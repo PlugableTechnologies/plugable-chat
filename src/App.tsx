@@ -29,7 +29,7 @@ function App() {
   console.log("App component rendering...");
 
   return (
-    <div className="fixed inset-0 flex flex-col bg-[#0f1419] text-slate-200 overflow-hidden font-sans antialiased selection:bg-cyan-500/30 px-3 sm:px-6">
+    <div className="fixed inset-0 flex flex-col bg-[#0f1419] text-slate-200 overflow-hidden font-sans antialiased selection:bg-cyan-500/30">
       {/* Top Header Bar */}
       <div className="h-14 bg-[#0d1117] border-b border-transparent flex items-center justify-between px-4 sm:px-6 shrink-0 rounded-2xl shadow-[0_0_35px_rgba(2,6,23,0.7)]">
         <div className="flex items-center gap-3">
@@ -47,7 +47,7 @@ function App() {
         <div className="flex-[1] min-w-[260px]">
           <Sidebar className="h-full rounded-2xl" />
         </div>
-        <div className="flex-[2] min-w-0 flex flex-col relative overflow-hidden">
+        <div className="flex-[2] min-w-0 flex flex-col relative overflow-hidden h-full">
           <ErrorBanner />
           <ChatArea />
         </div>

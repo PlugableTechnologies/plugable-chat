@@ -18,7 +18,7 @@ export async function invoke<T>(cmd: string, args?: any): Promise<T> {
     }
 }
 
-async function mockInvoke(cmd: string, args?: any): Promise<any> {
+async function mockInvoke(cmd: string, _args?: any): Promise<any> {
     console.warn(`[Tauri Bridge] '${cmd}' called but Tauri is not detected. Ensure you are running in the Tauri window for real backend functionality.`);
 
     // Return safe empty defaults to prevent UI crashes in browser view

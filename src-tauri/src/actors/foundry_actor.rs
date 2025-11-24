@@ -1,9 +1,9 @@
 use tokio::sync::mpsc;
 use crate::protocol::FoundryMsg;
 use serde_json::json;
-use std::process::Command;
+use tokio::process::Command;
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tauri::{AppHandle, Emitter};
 
 pub struct FoundryActor {
@@ -23,7 +23,7 @@ impl FoundryActor {
         println!("Initializing Foundry Local Manager via CLI...");
         
         // Try to start the service or ensure it's running
-        if let Err(e) = self.ensure_service_running() {
+        if let Err(e) = self.ensure_service_running().await {
             println!("Warning: Failed to ensure Foundry service is running: {}", e);
         }
 
@@ -150,7 +150,7 @@ impl FoundryActor {
     }
 
     async fn update_connection_info(&mut self) {
-        self.port = self.detect_port();
+        self.port = self.detect_port().await;
         if let Some(p) = self.port {
             println!("Foundry service detected on port {}", p);
             
@@ -191,12 +191,21 @@ impl FoundryActor {
         let _ = self.app_handle.emit("model-selected", model.to_string());
     }
 
-    fn ensure_service_running(&self) -> std::io::Result<()> {
+    async fn ensure_service_running(&self) -> std::io::Result<()> {
+        println!("FoundryActor: Checking/Starting Foundry service...");
         // Try to start service via CLI: `foundry service start`
-        // We won't wait for it to fully initialize here, just trigger it
-        let output = Command::new("foundry")
+        // We use a timeout to prevent hanging indefinitely
+        let child = Command::new("foundry")
             .args(&["service", "start"])
-            .output()?;
+            .output();
+            
+        let output = match timeout(Duration::from_secs(10), child).await {
+            Ok(res) => res?,
+            Err(_) => {
+                println!("FoundryActor: 'foundry service start' timed out.");
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "foundry service start timed out"));
+            }
+        };
             
         if output.status.success() {
              println!("Foundry service start command issued successfully.");
@@ -213,7 +222,8 @@ impl FoundryActor {
         // Run `foundry service restart`
         let output = Command::new("foundry")
             .args(&["service", "restart"])
-            .output()?;
+            .output()
+            .await?;
             
         if output.status.success() {
              println!("Foundry service restart command issued successfully.");
@@ -221,7 +231,7 @@ impl FoundryActor {
              let stderr = String::from_utf8_lossy(&output.stderr);
              println!("Foundry service restart command failed: {}", stderr);
              // If restart fails (e.g. not running), try start
-             self.ensure_service_running()?;
+             self.ensure_service_running().await?;
         }
         
         // Wait a few seconds for it to spin up
@@ -231,14 +241,17 @@ impl FoundryActor {
         Ok(())
     }
 
-    fn detect_port(&self) -> Option<u16> {
+    async fn detect_port(&self) -> Option<u16> {
+        println!("FoundryActor: Detecting port via 'foundry service status'...");
         // Try `foundry service status` to get endpoint
         // Expected output often contains "http://127.0.0.1:PORT"
-        match Command::new("foundry")
+        let child = Command::new("foundry")
             .args(&["service", "status"])
-            .output() 
+            .output();
+            
+        match timeout(Duration::from_secs(5), child).await 
         {
-            Ok(output) => {
+            Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 // Look for pattern http://127.0.0.1:(\d+)
                 // Simple parsing:
@@ -252,8 +265,12 @@ impl FoundryActor {
                 // Fallback: check logs if command doesn't output it directly but we saw it in logs earlier
                 None
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 println!("Failed to run foundry status: {}", e);
+                None
+            }
+            Err(_) => {
+                println!("FoundryActor: 'foundry service status' timed out.");
                 None
             }
         }

@@ -174,7 +174,7 @@ export function ChatArea() {
     };
 
     return (
-        <div className="flex-1 w-full flex flex-col bg-[#0f1419] text-slate-200 font-sans relative overflow-hidden">
+        <div className="h-full flex-1 w-full flex flex-col bg-[#0f1419] text-slate-200 font-sans relative overflow-hidden">
             {/* Scrollable Messages Area - takes all remaining space */}
             <div className="flex-1 min-h-0 flex flex-col">
                 <div className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-2 sm:px-6 pt-6 pb-6">
