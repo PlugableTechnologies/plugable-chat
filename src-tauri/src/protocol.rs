@@ -32,6 +32,10 @@ pub enum VectorMsg {
         // Channel to send results back to the caller (Orchestrator)
         respond_to: oneshot::Sender<Vec<ChatSummary>>,
     },
+    /// Get all chats
+    GetAllChats {
+        respond_to: oneshot::Sender<Vec<ChatSummary>>,
+    },
 }
 
 pub enum FoundryMsg {
@@ -40,10 +44,19 @@ pub enum FoundryMsg {
         text: String,
         respond_to: oneshot::Sender<Vec<f32>>,
     },
-    /// Chat with the model
+    /// Chat with the model (streaming)
     Chat {
         history: Vec<ChatMessage>,
-        respond_to: oneshot::Sender<String>,
+        respond_to: tokio::sync::mpsc::Sender<String>,
+    },
+    /// Get available models
+    GetModels {
+        respond_to: oneshot::Sender<Vec<String>>,
+    },
+    /// Set the active model
+    SetModel {
+        model_id: String,
+        respond_to: oneshot::Sender<bool>,
     },
 }
 

@@ -27,18 +27,29 @@ impl VectorActor {
             // Clone table handle for parallel execution (it's cheap, just an Arc internally)
             let table = self.table.clone();
             
-            println!("VectorActor received message");
-
             // Spawn a detached task for every request.
             // This ensures the actor mailbox never clogs, even if a query takes 100ms.
             tokio::spawn(async move {
                 match msg {
                     VectorMsg::SearchHistory { query_vector, limit, respond_to } => {
+                        println!("VectorActor: Searching history (limit: {})", limit);
                         let results = perform_search(table, query_vector, limit).await;
                         // Ignore errors if receiver dropped (UI navigated away)
                         let _ = respond_to.send(results);
                     }
+                    VectorMsg::GetAllChats { respond_to } => {
+                        println!("VectorActor: Getting all chats");
+                        // For now, since LanceDB doesn't have a simple "select *" without vector query, 
+                        // we can query nearest to a zero vector with high limit, or implement a proper scan.
+                        // LanceDB's rust SDK is still evolving. A zero vector search is a common workaround for "all" if we want ranked by something,
+                        // but here we probably want chronological.
+                        // Let's try a zero vector search for now as a placeholder to get data flowing.
+                        let zero_vector = vec![0.0; 384];
+                        let results = perform_search(table, zero_vector, 100).await;
+                        let _ = respond_to.send(results);
+                    }
                     VectorMsg::UpsertChat { id, title, content, vector } => {
+                        println!("VectorActor: Upserting chat (id: {}, title: {})", id, title);
                         if let Some(vec) = vector {
                            let _ = perform_upsert(table, id, title, content, vec).await;
                         }

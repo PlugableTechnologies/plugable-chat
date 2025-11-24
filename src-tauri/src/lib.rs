@@ -45,12 +45,40 @@ async fn search_history(
 }
 
 #[tauri::command]
+async fn get_all_chats(handles: State<'_, ActorHandles>) -> Result<Vec<protocol::ChatSummary>, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.vector_tx.send(VectorMsg::GetAllChats { respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "Vector actor died".to_string())
+}
+
+#[tauri::command]
+async fn get_models(handles: State<'_, ActorHandles>) -> Result<Vec<String>, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.foundry_tx.send(FoundryMsg::GetModels { respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "Foundry actor died".to_string())
+}
+
+#[tauri::command]
+async fn set_model(model: String, handles: State<'_, ActorHandles>) -> Result<bool, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.foundry_tx.send(FoundryMsg::SetModel { model_id: model, respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "Foundry actor died".to_string())
+}
+
+#[tauri::command]
 async fn chat(
     message: String,
     history: Vec<ChatMessage>,
-    handles: State<'_, ActorHandles>
-) -> Result<String, String> {
-    let (tx, rx) = oneshot::channel();
+    handles: State<'_, ActorHandles>,
+    app_handle: tauri::AppHandle
+) -> Result<(), String> {
+    let (tx, mut rx) = mpsc::channel(100);
     
     // Add the new message to history
     let mut full_history = history;
@@ -64,7 +92,15 @@ async fn chat(
         respond_to: tx,
     }).await.map_err(|e| e.to_string())?;
 
-    rx.await.map_err(|_| "Foundry actor died".to_string())
+    // Spawn a task to forward tokens to frontend
+    tauri::async_runtime::spawn(async move {
+        while let Some(token) = rx.recv().await {
+            let _ = app_handle.emit("chat-token", token);
+        }
+        let _ = app_handle.emit("chat-finished", ());
+    });
+
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -99,7 +135,7 @@ pub fn run() {
              
              Ok(())
         })
-        .invoke_handler(tauri::generate_handler![search_history, chat])
+        .invoke_handler(tauri::generate_handler![search_history, chat, get_models, set_model, get_all_chats])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

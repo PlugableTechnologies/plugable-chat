@@ -1,42 +1,51 @@
-import { Plus, FileCode } from 'lucide-react';
+import { Plus, Search } from 'lucide-react';
 import { useChatStore } from '../store/chat-store';
+import { useEffect } from 'react';
 
 export function Sidebar() {
-  const { toggleCodeEditor } = useChatStore();
+  const { history, fetchHistory } = useChatStore();
 
+  useEffect(() => {
+      fetchHistory();
+  }, []);
+  
   return (
-    <div className="w-[260px] bg-gray-50 text-gray-900 p-2 flex flex-col h-full border-r border-gray-200 shrink-0">
-        <button className="border border-gray-300 rounded-md p-3 w-full mb-4 hover:bg-gray-200 text-left flex items-center gap-2 transition-colors text-sm text-gray-900">
-             <Plus size={16} />
-             <span>New chat</span>
-        </button>
-        
-        <div className="flex-1 overflow-y-auto scrollbar-hide">
-            <div className="px-2 py-2">
-                <div className="text-xs font-medium text-gray-500 mb-2 pl-2">Today</div>
-                <div className="text-gray-700 text-sm p-2 hover:bg-gray-200 rounded-md cursor-pointer truncate transition-colors">
-                    Project Planning
-                </div>
-                <div className="text-gray-700 text-sm p-2 hover:bg-gray-200 rounded-md cursor-pointer truncate transition-colors">
-                    Rust Actor System
-                </div>
+    <div className="w-[260px] bg-[#f9f9f9] text-gray-900 flex flex-col h-full border-r border-gray-200 shrink-0 font-sans text-sm">
+        {/* Logo */}
+        <div className="px-4 pt-4 pb-2">
+            <img src="/plugable-logo.png" alt="Plugable" className="w-full h-auto object-contain" />
+        </div>
+
+        {/* New Chat Button */}
+        <div className="px-3 pt-2">
+            <button className="w-full flex items-center gap-2 p-2 hover:bg-gray-200 rounded-lg transition-colors border border-gray-200 bg-white shadow-sm text-left">
+                <Plus size={16} className="text-gray-500" />
+                <span className="font-medium text-gray-700">New chat</span>
+            </button>
+        </div>
+
+        {/* Scrollable Content - History */}
+        <div className="flex-1 overflow-y-auto scrollbar-hide px-3 mt-4">
+            <div className="mb-6">
+                 <div className="text-xs font-medium text-gray-500 mb-2 px-2">History</div>
+                 <div className="space-y-1">
+                    {history.length === 0 ? (
+                        <div className="px-2 text-xs text-gray-400 italic">No history yet</div>
+                    ) : (
+                        history.map((chat) => (
+                            <div key={chat.id} className="text-gray-700 p-2 hover:bg-gray-200 rounded-lg cursor-pointer truncate transition-colors text-xs">
+                                {chat.title || "Untitled Chat"}
+                            </div>
+                        ))
+                    )}
+                 </div>
             </div>
         </div>
         
-        <div className="p-2 border-t border-gray-200 space-y-1">
-             <button 
-                onClick={toggleCodeEditor}
-                className="w-full flex items-center gap-2 p-2 hover:bg-gray-200 rounded-md cursor-pointer text-sm text-gray-900 text-left"
-             >
-                <FileCode size={16} />
-                <span>Code Editor</span>
-             </button>
-             
-             <div className="flex items-center gap-2 p-2 hover:bg-gray-200 rounded-md cursor-pointer text-sm text-gray-900">
-                 <div className="w-8 h-8 bg-green-600 rounded-sm flex items-center justify-center text-xs">
-                     B
-                 </div>
-                 <div className="font-medium">User</div>
+        {/* Bottom Actions */}
+        <div className="p-3 space-y-1">
+             <div className="pt-2 mt-2 border-t border-gray-200">
+                {/* Empty for now, user profile removed */}
              </div>
         </div>
     </div>
