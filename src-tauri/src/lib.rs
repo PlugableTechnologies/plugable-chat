@@ -115,6 +115,7 @@ pub fn run() {
              // Store handles in state
              app.manage(ActorHandles { vector_tx, foundry_tx });
 
+             let app_handle = app.handle();
              // Spawn Vector Actor
              tauri::async_runtime::spawn(async move {
                  println!("Starting Vector Actor...");
@@ -127,9 +128,10 @@ pub fn run() {
              });
 
              // Spawn Foundry Actor
-             tauri::async_runtime::spawn(async move {
+            let foundry_app_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
                  println!("Starting Foundry Actor...");
-                 let actor = FoundryActor::new(foundry_rx);
+                let actor = FoundryActor::new(foundry_rx, foundry_app_handle);
                  actor.run().await;
              });
              

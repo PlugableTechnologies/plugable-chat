@@ -4,17 +4,19 @@ use serde_json::json;
 use std::process::Command;
 use std::time::Duration;
 use tokio::time::sleep;
+use tauri::{AppHandle, Emitter};
 
 pub struct FoundryActor {
     rx: mpsc::Receiver<FoundryMsg>,
     port: Option<u16>,
     model_id: Option<String>,
     available_models: Vec<String>,
+    app_handle: AppHandle,
 }
 
 impl FoundryActor {
-    pub fn new(rx: mpsc::Receiver<FoundryMsg>) -> Self {
-        Self { rx, port: None, model_id: None, available_models: Vec::new() }
+    pub fn new(rx: mpsc::Receiver<FoundryMsg>, app_handle: AppHandle) -> Self {
+        Self { rx, port: None, model_id: None, available_models: Vec::new(), app_handle }
     }
 
     pub async fn run(mut self) {
@@ -45,7 +47,8 @@ impl FoundryActor {
                     let _ = respond_to.send(self.available_models.clone());
                 }
                 FoundryMsg::SetModel { model_id, respond_to } => {
-                    self.model_id = Some(model_id);
+                    self.model_id = Some(model_id.clone());
+                    self.emit_model_selected(&model_id);
                     let _ = respond_to.send(true);
                 }
                 FoundryMsg::Chat { history, respond_to } => {
@@ -165,9 +168,10 @@ impl FoundryActor {
                                     .collect();
                                 
                                 if self.model_id.is_none() {
-                                    if let Some(first) = self.available_models.first() {
-                                        println!("Selected default model: {}", first);
-                                        self.model_id = Some(first.clone());
+                                if let Some(first) = self.available_models.first() {
+                                    println!("Selected default model: {}", first);
+                                    self.model_id = Some(first.clone());
+                                    self.emit_model_selected(first);
                                     }
                                 }
                             }
@@ -181,6 +185,10 @@ impl FoundryActor {
         } else {
              println!("Warning: Could not detect Foundry service port.");
         }
+    }
+
+    fn emit_model_selected(&self, model: &str) {
+        let _ = self.app_handle.emit("model-selected", model.to_string());
     }
 
     fn ensure_service_running(&self) -> std::io::Result<()> {

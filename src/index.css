@@ -3,12 +3,32 @@
 @tailwind utilities;
 
 @layer base {
-  html, body, #root {
+
+  html,
+  body,
+  #root {
     height: 100%;
+    min-height: 100vh;
     width: 100%;
+    min-width: 100vw;
     margin: 0;
     padding: 0;
     overflow: hidden;
+    background: radial-gradient(circle at top right, #1a2332 0%, #0f1419 40%, #0d1117 100%);
+    color: #ffffff !important;
+    /* Force white text */
+    max-width: none;
+  }
+
+  #root > div {
+    width: 100%;
+    min-width: 100vw;
+    max-width: none;
+  }
+
+  /* Force all text to be light colored */
+  * {
+    color: inherit;
   }
 }
 
@@ -16,8 +36,120 @@
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
   }
+
   .scrollbar-hide {
     -ms-overflow-style: none;
     scrollbar-width: none;
   }
+}
+
+/* Custom scrollbar styling for dark mode */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.05) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 3px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Prose styling overrides for dark mode */
+.prose {
+  color: #e5e7eb !important;
+  max-width: none;
+}
+
+.prose * {
+  color: inherit;
+}
+
+.prose p {
+  color: #e5e7eb !important;
+  margin-top: 0.75em;
+  margin-bottom: 0.75em;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+  color: #f3f4f6 !important;
+  font-weight: 600;
+}
+
+.prose strong {
+  color: #f9fafb !important;
+  font-weight: 600;
+}
+
+.prose a {
+  color: #22d3ee !important;
+  text-decoration: underline;
+}
+
+.prose a:hover {
+  color: #06b6d4 !important;
+}
+
+.prose ul,
+.prose ol {
+  color: #e5e7eb !important;
+}
+
+.prose li {
+  color: #e5e7eb !important;
+}
+
+.prose blockquote {
+  color: #9ca3af !important;
+  border-left-color: rgba(34, 211, 238, 0.3);
+}
+
+.prose pre {
+  background-color: #0d1117 !important;
+  color: #e5e7eb !important;
+}
+
+.prose pre code {
+  color: #e5e7eb !important;
+}
+
+.prose code {
+  color: #22d3ee !important;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.prose table {
+  color: #e5e7eb !important;
+}
+
+.prose thead {
+  color: #f3f4f6 !important;
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+
+.prose tbody tr {
+  border-bottom-color: rgba(255, 255, 255, 0.05);
+  color: #e5e7eb !important;
+}
+
+.prose td,
+.prose th {
+  color: #e5e7eb !important;
 }
