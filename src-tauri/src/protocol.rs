@@ -1,0 +1,55 @@
+use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSummary {
+    pub id: String,
+    pub title: String,
+    pub preview: String,
+    pub score: f32, // Similarity score
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+pub enum VectorMsg {
+    /// Index a new chat or update an existing one
+    UpsertChat {
+        id: String,
+        title: String,
+        content: String,
+        // The actor will handle embedding generation internally via Foundry
+        // or receive a pre-computed vector.
+        vector: Option<Vec<f32>>, 
+    },
+    /// Search for similar chats
+    SearchHistory {
+        query_vector: Vec<f32>, 
+        limit: usize,
+        // Channel to send results back to the caller (Orchestrator)
+        respond_to: oneshot::Sender<Vec<ChatSummary>>,
+    },
+}
+
+pub enum FoundryMsg {
+    /// Generate an embedding for a string
+    GetEmbedding {
+        text: String,
+        respond_to: oneshot::Sender<Vec<f32>>,
+    },
+    /// Chat with the model
+    Chat {
+        history: Vec<ChatMessage>,
+        respond_to: oneshot::Sender<String>,
+    },
+}
+
+pub enum McpMsg {
+    ExecuteTool {
+        tool_name: String,
+        args: serde_json::Value,
+    },
+}
