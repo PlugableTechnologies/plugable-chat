@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
 import { useChatStore } from "./store/chat-store";
@@ -27,6 +28,127 @@ function ErrorBanner() {
 function App() {
   const { currentModel } = useChatStore();
   console.log("App component rendering...");
+
+  // Debug layout utility function
+  const debugLayout = () => {
+    console.log('\n=== 🔍 LAYOUT DEBUG INFO ===');
+    console.log('💡 TIP: Open DevTools (Cmd+Option+I on Mac, Ctrl+Shift+I on Windows) to see full output\n');
+
+    console.log('=== WINDOW INFO ===');
+    console.log({
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      outerWidth: window.outerWidth,
+      outerHeight: window.outerHeight,
+      devicePixelRatio: window.devicePixelRatio,
+      screenWidth: window.screen.width,
+      screenHeight: window.screen.height,
+    });
+
+    console.log('\n=== DOCUMENT INFO ===');
+    console.log({
+      scrollWidth: document.documentElement.scrollWidth,
+      scrollHeight: document.documentElement.scrollHeight,
+      clientWidth: document.documentElement.clientWidth,
+      clientHeight: document.documentElement.clientHeight,
+      offsetWidth: document.documentElement.offsetWidth,
+      offsetHeight: document.documentElement.offsetHeight,
+    });
+
+    console.log('\n=== KEY ELEMENTS ===');
+    const selectors = [
+      'html',
+      'body',
+      '#root',
+      '.fixed.inset-0', // Main app container
+      '.h-14.bg-\\[\\#0d1117\\]', // Header
+      '.flex-1.flex.overflow-hidden', // Main content area
+      '.flex-\\[1\\]', // Sidebar container
+      '.flex-\\[2\\]', // Chat area container
+    ];
+
+    selectors.forEach(selector => {
+      try {
+        const el = document.querySelector(selector);
+        if (el) {
+          const rect = el.getBoundingClientRect();
+          const styles = window.getComputedStyle(el);
+          console.log(`${selector}:`, {
+            dimensions: {
+              width: rect.width,
+              height: rect.height,
+              computedWidth: styles.width,
+              computedHeight: styles.height,
+            },
+            position: {
+              top: rect.top,
+              left: rect.left,
+              right: rect.right,
+              bottom: rect.bottom,
+            },
+            computed: {
+              display: styles.display,
+              position: styles.position,
+              margin: styles.margin,
+              padding: styles.padding,
+              boxSizing: styles.boxSizing,
+              overflow: styles.overflow,
+              flex: styles.flex,
+            }
+          });
+        } else {
+          console.log(`${selector}: NOT FOUND`);
+        }
+      } catch (error) {
+        console.log(`${selector}: ERROR -`, error);
+      }
+    });
+
+    console.log('\n=== ALL VISIBLE ELEMENTS (with dimensions > 0) ===');
+    const allElements = document.querySelectorAll('*');
+    let count = 0;
+    allElements.forEach((el) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const styles = window.getComputedStyle(el);
+        const identifier = `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${el.className ? '.' + String(el.className).split(' ').filter(c => c).join('.') : ''}`;
+        console.log(`[${count}] ${identifier}`, {
+          size: { w: Math.round(rect.width), h: Math.round(rect.height) },
+          pos: { x: Math.round(rect.left), y: Math.round(rect.top) },
+          display: styles.display,
+          position: styles.position,
+        });
+        count++;
+      }
+    });
+    console.log(`\nTotal visible elements: ${count}`);
+    console.log('\n=== END LAYOUT DEBUG ===\n');
+  };
+
+  // Log layout info after initial render
+  useEffect(() => {
+    // Use setTimeout to ensure DOM is fully rendered and styled
+    const timer = setTimeout(() => {
+      console.log('📊 Initial layout debug (after first render):');
+      debugLayout();
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Set up keyboard shortcut: Ctrl+Shift+L
+  useEffect(() => {
+    const handleKeyPress = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'l') {
+        event.preventDefault();
+        console.log('⌨️  Ctrl+Shift+L pressed - Running layout debug:');
+        debugLayout();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyPress);
+    return () => window.removeEventListener('keydown', handleKeyPress);
+  }, []);
 
   return (
     <div className="fixed inset-0 flex flex-col bg-[#0f1419] text-slate-200 overflow-hidden font-sans antialiased selection:bg-cyan-500/30">
