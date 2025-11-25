@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
@@ -29,13 +30,26 @@ function App() {
   const { currentModel } = useChatStore();
   console.log("App component rendering...");
 
-  // Debug layout utility function
-  const debugLayout = () => {
-    console.log('\n=== 🔍 LAYOUT DEBUG INFO ===');
-    console.log('💡 TIP: Open DevTools (Cmd+Option+I on Mac, Ctrl+Shift+I on Windows) to see full output\n');
+  // ... existing imports ...
 
-    console.log('=== WINDOW INFO ===');
-    console.log({
+  // Inside App component:
+
+  // Debug layout utility function
+  const debugLayout = async () => {
+    const log = async (msg: string, data?: any) => {
+      console.log(msg, data || '');
+      try {
+        const message = data ? `${msg} ${JSON.stringify(data, null, 2)}` : msg;
+        await invoke('log_to_terminal', { message });
+      } catch (e) {
+        console.error('Failed to log to terminal:', e);
+      }
+    };
+
+    await log('\n=== 🔍 LAYOUT DEBUG INFO ===');
+    await log('💡 TIP: Open DevTools (Cmd+Option+I on Mac, Ctrl+Shift+I on Windows) to see full output\n');
+
+    await log('=== WINDOW INFO ===', {
       innerWidth: window.innerWidth,
       innerHeight: window.innerHeight,
       outerWidth: window.outerWidth,
@@ -45,8 +59,7 @@ function App() {
       screenHeight: window.screen.height,
     });
 
-    console.log('\n=== DOCUMENT INFO ===');
-    console.log({
+    await log('\n=== DOCUMENT INFO ===', {
       scrollWidth: document.documentElement.scrollWidth,
       scrollHeight: document.documentElement.scrollHeight,
       clientWidth: document.documentElement.clientWidth,
@@ -55,7 +68,7 @@ function App() {
       offsetHeight: document.documentElement.offsetHeight,
     });
 
-    console.log('\n=== KEY ELEMENTS ===');
+    await log('\n=== KEY ELEMENTS ===');
     const selectors = [
       'html',
       'body',
@@ -67,13 +80,13 @@ function App() {
       '.flex-\\[2\\]', // Chat area container
     ];
 
-    selectors.forEach(selector => {
+    for (const selector of selectors) {
       try {
         const el = document.querySelector(selector);
         if (el) {
           const rect = el.getBoundingClientRect();
           const styles = window.getComputedStyle(el);
-          console.log(`${selector}:`, {
+          await log(`${selector}:`, {
             dimensions: {
               width: rect.width,
               height: rect.height,
@@ -97,32 +110,42 @@ function App() {
             }
           });
         } else {
-          console.log(`${selector}: NOT FOUND`);
+          await log(`${selector}: NOT FOUND`);
         }
       } catch (error) {
-        console.log(`${selector}: ERROR -`, error);
+        await log(`${selector}: ERROR - ${error}`);
       }
-    });
+    }
 
-    console.log('\n=== ALL VISIBLE ELEMENTS (with dimensions > 0) ===');
+    await log('\n=== ALL VISIBLE ELEMENTS (with dimensions > 0) ===');
     const allElements = document.querySelectorAll('*');
     let count = 0;
+    // Collect all visible elements first to avoid too many async calls in loop causing delay
+    const visibleElements: { identifier: string; data: any }[] = [];
     allElements.forEach((el) => {
       const rect = el.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
         const styles = window.getComputedStyle(el);
         const identifier = `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${el.className ? '.' + String(el.className).split(' ').filter(c => c).join('.') : ''}`;
-        console.log(`[${count}] ${identifier}`, {
-          size: { w: Math.round(rect.width), h: Math.round(rect.height) },
-          pos: { x: Math.round(rect.left), y: Math.round(rect.top) },
-          display: styles.display,
-          position: styles.position,
+        visibleElements.push({
+          identifier,
+          data: {
+            size: { w: Math.round(rect.width), h: Math.round(rect.height) },
+            pos: { x: Math.round(rect.left), y: Math.round(rect.top) },
+            display: styles.display,
+            position: styles.position,
+          }
         });
         count++;
       }
     });
-    console.log(`\nTotal visible elements: ${count}`);
-    console.log('\n=== END LAYOUT DEBUG ===\n');
+
+    for (const item of visibleElements) {
+      await log(`[${visibleElements.indexOf(item)}] ${item.identifier}`, item.data);
+    }
+
+    await log(`\nTotal visible elements: ${count}`);
+    await log('\n=== END LAYOUT DEBUG ===\n');
   };
 
   // Log layout info after initial render

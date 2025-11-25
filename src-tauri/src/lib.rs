@@ -103,6 +103,11 @@ async fn chat(
     Ok(())
 }
 
+#[tauri::command]
+fn log_to_terminal(message: String) {
+    println!("[FRONTEND] {}", message);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -137,7 +142,7 @@ pub fn run() {
              
              Ok(())
         })
-        .invoke_handler(tauri::generate_handler![search_history, chat, get_models, set_model, get_all_chats])
+        .invoke_handler(tauri::generate_handler![search_history, chat, get_models, set_model, get_all_chats, log_to_terminal])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
