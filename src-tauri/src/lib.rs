@@ -78,7 +78,8 @@ async fn chat(
     handles: State<'_, ActorHandles>,
     app_handle: tauri::AppHandle
 ) -> Result<(), String> {
-    let (tx, mut rx) = mpsc::channel(100);
+    // Use unbounded channel to prevent blocking on long responses
+    let (tx, mut rx) = mpsc::unbounded_channel();
     
     // Add the new message to history
     let mut full_history = history;

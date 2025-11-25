@@ -55,12 +55,12 @@ impl FoundryActor {
                      // Check if we need to restart/reconnect
                      if self.port.is_none() || self.available_models.is_empty() {
                          println!("FoundryActor: No models found or port missing. Attempting to restart service...");
-                         let _ = respond_to.send("Restarting local model service...".to_string()).await;
+                         let _ = respond_to.send("Restarting local model service...".to_string());
                          
                          // Restart service
                          if let Err(e) = self.restart_service().await {
                              println!("FoundryActor: Failed to restart service: {}", e);
-                             let _ = respond_to.send(format!("Error: Failed to restart service: {}", e)).await;
+                             let _ = respond_to.send(format!("Error: Failed to restart service: {}", e));
                              continue;
                          }
                          
@@ -74,11 +74,27 @@ impl FoundryActor {
                          
                          let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
                          
+                         // For reasoning models, ensure we have a system message that instructs
+                         // the model to provide a final answer after thinking
+                         let mut messages = history.clone();
+                         let has_system_msg = messages.iter().any(|m| m.role == "system");
+                         
+                         if !has_system_msg {
+                             // Prepend system message for reasoning models
+                             messages.insert(0, crate::protocol::ChatMessage {
+                                 role: "system".to_string(),
+                                 content: "You are a helpful AI assistant. When answering questions, you may use <think></think> tags to show your reasoning process. After your thinking, always provide a clear, concise final answer outside the think tags.".to_string(),
+                             });
+                         }
+                         
                          // Convert history to messages
+                         // For reasoning models: they output thinking in <think> tags, then a final answer
                          let body = json!({
                              "model": model, 
-                             "messages": history,
-                             "stream": true
+                             "messages": messages,
+                             "stream": true,
+                             "max_tokens": 16384,  // Use the model's maximum to prevent premature cutoff
+                             "reasoning_effort": "medium"  // Control reasoning depth: low, medium, high
                          });
                          
                          println!("Sending streaming request to Foundry at {}", url);
@@ -99,7 +115,7 @@ impl FoundryActor {
                                 if !status.is_success() {
                                      let text = resp.text().await.unwrap_or_default();
                                      println!("Foundry error ({}): {}", status, text);
-                                     let _ = respond_to_clone.send(format!("Error: {}", text)).await;
+                                     let _ = respond_to_clone.send(format!("Error: {}", text));
                                 } else {
                                     let mut buffer = String::new();
                                     println!("Foundry stream started.");
@@ -124,7 +140,7 @@ impl FoundryActor {
                                                         if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                                                             if !content.is_empty() {
                                                                 // println!("Token: {:?}", content); // Uncomment for verbose logging
-                                                                let _ = respond_to_clone.send(content.to_string()).await;
+                                                                let _ = respond_to_clone.send(content.to_string());
                                                             }
                                                         }
                                                     }
@@ -137,12 +153,12 @@ impl FoundryActor {
                             },
                             Err(e) => {
                                 println!("Failed to call Foundry: {}", e);
-                                let _ = respond_to_clone.send(format!("Error connecting to local model: {}", e)).await;
+                                let _ = respond_to_clone.send(format!("Error connecting to local model: {}", e));
                             }
                          }
                      } else {
                          println!("Foundry endpoint not available (port not found).");
-                         let _ = respond_to.send("The local model service is not available. Please check if Foundry is installed and running.".to_string()).await;
+                         let _ = respond_to.send("The local model service is not available. Please check if Foundry is installed and running.".to_string());
                      }
                 }
             }

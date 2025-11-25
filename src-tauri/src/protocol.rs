@@ -47,7 +47,7 @@ pub enum FoundryMsg {
     /// Chat with the model (streaming)
     Chat {
         history: Vec<ChatMessage>,
-        respond_to: tokio::sync::mpsc::Sender<String>,
+        respond_to: tokio::sync::mpsc::UnboundedSender<String>,
     },
     /// Get available models
     GetModels {
