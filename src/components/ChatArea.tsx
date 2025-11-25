@@ -174,110 +174,108 @@ export function ChatArea() {
     };
 
     return (
-        <div className="h-full flex-1 w-full flex flex-col bg-[#0f1419] text-slate-200 font-sans relative overflow-hidden">
+        <div className="h-full w-full flex flex-col bg-[#0f1419] text-slate-200 font-sans relative overflow-hidden">
             {/* Scrollable Messages Area - takes all remaining space */}
-            <div className="flex-1 min-h-0 flex flex-col">
-                <div className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-2 sm:px-6 pt-6 pb-6">
-                    {messages.length === 0 ? (
-                        <div className="flex-1 flex flex-col items-center justify-center px-6">
-                            <div className="mb-8 text-center">
-                                <div className="w-16 h-16 bg-gradient-to-tr from-cyan-500 to-blue-500 rounded-2xl flex items-center justify-center mb-6 mx-auto shadow-xl shadow-cyan-500/20">
-                                    <div className="w-8 h-8 bg-white rounded-full opacity-90" />
-                                </div>
-                                <h1 className="text-2xl font-bold text-white">How can I help you today?</h1>
+            <div className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-2 sm:px-6 pt-6 pb-6">
+                {messages.length === 0 ? (
+                    <div className="flex-1 flex flex-col items-center justify-center px-6">
+                        <div className="mb-8 text-center">
+                            <div className="w-16 h-16 bg-gradient-to-tr from-cyan-500 to-blue-500 rounded-2xl flex items-center justify-center mb-6 mx-auto shadow-xl shadow-cyan-500/20">
+                                <div className="w-8 h-8 bg-white rounded-full opacity-90" />
                             </div>
+                            <h1 className="text-2xl font-bold text-white">How can I help you today?</h1>
                         </div>
-                    ) : (
-                        <div className="w-full max-w-none space-y-6 py-0">
-                            {messages.map(m => (
-                                <div key={m.id} className={`flex w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                    <div
-                                        className={`
-                                        relative w-full max-w-none rounded-2xl px-5 py-3.5 text-[15px] leading-7
-                                        ${m.role === 'user'
-                                                ? 'bg-[#1a1f26] text-slate-200 border border-transparent shadow-[0_10px_30px_rgba(2,6,23,0.45)]'
-                                                : 'bg-transparent text-slate-200'
-                                            }
-                                    `}
-                                    >
-                                        <div className="prose prose-slate max-w-none break-words text-slate-200">
-                                            {m.role === 'assistant' ? (
-                                                parseMessageContent(m.content).map((part, idx) => (
-                                                    part.type === 'think' ? (
-                                                        <details key={idx} className="mb-4 group">
-                                                            <summary className="cursor-pointer text-xs font-medium text-slate-400 hover:text-slate-200 select-none flex items-center gap-2 mb-2">
-                                                                <span className="uppercase tracking-wider text-slate-400">Thought Process</span>
-                                                                <span className="h-px flex-1 bg-white/10 group-open:bg-white/20 transition-colors"></span>
-                                                                <ChevronDown size={12} className="group-open:rotate-180 transition-transform" />
-                                                            </summary>
-                                                            <div className="pl-3 border-l-2 border-cyan-500/60 text-slate-400 text-sm italic bg-white/5 p-3 rounded-r-lg">
-                                                                {part.content || "Thinking..."}
-                                                            </div>
-                                                        </details>
-                                                    ) : (
-                                                        <ReactMarkdown
-                                                            key={idx}
-                                                            remarkPlugins={[remarkGfm]}
-                                                            rehypePlugins={[rehypeKatex]}
-                                                            components={{
-                                                                code({ node, inline, className, children, ...props }: any) {
-                                                                    const match = /language-(\w+)/.exec(className || '')
-                                                                    const codeContent = String(children).replace(/\n$/, '');
+                    </div>
+                ) : (
+                    <div className="w-full max-w-none space-y-6 py-0">
+                        {messages.map(m => (
+                            <div key={m.id} className={`flex w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                <div
+                                    className={`
+                                    relative w-full max-w-none rounded-2xl px-5 py-3.5 text-[15px] leading-7
+                                    ${m.role === 'user'
+                                            ? 'bg-[#1a1f26] text-slate-200 border border-transparent shadow-[0_10px_30px_rgba(2,6,23,0.45)]'
+                                            : 'bg-transparent text-slate-200'
+                                        }
+                                `}
+                                >
+                                    <div className="prose prose-slate max-w-none break-words text-slate-200">
+                                        {m.role === 'assistant' ? (
+                                            parseMessageContent(m.content).map((part, idx) => (
+                                                part.type === 'think' ? (
+                                                    <details key={idx} className="mb-4 group">
+                                                        <summary className="cursor-pointer text-xs font-medium text-slate-400 hover:text-slate-200 select-none flex items-center gap-2 mb-2">
+                                                            <span className="uppercase tracking-wider text-slate-400">Thought Process</span>
+                                                            <span className="h-px flex-1 bg-white/10 group-open:bg-white/20 transition-colors"></span>
+                                                            <ChevronDown size={12} className="group-open:rotate-180 transition-transform" />
+                                                        </summary>
+                                                        <div className="pl-3 border-l-2 border-cyan-500/60 text-slate-400 text-sm italic bg-white/5 p-3 rounded-r-lg">
+                                                            {part.content || "Thinking..."}
+                                                        </div>
+                                                    </details>
+                                                ) : (
+                                                    <ReactMarkdown
+                                                        key={idx}
+                                                        remarkPlugins={[remarkGfm]}
+                                                        rehypePlugins={[rehypeKatex]}
+                                                        components={{
+                                                            code({ node, inline, className, children, ...props }: any) {
+                                                                const match = /language-(\w+)/.exec(className || '')
+                                                                const codeContent = String(children).replace(/\n$/, '');
 
-                                                                    return !inline && match ? (
-                                                                        <div className="my-4 rounded-xl overflow-hidden border border-white/10 bg-[#0d1117] shadow-sm group/code">
-                                                                            <div className="flex justify-between items-center bg-[#161b22] px-3 py-2 border-b border-white/10 backdrop-blur-sm">
-                                                                                <span className="text-xs text-slate-400 font-mono font-medium">{match[1]}</span>
-                                                                                <button
-                                                                                    onClick={() => navigator.clipboard.writeText(codeContent)}
-                                                                                    className="text-xs text-slate-400 hover:text-white transition-colors px-2 py-1 hover:bg-white/5 rounded opacity-0 group-hover/code:opacity-100"
-                                                                                >
-                                                                                    Copy
-                                                                                </button>
-                                                                            </div>
-                                                                            <div className="bg-[#0d1117] p-4 overflow-x-auto text-sm">
-                                                                                <code className={className} {...props}>
-                                                                                    {children}
-                                                                                </code>
-                                                                            </div>
+                                                                return !inline && match ? (
+                                                                    <div className="my-4 rounded-xl overflow-hidden border border-white/10 bg-[#0d1117] shadow-sm group/code">
+                                                                        <div className="flex justify-between items-center bg-[#161b22] px-3 py-2 border-b border-white/10 backdrop-blur-sm">
+                                                                            <span className="text-xs text-slate-400 font-mono font-medium">{match[1]}</span>
+                                                                            <button
+                                                                                onClick={() => navigator.clipboard.writeText(codeContent)}
+                                                                                className="text-xs text-slate-400 hover:text-white transition-colors px-2 py-1 hover:bg-white/5 rounded opacity-0 group-hover/code:opacity-100"
+                                                                            >
+                                                                                Copy
+                                                                            </button>
                                                                         </div>
-                                                                    ) : (
-                                                                        <code className={`${className} bg-white/10 px-1.5 py-0.5 rounded text-[13px] text-cyan-300 font-mono border border-white/10`} {...props}>
-                                                                            {children}
-                                                                        </code>
-                                                                    )
-                                                                }
-                                                            }}
-                                                        >
-                                                            {part.content}
-                                                        </ReactMarkdown>
-                                                    )
-                                                ))
-                                            ) : (
-                                                <div className="whitespace-pre-wrap">{m.content}</div>
-                                            )}
-                                        </div>
+                                                                        <div className="bg-[#0d1117] p-4 overflow-x-auto text-sm">
+                                                                            <code className={className} {...props}>
+                                                                                {children}
+                                                                            </code>
+                                                                        </div>
+                                                                    </div>
+                                                                ) : (
+                                                                    <code className={`${className} bg-white/10 px-1.5 py-0.5 rounded text-[13px] text-cyan-300 font-mono border border-white/10`} {...props}>
+                                                                        {children}
+                                                                    </code>
+                                                                )
+                                                            }
+                                                        }}
+                                                    >
+                                                        {part.content}
+                                                    </ReactMarkdown>
+                                                )
+                                            ))
+                                        ) : (
+                                            <div className="whitespace-pre-wrap">{m.content}</div>
+                                        )}
                                     </div>
                                 </div>
-                            ))}
-                            {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
-                                <div className="flex w-full justify-start">
-                                    <div className="bg-[#171d24] rounded-2xl px-6 py-4 border border-transparent">
-                                        <div className="flex gap-1.5">
-                                            <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                                            <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                                            <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                                        </div>
+                            </div>
+                        ))}
+                        {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
+                            <div className="flex w-full justify-start">
+                                <div className="bg-[#171d24] rounded-2xl px-6 py-4 border border-transparent">
+                                    <div className="flex gap-1.5">
+                                        <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                                        <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                                        <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                                     </div>
                                 </div>
-                            )}
-                        </div>
-                    )}
-                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
 
             {/* Fixed Input Area at Bottom */}
-            <div className="flex-shrink-0 mt-1">
+            <div className="flex-shrink-0 mt-1 pb-4">
                 <div className="px-2 sm:px-6">
                     <InputBar
                         className=""

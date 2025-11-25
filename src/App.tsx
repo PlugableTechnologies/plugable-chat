@@ -30,11 +30,7 @@ function App() {
   const { currentModel } = useChatStore();
   console.log("App component rendering...");
 
-  // ... existing imports ...
 
-  // Inside App component:
-
-  // Debug layout utility function
   const debugLayout = async () => {
     const log = async (msg: string, data?: any) => {
       console.log(msg, data || '');
@@ -174,7 +170,7 @@ function App() {
   }, []);
 
   return (
-    <div className="fixed inset-0 flex flex-col bg-[#0f1419] text-slate-200 overflow-hidden font-sans antialiased selection:bg-cyan-500/30">
+    <div className="h-screen w-screen fixed inset-0 flex flex-col bg-[#0f1419] text-slate-200 overflow-hidden font-sans antialiased selection:bg-cyan-500/30">
       {/* Top Header Bar */}
       <div className="h-14 bg-[#0d1117] border-b border-transparent flex items-center justify-between px-4 sm:px-6 shrink-0 rounded-2xl shadow-[0_0_35px_rgba(2,6,23,0.7)]">
         <div className="flex items-center gap-3">
