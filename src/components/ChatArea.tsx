@@ -297,7 +297,7 @@ const preprocessLaTeX = (content: string) => {
 export function ChatArea() {
     const {
         messages, input, setInput, addMessage, isLoading, setIsLoading, stopGeneration, currentChatId, reasoningEffort,
-        triggerRelevanceSearch, clearRelevanceSearch
+        triggerRelevanceSearch, clearRelevanceSearch, isConnecting
     } = useChatStore();
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -461,7 +461,9 @@ export function ChatArea() {
                 {messages.length === 0 ? (
                     <div className="flex-1 flex flex-col items-center justify-center px-6">
                         <div className="mb-8 text-center">
-                            <h1 className="text-2xl font-bold text-gray-900">How can I help you today?</h1>
+                            <h1 className="text-2xl font-bold text-gray-900">
+                                {isConnecting ? "Wait, Loading Local Models ..." : "How can I help you today?"}
+                            </h1>
                         </div>
                     </div>
                 ) : (
