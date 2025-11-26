@@ -14,19 +14,17 @@
     margin: 0;
     padding: 0;
     overflow: hidden;
-    background: radial-gradient(circle at top right, #1a2332 0%, #0f1419 40%, #0d1117 100%);
-    color: #ffffff !important;
-    /* Force white text */
+    background: #ffffff;
+    color: #2e2e2e;
     max-width: none;
   }
 
-  #root > div {
+  #root>div {
     width: 100%;
     min-width: 100vw;
     max-width: none;
   }
 
-  /* Force all text to be light colored */
   * {
     color: inherit;
   }
@@ -43,10 +41,10 @@
   }
 }
 
-/* Custom scrollbar styling for dark mode */
+/* Custom scrollbar styling for light mode */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.05) transparent;
+  scrollbar-color: rgba(0, 0, 0, 0.1) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -59,17 +57,17 @@
 }
 
 *::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.1);
   border-radius: 3px;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.15);
 }
 
-/* Prose styling overrides for dark mode */
+/* Prose styling overrides for light mode */
 .prose {
-  color: #e5e7eb !important;
+  color: #2e2e2e;
   max-width: none;
 }
 
@@ -78,7 +76,7 @@
 }
 
 .prose p {
-  color: #e5e7eb !important;
+  color: #2e2e2e;
   margin-top: 0.75em;
   margin-bottom: 0.75em;
 }
@@ -89,67 +87,145 @@
 .prose h4,
 .prose h5,
 .prose h6 {
-  color: #f3f4f6 !important;
+  color: #1a1a1a;
   font-weight: 600;
 }
 
 .prose strong {
-  color: #f9fafb !important;
+  color: #1a1a1a;
   font-weight: 600;
 }
 
 .prose a {
-  color: #22d3ee !important;
+  color: #0066cc;
   text-decoration: underline;
 }
 
 .prose a:hover {
-  color: #06b6d4 !important;
+  color: #0052a3;
 }
 
 .prose ul,
 .prose ol {
-  color: #e5e7eb !important;
+  color: #2e2e2e;
 }
 
 .prose li {
-  color: #e5e7eb !important;
+  color: #2e2e2e;
 }
 
 .prose blockquote {
-  color: #9ca3af !important;
-  border-left-color: rgba(34, 211, 238, 0.3);
+  color: #6b6b6b;
+  border-left-color: rgba(0, 0, 0, 0.15);
 }
 
 .prose pre {
-  background-color: #0d1117 !important;
-  color: #e5e7eb !important;
+  background-color: #f5f5f5;
+  color: #2e2e2e;
+  border: 1px solid #e5e5e5;
 }
 
 .prose pre code {
-  color: #e5e7eb !important;
+  color: #2e2e2e;
 }
 
 .prose code {
-  color: #22d3ee !important;
-  background-color: rgba(255, 255, 255, 0.1);
+  color: #1a1a1a;
+  background-color: #f0f0f0;
 }
 
 .prose table {
-  color: #e5e7eb !important;
+  color: #2e2e2e;
 }
 
 .prose thead {
-  color: #f3f4f6 !important;
-  border-bottom-color: rgba(255, 255, 255, 0.1);
+  color: #1a1a1a;
+  border-bottom-color: rgba(0, 0, 0, 0.1);
 }
 
 .prose tbody tr {
-  border-bottom-color: rgba(255, 255, 255, 0.05);
-  color: #e5e7eb !important;
+  border-bottom-color: rgba(0, 0, 0, 0.05);
+  color: #2e2e2e;
 }
 
 .prose td,
 .prose th {
-  color: #e5e7eb !important;
+  color: #2e2e2e;
+}
+
+/* KaTeX styling for light mode */
+.katex {
+  color: #1a1a1a;
+  font-size: 1.1em;
+}
+
+.katex-display {
+  margin: 1em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Style for \boxed{} command - KaTeX generates .boxed or uses fbox/framebox */
+.katex .boxed,
+.katex .fbox,
+.katex .fcolorbox,
+.katex .framebox {
+  border: 2px solid #2e2e2e !important;
+  padding: 0.3em 0.5em !important;
+  border-radius: 4px !important;
+  background-color: #f9f9f9 !important;
+}
+
+/* Target the enclosing element that KaTeX creates for boxed content */
+.katex .enclosing {
+  border: 2px solid #2e2e2e !important;
+  padding: 0.3em 0.5em !important;
+  border-radius: 4px !important;
+  background-color: #f9f9f9 !important;
+}
+
+/* Target fbox-line which is what KaTeX actually uses for \boxed */
+.katex .fbox-line {
+  border: 2px solid #2e2e2e !important;
+  border-radius: 4px !important;
+  background-color: #f9f9f9 !important;
+  padding: 0.3em 0.5em !important;
+}
+
+/* KaTeX uses SVG for drawing boxes - style the SVG paths */
+.katex svg path {
+  stroke: #2e2e2e !important;
+  stroke-width: 2px !important;
+}
+
+/* Target the mord element that contains boxed content */
+.katex .mord.boxed {
+  border: 2px solid #2e2e2e !important;
+  border-radius: 4px !important;
+  background-color: #f9f9f9 !important;
+  padding: 0.3em 0.5em !important;
+  display: inline-block !important;
+}
+
+/* Ensure math expressions are visible in light mode */
+.katex .mord,
+.katex .mbin,
+.katex .mrel,
+.katex .mop,
+.katex .mpunct,
+.katex .mopen,
+.katex .mclose {
+  color: #1a1a1a;
+}
+
+/* Inline math styling */
+.prose .katex {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* Display math styling */
+.prose .katex-display {
+  text-align: center;
+  padding: 0.5em 0;
 }

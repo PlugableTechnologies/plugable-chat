@@ -1,7 +1,8 @@
 import { useChatStore } from '../store/chat-store';
-import { ChevronDown, Plus } from 'lucide-react';
+// Icons replaced with unicode characters
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { invoke } from '../lib/api';
@@ -46,34 +47,21 @@ const InputBar = ({
     setInput,
     handleSend,
     handleKeyDown,
-    textareaRef,
-    onNewChat
+    textareaRef
 }: {
     className?: string,
     input: string,
     setInput: (s: string) => void,
     handleSend: () => void,
     handleKeyDown: (e: React.KeyboardEvent) => void,
-    textareaRef: React.RefObject<HTMLTextAreaElement | null>,
-    onNewChat: () => void
+    textareaRef: React.RefObject<HTMLTextAreaElement | null>
 }) => (
     <div className={`w-full flex items-end gap-3 ${className}`}>
-        {/* New Chat Button */}
-        <button
-            onClick={onNewChat}
-            className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors pb-3 shrink-0 group"
-        >
-            <div className="w-9 h-9 rounded-full border-2 border-slate-700 flex items-center justify-center group-hover:border-slate-400 transition-colors">
-                <Plus size={18} />
-            </div>
-            <span className="font-medium text-sm">New Chat</span>
-        </button>
-
         {/* Input Field */}
-        <div className="flex-1 bg-[#1a1f26] rounded-3xl p-1 pl-5 pr-2 flex items-end gap-3 border border-transparent shadow-[0_15px_40px_rgba(1,9,22,0.45)]">
+        <div className="flex-1 bg-white rounded-3xl p-1 pl-5 pr-2 flex items-end gap-3 border border-gray-300 shadow-sm">
             <textarea
                 ref={textareaRef}
-                className="flex-1 bg-transparent text-slate-100 resize-none focus:outline-none max-h-[200px] py-3 min-h-[24px] overflow-y-auto scrollbar-hide placeholder:text-slate-500 font-normal text-[15px] leading-relaxed"
+                className="flex-1 bg-transparent text-gray-900 resize-none focus:outline-none max-h-[200px] py-3 min-h-[24px] overflow-y-auto scrollbar-hide placeholder:text-gray-400 font-normal text-[15px] leading-relaxed"
                 rows={1}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -82,10 +70,10 @@ const InputBar = ({
             />
             <button
                 onClick={handleSend}
-                className={`px-5 py-2.5 rounded-full font-semibold text-sm transition-all transform duration-200 shrink-0 mb-0.5 ${input.trim() ? 'bg-cyan-400 text-black hover:bg-cyan-300 shadow-lg shadow-cyan-400/20' : 'bg-slate-700 text-slate-500 cursor-not-allowed'}`}
+                className={`px-5 py-2.5 rounded-full font-semibold text-sm transition-all transform duration-200 shrink-0 mb-0.5 ${input.trim() ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}
                 disabled={!input.trim()}
             >
-                Send
+                ↑
             </button>
         </div>
     </div>
@@ -174,16 +162,13 @@ export function ChatArea() {
     };
 
     return (
-        <div className="h-full w-full flex flex-col bg-[#0f1419] text-slate-200 font-sans relative overflow-hidden">
+        <div className="h-full w-full flex flex-col bg-white text-gray-800 font-sans relative overflow-hidden">
             {/* Scrollable Messages Area - takes all remaining space */}
             <div className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-2 sm:px-6 pt-6 pb-6">
                 {messages.length === 0 ? (
                     <div className="flex-1 flex flex-col items-center justify-center px-6">
                         <div className="mb-8 text-center">
-                            <div className="w-16 h-16 bg-gradient-to-tr from-cyan-500 to-blue-500 rounded-2xl flex items-center justify-center mb-6 mx-auto shadow-xl shadow-cyan-500/20">
-                                <div className="w-8 h-8 bg-white rounded-full opacity-90" />
-                            </div>
-                            <h1 className="text-2xl font-bold text-white">How can I help you today?</h1>
+                            <h1 className="text-2xl font-bold text-gray-900">How can I help you today?</h1>
                         </div>
                     </div>
                 ) : (
@@ -194,29 +179,29 @@ export function ChatArea() {
                                     className={`
                                     relative w-full max-w-none rounded-2xl px-5 py-3.5 text-[15px] leading-7
                                     ${m.role === 'user'
-                                            ? 'bg-[#1a1f26] text-slate-200 border border-transparent shadow-[0_10px_30px_rgba(2,6,23,0.45)]'
-                                            : 'bg-transparent text-slate-200'
+                                            ? 'bg-gray-100 text-gray-900'
+                                            : 'bg-gray-50 text-gray-900'
                                         }
                                 `}
                                 >
-                                    <div className="prose prose-slate max-w-none break-words text-slate-200">
+                                    <div className="prose prose-slate max-w-none break-words text-gray-900">
                                         {m.role === 'assistant' ? (
                                             parseMessageContent(m.content).map((part, idx) => (
                                                 part.type === 'think' ? (
                                                     <details key={idx} className="mb-4 group">
-                                                        <summary className="cursor-pointer text-xs font-medium text-slate-400 hover:text-slate-200 select-none flex items-center gap-2 mb-2">
-                                                            <span className="uppercase tracking-wider text-slate-400">Thought Process</span>
-                                                            <span className="h-px flex-1 bg-white/10 group-open:bg-white/20 transition-colors"></span>
-                                                            <ChevronDown size={12} className="group-open:rotate-180 transition-transform" />
+                                                        <summary className="cursor-pointer text-xs font-medium text-gray-500 hover:text-gray-700 select-none flex items-center gap-2 mb-2">
+                                                            <span className="uppercase tracking-wider text-gray-500">Thought Process</span>
+                                                            <span className="h-px flex-1 bg-gray-300 group-open:bg-gray-400 transition-colors"></span>
+                                                            <span className="text-sm group-open:rotate-180 transition-transform inline-block">▼</span>
                                                         </summary>
-                                                        <div className="pl-3 border-l-2 border-cyan-500/60 text-slate-400 text-sm italic bg-white/5 p-3 rounded-r-lg">
+                                                        <div className="pl-3 border-l-2 border-gray-400 text-gray-600 text-sm italic bg-gray-100 p-3 rounded-r-lg">
                                                             {part.content || "Thinking..."}
                                                         </div>
                                                     </details>
                                                 ) : (
                                                     <ReactMarkdown
                                                         key={idx}
-                                                        remarkPlugins={[remarkGfm]}
+                                                        remarkPlugins={[remarkGfm, remarkMath]}
                                                         rehypePlugins={[rehypeKatex]}
                                                         components={{
                                                             code({ node, inline, className, children, ...props }: any) {
@@ -224,24 +209,24 @@ export function ChatArea() {
                                                                 const codeContent = String(children).replace(/\n$/, '');
 
                                                                 return !inline && match ? (
-                                                                    <div className="my-4 rounded-xl overflow-hidden border border-white/10 bg-[#0d1117] shadow-sm group/code">
-                                                                        <div className="flex justify-between items-center bg-[#161b22] px-3 py-2 border-b border-white/10 backdrop-blur-sm">
-                                                                            <span className="text-xs text-slate-400 font-mono font-medium">{match[1]}</span>
+                                                                    <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
+                                                                        <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
+                                                                            <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
                                                                             <button
                                                                                 onClick={() => navigator.clipboard.writeText(codeContent)}
-                                                                                className="text-xs text-slate-400 hover:text-white transition-colors px-2 py-1 hover:bg-white/5 rounded opacity-0 group-hover/code:opacity-100"
+                                                                                className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
                                                                             >
-                                                                                Copy
+                                                                                📋
                                                                             </button>
                                                                         </div>
-                                                                        <div className="bg-[#0d1117] p-4 overflow-x-auto text-sm">
+                                                                        <div className="bg-white p-4 overflow-x-auto text-sm">
                                                                             <code className={className} {...props}>
                                                                                 {children}
                                                                             </code>
                                                                         </div>
                                                                     </div>
                                                                 ) : (
-                                                                    <code className={`${className} bg-white/10 px-1.5 py-0.5 rounded text-[13px] text-cyan-300 font-mono border border-white/10`} {...props}>
+                                                                    <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
                                                                         {children}
                                                                     </code>
                                                                 )
@@ -261,11 +246,11 @@ export function ChatArea() {
                         ))}
                         {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
                             <div className="flex w-full justify-start">
-                                <div className="bg-[#171d24] rounded-2xl px-6 py-4 border border-transparent">
+                                <div className="bg-gray-50 rounded-2xl px-6 py-4">
                                     <div className="flex gap-1.5">
-                                        <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                                        <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                                        <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                                        <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                                        <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                                        <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                                     </div>
                                 </div>
                             </div>
@@ -284,12 +269,8 @@ export function ChatArea() {
                         handleSend={handleSend}
                         handleKeyDown={handleKeyDown}
                         textareaRef={textareaRef}
-                        onNewChat={() => {
-                            useChatStore.setState({ messages: [] });
-                            setInput('');
-                        }}
                     />
-                    <div className="text-center text-xs text-slate-400 mt-3 font-normal">
+                    <div className="text-center text-xs text-gray-500 mt-3 font-normal">
                         Plugable Chat can make mistakes. Check important info.
                     </div>
                 </div>
