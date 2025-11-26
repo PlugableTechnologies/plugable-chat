@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedModel {
+    pub alias: String,
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatSummary {
     pub id: String,
     pub title: String,
@@ -70,9 +76,13 @@ pub enum FoundryMsg {
         reasoning_effort: String,
         respond_to: tokio::sync::mpsc::UnboundedSender<String>,
     },
-    /// Get available models
+    /// Get available models from running service
     GetModels {
         respond_to: oneshot::Sender<Vec<String>>,
+    },
+    /// Get cached models from `foundry cache ls`
+    GetCachedModels {
+        respond_to: oneshot::Sender<Vec<CachedModel>>,
     },
     /// Set the active model
     SetModel {

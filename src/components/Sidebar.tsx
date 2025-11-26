@@ -1,6 +1,6 @@
 import { useChatStore } from '../store/chat-store';
 import { useEffect, useState, useRef } from 'react';
-import { MoreHorizontal, Pin, Trash, Edit, MessageSquare, Plus } from 'lucide-react';
+import { MoreHorizontal, Pin, Trash, Edit, MessageSquare, Plus, Search, Loader2 } from 'lucide-react';
 
 type SidebarProps = {
     className?: string;
@@ -8,7 +8,8 @@ type SidebarProps = {
 
 export function Sidebar({ className = "" }: SidebarProps) {
     const {
-        history, fetchHistory, loadChat, deleteChat, renameChat, togglePin, currentChatId
+        history, fetchHistory, loadChat, deleteChat, renameChat, togglePin, currentChatId,
+        relevanceResults, isSearchingRelevance, input
     } = useChatStore();
 
     const [editingId, setEditingId] = useState<string | null>(null);
@@ -17,8 +18,15 @@ export function Sidebar({ className = "" }: SidebarProps) {
     const menuRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
+        console.log('[Sidebar] Component mounted, fetching history...');
         fetchHistory();
     }, []);
+
+    // Log when history changes
+    useEffect(() => {
+        console.log(`[Sidebar] History updated: ${history.length} chats`, 
+            history.map(c => ({ id: c.id.slice(0, 8), title: c.title })));
+    }, [history]);
 
     // Close menu when clicking outside
     useEffect(() => {
@@ -38,8 +46,12 @@ export function Sidebar({ className = "" }: SidebarProps) {
         setEditingId(null);
     };
 
-    const pinnedChats = history.filter(c => c.pinned);
-    const recentChats = history.filter(c => !c.pinned);
+    // Use relevance results if available (user is typing), otherwise use normal history
+    const isShowingRelevance = relevanceResults !== null && input.trim().length >= 3;
+    const displayChats = isShowingRelevance ? relevanceResults : history;
+    
+    const pinnedChats = displayChats.filter(c => c.pinned);
+    const recentChats = displayChats.filter(c => !c.pinned);
 
     const ChatItem = ({ chat }: { chat: any }) => {
         const isActive = chat.id === currentChatId;
@@ -127,7 +139,7 @@ export function Sidebar({ className = "" }: SidebarProps) {
     };
 
     return (
-        <div className={`bg-gray-50 text-gray-800 flex flex-col h-full w-full border-r border-gray-200 font-sans text-sm ${className}`}>
+        <div className={`text-gray-900 flex flex-col h-full w-full font-sans text-sm ${className}`} style={{ backgroundColor: '#e5e7eb' }}>
             {/* Scrollable Content - History */}
             <div className="flex-1 overflow-y-auto scrollbar-hide px-3 pt-4">
                 {/* New Chat Button */}
@@ -135,10 +147,11 @@ export function Sidebar({ className = "" }: SidebarProps) {
                     onClick={() => {
                         useChatStore.setState({ messages: [], input: '', currentChatId: null });
                     }}
-                    className="w-full flex items-center gap-2 text-gray-700 hover:bg-gray-100 transition-colors px-3 py-2.5 rounded-lg mb-4 group border border-gray-200 hover:border-gray-300 bg-white shadow-sm"
+                    className="inline-flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors px-3 py-1.5 rounded-full group text-xs font-semibold uppercase tracking-wide self-start"
+                    style={{ marginBottom: '24px' }}
                 >
-                    <Plus size={16} className="text-gray-500 group-hover:text-gray-900" />
-                    <span className="font-medium text-sm">New Chat</span>
+                    <Plus size={16} className="text-gray-500 group-hover:text-gray-700" />
+                    <span>New Chat</span>
                 </button>
 
                 {/* Pinned Section */}
@@ -157,10 +170,18 @@ export function Sidebar({ className = "" }: SidebarProps) {
 
                 {/* Chat History Section */}
                 <div className="mb-8">
-                    <div className="text-xs font-semibold text-gray-500 mb-2 px-3 uppercase tracking-wider">Recent</div>
+                    {isShowingRelevance && (
+                        <div className="text-xs font-semibold text-gray-500 mb-2 px-3 uppercase tracking-wider flex items-center gap-2">
+                            <Search size={10} />
+                            <span>Relevant</span>
+                            {isSearchingRelevance && <Loader2 size={10} className="animate-spin" />}
+                        </div>
+                    )}
                     <div className="space-y-0.5">
                         {recentChats.length === 0 ? (
-                            <div className="px-3 text-sm text-gray-400 italic py-2">No history yet</div>
+                            <div className="px-3 text-sm text-gray-400 italic py-2">
+                                {isShowingRelevance ? "No matching chats" : "No history yet"}
+                            </div>
                         ) : (
                             recentChats.map((chat) => (
                                 <ChatItem key={chat.id} chat={chat} />
@@ -172,7 +193,7 @@ export function Sidebar({ className = "" }: SidebarProps) {
 
             {/* Bottom Actions */}
             <div className="p-3 space-y-1">
-                <div className="pt-2 mt-2 border-t border-gray-200">
+                <div className="pt-2 mt-2">
                     {/* Empty for now, user profile removed */}
                 </div>
             </div>

@@ -28,7 +28,7 @@ function ErrorBanner() {
 }
 
 function App() {
-  const { currentModel, reasoningEffort, setReasoningEffort } = useChatStore();
+  const { currentModel, cachedModels, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, setModel } = useChatStore();
   const effortOptions: ReasoningEffort[] = ['low', 'medium', 'high'];
   console.log("App component rendering...");
 
@@ -172,46 +172,51 @@ function App() {
   }, []);
 
   return (
-    <div className="h-screen w-screen fixed inset-0 bg-white text-gray-800 overflow-hidden font-sans antialiased">
-      <div className="h-full w-full">
-        <div className="h-full w-full px-4 sm:px-6 py-4 sm:py-6">
-          <div className="mx-auto h-full w-full max-w-[1400px] flex flex-col gap-4">
-            {/* Top Header Bar */}
-            <div className="h-14 bg-white border border-transparent rounded-2xl border-b border-gray-200 flex items-center relative px-4 sm:px-6">
-              <div className="flex items-center gap-3">
-                <img src="/plugable-logo.png" alt="Plugable" className="h-6 max-w-[120px] w-auto object-contain" />
-                <span className="font-semibold text-sm text-gray-900">Chat for Microsoft Foundry</span>
-              </div>
-              <div className="flex-1" />
-              <div className="flex items-center gap-6 text-sm text-gray-500">
-              <span>Reasoning:&nbsp;</span>
-                  <select
-                    value={reasoningEffort}
-                    onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort)}
-                    className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none"
-                  >
-                    {effortOptions.map((option) => (
-                      <option key={option} value={option}>
-                        {option.charAt(0).toUpperCase() + option.slice(1)}
-                      </option>
-                    ))}
-                  </select>
-                  &nbsp;
-                <span> Local Model:&nbsp;</span>
-                <span className="text-gray-700">{currentModel}</span>
-              </div>
-            </div>
-
-            {/* Main Content Area */}
-            <div className="flex-1 flex overflow-hidden min-h-0 w-full max-w-none min-w-0">
-              <div className="flex-[1] min-w-[260px]">
-                <Sidebar className="h-full" />
-              </div>
-              <div className="flex-[2] min-w-0 flex flex-col relative overflow-hidden h-full">
-                <ErrorBanner />
-                <ChatArea />
-              </div>
-            </div>
+    <div className="h-screen w-screen fixed inset-0 bg-white text-gray-800 overflow-hidden font-sans antialiased flex items-center justify-center">
+      <div className="w-[calc(100%-24px)] h-[calc(100%-24px)] sm:w-[calc(100%-32px)] sm:h-[calc(100%-32px)] bg-white rounded-2xl shadow-lg overflow-hidden flex flex-col">
+        {/* Header */}
+        <div className="h-14 shrink-0 flex items-center px-4 sm:px-6 bg-white">
+          <div className="flex items-center gap-3">
+            <img src="/plugable-logo.png" alt="Plugable" className="h-6 max-w-[120px] w-auto object-contain" />
+            <span className="font-semibold text-sm text-gray-900">Local Chat - Microsoft Foundry</span>
+          </div>
+          <div className="flex-1" />
+          <div className="flex items-center gap-2 text-sm text-gray-500">
+            <span>Model:</span>
+            {isConnecting ? (
+              <span className="text-gray-500 flex items-center gap-1.5">
+                <span className="inline-block w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></span>
+                Connecting...
+              </span>
+            ) : currentModel === 'Unavailable' ? (
+              <button onClick={retryConnection} className="text-red-600 hover:text-red-800 underline underline-offset-2 transition-colors" title="Click to retry connection">
+                Unavailable (retry)
+              </button>
+            ) : cachedModels.length > 0 ? (
+              <select value={currentModel} onChange={(e) => setModel(e.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none max-w-[200px]" title="Select a cached model">
+                {cachedModels.map((model) => (
+                  <option key={model.model_id} value={model.model_id}>{model.alias}{currentModel === model.model_id ? ' ✓' : ''}</option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-gray-700">{currentModel === 'Loading...' ? 'Loading...' : currentModel}</span>
+            )}
+            <span style={{ marginLeft: '24px' }}>Reasoning:</span>
+            <select value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none">
+              {effortOptions.map((option) => (
+                <option key={option} value={option}>{option.charAt(0).toUpperCase() + option.slice(1)}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        {/* Main Content */}
+        <div className="flex-1 flex overflow-hidden min-h-0">
+          <div className="flex-[1] min-w-[260px] overflow-hidden" style={{ backgroundColor: '#e5e7eb' }}>
+            <Sidebar className="h-full" />
+          </div>
+          <div className="flex-[2] min-w-0 flex flex-col overflow-hidden h-full bg-white">
+            <ErrorBanner />
+            <ChatArea />
           </div>
         </div>
       </div>

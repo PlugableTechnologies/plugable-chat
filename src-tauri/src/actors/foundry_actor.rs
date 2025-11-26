@@ -1,5 +1,5 @@
 use tokio::sync::mpsc;
-use crate::protocol::FoundryMsg;
+use crate::protocol::{FoundryMsg, CachedModel};
 use serde_json::json;
 use tokio::process::Command;
 use std::time::Duration;
@@ -27,8 +27,9 @@ impl FoundryActor {
             println!("Warning: Failed to ensure Foundry service is running: {}", e);
         }
 
-        // Try to get the port and model
-        self.update_connection_info().await;
+        // Try to get the port and model with retries
+        // Foundry may take time to start up, so we retry with exponential backoff
+        self.update_connection_info_with_retry(5, Duration::from_secs(2)).await;
 
         let client = reqwest::Client::new();
 
@@ -42,9 +43,14 @@ impl FoundryActor {
                 }
                 FoundryMsg::GetModels { respond_to } => {
                     if self.port.is_none() || self.available_models.is_empty() {
-                        self.update_connection_info().await;
+                        // Retry with exponential backoff if still not connected
+                        self.update_connection_info_with_retry(3, Duration::from_secs(1)).await;
                     }
                     let _ = respond_to.send(self.available_models.clone());
+                }
+                FoundryMsg::GetCachedModels { respond_to } => {
+                    let cached = self.get_cached_models().await;
+                    let _ = respond_to.send(cached);
                 }
                 FoundryMsg::SetModel { model_id, respond_to } => {
                     self.model_id = Some(model_id.clone());
@@ -55,17 +61,25 @@ impl FoundryActor {
                      // Check if we need to restart/reconnect
                      if self.port.is_none() || self.available_models.is_empty() {
                          println!("FoundryActor: No models found or port missing. Attempting to restart service...");
-                         let _ = respond_to.send("Restarting local model service...".to_string());
                          
-                         // Restart service
-                         if let Err(e) = self.restart_service().await {
-                             println!("FoundryActor: Failed to restart service: {}", e);
-                             let _ = respond_to.send(format!("Error: Failed to restart service: {}", e));
-                             continue;
+                         // First try to just reconnect (maybe service started in meantime)
+                         if !self.update_connection_info_with_retry(2, Duration::from_secs(1)).await {
+                             // Still not working, restart the service
+                             println!("FoundryActor: Quick reconnect failed, restarting service...");
+                             
+                             // Restart service
+                             if let Err(e) = self.restart_service().await {
+                                 println!("FoundryActor: Failed to restart service: {}", e);
+                                 let _ = respond_to.send(format!("Error: Failed to restart local model service. Please ensure Foundry is installed: {}", e));
+                                 continue;
+                             }
+                             
+                             // Update info with longer retry
+                             if !self.update_connection_info_with_retry(5, Duration::from_secs(2)).await {
+                                 let _ = respond_to.send("Error: Could not connect to Foundry service after restart. Please check if Foundry is running.".to_string());
+                                 continue;
+                             }
                          }
-                         
-                         // Update info
-                         self.update_connection_info().await;
                      }
 
                      if let Some(port) = self.port {
@@ -165,7 +179,7 @@ impl FoundryActor {
         }
     }
 
-    async fn update_connection_info(&mut self) {
+    async fn update_connection_info(&mut self) -> bool {
         self.port = self.detect_port().await;
         if let Some(p) = self.port {
             println!("Foundry service detected on port {}", p);
@@ -190,6 +204,7 @@ impl FoundryActor {
                                     self.emit_model_selected(first);
                                     }
                                 }
+                                return !self.available_models.is_empty();
                             }
                          },
                          Err(e) => println!("Failed to parse models response: {}", e),
@@ -201,6 +216,31 @@ impl FoundryActor {
         } else {
              println!("Warning: Could not detect Foundry service port.");
         }
+        false
+    }
+    
+    /// Try to update connection info with exponential backoff
+    /// Returns true if successfully connected and found models
+    async fn update_connection_info_with_retry(&mut self, max_retries: u32, initial_delay: Duration) -> bool {
+        let mut delay = initial_delay;
+        
+        for attempt in 1..=max_retries {
+            println!("FoundryActor: Connection attempt {}/{}", attempt, max_retries);
+            
+            if self.update_connection_info().await {
+                println!("FoundryActor: Successfully connected to Foundry on attempt {}", attempt);
+                return true;
+            }
+            
+            if attempt < max_retries {
+                println!("FoundryActor: Attempt {} failed, retrying in {:?}...", attempt, delay);
+                sleep(delay).await;
+                delay = Duration::from_millis((delay.as_millis() as f64 * 1.5) as u64).min(Duration::from_secs(10));
+            }
+        }
+        
+        println!("FoundryActor: Failed to connect after {} attempts", max_retries);
+        false
     }
 
     fn emit_model_selected(&self, model: &str) {
@@ -290,5 +330,83 @@ impl FoundryActor {
                 None
             }
         }
+    }
+
+    /// Get cached models from `foundry cache ls`
+    /// Parses output like:
+    /// ```
+    /// Models cached on device:
+    ///
+    ///    Alias                                             Model ID
+    ///
+    /// 💾 qwen2.5-coder-0.5b                                qwen2.5-coder-0.5b-instruct-generic-gpu:4
+    /// 💾 phi-4-mini-reasoning                              Phi-4-mini-reasoning-generic-gpu:3
+    /// ```
+    async fn get_cached_models(&self) -> Vec<CachedModel> {
+        println!("FoundryActor: Getting cached models via 'foundry cache ls'...");
+        
+        let child = Command::new("foundry")
+            .args(&["cache", "ls"])
+            .output();
+            
+        match timeout(Duration::from_secs(10), child).await {
+            Ok(Ok(output)) => {
+                if !output.status.success() {
+                    println!("FoundryActor: 'foundry cache ls' failed");
+                    return Vec::new();
+                }
+                
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                self.parse_cache_ls_output(&stdout)
+            }
+            Ok(Err(e)) => {
+                println!("FoundryActor: Failed to run 'foundry cache ls': {}", e);
+                Vec::new()
+            }
+            Err(_) => {
+                println!("FoundryActor: 'foundry cache ls' timed out.");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Parse the output of `foundry cache ls`
+    fn parse_cache_ls_output(&self, output: &str) -> Vec<CachedModel> {
+        let mut models = Vec::new();
+        
+        for line in output.lines() {
+            let trimmed = line.trim();
+            
+            // Skip empty lines and header lines
+            if trimmed.is_empty() 
+                || trimmed.starts_with("Models cached")
+                || trimmed.starts_with("Alias")
+                || trimmed.starts_with("---") 
+            {
+                continue;
+            }
+            
+            // Lines with models start with 💾 emoji
+            // Format: "💾 alias                                             model_id"
+            if trimmed.starts_with("💾") || trimmed.starts_with("💾") {
+                // Remove the emoji and parse
+                let rest = trimmed.trim_start_matches("💾").trim_start_matches("💾").trim();
+                
+                // Split on multiple spaces (the columns are separated by many spaces)
+                // Find where alias ends and model_id begins by looking for multiple spaces
+                if let Some(split_pos) = rest.find("  ") {
+                    let alias = rest[..split_pos].trim().to_string();
+                    let model_id = rest[split_pos..].trim().to_string();
+                    
+                    if !alias.is_empty() && !model_id.is_empty() {
+                        println!("FoundryActor: Found cached model: {} -> {}", alias, model_id);
+                        models.push(CachedModel { alias, model_id });
+                    }
+                }
+            }
+        }
+        
+        println!("FoundryActor: Found {} cached models", models.len());
+        models
     }
 }

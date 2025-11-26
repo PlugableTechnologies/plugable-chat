@@ -45,9 +45,13 @@ impl VectorActor {
                         let _ = respond_to.send(results);
                     }
                     VectorMsg::UpsertChat { id, title, content, messages, vector, pinned } => {
-                        println!("VectorActor: Upserting chat (id: {}, title: {})", id, title);
+                        println!("VectorActor: Upserting chat (id: {}, title: {}, has_vector: {})", 
+                            &id[..8.min(id.len())], title, vector.is_some());
                         if let Some(vec) = vector {
-                           let _ = perform_upsert(&table, id, title, content, messages, vec, pinned).await;
+                            println!("VectorActor: Vector length: {}", vec.len());
+                            perform_upsert(&table, id, title, content, messages, vec, pinned).await;
+                        } else {
+                            println!("VectorActor WARNING: No vector provided, skipping upsert!");
                         }
                     }
                     VectorMsg::GetChat { id, respond_to } => {
@@ -170,10 +174,18 @@ async fn setup_table(db: &Connection) -> Table {
 }
 
 async fn perform_upsert(table: &Table, id: String, title: String, content: String, messages: String, vector: Vec<f32>, pinned: bool) {
-    let schema = table.schema().await.unwrap();
+    println!("VectorActor: perform_upsert starting for id={}", &id[..8.min(id.len())]);
+    
+    let schema = match table.schema().await {
+        Ok(s) => s,
+        Err(e) => {
+            println!("VectorActor ERROR: Failed to get schema: {}", e);
+            return;
+        }
+    };
     
     let id_array = StringArray::from(vec![id.clone()]);
-    let title_array = StringArray::from(vec![title]);
+    let title_array = StringArray::from(vec![title.clone()]);
     let content_array = StringArray::from(vec![content]);
     let messages_array = StringArray::from(vec![messages]);
     let pinned_array = BooleanArray::from(vec![pinned]);
@@ -184,7 +196,7 @@ async fn perform_upsert(table: &Table, id: String, title: String, content: Strin
         384
     );
 
-    let batch = RecordBatch::try_new(
+    let batch = match RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(id_array),
@@ -194,15 +206,27 @@ async fn perform_upsert(table: &Table, id: String, title: String, content: Strin
             Arc::new(pinned_array),
             Arc::new(vector_array),
         ],
-    ).unwrap();
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            println!("VectorActor ERROR: Failed to create RecordBatch: {}", e);
+            return;
+        }
+    };
 
     // Perform upsert by deleting existing record (if any) and adding new one
     // This is a workaround for merge_insert API issues in lancedb 0.4
-    let _ = table.delete(&format!("id = '{}'", id)).await;
+    if let Err(e) = table.delete(&format!("id = '{}'", id)).await {
+        println!("VectorActor WARNING: Delete before upsert failed (may be ok if new): {}", e);
+    }
     
-    let _ = table.add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
+    match table.add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
         .execute()
-        .await;
+        .await 
+    {
+        Ok(_) => println!("VectorActor: Successfully saved chat '{}' to LanceDB", title),
+        Err(e) => println!("VectorActor ERROR: Failed to add chat to LanceDB: {}", e),
+    }
 }
 
 async fn perform_get_chat(table: Table, id: String) -> Option<String> {

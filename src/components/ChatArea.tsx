@@ -4,9 +4,10 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import rehypeRaw from 'rehype-raw';
 import 'katex/dist/katex.min.css';
 import { invoke } from '../lib/api';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 // Helper to parse thinking blocks
 const parseMessageContent = (content: string) => {
@@ -40,51 +41,112 @@ const parseMessageContent = (content: string) => {
     return parts;
 };
 
+// Check if message has only think content (no visible text)
+const hasOnlyThinkContent = (content: string): boolean => {
+    const parts = parseMessageContent(content);
+    const textParts = parts.filter(p => p.type === 'text');
+    const thinkParts = parts.filter(p => p.type === 'think');
+    // Has think content but no meaningful visible text
+    return thinkParts.length > 0 && textParts.every(p => !p.content.trim());
+};
+
+// Thinking indicator component with elapsed time
+const ThinkingIndicator = ({ startTime }: { startTime: number }) => {
+    const [elapsed, setElapsed] = useState(0);
+    
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setElapsed(Math.floor((Date.now() - startTime) / 1000));
+        }, 1000);
+        return () => clearInterval(interval);
+    }, [startTime]);
+
+    // Format elapsed time
+    const formatTime = (seconds: number) => {
+        if (seconds < 60) return `${seconds}s`;
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins}m ${secs}s`;
+    };
+
+    return (
+        <div className="flex items-center gap-2 text-xs text-gray-500 mt-2 mb-1">
+            <div className="flex gap-1">
+                <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />
+                <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
+                <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" style={{ animationDelay: '600ms' }} />
+            </div>
+            <span className="font-medium text-gray-500">
+                Reasoning{elapsed >= 10 ? ` · ${formatTime(elapsed)}` : '...'}
+            </span>
+        </div>
+    );
+};
+
 // Input Bar Component
 const InputBar = ({
     className = "",
     input,
     setInput,
     handleSend,
+    handleStop,
     handleKeyDown,
-    textareaRef
+    textareaRef,
+    isLoading
 }: {
     className?: string,
     input: string,
     setInput: (s: string) => void,
     handleSend: () => void,
+    handleStop: () => void,
     handleKeyDown: (e: React.KeyboardEvent) => void,
-    textareaRef: React.RefObject<HTMLTextAreaElement | null>
-}) => (
-    <div className={`w-full flex justify-center ${className}`}>
-        <div className="flex items-center gap-3 w-full max-w-[900px] bg-[#f5f5f5] border border-transparent rounded-full px-3 py-2 shadow-[0px_2px_8px_rgba(15,23,42,0.08)] focus-within:border-gray-300 transition-all">
-            <button
-                type="button"
-                className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-gray-600 shadow-sm hover:bg-gray-100 transition"
-                aria-label="Start new request"
-            >
-                +
-            </button>
-            <textarea
-                ref={textareaRef}
-                className="flex-1 bg-transparent text-gray-700 resize-none focus:outline-none focus:ring-0 focus:border-none max-h-[280px] min-h-[72px] overflow-y-auto scrollbar-hide placeholder:text-gray-400 font-normal text-[15px] leading-relaxed border-none"
-                rows={3}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Ask anything"
-            />
-            <button
-                onClick={handleSend}
-                className={`h-9 w-9 flex items-center justify-center rounded-full text-lg transition ${input.trim() ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}
-                disabled={!input.trim()}
-                aria-label="Send message"
-            >
-                ↩
-            </button>
+    textareaRef: React.RefObject<HTMLTextAreaElement | null>,
+    isLoading: boolean
+}) => {
+    const isMultiline = input.includes('\n') || (textareaRef.current && textareaRef.current.scrollHeight > 44);
+    
+    return (
+        <div className={`w-full flex justify-center ${className}`}>
+            <div className={`flex items-center gap-3 w-full max-w-[900px] bg-[#f5f5f5] border border-transparent px-4 py-2.5 shadow-[0px_2px_8px_rgba(15,23,42,0.08)] focus-within:border-gray-300 transition-all ${isMultiline ? 'rounded-2xl' : 'rounded-full'}`}>
+                <button
+                    type="button"
+                    className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-gray-600 text-xl shadow-sm hover:bg-gray-100 transition shrink-0"
+                    aria-label="Start new request"
+                >
+                    +
+                </button>
+                <textarea
+                    ref={textareaRef}
+                    className="flex-1 bg-transparent text-gray-700 resize-none focus:outline-none focus:ring-0 focus:border-none max-h-[200px] overflow-y-auto placeholder:text-gray-400 font-normal text-[15px] leading-6 border-none py-1"
+                    rows={1}
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Ask anything"
+                    style={{ height: 'auto', minHeight: '32px' }}
+                />
+                {isLoading ? (
+                    <button
+                        onClick={handleStop}
+                        className="h-9 w-9 flex items-center justify-center rounded-full text-base transition bg-red-500 text-white hover:bg-red-600 shrink-0"
+                        aria-label="Stop generation"
+                    >
+                        ■
+                    </button>
+                ) : (
+                    <button
+                        onClick={handleSend}
+                        className={`h-9 w-9 flex items-center justify-center rounded-full text-xl transition shrink-0 ${input.trim() ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}
+                        disabled={!input.trim()}
+                        aria-label="Send message"
+                    >
+                        ↩
+                    </button>
+                )}
+            </div>
         </div>
-    </div>
-);
+    );
+};
 
 
 const generateClientChatId = () => {
@@ -202,9 +264,20 @@ const preprocessLaTeX = (content: string) => {
             }
 
             if (braceCount === 0) {
-                // Found complete block
-                const original = content.substring(i, ptr);
-                result += '$' + original + '$';
+                // Found complete block - extract the inner content
+                const innerContent = content.substring(i + 7, ptr - 1);
+                
+                // Check if content looks like prose text (has spaces, no math operators)
+                const looksLikeText = innerContent.includes(' ') && 
+                    !/[+\-*/=^_{}\\]/.test(innerContent.replace(/\\text\{[^}]*\}/g, ''));
+                
+                if (looksLikeText) {
+                    // For text content, use HTML box instead of KaTeX (inline styles work reliably)
+                    result += '<div style="border: 2px solid #2e2e2e; padding: 0.5em 0.75em; border-radius: 6px; margin: 0.5em 0; display: inline-block; max-width: 100%; word-wrap: break-word;">' + innerContent + '</div>';
+                } else {
+                    // Math content - use KaTeX boxed
+                    result += '$\\boxed{' + innerContent + '}$';
+                }
                 i = ptr;
                 continue;
             }
@@ -219,10 +292,26 @@ const preprocessLaTeX = (content: string) => {
 
 export function ChatArea() {
     const {
-        messages, input, setInput, addMessage, isLoading, setIsLoading, currentChatId, reasoningEffort
+        messages, input, setInput, addMessage, isLoading, setIsLoading, stopGeneration, currentChatId, reasoningEffort,
+        triggerRelevanceSearch, clearRelevanceSearch
     } = useChatStore();
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const [thinkingStartTime, setThinkingStartTime] = useState<number | null>(null);
+
+    // Track when thinking phase starts
+    useEffect(() => {
+        const lastMessage = messages[messages.length - 1];
+        const isThinkingOnly = lastMessage?.role === 'assistant' && 
+                               hasOnlyThinkContent(lastMessage.content) && 
+                               isLoading;
+        
+        if (isThinkingOnly && !thinkingStartTime) {
+            setThinkingStartTime(Date.now());
+        } else if (!isLoading || (lastMessage?.role === 'assistant' && !hasOnlyThinkContent(lastMessage.content))) {
+            setThinkingStartTime(null);
+        }
+    }, [messages, isLoading, thinkingStartTime]);
 
     // Auto-scroll to bottom
     useEffect(() => {
@@ -246,13 +335,25 @@ export function ChatArea() {
         };
     }, []);
 
-    // Auto-resize textarea
+    // Auto-resize textarea (ChatGPT-style: starts compact, grows as you type)
     useEffect(() => {
         if (textareaRef.current) {
+            // Reset height to auto to get accurate scrollHeight
             textareaRef.current.style.height = 'auto';
-            textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+            // Set height to scrollHeight, capped by CSS max-height
+            const newHeight = Math.max(32, Math.min(textareaRef.current.scrollHeight, 200));
+            textareaRef.current.style.height = `${newHeight}px`;
         }
     }, [input]);
+
+    // Trigger relevance search as user types (debounced in store)
+    useEffect(() => {
+        if (input.trim().length >= 3) {
+            triggerRelevanceSearch(input);
+        } else {
+            clearRelevanceSearch();
+        }
+    }, [input, triggerRelevanceSearch, clearRelevanceSearch]);
 
     const handleSend = async () => {
         const text = input;
@@ -260,11 +361,17 @@ export function ChatArea() {
         const trimmedText = text.trim();
 
         const storeState = useChatStore.getState();
-        let chatId = currentChatId;
-        const isNewChat = !chatId;
+        const isNewChat = !currentChatId;
+        const chatId = isNewChat ? generateClientChatId() : currentChatId!;
         if (isNewChat) {
-            chatId = generateClientChatId();
             storeState.setCurrentChatId(chatId);
+            if (storeState.currentModel === 'Loading...') {
+                try {
+                    await storeState.fetchModels();
+                } catch (error) {
+                    console.error('[ChatArea] Failed to refresh models before sending new chat:', error);
+                }
+            }
         }
 
         const existingSummary = storeState.history.find((chat) => chat.id === chatId);
@@ -284,6 +391,7 @@ export function ChatArea() {
         // Add user message
         addMessage({ id: Date.now().toString(), role: 'user', content: text, timestamp: Date.now() });
         setInput('');
+        clearRelevanceSearch(); // Clear relevance results when sending
         if (textareaRef.current) textareaRef.current.style.height = 'auto';
         setIsLoading(true);
 
@@ -316,7 +424,6 @@ export function ChatArea() {
                     pinned: summaryPinned
                 });
             }
-
             storeState.fetchHistory();
         } catch (error) {
             console.error('[ChatArea] Failed to send message:', error);
@@ -344,7 +451,7 @@ export function ChatArea() {
     };
 
     return (
-    <div className="h-full w-full flex flex-col bg-white text-gray-800 font-sans relative overflow-hidden">
+    <div className="h-full w-full flex flex-col text-gray-800 font-sans relative overflow-hidden">
         {/* Scrollable Messages Area - takes all remaining space */}
         <div className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-4 sm:px-6 pt-6 pb-6">
                 {messages.length === 0 ? (
@@ -368,57 +475,64 @@ export function ChatArea() {
                                 >
                                     <div className="prose prose-slate max-w-none break-words text-gray-900">
                                         {m.role === 'assistant' ? (
-                                            parseMessageContent(m.content).map((part, idx) => (
-                                                part.type === 'think' ? (
-                                                    <details key={idx} className="mb-4 group">
-                                                        <summary className="cursor-pointer text-xs font-medium text-gray-500 hover:text-gray-700 select-none flex items-center gap-2 mb-2">
-                                                            <span className="uppercase tracking-wider text-gray-500">Thought Process</span>
-                                                            <span className="h-px flex-1 bg-gray-300 group-open:bg-gray-400 transition-colors"></span>
-                                                            <span className="text-sm group-open:rotate-180 transition-transform inline-block">▼</span>
-                                                        </summary>
-                                                        <div className="pl-3 border-l-2 border-gray-400 text-gray-600 text-sm italic bg-gray-100 p-3 rounded-r-lg">
-                                                            {part.content || "Thinking..."}
-                                                        </div>
-                                                    </details>
-                                                ) : (
-                                                    <ReactMarkdown
-                                                        key={idx}
-                                                        remarkPlugins={[remarkGfm, remarkMath]}
-                                                        rehypePlugins={[rehypeKatex]}
-                                                        components={{
-                                                            code({ node, inline, className, children, ...props }: any) {
-                                                                const match = /language-(\w+)/.exec(className || '')
-                                                                const codeContent = String(children).replace(/\n$/, '');
+                                            <>
+                                                {parseMessageContent(m.content).map((part, idx) => (
+                                                    part.type === 'think' ? (
+                                                        <details key={idx} className="mb-4 group">
+                                                            <summary className="cursor-pointer text-xs font-medium text-gray-400 hover:text-gray-600 select-none flex items-center gap-2 mb-2">
+                                                                <span className="h-px flex-1 bg-gray-200 group-open:bg-gray-300 transition-colors"></span>
+                                                                <span className="text-sm group-open:rotate-180 transition-transform inline-block">▼</span>
+                                                            </summary>
+                                                            <div className="pl-3 border-l-2 border-gray-300 text-gray-600 text-sm italic bg-gray-50 p-3 rounded-r-lg">
+                                                                {part.content || "Thinking..."}
+                                                            </div>
+                                                        </details>
+                                                    ) : (
+                                                        <ReactMarkdown
+                                                            key={idx}
+                                                            remarkPlugins={[remarkGfm, remarkMath]}
+                                                            rehypePlugins={[rehypeRaw, rehypeKatex]}
+                                                            components={{
+                                                                code({ node, inline, className, children, ...props }: any) {
+                                                                    const match = /language-(\w+)/.exec(className || '')
+                                                                    const codeContent = String(children).replace(/\n$/, '');
 
-                                                                return !inline && match ? (
-                                                                    <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
-                                                                        <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
-                                                                            <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
-                                                                            <button
-                                                                                onClick={() => navigator.clipboard.writeText(codeContent)}
-                                                                                className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
-                                                                            >
-                                                                                📋
-                                                                            </button>
+                                                                    return !inline && match ? (
+                                                                        <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
+                                                                            <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
+                                                                                <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
+                                                                                <button
+                                                                                    onClick={() => navigator.clipboard.writeText(codeContent)}
+                                                                                    className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
+                                                                                >
+                                                                                    📋
+                                                                                </button>
+                                                                            </div>
+                                                                            <div className="bg-white p-4 overflow-x-auto text-sm">
+                                                                                <code className={className} {...props}>
+                                                                                    {children}
+                                                                                </code>
+                                                                            </div>
                                                                         </div>
-                                                                        <div className="bg-white p-4 overflow-x-auto text-sm">
-                                                                            <code className={className} {...props}>
-                                                                                {children}
-                                                                            </code>
-                                                                        </div>
-                                                                    </div>
-                                                                ) : (
-                                                                    <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
-                                                                        {children}
-                                                                    </code>
-                                                                )
-                                                            }
-                                                        }}
-                                                    >
-                                                        {preprocessLaTeX(part.content)}
-                                                    </ReactMarkdown>
-                                                )
-                                            ))
+                                                                    ) : (
+                                                                        <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
+                                                                            {children}
+                                                                        </code>
+                                                                    )
+                                                                }
+                                                            }}
+                                                        >
+                                                            {preprocessLaTeX(part.content)}
+                                                        </ReactMarkdown>
+                                                    )
+                                                ))}
+                                                {/* Show thinking indicator when only think content is visible */}
+                                                {thinkingStartTime && 
+                                                 messages[messages.length - 1]?.id === m.id && 
+                                                 hasOnlyThinkContent(m.content) && (
+                                                    <ThinkingIndicator startTime={thinkingStartTime} />
+                                                )}
+                                            </>
                                         ) : (
                                             <div className="whitespace-pre-wrap">{m.content}</div>
                                         )}
@@ -450,8 +564,10 @@ export function ChatArea() {
                         input={input}
                         setInput={setInput}
                         handleSend={handleSend}
+                        handleStop={stopGeneration}
                         handleKeyDown={handleKeyDown}
                         textareaRef={textareaRef}
+                        isLoading={isLoading}
                     />
                 </div>
             </div>

@@ -1,7 +1,7 @@
 pub mod protocol;
 pub mod actors;
 
-use protocol::{VectorMsg, FoundryMsg, ChatMessage};
+use protocol::{VectorMsg, FoundryMsg, ChatMessage, CachedModel};
 use actors::vector_actor::VectorActor;
 use actors::foundry_actor::FoundryActor;
 use tauri::{State, Manager, Emitter};
@@ -73,6 +73,15 @@ async fn set_model(model: String, handles: State<'_, ActorHandles>) -> Result<bo
 }
 
 #[tauri::command]
+async fn get_cached_models(handles: State<'_, ActorHandles>) -> Result<Vec<CachedModel>, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.foundry_tx.send(FoundryMsg::GetCachedModels { respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "Foundry actor died".to_string())
+}
+
+#[tauri::command]
 async fn chat(
     chat_id: Option<String>,
     title: Option<String>,
@@ -118,6 +127,8 @@ async fn chat(
         }
         let _ = app_handle.emit("chat-finished", ());
         
+        println!("[ChatSave] Response complete, saving chat {}...", &chat_id_task[..8.min(chat_id_task.len())]);
+        
         // Save chat
         full_history.push(ChatMessage {
             role: "assistant".to_string(),
@@ -130,23 +141,36 @@ async fn chat(
         // Or better, use the title + last interaction.
         let embedding_text = format!("{}\nUser: {}\nAssistant: {}", title, message, assistant_response);
         
+        println!("[ChatSave] Requesting embedding...");
         let (emb_tx, emb_rx) = oneshot::channel();
-        if let Ok(_) = foundry_tx.send(FoundryMsg::GetEmbedding { 
+        match foundry_tx.send(FoundryMsg::GetEmbedding { 
             text: embedding_text.clone(), 
             respond_to: emb_tx 
         }).await {
-            if let Ok(vector) = emb_rx.await {
-                if let Ok(_) = vector_tx.send(VectorMsg::UpsertChat {
-                    id: chat_id_task.clone(),
-                    title,
-                    content: embedding_text, // This is what we search against
-                    messages: messages_json,
-                    vector: Some(vector),
-                    pinned: false, 
-                }).await {
-                    let _ = app_handle.emit("chat-saved", chat_id_task.clone());
+            Ok(_) => {
+                println!("[ChatSave] Waiting for embedding response...");
+                match emb_rx.await {
+                    Ok(vector) => {
+                        println!("[ChatSave] Got embedding (len={}), sending to VectorActor...", vector.len());
+                        match vector_tx.send(VectorMsg::UpsertChat {
+                            id: chat_id_task.clone(),
+                            title: title.clone(),
+                            content: embedding_text,
+                            messages: messages_json,
+                            vector: Some(vector),
+                            pinned: false, 
+                        }).await {
+                            Ok(_) => {
+                                println!("[ChatSave] UpsertChat sent, emitting chat-saved event");
+                                let _ = app_handle.emit("chat-saved", chat_id_task.clone());
+                            }
+                            Err(e) => println!("[ChatSave] ERROR: Failed to send UpsertChat: {}", e),
+                        }
+                    }
+                    Err(e) => println!("[ChatSave] ERROR: Failed to receive embedding: {}", e),
                 }
             }
+            Err(e) => println!("[ChatSave] ERROR: Failed to send GetEmbedding: {}", e),
         }
     });
 
@@ -219,7 +243,7 @@ pub fn run() {
              
              Ok(())
         })
-        .invoke_handler(tauri::generate_handler![search_history, chat, get_models, set_model, get_all_chats, log_to_terminal, delete_chat, load_chat, update_chat])
+        .invoke_handler(tauri::generate_handler![search_history, chat, get_models, get_cached_models, set_model, get_all_chats, log_to_terminal, delete_chat, load_chat, update_chat])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
