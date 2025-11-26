@@ -1,10 +1,30 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use std::sync::Arc;
+use fastembed::TextEmbedding;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedModel {
     pub alias: String,
     pub model_id: String,
+}
+
+/// A chunk of text from a document with its source information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RagChunk {
+    pub id: String,
+    pub content: String,
+    pub source_file: String,
+    pub chunk_index: usize,
+    pub score: f32,
+}
+
+/// Result of processing documents for RAG
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RagIndexResult {
+    pub total_chunks: usize,
+    pub files_processed: usize,
+    pub cache_hits: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,5 +115,25 @@ pub enum McpMsg {
     ExecuteTool {
         tool_name: String,
         args: serde_json::Value,
+    },
+}
+
+/// Messages for the RAG (Retrieval Augmented Generation) actor
+pub enum RagMsg {
+    /// Process and index documents for RAG
+    ProcessDocuments {
+        paths: Vec<String>,
+        embedding_model: Arc<TextEmbedding>,
+        respond_to: oneshot::Sender<Result<RagIndexResult, String>>,
+    },
+    /// Search indexed documents for relevant chunks
+    SearchDocuments {
+        query_vector: Vec<f32>,
+        limit: usize,
+        respond_to: oneshot::Sender<Vec<RagChunk>>,
+    },
+    /// Clear all indexed documents (reset context)
+    ClearContext {
+        respond_to: oneshot::Sender<bool>,
     },
 }

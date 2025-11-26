@@ -50,6 +50,14 @@ const hasOnlyThinkContent = (content: string): boolean => {
     return thinkParts.length > 0 && textParts.every(p => !p.content.trim());
 };
 
+// Format elapsed time helper
+const formatTime = (seconds: number) => {
+    if (seconds < 60) return `${seconds}s`;
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}m ${secs}s`;
+};
+
 // Thinking indicator component with elapsed time
 const ThinkingIndicator = ({ startTime }: { startTime: number }) => {
     const [elapsed, setElapsed] = useState(0);
@@ -60,14 +68,6 @@ const ThinkingIndicator = ({ startTime }: { startTime: number }) => {
         }, 1000);
         return () => clearInterval(interval);
     }, [startTime]);
-
-    // Format elapsed time
-    const formatTime = (seconds: number) => {
-        if (seconds < 60) return `${seconds}s`;
-        const mins = Math.floor(seconds / 60);
-        const secs = seconds % 60;
-        return `${mins}m ${secs}s`;
-    };
 
     return (
         <div className="flex items-center gap-2 text-xs text-gray-500 mt-2 mb-1">
@@ -83,6 +83,85 @@ const ThinkingIndicator = ({ startTime }: { startTime: number }) => {
     );
 };
 
+// Searching indicator component for RAG retrieval
+const SearchingIndicator = ({ startTime, stage }: { startTime: number, stage: 'indexing' | 'searching' }) => {
+    const [elapsed, setElapsed] = useState(0);
+    
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setElapsed(Math.floor((Date.now() - startTime) / 1000));
+        }, 1000);
+        return () => clearInterval(interval);
+    }, [startTime]);
+
+    const label = stage === 'indexing' ? 'Indexing documents' : 'Searching documents';
+    const color = stage === 'indexing' ? 'bg-blue-400' : 'bg-emerald-400';
+
+    return (
+        <div className="flex items-center gap-2 text-xs text-gray-500 mt-2 mb-1">
+            <div className="flex gap-1">
+                <div className={`w-1.5 h-1.5 ${color} rounded-full animate-pulse`} />
+                <div className={`w-1.5 h-1.5 ${color} rounded-full animate-pulse`} style={{ animationDelay: '300ms' }} />
+                <div className={`w-1.5 h-1.5 ${color} rounded-full animate-pulse`} style={{ animationDelay: '600ms' }} />
+            </div>
+            <span className="font-medium text-gray-500">
+                {label}{elapsed >= 1 ? ` · ${formatTime(elapsed)}` : '...'}
+            </span>
+        </div>
+    );
+};
+
+// Attachment Menu Component
+const AttachmentMenu = ({ 
+    isOpen, 
+    onClose, 
+    onSelectFiles, 
+    onSelectFolder 
+}: { 
+    isOpen: boolean, 
+    onClose: () => void, 
+    onSelectFiles: () => void, 
+    onSelectFolder: () => void 
+}) => {
+    const menuRef = useRef<HTMLDivElement>(null);
+    
+    useEffect(() => {
+        const handleClickOutside = (e: MouseEvent) => {
+            if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+                onClose();
+            }
+        };
+        if (isOpen) {
+            document.addEventListener('mousedown', handleClickOutside);
+        }
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [isOpen, onClose]);
+    
+    if (!isOpen) return null;
+    
+    return (
+        <div 
+            ref={menuRef}
+            className="absolute bottom-full left-0 mb-2 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[160px] z-50"
+        >
+            <button
+                onClick={() => { onSelectFiles(); onClose(); }}
+                className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+            >
+                <span>📄</span>
+                <span>Attach Files</span>
+            </button>
+            <button
+                onClick={() => { onSelectFolder(); onClose(); }}
+                className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+            >
+                <span>📁</span>
+                <span>Attach Folder</span>
+            </button>
+        </div>
+    );
+};
+
 // Input Bar Component
 const InputBar = ({
     className = "",
@@ -92,7 +171,11 @@ const InputBar = ({
     handleStop,
     handleKeyDown,
     textareaRef,
-    isLoading
+    isLoading,
+    attachedCount,
+    onAttachFiles,
+    onAttachFolder,
+    onClearAttachments
 }: {
     className?: string,
     input: string,
@@ -101,20 +184,53 @@ const InputBar = ({
     handleStop: () => void,
     handleKeyDown: (e: React.KeyboardEvent) => void,
     textareaRef: React.RefObject<HTMLTextAreaElement | null>,
-    isLoading: boolean
+    isLoading: boolean,
+    attachedCount: number,
+    onAttachFiles: () => void,
+    onAttachFolder: () => void,
+    onClearAttachments: () => void
 }) => {
+    const [menuOpen, setMenuOpen] = useState(false);
     const isMultiline = input.includes('\n') || (textareaRef.current && textareaRef.current.scrollHeight > 44);
+    const hasAttachments = attachedCount > 0;
     
     return (
         <div className={`w-full flex justify-center ${className}`}>
             <div className={`flex items-center gap-3 w-full max-w-[900px] bg-[#f5f5f5] border border-transparent px-4 py-2.5 shadow-[0px_2px_8px_rgba(15,23,42,0.08)] focus-within:border-gray-300 transition-all ${isMultiline ? 'rounded-2xl' : 'rounded-full'}`}>
-                <button
-                    type="button"
-                    className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-gray-600 text-xl shadow-sm hover:bg-gray-100 transition shrink-0"
-                    aria-label="Start new request"
-                >
-                    +
-                </button>
+                <div className="relative">
+                    <button
+                        type="button"
+                        onClick={() => setMenuOpen(!menuOpen)}
+                        className={`flex h-9 w-9 items-center justify-center rounded-full text-xl shadow-sm transition shrink-0 relative ${
+                            hasAttachments 
+                                ? 'bg-blue-500 text-white hover:bg-blue-600' 
+                                : 'bg-white text-gray-600 hover:bg-gray-100'
+                        }`}
+                        aria-label="Attach files"
+                    >
+                        +
+                        {hasAttachments && (
+                            <span className="absolute -top-1 -right-1 bg-blue-700 text-white text-[10px] font-bold rounded-full h-4 w-4 flex items-center justify-center">
+                                {attachedCount}
+                            </span>
+                        )}
+                    </button>
+                    <AttachmentMenu
+                        isOpen={menuOpen}
+                        onClose={() => setMenuOpen(false)}
+                        onSelectFiles={onAttachFiles}
+                        onSelectFolder={onAttachFolder}
+                    />
+                </div>
+                {hasAttachments && (
+                    <button
+                        onClick={onClearAttachments}
+                        className="text-xs text-gray-500 hover:text-gray-700 underline"
+                        title="Clear attachments"
+                    >
+                        Clear
+                    </button>
+                )}
                 <textarea
                     ref={textareaRef}
                     className="flex-1 bg-transparent text-gray-700 resize-none focus:outline-none focus:ring-0 focus:border-none max-h-[200px] overflow-y-auto placeholder:text-gray-400 font-normal text-[15px] leading-6 border-none py-1"
@@ -122,7 +238,7 @@ const InputBar = ({
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="Ask anything"
+                    placeholder={hasAttachments ? "Ask about your documents..." : "Ask anything"}
                     style={{ height: 'auto', minHeight: '32px' }}
                 />
                 {isLoading ? (
@@ -297,11 +413,18 @@ const preprocessLaTeX = (content: string) => {
 export function ChatArea() {
     const {
         messages, input, setInput, addMessage, isLoading, setIsLoading, stopGeneration, currentChatId, reasoningEffort,
-        triggerRelevanceSearch, clearRelevanceSearch, isConnecting
+        triggerRelevanceSearch, clearRelevanceSearch, isConnecting,
+        // RAG state
+        attachedPaths, addAttachment, clearAttachments,
+        processRagDocuments, searchRagContext, clearRagContext
     } = useChatStore();
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const [thinkingStartTime, setThinkingStartTime] = useState<number | null>(null);
+    // Local RAG state for UI (controlled directly, not from store)
+    const [ragStartTime, setRagStartTime] = useState<number | null>(null);
+    const [ragStage, setRagStage] = useState<'indexing' | 'searching'>('indexing');
+    const [isRagProcessing, setIsRagProcessing] = useState(false);
 
     // Track when thinking phase starts
     useEffect(() => {
@@ -359,6 +482,49 @@ export function ChatArea() {
         }
     }, [input, triggerRelevanceSearch, clearRelevanceSearch]);
 
+    // Handle file selection via Tauri dialog
+    const handleAttachFiles = async () => {
+        try {
+            const { open } = await import('@tauri-apps/plugin-dialog');
+            const selected = await open({
+                multiple: true,
+                filters: [{
+                    name: 'Documents',
+                    extensions: ['txt', 'csv', 'tsv', 'md', 'json']
+                }]
+            });
+            if (selected) {
+                const paths = Array.isArray(selected) ? selected : [selected];
+                paths.forEach(path => {
+                    if (path) addAttachment(path);
+                });
+            }
+        } catch (e) {
+            console.error('[ChatArea] Failed to open file dialog:', e);
+        }
+    };
+
+    // Handle folder selection via Tauri dialog
+    const handleAttachFolder = async () => {
+        try {
+            const { open } = await import('@tauri-apps/plugin-dialog');
+            const selected = await open({
+                directory: true,
+                multiple: false
+            });
+            if (selected && typeof selected === 'string') {
+                addAttachment(selected);
+            }
+        } catch (e) {
+            console.error('[ChatArea] Failed to open folder dialog:', e);
+        }
+    };
+
+    // Handle clearing attachments (also clears RAG context)
+    const handleClearAttachments = async () => {
+        await clearRagContext();
+    };
+
     const handleSend = async () => {
         const text = input;
         if (!text.trim()) return;
@@ -392,7 +558,7 @@ export function ChatArea() {
             pinned: summaryPinned
         });
 
-        // Add user message
+        // Add user message (show original text to user)
         addMessage({ id: Date.now().toString(), role: 'user', content: text, timestamp: Date.now() });
         setInput('');
         clearRelevanceSearch(); // Clear relevance results when sending
@@ -408,12 +574,56 @@ export function ChatArea() {
         });
 
         try {
+            // Check if we have attachments - if so, process RAG
+            let messageToSend = text;
+            const currentAttachedPaths = storeState.attachedPaths;
+            
+            if (currentAttachedPaths.length > 0) {
+                console.log('[ChatArea] Processing RAG with', currentAttachedPaths.length, 'attachments');
+                
+                // Show RAG indicator
+                setIsRagProcessing(true);
+                setRagStartTime(Date.now());
+                setRagStage('indexing');
+                
+                // Step 1: Index documents
+                const indexResult = await processRagDocuments();
+                if (indexResult && indexResult.total_chunks > 0) {
+                    console.log('[ChatArea] Indexed', indexResult.total_chunks, 'chunks');
+                    
+                    // Update to searching stage
+                    setRagStage('searching');
+                    
+                    // Step 2: Search for relevant context
+                    const relevantChunks = await searchRagContext(trimmedText, 5);
+                    
+                    if (relevantChunks.length > 0) {
+                        // Step 3: Build context string
+                        const contextParts = relevantChunks.map((chunk, idx) => 
+                            `[${idx + 1}] From "${chunk.source_file}" (relevance: ${(chunk.score * 100).toFixed(1)}%):\n${chunk.content}`
+                        );
+                        const contextString = contextParts.join('\n\n');
+                        
+                        // Prepend context to the message
+                        messageToSend = `Context from attached documents:\n\n${contextString}\n\n---\n\nUser question: ${text}`;
+                        console.log('[ChatArea] Added', relevantChunks.length, 'chunks as context');
+                    }
+                }
+                
+                // Hide RAG indicator
+                setIsRagProcessing(false);
+                setRagStartTime(null);
+                
+                // Clear attachments after processing (they've been indexed)
+                clearAttachments();
+            }
+
             const history = messages.map(m => ({ role: m.role, content: m.content }));
             // Call backend - streaming will trigger events
             const returnedChatId = await invoke<string>('chat', {
                 chatId,
                 title: isNewChat ? derivedTitle : undefined,
-                message: text,
+                message: messageToSend,
                 history: history,
                 reasoningEffort
             });
@@ -431,6 +641,9 @@ export function ChatArea() {
             storeState.fetchHistory();
         } catch (error) {
             console.error('[ChatArea] Failed to send message:', error);
+            // Reset RAG state on error
+            setIsRagProcessing(false);
+            setRagStartTime(null);
             // Update the last message with error
             useChatStore.setState((state) => {
                 const newMessages = [...state.messages];
@@ -562,6 +775,15 @@ export function ChatArea() {
                 )}
             </div>
 
+            {/* RAG Searching Indicator */}
+            {isRagProcessing && ragStartTime && (
+                <div className="flex-shrink-0 px-4 sm:px-6">
+                    <div className="max-w-[900px] mx-auto">
+                        <SearchingIndicator startTime={ragStartTime} stage={ragStage} />
+                    </div>
+                </div>
+            )}
+
             {/* Fixed Input Area at Bottom */}
             <div className="flex-shrink-0 mt-1 pb-4">
                 <div className="px-2 sm:px-6">
@@ -574,6 +796,10 @@ export function ChatArea() {
                         handleKeyDown={handleKeyDown}
                         textareaRef={textareaRef}
                         isLoading={isLoading}
+                        attachedCount={attachedPaths.length}
+                        onAttachFiles={handleAttachFiles}
+                        onAttachFolder={handleAttachFolder}
+                        onClearAttachments={handleClearAttachments}
                     />
                 </div>
             </div>

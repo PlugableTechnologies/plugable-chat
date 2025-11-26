@@ -23,6 +23,20 @@ export interface Message {
     timestamp: number;
 }
 
+export interface RagChunk {
+    id: string;
+    content: string;
+    source_file: string;
+    chunk_index: number;
+    score: number;
+}
+
+export interface RagIndexResult {
+    total_chunks: number;
+    files_processed: number;
+    cache_hits: number;
+}
+
 interface ChatState {
     messages: Message[];
     addMessage: (msg: Message) => void;
@@ -79,6 +93,18 @@ interface ChatState {
     editorLanguage: string;
     setEditorOpen: (open: boolean) => void;
     setEditorContent: (content: string, language: string) => void;
+
+    // RAG (Retrieval Augmented Generation) State
+    attachedPaths: string[];
+    isIndexingRag: boolean;
+    isSearchingRag: boolean;
+    ragChunkCount: number;
+    addAttachment: (path: string) => void;
+    removeAttachment: (path: string) => void;
+    clearAttachments: () => void;
+    processRagDocuments: () => Promise<RagIndexResult | null>;
+    searchRagContext: (query: string, limit?: number) => Promise<RagChunk[]>;
+    clearRagContext: () => Promise<void>;
 }
 
 // Module-level variables to hold unlisten functions
@@ -555,5 +581,77 @@ export const useChatStore = create<ChatState>((set, get) => ({
     editorContent: '',
     editorLanguage: 'typescript',
     setEditorOpen: (open) => set({ isEditorOpen: open }),
-    setEditorContent: (content, language) => set({ editorContent: content, editorLanguage: language, isEditorOpen: true })
+    setEditorContent: (content, language) => set({ editorContent: content, editorLanguage: language, isEditorOpen: true }),
+
+    // RAG (Retrieval Augmented Generation) State
+    attachedPaths: [],
+    isIndexingRag: false,
+    isSearchingRag: false,
+    ragChunkCount: 0,
+    
+    addAttachment: (path: string) => set((state) => {
+        // Avoid duplicates
+        if (state.attachedPaths.includes(path)) {
+            return state;
+        }
+        console.log(`[ChatStore] Adding attachment: ${path}`);
+        return { attachedPaths: [...state.attachedPaths, path] };
+    }),
+    
+    removeAttachment: (path: string) => set((state) => {
+        console.log(`[ChatStore] Removing attachment: ${path}`);
+        return { attachedPaths: state.attachedPaths.filter(p => p !== path) };
+    }),
+    
+    clearAttachments: () => {
+        console.log('[ChatStore] Clearing all attachments');
+        set({ attachedPaths: [], ragChunkCount: 0 });
+    },
+    
+    processRagDocuments: async () => {
+        const paths = get().attachedPaths;
+        if (paths.length === 0) {
+            return null;
+        }
+        
+        console.log(`[ChatStore] Processing ${paths.length} RAG documents...`);
+        set({ isIndexingRag: true });
+        
+        try {
+            const result = await invoke<RagIndexResult>('process_rag_documents', { paths });
+            console.log(`[ChatStore] RAG indexing complete: ${result.total_chunks} chunks from ${result.files_processed} files`);
+            set({ ragChunkCount: result.total_chunks, isIndexingRag: false });
+            return result;
+        } catch (e: any) {
+            console.error('[ChatStore] RAG processing failed:', e);
+            set({ isIndexingRag: false });
+            return null;
+        }
+    },
+    
+    searchRagContext: async (query: string, limit: number = 5) => {
+        console.log(`[ChatStore] Searching RAG context for: "${query.slice(0, 50)}..."`);
+        set({ isSearchingRag: true });
+        
+        try {
+            const chunks = await invoke<RagChunk[]>('search_rag_context', { query, limit });
+            console.log(`[ChatStore] Found ${chunks.length} relevant chunks`);
+            set({ isSearchingRag: false });
+            return chunks;
+        } catch (e: any) {
+            console.error('[ChatStore] RAG search failed:', e);
+            set({ isSearchingRag: false });
+            return [];
+        }
+    },
+    
+    clearRagContext: async () => {
+        console.log('[ChatStore] Clearing RAG context');
+        try {
+            await invoke<boolean>('clear_rag_context');
+            set({ attachedPaths: [], ragChunkCount: 0 });
+        } catch (e: any) {
+            console.error('[ChatStore] Failed to clear RAG context:', e);
+        }
+    }
 }))
