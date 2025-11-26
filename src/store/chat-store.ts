@@ -6,6 +6,7 @@ export interface ChatSummary {
     title: string;
     preview: string;
     score: number;
+    pinned: boolean;
 }
 
 export interface Message {
@@ -23,6 +24,9 @@ interface ChatState {
     isLoading: boolean;
     setIsLoading: (loading: boolean) => void;
 
+    currentChatId: string | null;
+    setCurrentChatId: (id: string | null) => void;
+
     availableModels: string[];
     currentModel: string;
     fetchModels: () => Promise<void>;
@@ -31,6 +35,10 @@ interface ChatState {
     // History
     history: ChatSummary[];
     fetchHistory: () => Promise<void>;
+    loadChat: (id: string) => Promise<void>;
+    deleteChat: (id: string) => Promise<void>;
+    renameChat: (id: string, newTitle: string) => Promise<void>;
+    togglePin: (id: string) => Promise<void>;
 
     // Listener management
     isListening: boolean;
@@ -65,6 +73,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     isLoading: false,
     setIsLoading: (isLoading) => set({ isLoading }),
 
+    currentChatId: null,
+    setCurrentChatId: (id) => set({ currentChatId: id }),
+
     availableModels: [],
     currentModel: 'Loading...',
     fetchModels: async () => {
@@ -96,6 +107,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
         } catch (e: any) {
             console.error("Failed to fetch history", e);
             set({ backendError: `Failed to load history: ${e.message || e}` });
+        }
+    },
+    loadChat: async (id) => {
+        try {
+            const messagesJson = await invoke<string | null>('load_chat', { id });
+            if (messagesJson) {
+                const messages = JSON.parse(messagesJson);
+                // Ensure messages have IDs if missing (legacy)
+                const processedMessages = messages.map((m: any, idx: number) => ({
+                    ...m,
+                    id: m.id || `${Date.now()}-${idx}`,
+                    timestamp: m.timestamp || Date.now()
+                }));
+                set({ messages: processedMessages, currentChatId: id, backendError: null });
+            } else {
+                set({ messages: [], currentChatId: id });
+            }
+        } catch (e: any) {
+            console.error("Failed to load chat", e);
+            set({ backendError: `Failed to load chat: ${e.message || e}` });
+        }
+    },
+    deleteChat: async (id) => {
+        try {
+            await invoke('delete_chat', { id });
+            if (get().currentChatId === id) {
+                set({ messages: [], currentChatId: null });
+            }
+            await get().fetchHistory();
+        } catch (e: any) {
+            console.error("Failed to delete chat", e);
+            set({ backendError: `Failed to delete chat: ${e.message || e}` });
+        }
+    },
+    renameChat: async (id, newTitle) => {
+        try {
+            await invoke('update_chat', { id, title: newTitle });
+            await get().fetchHistory();
+        } catch (e: any) {
+            console.error("Failed to rename chat", e);
+        }
+    },
+    togglePin: async (id) => {
+        try {
+            const chat = get().history.find(c => c.id === id);
+            if (chat) {
+                await invoke('update_chat', { id, pinned: !chat.pinned });
+                await get().fetchHistory();
+            }
+        } catch (e: any) {
+            console.error("Failed to toggle pin", e);
         }
     },
 
@@ -135,6 +197,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
             const finishedListener = await listen('chat-finished', () => {
                 set({ isLoading: false });
+                // Refresh history to show new chat or updated preview
+                get().fetchHistory();
             });
 
             const modelSelectedListener = await listen<string>('model-selected', (event) => {

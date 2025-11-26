@@ -182,7 +182,7 @@ const preprocessLaTeX = (content: string) => {
 
 export function ChatArea() {
     const {
-        messages, input, setInput, addMessage, isLoading, setIsLoading
+        messages, input, setInput, addMessage, isLoading, setIsLoading, currentChatId
     } = useChatStore();
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -238,10 +238,15 @@ export function ChatArea() {
         try {
             const history = messages.map(m => ({ role: m.role, content: m.content }));
             // Call backend - streaming will trigger events
-            await invoke('chat', {
+            const chatId = await invoke<string>('chat', {
+                chatId: currentChatId,
                 message: text,
                 history: history
             });
+
+            if (!currentChatId) {
+                useChatStore.setState({ currentChatId: chatId });
+            }
         } catch (error) {
             console.error('[ChatArea] Failed to send message:', error);
             // Update the last message with error

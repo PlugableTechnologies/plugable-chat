@@ -2,9 +2,11 @@ use crate::protocol::{VectorMsg, ChatSummary};
 use lancedb::{connect, Table, Connection};
 use lancedb::query::{QueryBase, ExecutableQuery};
 use arrow_schema::{DataType, Field, Schema};
-use arrow_array::{RecordBatch, RecordBatchIterator};
+use arrow_array::{Array, RecordBatch, RecordBatchIterator, StringArray, Float32Array, BooleanArray, FixedSizeListArray};
+use arrow_array::types::Float32Type;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use futures::StreamExt;
 
 pub struct VectorActor {
     rx: mpsc::Receiver<VectorMsg>,
@@ -34,25 +36,41 @@ impl VectorActor {
                     VectorMsg::SearchHistory { query_vector, limit, respond_to } => {
                         println!("VectorActor: Searching history (limit: {})", limit);
                         let results = perform_search(table, query_vector, limit).await;
-                        // Ignore errors if receiver dropped (UI navigated away)
                         let _ = respond_to.send(results);
                     }
                     VectorMsg::GetAllChats { respond_to } => {
                         println!("VectorActor: Getting all chats");
-                        // For now, since LanceDB doesn't have a simple "select *" without vector query, 
-                        // we can query nearest to a zero vector with high limit, or implement a proper scan.
-                        // LanceDB's rust SDK is still evolving. A zero vector search is a common workaround for "all" if we want ranked by something,
-                        // but here we probably want chronological.
-                        // Let's try a zero vector search for now as a placeholder to get data flowing.
                         let zero_vector = vec![0.0; 384];
                         let results = perform_search(table, zero_vector, 100).await;
                         let _ = respond_to.send(results);
                     }
-                    VectorMsg::UpsertChat { id, title, content, vector } => {
+                    VectorMsg::UpsertChat { id, title, content, messages, vector, pinned } => {
                         println!("VectorActor: Upserting chat (id: {}, title: {})", id, title);
                         if let Some(vec) = vector {
-                           let _ = perform_upsert(table, id, title, content, vec).await;
+                           let _ = perform_upsert(&table, id, title, content, messages, vec, pinned).await;
                         }
+                    }
+                    VectorMsg::GetChat { id, respond_to } => {
+                         let messages = perform_get_chat(table, id).await;
+                         let _ = respond_to.send(messages);
+                    }
+                    VectorMsg::UpdateChatMetadata { id, title, pinned, respond_to } => {
+                        println!("VectorActor: Updating metadata (id: {})", id);
+                        // We need to clone table for async block if we were spawning, but we are in spawned block
+                        let table_clone = table.clone();
+                        if let Some((_, old_title, content, messages, vector, old_pinned)) = perform_get_full_chat(table_clone.clone(), id.clone()).await {
+                            let new_title = title.unwrap_or(old_title);
+                            let new_pinned = pinned.unwrap_or(old_pinned);
+                            perform_upsert(&table_clone, id, new_title, content, messages, vector, new_pinned).await;
+                            let _ = respond_to.send(true);
+                        } else {
+                            let _ = respond_to.send(false);
+                        }
+                    }
+                    VectorMsg::DeleteChat { id, respond_to } => {
+                        println!("VectorActor: Deleting chat (id: {})", id);
+                        let result = table.delete(&format!("id = '{}'", id)).await;
+                        let _ = respond_to.send(result.is_ok());
                     }
                 }
             });
@@ -76,12 +94,48 @@ async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<Cha
         .execute()
         .await;
 
-    if stream.is_err() { return vec![]; }
+    let mut results = Vec::new();
+
+    if let Ok(mut stream) = stream {
+        while let Some(batch) = stream.next().await {
+            if let Ok(batch) = batch {
+                let ids = batch.column_by_name("id").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+                let titles = batch.column_by_name("title").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+                let contents = batch.column_by_name("content").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+                // Handle optional pinned column for backward compatibility
+                let pinned_col = batch.column_by_name("pinned");
+                let pinned_vals = if let Some(col) = pinned_col {
+                    col.as_any().downcast_ref::<BooleanArray>()
+                } else {
+                    None
+                };
+
+                for i in 0..batch.num_rows() {
+                    let id = ids.value(i).to_string();
+                    let title = titles.value(i).to_string();
+                    let content = contents.value(i).to_string();
+                    let pinned = pinned_vals.map(|p| p.value(i)).unwrap_or(false);
+                    
+                    // Simple preview generation
+                    let preview = if content.len() > 50 {
+                        format!("{}...", &content[0..50])
+                    } else {
+                        content.clone()
+                    };
+
+                    results.push(ChatSummary {
+                        id,
+                        title,
+                        preview,
+                        score: 0.0, // TODO: Get score from distance
+                        pinned,
+                    });
+                }
+            }
+        }
+    }
     
-    // Process Arrow RecordBatches (Simplified for brevity)
-    // In production, you would iterate the stream and map columns to ChatSummary structs
-    // For now returning empty vec until we implement the record batch mapping
-    vec![] 
+    results
 }
 
 async fn setup_table(db: &Connection) -> Table {
@@ -97,6 +151,8 @@ async fn setup_table(db: &Connection) -> Table {
                  Field::new("id", DataType::Utf8, false),
                  Field::new("title", DataType::Utf8, false),
                  Field::new("content", DataType::Utf8, false),
+                 Field::new("messages", DataType::Utf8, false),
+                 Field::new("pinned", DataType::Boolean, false),
                  Field::new("vector", DataType::FixedSizeList(
                      Arc::new(Field::new("item", DataType::Float32, true)),
                      384
@@ -113,7 +169,86 @@ async fn setup_table(db: &Connection) -> Table {
     }
 }
 
-async fn perform_upsert(_table: Table, _id: String, _title: String, _content: String, _vector: Vec<f32>) {
-    // Convert Rust Vecs to Arrow Arrays and perform .add()
+async fn perform_upsert(table: &Table, id: String, title: String, content: String, messages: String, vector: Vec<f32>, pinned: bool) {
+    let schema = table.schema().await.unwrap();
+    
+    let id_array = StringArray::from(vec![id.clone()]);
+    let title_array = StringArray::from(vec![title]);
+    let content_array = StringArray::from(vec![content]);
+    let messages_array = StringArray::from(vec![messages]);
+    let pinned_array = BooleanArray::from(vec![pinned]);
+    
+    let vector_values = Float32Array::from(vector);
+    let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        vec![Some(vector_values.values().iter().map(|v| Some(*v)).collect::<Vec<_>>())],
+        384
+    );
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(id_array),
+            Arc::new(title_array),
+            Arc::new(content_array),
+            Arc::new(messages_array),
+            Arc::new(pinned_array),
+            Arc::new(vector_array),
+        ],
+    ).unwrap();
+
+    // Perform upsert by deleting existing record (if any) and adding new one
+    // This is a workaround for merge_insert API issues in lancedb 0.4
+    let _ = table.delete(&format!("id = '{}'", id)).await;
+    
+    let _ = table.add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
+        .execute()
+        .await;
+}
+
+async fn perform_get_chat(table: Table, id: String) -> Option<String> {
+    let query = table.query().only_if(format!("id = '{}'", id)).limit(1);
+    let mut stream = query.execute().await.ok()?;
+    if let Some(Ok(batch)) = stream.next().await {
+        let messages = batch.column_by_name("messages")?.as_any().downcast_ref::<StringArray>()?;
+        if messages.len() > 0 {
+            return Some(messages.value(0).to_string());
+        }
+    }
+    None
+}
+
+async fn perform_get_full_chat(table: Table, id: String) -> Option<(String, String, String, String, Vec<f32>, bool)> {
+    let query = table.query().only_if(format!("id = '{}'", id)).limit(1);
+    let mut stream = query.execute().await.ok()?;
+    if let Some(Ok(batch)) = stream.next().await {
+        if batch.num_rows() == 0 { return None; }
+        
+        let ids = batch.column_by_name("id")?.as_any().downcast_ref::<StringArray>()?;
+        let titles = batch.column_by_name("title")?.as_any().downcast_ref::<StringArray>()?;
+        let contents = batch.column_by_name("content")?.as_any().downcast_ref::<StringArray>()?;
+        let messages_col = batch.column_by_name("messages")?.as_any().downcast_ref::<StringArray>()?;
+        
+        let pinned_col = batch.column_by_name("pinned");
+        let pinned = if let Some(col) = pinned_col {
+            col.as_any().downcast_ref::<BooleanArray>()?.value(0)
+        } else {
+            false
+        };
+
+        let vectors = batch.column_by_name("vector")?.as_any().downcast_ref::<FixedSizeListArray>()?;
+        let vector_val = vectors.value(0);
+        let float_array = vector_val.as_any().downcast_ref::<Float32Array>()?;
+        let vector: Vec<f32> = float_array.values().to_vec();
+
+        return Some((
+            ids.value(0).to_string(),
+            titles.value(0).to_string(),
+            contents.value(0).to_string(),
+            messages_col.value(0).to_string(),
+            vector,
+            pinned
+        ));
+    }
+    None
 }
 

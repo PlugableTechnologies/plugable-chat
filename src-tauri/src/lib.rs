@@ -6,6 +6,7 @@ use actors::vector_actor::VectorActor;
 use actors::foundry_actor::FoundryActor;
 use tauri::{State, Manager, Emitter};
 use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
 // State managed by Tauri
 struct ActorHandles {
@@ -73,35 +74,106 @@ async fn set_model(model: String, handles: State<'_, ActorHandles>) -> Result<bo
 
 #[tauri::command]
 async fn chat(
+    chat_id: Option<String>,
+    title: Option<String>,
     message: String,
     history: Vec<ChatMessage>,
     handles: State<'_, ActorHandles>,
     app_handle: tauri::AppHandle
-) -> Result<(), String> {
+) -> Result<String, String> {
+    let chat_id = chat_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let chat_id_return = chat_id.clone(); // Clone for return value
+    let title = title.unwrap_or_else(|| message.chars().take(50).collect::<String>());
+    
     // Use unbounded channel to prevent blocking on long responses
     let (tx, mut rx) = mpsc::unbounded_channel();
     
     // Add the new message to history
-    let mut full_history = history;
+    let mut full_history = history.clone();
     full_history.push(ChatMessage {
         role: "user".to_string(),
-        content: message,
+        content: message.clone(),
     });
 
     handles.foundry_tx.send(FoundryMsg::Chat {
-        history: full_history,
+        history: full_history.clone(),
         respond_to: tx,
     }).await.map_err(|e| e.to_string())?;
 
+    // State<T> is a wrapper around Arc<T>, so we can clone it? No, State is not Clone.
+    // But ActorHandles fields are senders which are cloneable.
+    let vector_tx = handles.vector_tx.clone();
+    let foundry_tx = handles.foundry_tx.clone();
+    let chat_id_task = chat_id.clone();
+
     // Spawn a task to forward tokens to frontend
     tauri::async_runtime::spawn(async move {
+        let mut assistant_response = String::new();
+        
         while let Some(token) = rx.recv().await {
+            assistant_response.push_str(&token);
             let _ = app_handle.emit("chat-token", token);
         }
         let _ = app_handle.emit("chat-finished", ());
+        
+        // Save chat
+        full_history.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: assistant_response.clone(),
+        });
+        
+        let messages_json = serde_json::to_string(&full_history).unwrap_or_default();
+        
+        // Generate embedding for the chat content (using last user message + assistant response for relevance)
+        // Or better, use the title + last interaction.
+        let embedding_text = format!("{}\nUser: {}\nAssistant: {}", title, message, assistant_response);
+        
+        let (emb_tx, emb_rx) = oneshot::channel();
+        if let Ok(_) = foundry_tx.send(FoundryMsg::GetEmbedding { 
+            text: embedding_text.clone(), 
+            respond_to: emb_tx 
+        }).await {
+            if let Ok(vector) = emb_rx.await {
+                let _ = vector_tx.send(VectorMsg::UpsertChat {
+                    id: chat_id_task,
+                    title,
+                    content: embedding_text, // This is what we search against
+                    messages: messages_json,
+                    vector: Some(vector),
+                    pinned: false, 
+                }).await;
+            }
+        }
     });
 
-    Ok(())
+    Ok(chat_id_return)
+}
+
+#[tauri::command]
+async fn delete_chat(id: String, handles: State<'_, ActorHandles>) -> Result<bool, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.vector_tx.send(VectorMsg::DeleteChat { id, respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "Vector actor died".to_string())
+}
+
+#[tauri::command]
+async fn load_chat(id: String, handles: State<'_, ActorHandles>) -> Result<Option<String>, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.vector_tx.send(VectorMsg::GetChat { id, respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "Vector actor died".to_string())
+}
+
+#[tauri::command]
+async fn update_chat(id: String, title: Option<String>, pinned: Option<bool>, handles: State<'_, ActorHandles>) -> Result<bool, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.vector_tx.send(VectorMsg::UpdateChatMetadata { id, title, pinned, respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "Vector actor died".to_string())
 }
 
 #[tauri::command]
@@ -143,7 +215,7 @@ pub fn run() {
              
              Ok(())
         })
-        .invoke_handler(tauri::generate_handler![search_history, chat, get_models, set_model, get_all_chats, log_to_terminal])
+        .invoke_handler(tauri::generate_handler![search_history, chat, get_models, set_model, get_all_chats, log_to_terminal, delete_chat, load_chat, update_chat])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
