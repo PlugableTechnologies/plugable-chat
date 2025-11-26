@@ -24,6 +24,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["../public/plugable-avatar.png"]
+    "icon": ["../public/plugable-icon.png"]
   }
 }

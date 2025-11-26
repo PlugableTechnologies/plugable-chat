@@ -39,6 +39,7 @@ interface ChatState {
     // History
     history: ChatSummary[];
     fetchHistory: () => Promise<void>;
+    upsertHistoryEntry: (summary: ChatSummary) => void;
     loadChat: (id: string) => Promise<void>;
     deleteChat: (id: string) => Promise<void>;
     renameChat: (id: string, newTitle: string) => Promise<void>;
@@ -148,6 +149,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
             set({ backendError: `Failed to delete chat: ${e.message || e}` });
         }
     },
+    upsertHistoryEntry: (summary) => set((state) => {
+        const existing = state.history.find((chat) => chat.id === summary.id);
+        const pinned = existing?.pinned ?? summary.pinned;
+        const filtered = state.history.filter((chat) => chat.id !== summary.id);
+        const updatedSummary = { ...summary, pinned };
+        return { history: [updatedSummary, ...filtered] };
+    }),
     renameChat: async (id, newTitle) => {
         try {
             await invoke('update_chat', { id, title: newTitle });

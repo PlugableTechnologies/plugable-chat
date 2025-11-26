@@ -5,7 +5,6 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
 import { useChatStore } from "./store/chat-store";
 import { AlertTriangle, X } from "lucide-react";
-import plugableLogo from "../docs/plugable_logo_color_3x2_1800x1200_on_transparent.png";
 
 function ErrorBanner() {
   const { backendError, clearError } = useChatStore();
@@ -180,12 +179,12 @@ function App() {
             {/* Top Header Bar */}
             <div className="h-14 bg-white border border-transparent rounded-2xl border-b border-gray-200 flex items-center relative px-4 sm:px-6">
               <div className="flex items-center gap-3">
-                <img src={plugableLogo} alt="Plugable" className="h-6 max-w-[120px] w-auto object-contain" />
+                <img src="/plugable-logo.png" alt="Plugable" className="h-6 max-w-[120px] w-auto object-contain" />
                 <span className="font-semibold text-sm text-gray-900">Chat for Microsoft Foundry</span>
               </div>
               <div className="flex-1" />
               <div className="flex items-center gap-6 text-sm text-gray-500">
-              <span>Reasoning: </span>
+              <span>Reasoning:&nbsp;</span>
                   <select
                     value={reasoningEffort}
                     onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort)}
@@ -197,7 +196,8 @@ function App() {
                       </option>
                     ))}
                   </select>
-                <span> Local Model: </span>
+                  &nbsp;
+                <span> Local Model:&nbsp;</span>
                 <span className="text-gray-700">{currentModel}</span>
               </div>
             </div>

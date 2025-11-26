@@ -87,6 +87,36 @@ const InputBar = ({
 );
 
 
+const generateClientChatId = () => {
+    const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+    if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
+        return cryptoObj.randomUUID();
+    }
+    return `chat-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+};
+
+const createChatTitleFromPrompt = (prompt: string) => {
+    const cleaned = prompt.trim().replace(/\s+/g, ' ');
+    if (!cleaned) {
+        return "Untitled Chat";
+    }
+    const sentenceEnd = cleaned.search(/[.!?]/);
+    const base = sentenceEnd > 0 ? cleaned.substring(0, sentenceEnd).trim() : cleaned;
+    if (base.length <= 40) {
+        return base;
+    }
+    return `${base.substring(0, 37).trim()}...`;
+};
+
+const createChatPreviewFromMessage = (message: string) => {
+    const cleaned = message.trim().replace(/\s+/g, ' ');
+    if (!cleaned) return "";
+    if (cleaned.length <= 80) {
+        return cleaned;
+    }
+    return `${cleaned.substring(0, 77)}...`;
+};
+
 // Helper to wrap raw \boxed{} in math delimiters to ensure they render
 const preprocessLaTeX = (content: string) => {
     let result = '';
@@ -227,6 +257,29 @@ export function ChatArea() {
     const handleSend = async () => {
         const text = input;
         if (!text.trim()) return;
+        const trimmedText = text.trim();
+
+        const storeState = useChatStore.getState();
+        let chatId = currentChatId;
+        const isNewChat = !chatId;
+        if (isNewChat) {
+            chatId = generateClientChatId();
+            storeState.setCurrentChatId(chatId);
+        }
+
+        const existingSummary = storeState.history.find((chat) => chat.id === chatId);
+        const derivedTitle = existingSummary?.title ?? createChatTitleFromPrompt(trimmedText);
+        const preview = createChatPreviewFromMessage(trimmedText);
+        const summaryScore = existingSummary?.score ?? 0;
+        const summaryPinned = existingSummary?.pinned ?? false;
+
+        storeState.upsertHistoryEntry({
+            id: chatId,
+            title: derivedTitle,
+            preview,
+            score: summaryScore,
+            pinned: summaryPinned
+        });
 
         // Add user message
         addMessage({ id: Date.now().toString(), role: 'user', content: text, timestamp: Date.now() });
@@ -245,16 +298,26 @@ export function ChatArea() {
         try {
             const history = messages.map(m => ({ role: m.role, content: m.content }));
             // Call backend - streaming will trigger events
-            const chatId = await invoke<string>('chat', {
-                chatId: currentChatId,
+            const returnedChatId = await invoke<string>('chat', {
+                chatId,
+                title: isNewChat ? derivedTitle : undefined,
                 message: text,
                 history: history,
                 reasoningEffort
             });
 
-            if (!currentChatId) {
-                useChatStore.setState({ currentChatId: chatId });
+            if (returnedChatId && returnedChatId !== chatId) {
+                storeState.setCurrentChatId(returnedChatId);
+                storeState.upsertHistoryEntry({
+                    id: returnedChatId,
+                    title: derivedTitle,
+                    preview,
+                    score: summaryScore,
+                    pinned: summaryPinned
+                });
             }
+
+            storeState.fetchHistory();
         } catch (error) {
             console.error('[ChatArea] Failed to send message:', error);
             // Update the last message with error
