@@ -77,7 +77,7 @@ const ThinkingIndicator = ({ startTime }: { startTime: number }) => {
                 <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" style={{ animationDelay: '600ms' }} />
             </div>
             <span className="font-medium text-gray-500">
-                Reasoning{elapsed >= 10 ? ` · ${formatTime(elapsed)}` : '...'}
+                Reasoning{elapsed >= 1 ? ` · ${formatTime(elapsed)}` : '...'}
             </span>
         </div>
     );
@@ -267,15 +267,19 @@ const preprocessLaTeX = (content: string) => {
                 // Found complete block - extract the inner content
                 const innerContent = content.substring(i + 7, ptr - 1);
                 
-                // Check if content looks like prose text (has spaces, no math operators)
-                const looksLikeText = innerContent.includes(' ') && 
-                    !/[+\-*/=^_{}\\]/.test(innerContent.replace(/\\text\{[^}]*\}/g, ''));
+                // Check if content contains LaTeX commands like \text{}, \mathbf{}, etc.
+                const hasLatexCommands = /\\[a-zA-Z]+\{/.test(innerContent);
                 
-                if (looksLikeText) {
-                    // For text content, use HTML box instead of KaTeX (inline styles work reliably)
+                // Check if content looks like plain prose text (has spaces, no math operators, no LaTeX commands)
+                const looksLikePlainText = !hasLatexCommands && 
+                    innerContent.includes(' ') && 
+                    !/[+\-*/=^_{}\\]/.test(innerContent);
+                
+                if (looksLikePlainText) {
+                    // For plain text content (no LaTeX commands), use HTML box
                     result += '<div style="border: 2px solid #2e2e2e; padding: 0.5em 0.75em; border-radius: 6px; margin: 0.5em 0; display: inline-block; max-width: 100%; word-wrap: break-word;">' + innerContent + '</div>';
                 } else {
-                    // Math content - use KaTeX boxed
+                    // Content has LaTeX commands or math - let KaTeX handle it
                     result += '$\\boxed{' + innerContent + '}$';
                 }
                 i = ptr;
