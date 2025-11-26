@@ -77,8 +77,18 @@ impl VectorActor {
                     }
                     VectorMsg::DeleteChat { id, respond_to } => {
                         println!("VectorActor: Deleting chat (id: {})", id);
-                        let result = table.delete(&format!("id = '{}'", id)).await;
-                        let _ = respond_to.send(result.is_ok());
+                        let filter = format!("id = '{}'", id);
+                        println!("VectorActor: Delete filter: {}", filter);
+                        match table.delete(&filter).await {
+                            Ok(_) => {
+                                println!("VectorActor: Successfully deleted chat {}", id);
+                                let _ = respond_to.send(true);
+                            }
+                            Err(e) => {
+                                println!("VectorActor ERROR: Failed to delete chat {}: {}", id, e);
+                                let _ = respond_to.send(false);
+                            }
+                        }
                     }
                 }
             });
@@ -87,14 +97,17 @@ impl VectorActor {
 }
 
 async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<ChatSummary> {
-    // LanceDB Async Query
+    // LanceDB Async Query - results are automatically sorted by similarity (closest first)
     let query_result = table
         .query()
         .nearest_to(vector); // Vector search
 
     let query = match query_result {
         Ok(q) => q,
-        Err(_) => return vec![],
+        Err(e) => {
+            println!("VectorActor ERROR: Failed to create vector query: {}", e);
+            return vec![];
+        }
     };
 
     let stream = query
@@ -110,10 +123,19 @@ async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<Cha
                 let ids = batch.column_by_name("id").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
                 let titles = batch.column_by_name("title").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
                 let contents = batch.column_by_name("content").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+                
                 // Handle optional pinned column for backward compatibility
                 let pinned_col = batch.column_by_name("pinned");
                 let pinned_vals = if let Some(col) = pinned_col {
                     col.as_any().downcast_ref::<BooleanArray>()
+                } else {
+                    None
+                };
+                
+                // LanceDB includes _distance column with similarity scores (lower = more similar)
+                let distance_col = batch.column_by_name("_distance");
+                let distance_vals = if let Some(col) = distance_col {
+                    col.as_any().downcast_ref::<Float32Array>()
                 } else {
                     None
                 };
@@ -123,6 +145,9 @@ async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<Cha
                     let title = titles.value(i).to_string();
                     let content = contents.value(i).to_string();
                     let pinned = pinned_vals.map(|p| p.value(i)).unwrap_or(false);
+                    // Convert distance to similarity score (1 / (1 + distance)) for display
+                    let distance = distance_vals.map(|d| d.value(i)).unwrap_or(0.0);
+                    let score = 1.0 / (1.0 + distance);
                     
                     // Simple preview generation
                     let preview = if content.len() > 50 {
@@ -135,7 +160,7 @@ async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<Cha
                         id,
                         title,
                         preview,
-                        score: 0.0, // TODO: Get score from distance
+                        score,
                         pinned,
                     });
                 }
@@ -143,6 +168,7 @@ async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<Cha
         }
     }
     
+    println!("VectorActor: Search returned {} results", results.len());
     results
 }
 

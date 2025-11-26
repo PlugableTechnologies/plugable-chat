@@ -278,14 +278,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
     },
     deleteChat: async (id) => {
+        console.log('[ChatStore] deleteChat called with id:', id);
         try {
-            await invoke('delete_chat', { id });
+            const result = await invoke<boolean>('delete_chat', { id });
+            console.log('[ChatStore] delete_chat backend returned:', result);
             if (get().currentChatId === id) {
                 set({ messages: [], currentChatId: null });
             }
+            // Clear from pending summaries (important for newly created chats)
+            get().clearPendingSummary(id);
+            // Also remove directly from history in case fetchHistory has race conditions
+            set((state) => ({
+                history: state.history.filter(chat => chat.id !== id)
+            }));
             await get().fetchHistory();
+            console.log('[ChatStore] History refreshed after delete');
         } catch (e: any) {
-            console.error("Failed to delete chat", e);
+            console.error("[ChatStore] Failed to delete chat", e);
             set({ backendError: `Failed to delete chat: ${e.message || e}` });
         }
     },

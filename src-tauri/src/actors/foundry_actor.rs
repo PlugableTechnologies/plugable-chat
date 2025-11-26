@@ -1,44 +1,15 @@
 use tokio::sync::mpsc;
 use crate::protocol::{FoundryMsg, CachedModel};
-use serde::Deserialize;
 use serde_json::json;
 use tokio::process::Command;
 use std::time::Duration;
+use std::sync::Arc;
 use tokio::time::{sleep, timeout};
 use tauri::{AppHandle, Emitter};
-
-/// OpenAI-compatible embeddings response
-#[derive(Debug, Deserialize)]
-struct EmbeddingResponse {
-    data: Vec<EmbeddingData>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EmbeddingData {
-    embedding: Vec<f32>,
-}
+use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 
 /// Target embedding dimension (must match LanceDB schema)
 const EMBEDDING_DIM: usize = 384;
-
-/// Normalize embedding to target dimension by truncating or zero-padding
-fn normalize_embedding(mut embedding: Vec<f32>) -> Vec<f32> {
-    if embedding.len() == EMBEDDING_DIM {
-        return embedding;
-    }
-    
-    if embedding.len() > EMBEDDING_DIM {
-        // Truncate to target dimension
-        println!("FoundryActor: Truncating embedding from {} to {} dimensions", embedding.len(), EMBEDDING_DIM);
-        embedding.truncate(EMBEDDING_DIM);
-    } else {
-        // Pad with zeros
-        println!("FoundryActor: Padding embedding from {} to {} dimensions", embedding.len(), EMBEDDING_DIM);
-        embedding.resize(EMBEDDING_DIM, 0.0);
-    }
-    
-    embedding
-}
 
 pub struct FoundryActor {
     rx: mpsc::Receiver<FoundryMsg>,
@@ -46,15 +17,43 @@ pub struct FoundryActor {
     model_id: Option<String>,
     available_models: Vec<String>,
     app_handle: AppHandle,
+    embedding_model: Option<Arc<TextEmbedding>>,
 }
 
 impl FoundryActor {
     pub fn new(rx: mpsc::Receiver<FoundryMsg>, app_handle: AppHandle) -> Self {
-        Self { rx, port: None, model_id: None, available_models: Vec::new(), app_handle }
+        Self { 
+            rx, 
+            port: None, 
+            model_id: None, 
+            available_models: Vec::new(), 
+            app_handle,
+            embedding_model: None,
+        }
     }
 
     pub async fn run(mut self) {
         println!("Initializing Foundry Local Manager via CLI...");
+        
+        // Initialize local embedding model (all-MiniLM-L6-v2, 384 dimensions)
+        println!("FoundryActor: Initializing local embedding model (all-MiniLM-L6-v2)...");
+        match tokio::task::spawn_blocking(|| {
+            let mut options = InitOptions::default();
+            options.model_name = EmbeddingModel::AllMiniLML6V2;
+            options.show_download_progress = true;
+            TextEmbedding::try_new(options)
+        }).await {
+            Ok(Ok(model)) => {
+                println!("FoundryActor: Embedding model loaded successfully");
+                self.embedding_model = Some(Arc::new(model));
+            }
+            Ok(Err(e)) => {
+                println!("FoundryActor ERROR: Failed to load embedding model: {}", e);
+            }
+            Err(e) => {
+                println!("FoundryActor ERROR: Embedding model initialization task panicked: {}", e);
+            }
+        }
         
         // Try to start the service or ensure it's running
         if let Err(e) = self.ensure_service_running().await {
@@ -70,49 +69,36 @@ impl FoundryActor {
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 FoundryMsg::GetEmbedding { text, respond_to } => {
-                    // Generate real embeddings via Foundry's /v1/embeddings endpoint
-                    if let Some(port) = self.port {
-                        let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
-                        println!("FoundryActor: Requesting embedding from {} (text len: {})", url, text.len());
+                    // Generate embeddings using local fastembed model
+                    if let Some(model) = &self.embedding_model {
+                        let model_clone = Arc::clone(model);
+                        let text_clone = text.clone();
                         
-                        let body = json!({
-                            "input": text,
-                            "model": self.model_id.clone().unwrap_or_else(|| "default".to_string())
-                        });
+                        println!("FoundryActor: Generating embedding locally (text len: {})", text.len());
                         
-                        match client.post(&url).json(&body).send().await {
-                            Ok(resp) => {
-                                if resp.status().is_success() {
-                                    match resp.json::<EmbeddingResponse>().await {
-                                        Ok(embedding_resp) => {
-                                            if let Some(first) = embedding_resp.data.first() {
-                                                println!("FoundryActor: Got embedding (dim: {})", first.embedding.len());
-                                                let normalized = normalize_embedding(first.embedding.clone());
-                                                let _ = respond_to.send(normalized);
-                                            } else {
-                                                println!("FoundryActor ERROR: Empty embedding response, using fallback");
-                                                let _ = respond_to.send(vec![0.0; EMBEDDING_DIM]);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            println!("FoundryActor ERROR: Failed to parse embedding response: {}", e);
-                                            let _ = respond_to.send(vec![0.0; EMBEDDING_DIM]);
-                                        }
-                                    }
+                        match tokio::task::spawn_blocking(move || {
+                            model_clone.embed(vec![text_clone], None)
+                        }).await {
+                            Ok(Ok(embeddings)) => {
+                                if let Some(embedding) = embeddings.into_iter().next() {
+                                    println!("FoundryActor: Generated embedding (dim: {})", embedding.len());
+                                    let _ = respond_to.send(embedding);
                                 } else {
-                                    let status = resp.status();
-                                    let text = resp.text().await.unwrap_or_default();
-                                    println!("FoundryActor ERROR: Embeddings endpoint returned {}: {}", status, text);
+                                    println!("FoundryActor ERROR: Empty embedding result, using fallback");
                                     let _ = respond_to.send(vec![0.0; EMBEDDING_DIM]);
                                 }
                             }
+                            Ok(Err(e)) => {
+                                println!("FoundryActor ERROR: Embedding generation failed: {}", e);
+                                let _ = respond_to.send(vec![0.0; EMBEDDING_DIM]);
+                            }
                             Err(e) => {
-                                println!("FoundryActor ERROR: Failed to call embeddings endpoint: {}", e);
+                                println!("FoundryActor ERROR: Embedding task panicked: {}", e);
                                 let _ = respond_to.send(vec![0.0; EMBEDDING_DIM]);
                             }
                         }
                     } else {
-                        println!("FoundryActor WARNING: No port available for embeddings, using fallback");
+                        println!("FoundryActor WARNING: Embedding model not loaded, using fallback");
                         let _ = respond_to.send(vec![0.0; EMBEDDING_DIM]);
                     }
                 }

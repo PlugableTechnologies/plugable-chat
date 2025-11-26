@@ -1,6 +1,7 @@
 import { useChatStore } from '../store/chat-store';
 import { useEffect, useState, useRef } from 'react';
 import { MoreHorizontal, Pin, Trash, Edit, MessageSquare, Plus, Search, Loader2 } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 
 type SidebarProps = {
     className?: string;
@@ -99,6 +100,7 @@ export function Sidebar({ className = "" }: SidebarProps) {
                             ref={menuRef}
                             className="absolute right-0 top-full mt-1 w-32 bg-white border border-gray-200 rounded-lg shadow-lg z-50 py-1 flex flex-col"
                             onClick={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
                         >
                             <button
                                 onClick={() => {
@@ -121,9 +123,18 @@ export function Sidebar({ className = "" }: SidebarProps) {
                             </button>
                             <div className="h-px bg-gray-100 my-1"></div>
                             <button
-                                onClick={() => {
-                                    if (confirm('Are you sure you want to delete this chat?')) {
-                                        deleteChat(chat.id);
+                                onClick={async (e) => {
+                                    e.stopPropagation();
+                                    e.preventDefault();
+                                    await invoke('log_to_terminal', { message: `[Sidebar] Delete button clicked for chat: ${chat.id}` });
+                                    
+                                    // Skip confirm dialog - it may not work well in Tauri webview
+                                    await invoke('log_to_terminal', { message: `[Sidebar] Calling deleteChat...` });
+                                    try {
+                                        await deleteChat(chat.id);
+                                        await invoke('log_to_terminal', { message: '[Sidebar] deleteChat completed successfully' });
+                                    } catch (err) {
+                                        await invoke('log_to_terminal', { message: `[Sidebar] deleteChat ERROR: ${err}` });
                                     }
                                     setMenuOpenId(null);
                                 }}

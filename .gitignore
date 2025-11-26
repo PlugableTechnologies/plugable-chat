@@ -44,3 +44,5 @@ src-tauri/data/
 *.njsproj
 *.sln
 *.sw?
+
+.fastembed_cache
