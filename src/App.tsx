@@ -172,8 +172,8 @@ function App() {
   }, []);
 
   return (
-    <div className="h-screen w-screen fixed inset-0 bg-white text-gray-800 overflow-hidden font-sans antialiased flex items-center justify-center">
-      <div className="w-[calc(100%-24px)] h-[calc(100%-24px)] sm:w-[calc(100%-32px)] sm:h-[calc(100%-32px)] bg-white rounded-2xl shadow-lg overflow-hidden flex flex-col">
+    <div className="h-screen w-screen fixed inset-0 bg-white text-gray-800 overflow-hidden font-sans antialiased flex items-start justify-center pt-0 pb-3">
+      <div className="w-[calc(100%-24px)] h-[calc(100%-12px)] sm:w-[calc(100%-32px)] sm:h-[calc(100%-16px)] bg-white rounded-b-2xl shadow-lg overflow-hidden flex flex-col">
         {/* Header */}
         <div className="h-14 shrink-0 flex items-center px-4 sm:px-6 bg-white">
           <div className="flex items-center gap-3">
@@ -210,8 +210,8 @@ function App() {
           </div>
         </div>
         {/* Main Content */}
-        <div className="flex-1 flex overflow-hidden min-h-0">
-          <div className="flex-[1] min-w-[260px] overflow-hidden" style={{ backgroundColor: '#e5e7eb' }}>
+        <div className="flex-1 flex overflow-hidden min-h-0" style={{ gap: '12px' }}>
+          <div className="flex-[1] min-w-[260px] overflow-hidden" style={{ backgroundColor: '#e5e7eb', borderRadius: '12px' }}>
             <Sidebar className="h-full" />
           </div>
           <div className="flex-[2] min-w-0 flex flex-col overflow-hidden h-full bg-white">

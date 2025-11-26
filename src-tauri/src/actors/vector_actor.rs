@@ -59,15 +59,19 @@ impl VectorActor {
                          let _ = respond_to.send(messages);
                     }
                     VectorMsg::UpdateChatMetadata { id, title, pinned, respond_to } => {
-                        println!("VectorActor: Updating metadata (id: {})", id);
+                        println!("VectorActor: Updating metadata (id: {}, title: {:?}, pinned: {:?})", 
+                            &id[..8.min(id.len())], title, pinned);
                         // We need to clone table for async block if we were spawning, but we are in spawned block
                         let table_clone = table.clone();
                         if let Some((_, old_title, content, messages, vector, old_pinned)) = perform_get_full_chat(table_clone.clone(), id.clone()).await {
-                            let new_title = title.unwrap_or(old_title);
+                            let new_title = title.unwrap_or(old_title.clone());
                             let new_pinned = pinned.unwrap_or(old_pinned);
+                            println!("VectorActor: Found chat to update: '{}' -> '{}', pinned: {} -> {}", 
+                                old_title, new_title, old_pinned, new_pinned);
                             perform_upsert(&table_clone, id, new_title, content, messages, vector, new_pinned).await;
                             let _ = respond_to.send(true);
                         } else {
+                            println!("VectorActor ERROR: Chat {} not found for metadata update", &id[..8.min(id.len())]);
                             let _ = respond_to.send(false);
                         }
                     }
@@ -142,33 +146,67 @@ async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<Cha
     results
 }
 
+fn get_expected_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("title", DataType::Utf8, false),
+        Field::new("content", DataType::Utf8, false),
+        Field::new("messages", DataType::Utf8, false),
+        Field::new("pinned", DataType::Boolean, false),
+        Field::new("vector", DataType::FixedSizeList(
+            Arc::new(Field::new("item", DataType::Float32, true)),
+            384
+        ), true),
+    ]))
+}
+
 async fn setup_table(db: &Connection) -> Table {
-    // Define Arrow Schema for: id (utf8), title (utf8), vector (fixed_size_list<384>)
-    // If table doesn't exist, create it. If it does, open it.
+    let expected_schema = get_expected_schema();
+    let expected_field_count = expected_schema.fields().len();
+    
+    // Try to open existing table
     let result = db.open_table("chats").execute().await;
     
     match result {
-        Ok(table) => table,
+        Ok(table) => {
+            // Check if the existing table has the expected schema
+            match table.schema().await {
+                Ok(existing_schema) => {
+                    let existing_field_count = existing_schema.fields().len();
+                    if existing_field_count != expected_field_count {
+                        println!("VectorActor: Schema mismatch detected! Table has {} fields, expected {}. Recreating table...", 
+                            existing_field_count, expected_field_count);
+                        
+                        // Drop and recreate the table
+                        if let Err(e) = db.drop_table("chats").await {
+                            println!("VectorActor WARNING: Failed to drop old table: {}", e);
+                        }
+                        
+                        let batch = RecordBatch::new_empty(expected_schema.clone());
+                        db.create_table("chats", RecordBatchIterator::new(vec![batch].into_iter().map(Ok), expected_schema))
+                            .execute()
+                            .await
+                            .expect("Failed to create chats table after schema migration")
+                    } else {
+                        println!("VectorActor: Table schema is up to date ({} fields)", existing_field_count);
+                        table
+                    }
+                }
+                Err(e) => {
+                    println!("VectorActor WARNING: Failed to get schema, using existing table: {}", e);
+                    table
+                }
+            }
+        }
         Err(_) => {
-             // Create the table if it doesn't exist
-             let schema = Arc::new(Schema::new(vec![
-                 Field::new("id", DataType::Utf8, false),
-                 Field::new("title", DataType::Utf8, false),
-                 Field::new("content", DataType::Utf8, false),
-                 Field::new("messages", DataType::Utf8, false),
-                 Field::new("pinned", DataType::Boolean, false),
-                 Field::new("vector", DataType::FixedSizeList(
-                     Arc::new(Field::new("item", DataType::Float32, true)),
-                     384
-                 ), true),
-             ]));
-             
-             let batch = RecordBatch::new_empty(schema.clone());
-             
-             db.create_table("chats", RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema))
-                 .execute()
-                 .await
-                 .expect("Failed to create chats table")
+            // Create the table if it doesn't exist
+            println!("VectorActor: Creating new chats table with {} fields", expected_field_count);
+            let batch = RecordBatch::new_empty(expected_schema.clone());
+            
+            db.create_table("chats", RecordBatchIterator::new(vec![batch].into_iter().map(Ok), expected_schema))
+                .execute()
+                .await
+                .expect("Failed to create chats table")
         }
     }
 }

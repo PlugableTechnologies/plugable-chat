@@ -156,7 +156,7 @@ export function Sidebar({ className = "" }: SidebarProps) {
 
                 {/* Pinned Section */}
                 {pinnedChats.length > 0 && (
-                    <div className="mb-6">
+                    <div style={{ paddingBottom: '24px' }}>
                         <div className="text-xs font-semibold text-gray-500 mb-2 px-3 uppercase tracking-wider flex items-center gap-2">
                             <Pin size={10} /> Pinned
                         </div>

@@ -17,6 +17,9 @@
 - **Layout System**: The app uses a `fixed inset-0` root container with `overflow-hidden`.
   - **Guardrail**: Do not add global scrollbars to `body` or `html`. Scrollbars should be contained within specific components (e.g., `ChatArea`).
 - **Tailwind v4**: The project uses Tailwind v4.
+  - **Critical**: Tailwind v4 uses `@import "tailwindcss";` — NOT the old v3 directives (`@tailwind base; @tailwind components; @tailwind utilities;`).
+  - **Symptom**: If Tailwind classes silently have no effect but inline styles work, the import syntax is likely wrong.
+  - **Config**: `tailwind.config.js` is optional in v4 (auto-detects content). The PostCSS plugin is `@tailwindcss/postcss` (not `tailwindcss`).
 - **Markdown & Math**: `src/index.css` contains **hardcoded overrides** for `.prose` and `.katex` classes.
   - **Guardrail**: These overrides are critical for correct rendering of `\boxed{}` math expressions and specific light-mode aesthetics. Do not remove them unless replacing with an equivalent robust solution.
 
@@ -29,15 +32,6 @@
   2. Look for `background`, `color`, `font-family`, or layout properties that might conflict
   3. Either modify the global CSS or ensure your Tailwind classes have sufficient specificity
 
-### Inline Styles vs Tailwind Classes
-- **Prefer inline styles** when Tailwind utility classes are not being applied correctly due to CSS specificity issues.
-- In this Tauri app, there are known specificity conflicts where Tailwind's `bg-*` classes get overridden by global CSS.
-- **Use inline styles** for critical styling like background colors that must be applied reliably:
-  ```jsx
-  style={{ backgroundColor: '#e5e7eb' }}  // gray-200
-  ```
-- Reference Tailwind color values: gray-100=#f3f4f6, gray-200=#e5e7eb, gray-300=#d1d5db, white=#ffffff
-
 ### Debugging
 - **Layout Debugger**: A built-in tool dumps detailed DOM dimensions to the console and backend terminal.
   - **Trigger**: Press `Ctrl+Shift+L` in the app.
@@ -47,3 +41,13 @@
 ## Backend Integration
 - **Streaming**: Chat responses are streamed via the `chat-token` event, which appends text to the last assistant message in the store.
 - **Commands**: Key Tauri commands include `get_models`, `set_model`, and `get_all_chats`.
+
+### LanceDB Schema Management
+- **Location**: Chat history is stored in LanceDB at `src-tauri/data/lancedb/chats.lance`.
+- **Schema Definition**: The expected schema is defined in `get_expected_schema()` in `src-tauri/src/actors/vector_actor.rs`.
+- **Schema Migration**: LanceDB does **not** automatically migrate schemas. If you add/remove columns:
+  - The `setup_table()` function checks if the existing table's field count matches the expected schema.
+  - On mismatch, it drops and recreates the table (losing existing data).
+  - **Guardrail**: When modifying the schema (adding fields like `messages`, `pinned`, etc.), you must handle migration. The current approach is destructive—consider implementing proper data migration if preserving history is critical.
+- **Common Symptom**: `RecordBatch` errors like `number of columns(6) must match number of fields(4)` indicate a schema mismatch between code and persisted table.
+- **Debugging**: Check terminal logs for `VectorActor: Schema mismatch detected!` or `VectorActor: Table schema is up to date`.
