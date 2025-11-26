@@ -173,7 +173,7 @@
   border: 2px solid #2e2e2e !important;
   padding: 0.3em 0.5em !important;
   border-radius: 4px !important;
-  background-color: #f9f9f9 !important;
+  background-color: transparent !important;
 }
 
 /* Target the enclosing element that KaTeX creates for boxed content */
@@ -181,14 +181,14 @@
   border: 2px solid #2e2e2e !important;
   padding: 0.3em 0.5em !important;
   border-radius: 4px !important;
-  background-color: #f9f9f9 !important;
+  background-color: transparent !important;
 }
 
 /* Target fbox-line which is what KaTeX actually uses for \boxed */
 .katex .fbox-line {
   border: 2px solid #2e2e2e !important;
   border-radius: 4px !important;
-  background-color: #f9f9f9 !important;
+  background-color: transparent !important;
   padding: 0.3em 0.5em !important;
 }
 
@@ -202,7 +202,7 @@
 .katex .mord.boxed {
   border: 2px solid #2e2e2e !important;
   border-radius: 4px !important;
-  background-color: #f9f9f9 !important;
+  background-color: transparent !important;
   padding: 0.3em 0.5em !important;
   display: inline-block !important;
 }

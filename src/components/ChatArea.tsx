@@ -80,11 +80,117 @@ const InputBar = ({
 );
 
 
+// Helper to wrap raw \boxed{} in math delimiters to ensure they render
+const preprocessLaTeX = (content: string) => {
+    let result = '';
+    let i = 0;
+
+    // States
+    let inMath: false | '$' | '$$' = false;
+    let inCode: false | '`' | '```' = false;
+
+    while (i < content.length) {
+        // 1. Handle Code Blocks
+        if (!inMath && !inCode && content.startsWith('```', i)) {
+            inCode = '```';
+            result += '```';
+            i += 3;
+            continue;
+        }
+        if (!inMath && inCode === '```' && content.startsWith('```', i)) {
+            inCode = false;
+            result += '```';
+            i += 3;
+            continue;
+        }
+
+        // 2. Handle Inline Code
+        if (!inMath && !inCode && content.startsWith('`', i)) {
+            inCode = '`';
+            result += '`';
+            i += 1;
+            continue;
+        }
+        if (!inMath && inCode === '`' && content.startsWith('`', i)) {
+            inCode = false;
+            result += '`';
+            i += 1;
+            continue;
+        }
+
+        // If in code, just consume
+        if (inCode) {
+            result += content[i];
+            i++;
+            continue;
+        }
+
+        // 3. Handle Math Delimiters
+        // Escaped dollar? \$
+        if (content.startsWith('\\$', i)) {
+            result += '\\$';
+            i += 2;
+            continue;
+        }
+
+        if (content.startsWith('$$', i)) {
+            if (inMath === '$$') inMath = false;
+            else if (!inMath) inMath = '$$';
+            result += '$$';
+            i += 2;
+            continue;
+        }
+        if (content.startsWith('$', i)) {
+            if (inMath === '$') inMath = false;
+            else if (!inMath) inMath = '$';
+            result += '$';
+            i += 1;
+            continue;
+        }
+
+        // 4. Handle \boxed{
+        if (!inMath && content.startsWith('\\boxed{', i)) {
+            // Look ahead to find matching brace
+            let braceCount = 1;
+            let ptr = i + 7; // skip \boxed{
+
+            while (ptr < content.length && braceCount > 0) {
+                if (content[ptr] === '\\') {
+                    ptr += 2; // skip escaped char
+                    continue;
+                }
+                if (content[ptr] === '{') braceCount++;
+                if (content[ptr] === '}') braceCount--;
+                ptr++;
+            }
+
+            if (braceCount === 0) {
+                // Found complete block
+                const original = content.substring(i, ptr);
+                result += '$' + original + '$';
+                i = ptr;
+                continue;
+            }
+            // If not found (unclosed), fall through to default char handling
+        }
+
+        result += content[i];
+        i++;
+    }
+    return result;
+};
+
 export function ChatArea() {
     const {
         messages, input, setInput, addMessage, isLoading, setIsLoading
     } = useChatStore();
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+
+    // Auto-scroll to bottom
+    useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [messages, isLoading]);
 
     // Setup Streaming Listeners
     useEffect(() => {
@@ -233,7 +339,7 @@ export function ChatArea() {
                                                             }
                                                         }}
                                                     >
-                                                        {part.content}
+                                                        {preprocessLaTeX(part.content)}
                                                     </ReactMarkdown>
                                                 )
                                             ))
@@ -255,6 +361,7 @@ export function ChatArea() {
                                 </div>
                             </div>
                         )}
+                        <div ref={messagesEndRef} />
                     </div>
                 )}
             </div>
