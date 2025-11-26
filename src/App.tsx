@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect } from "react";
+import type { ReasoningEffort } from "./store/chat-store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
 import { useChatStore } from "./store/chat-store";
 import { AlertTriangle, X } from "lucide-react";
+import plugableLogo from "../docs/plugable_logo_color_3x2_1800x1200_on_transparent.png";
 
 function ErrorBanner() {
   const { backendError, clearError } = useChatStore();
@@ -27,7 +29,8 @@ function ErrorBanner() {
 }
 
 function App() {
-  const { currentModel } = useChatStore();
+  const { currentModel, reasoningEffort, setReasoningEffort } = useChatStore();
+  const effortOptions: ReasoningEffort[] = ['low', 'medium', 'high'];
   console.log("App component rendering...");
 
 
@@ -170,27 +173,46 @@ function App() {
   }, []);
 
   return (
-    <div className="h-screen w-screen fixed inset-0 flex flex-col bg-white text-gray-800 overflow-hidden font-sans antialiased">
-      {/* Top Header Bar */}
-      <div className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-4 sm:px-6 shrink-0">
-        <div className="flex items-center gap-3">
-          <img src="/plugable-logo.png" alt="Plugable" className="h-6 max-w-[120px] w-auto object-contain" />
-          <span className="font-semibold text-sm text-gray-900">Plugable Chat</span>
-        </div>
-        <div className="flex items-center gap-4 text-sm">
-          <span className="text-gray-500">Local</span>
-          <span className="text-gray-700">Model: {currentModel}</span>
-        </div>
-      </div>
+    <div className="h-screen w-screen fixed inset-0 bg-white text-gray-800 overflow-hidden font-sans antialiased">
+      <div className="h-full w-full">
+        <div className="h-full w-full px-4 sm:px-6 py-4 sm:py-6">
+          <div className="mx-auto h-full w-full max-w-[1400px] flex flex-col gap-4">
+            {/* Top Header Bar */}
+            <div className="h-14 bg-white border border-transparent rounded-2xl border-b border-gray-200 flex items-center relative px-4 sm:px-6">
+              <div className="flex items-center gap-3">
+                <img src={plugableLogo} alt="Plugable" className="h-6 max-w-[120px] w-auto object-contain" />
+                <span className="font-semibold text-sm text-gray-900">Chat for Microsoft Foundry</span>
+              </div>
+              <div className="flex-1" />
+              <div className="flex items-center gap-6 text-sm text-gray-500">
+              <span>Reasoning: </span>
+                  <select
+                    value={reasoningEffort}
+                    onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort)}
+                    className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none"
+                  >
+                    {effortOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option.charAt(0).toUpperCase() + option.slice(1)}
+                      </option>
+                    ))}
+                  </select>
+                <span> Local Model: </span>
+                <span className="text-gray-700">{currentModel}</span>
+              </div>
+            </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex overflow-hidden min-h-0 w-full max-w-none min-w-0">
-        <div className="flex-[1] min-w-[260px]">
-          <Sidebar className="h-full" />
-        </div>
-        <div className="flex-[2] min-w-0 flex flex-col relative overflow-hidden h-full">
-          <ErrorBanner />
-          <ChatArea />
+            {/* Main Content Area */}
+            <div className="flex-1 flex overflow-hidden min-h-0 w-full max-w-none min-w-0">
+              <div className="flex-[1] min-w-[260px]">
+                <Sidebar className="h-full" />
+              </div>
+              <div className="flex-[2] min-w-0 flex flex-col relative overflow-hidden h-full">
+                <ErrorBanner />
+                <ChatArea />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

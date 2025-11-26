@@ -78,6 +78,7 @@ async fn chat(
     title: Option<String>,
     message: String,
     history: Vec<ChatMessage>,
+    reasoning_effort: String,
     handles: State<'_, ActorHandles>,
     app_handle: tauri::AppHandle
 ) -> Result<String, String> {
@@ -97,6 +98,7 @@ async fn chat(
 
     handles.foundry_tx.send(FoundryMsg::Chat {
         history: full_history.clone(),
+        reasoning_effort: reasoning_effort.clone(),
         respond_to: tx,
     }).await.map_err(|e| e.to_string())?;
 
@@ -134,14 +136,16 @@ async fn chat(
             respond_to: emb_tx 
         }).await {
             if let Ok(vector) = emb_rx.await {
-                let _ = vector_tx.send(VectorMsg::UpsertChat {
-                    id: chat_id_task,
+                if let Ok(_) = vector_tx.send(VectorMsg::UpsertChat {
+                    id: chat_id_task.clone(),
                     title,
                     content: embedding_text, // This is what we search against
                     messages: messages_json,
                     vector: Some(vector),
                     pinned: false, 
-                }).await;
+                }).await {
+                    let _ = app_handle.emit("chat-saved", chat_id_task.clone());
+                }
             }
         }
     });

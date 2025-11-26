@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { invoke, listen } from '../lib/api';
 
+export type ReasoningEffort = 'low' | 'medium' | 'high';
+
 export interface ChatSummary {
     id: string;
     title: string;
@@ -31,6 +33,8 @@ interface ChatState {
     currentModel: string;
     fetchModels: () => Promise<void>;
     setModel: (model: string) => Promise<void>;
+    reasoningEffort: ReasoningEffort;
+    setReasoningEffort: (effort: ReasoningEffort) => void;
 
     // History
     history: ChatSummary[];
@@ -62,6 +66,7 @@ interface ChatState {
 let unlistenToken: (() => void) | undefined;
 let unlistenFinished: (() => void) | undefined;
 let unlistenModelSelected: (() => void) | undefined;
+let unlistenChatSaved: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
 
@@ -78,6 +83,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     availableModels: [],
     currentModel: 'Loading...',
+    reasoningEffort: 'low',
     fetchModels: async () => {
         try {
             const models = await invoke<string[]>('get_models');
@@ -98,6 +104,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             console.error("Failed to set model", e);
         }
     },
+    setReasoningEffort: (effort: ReasoningEffort) => set({ reasoningEffort: effort }),
 
     history: [],
     fetchHistory: async () => {
@@ -197,12 +204,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
             const finishedListener = await listen('chat-finished', () => {
                 set({ isLoading: false });
-                // Refresh history to show new chat or updated preview
-                get().fetchHistory();
             });
 
             const modelSelectedListener = await listen<string>('model-selected', (event) => {
                 set({ currentModel: event.payload });
+            });
+            
+            const chatSavedListener = await listen<string>('chat-saved', () => {
+                get().fetchHistory();
             });
 
             // Critical check: did cleanup happen (invalidating this setup) while we were awaiting?
@@ -211,6 +220,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 tokenListener();
                 finishedListener();
                 modelSelectedListener();
+                chatSavedListener();
                 isSettingUp = false;
                 return;
             }
@@ -219,6 +229,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenToken = tokenListener;
             unlistenFinished = finishedListener;
             unlistenModelSelected = modelSelectedListener;
+            unlistenChatSaved = chatSavedListener;
 
             set({ isListening: true });
             console.log(`[ChatStore] Event listeners active (Gen: ${myGeneration}).`);
@@ -241,6 +252,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenModelSelected) {
             unlistenModelSelected();
             unlistenModelSelected = undefined;
+        }
+        if (unlistenChatSaved) {
+            unlistenChatSaved();
+            unlistenChatSaved = undefined;
         }
         set({ isListening: false });
         isSettingUp = false; // Reset setup guard

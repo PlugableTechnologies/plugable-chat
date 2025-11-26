@@ -67,6 +67,7 @@ pub enum FoundryMsg {
     /// Chat with the model (streaming)
     Chat {
         history: Vec<ChatMessage>,
+        reasoning_effort: String,
         respond_to: tokio::sync::mpsc::UnboundedSender<String>,
     },
     /// Get available models

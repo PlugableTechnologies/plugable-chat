@@ -51,7 +51,7 @@ impl FoundryActor {
                     self.emit_model_selected(&model_id);
                     let _ = respond_to.send(true);
                 }
-                FoundryMsg::Chat { history, respond_to } => {
+                FoundryMsg::Chat { history, reasoning_effort, respond_to } => {
                      // Check if we need to restart/reconnect
                      if self.port.is_none() || self.available_models.is_empty() {
                          println!("FoundryActor: No models found or port missing. Attempting to restart service...");
@@ -89,13 +89,13 @@ impl FoundryActor {
                          
                          // Convert history to messages
                          // For reasoning models: they output thinking in <think> tags, then a final answer
-                         let body = json!({
-                             "model": model, 
-                             "messages": messages,
-                             "stream": true,
-                             "max_tokens": 16384,  // Use the model's maximum to prevent premature cutoff
-                             "reasoning_effort": "medium"  // Control reasoning depth: low, medium, high
-                         });
+                        let body = json!({
+                            "model": model, 
+                            "messages": messages,
+                            "stream": true,
+                            "max_tokens": 16384,
+                            "reasoning_effort": reasoning_effort
+                        });
                          
                          println!("Sending streaming request to Foundry at {}", url);
                          

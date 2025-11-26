@@ -56,24 +56,31 @@ const InputBar = ({
     handleKeyDown: (e: React.KeyboardEvent) => void,
     textareaRef: React.RefObject<HTMLTextAreaElement | null>
 }) => (
-    <div className={`w-full flex items-end gap-3 ${className}`}>
-        {/* Input Field */}
-        <div className="flex-1 bg-white rounded-3xl p-1 pl-5 pr-2 flex items-end gap-3 border border-gray-300 shadow-sm">
+    <div className={`w-full flex justify-center ${className}`}>
+        <div className="flex items-center gap-3 w-full max-w-[900px] bg-[#f5f5f5] border border-transparent rounded-full px-3 py-2 shadow-[0px_2px_8px_rgba(15,23,42,0.08)] focus-within:border-gray-300 transition-all">
+            <button
+                type="button"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-gray-600 shadow-sm hover:bg-gray-100 transition"
+                aria-label="Start new request"
+            >
+                +
+            </button>
             <textarea
                 ref={textareaRef}
-                className="flex-1 bg-transparent text-gray-900 resize-none focus:outline-none max-h-[200px] py-3 min-h-[24px] overflow-y-auto scrollbar-hide placeholder:text-gray-400 font-normal text-[15px] leading-relaxed"
-                rows={1}
+                className="flex-1 bg-transparent text-gray-700 resize-none focus:outline-none focus:ring-0 focus:border-none max-h-[280px] min-h-[72px] overflow-y-auto scrollbar-hide placeholder:text-gray-400 font-normal text-[15px] leading-relaxed border-none"
+                rows={3}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={`Message Plugable Chat`}
+                placeholder="Ask anything"
             />
             <button
                 onClick={handleSend}
-                className={`px-5 py-2.5 rounded-full font-semibold text-sm transition-all transform duration-200 shrink-0 mb-0.5 ${input.trim() ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}
+                className={`h-9 w-9 flex items-center justify-center rounded-full text-lg transition ${input.trim() ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}
                 disabled={!input.trim()}
+                aria-label="Send message"
             >
-                ↑
+                ↩
             </button>
         </div>
     </div>
@@ -182,7 +189,7 @@ const preprocessLaTeX = (content: string) => {
 
 export function ChatArea() {
     const {
-        messages, input, setInput, addMessage, isLoading, setIsLoading, currentChatId
+        messages, input, setInput, addMessage, isLoading, setIsLoading, currentChatId, reasoningEffort
     } = useChatStore();
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -241,7 +248,8 @@ export function ChatArea() {
             const chatId = await invoke<string>('chat', {
                 chatId: currentChatId,
                 message: text,
-                history: history
+                history: history,
+                reasoningEffort
             });
 
             if (!currentChatId) {
@@ -273,9 +281,9 @@ export function ChatArea() {
     };
 
     return (
-        <div className="h-full w-full flex flex-col bg-white text-gray-800 font-sans relative overflow-hidden">
-            {/* Scrollable Messages Area - takes all remaining space */}
-            <div className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-2 sm:px-6 pt-6 pb-6">
+    <div className="h-full w-full flex flex-col bg-white text-gray-800 font-sans relative overflow-hidden">
+        {/* Scrollable Messages Area - takes all remaining space */}
+        <div className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-4 sm:px-6 pt-6 pb-6">
                 {messages.length === 0 ? (
                     <div className="flex-1 flex flex-col items-center justify-center px-6">
                         <div className="mb-8 text-center">
@@ -382,9 +390,6 @@ export function ChatArea() {
                         handleKeyDown={handleKeyDown}
                         textareaRef={textareaRef}
                     />
-                    <div className="text-center text-xs text-gray-500 mt-3 font-normal">
-                        Plugable Chat can make mistakes. Check important info.
-                    </div>
                 </div>
             </div>
         </div>
