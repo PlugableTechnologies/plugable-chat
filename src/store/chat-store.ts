@@ -1,11 +1,28 @@
 import { create } from 'zustand'
 import { invoke, listen } from '../lib/api';
+import { 
+    ToolCallsPendingEvent, 
+    ToolExecutingEvent, 
+    ToolResultEvent, 
+    ToolLoopFinishedEvent,
+    ParsedToolCall,
+    approveToolCall,
+    rejectToolCall
+} from '../lib/tool-calls';
 
 export type ReasoningEffort = 'low' | 'medium' | 'high';
 
 export interface CachedModel {
     alias: string;
     model_id: string;
+}
+
+export interface ModelInfo {
+    id: string;
+    tool_calling: boolean;
+    vision: boolean;
+    max_input_tokens: number;
+    max_output_tokens: number;
 }
 
 export interface ChatSummary {
@@ -37,6 +54,20 @@ export interface RagIndexResult {
     cache_hits: number;
 }
 
+// Tool execution state for UI display
+export interface PendingToolApproval {
+    approvalKey: string;
+    calls: ParsedToolCall[];
+    iteration: number;
+}
+
+export interface ToolExecutionState {
+    currentTool: { server: string; tool: string } | null;
+    lastResult: { server: string; tool: string; result: string; isError: boolean } | null;
+    totalIterations: number;
+    hadToolCalls: boolean;
+}
+
 interface ChatState {
     messages: Message[];
     addMessage: (msg: Message) => void;
@@ -52,10 +83,12 @@ interface ChatState {
 
     availableModels: string[];
     cachedModels: CachedModel[];
+    modelInfo: ModelInfo[];
     currentModel: string;
     isConnecting: boolean;
     fetchModels: () => Promise<void>;
     fetchCachedModels: () => Promise<void>;
+    fetchModelInfo: () => Promise<void>;
     retryConnection: () => Promise<void>;
     setModel: (model: string) => Promise<void>;
     reasoningEffort: ReasoningEffort;
@@ -105,6 +138,12 @@ interface ChatState {
     processRagDocuments: () => Promise<RagIndexResult | null>;
     searchRagContext: (query: string, limit?: number) => Promise<RagChunk[]>;
     clearRagContext: () => Promise<void>;
+
+    // Tool Execution State
+    pendingToolApproval: PendingToolApproval | null;
+    toolExecution: ToolExecutionState;
+    approveCurrentToolCall: () => Promise<void>;
+    rejectCurrentToolCall: () => Promise<void>;
 }
 
 // Module-level variables to hold unlisten functions
@@ -114,6 +153,10 @@ let unlistenFinished: (() => void) | undefined;
 let unlistenModelSelected: (() => void) | undefined;
 let unlistenChatSaved: (() => void) | undefined;
 let unlistenSidebarUpdate: (() => void) | undefined;
+let unlistenToolCallsPending: (() => void) | undefined;
+let unlistenToolExecuting: (() => void) | undefined;
+let unlistenToolResult: (() => void) | undefined;
+let unlistenToolLoopFinished: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
 let modelFetchPromise: Promise<void> | null = null;
@@ -148,6 +191,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     availableModels: [],
     cachedModels: [],
+    modelInfo: [],
     currentModel: 'Loading...',
     isConnecting: false,
     reasoningEffort: 'low',
@@ -241,6 +285,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
             console.log(`[ChatStore] Found ${cached.length} cached model(s)`);
         } catch (e: any) {
             console.error('[ChatStore] Failed to fetch cached models:', e);
+        }
+    },
+    fetchModelInfo: async () => {
+        try {
+            console.log('[ChatStore] Fetching model info with capabilities...');
+            const info = await invoke<ModelInfo[]>('get_model_info');
+            set({ modelInfo: info });
+            console.log(`[ChatStore] Found ${info.length} model(s) with capabilities:`, 
+                info.map(m => `${m.id}: toolCalling=${m.tool_calling}`).join(', '));
+        } catch (e: any) {
+            console.error('[ChatStore] Failed to fetch model info:', e);
         }
     },
     setModel: async (model) => {
@@ -508,6 +563,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
             });
 
+            // Tool execution event listeners
+            const toolCallsPendingListener = await listen<ToolCallsPendingEvent>('tool-calls-pending', (event) => {
+                console.log(`[ChatStore] Tool calls pending: ${event.payload.approval_key}`, event.payload.calls);
+                set({
+                    pendingToolApproval: {
+                        approvalKey: event.payload.approval_key,
+                        calls: event.payload.calls,
+                        iteration: event.payload.iteration,
+                    }
+                });
+            });
+
+            const toolExecutingListener = await listen<ToolExecutingEvent>('tool-executing', (event) => {
+                console.log(`[ChatStore] Tool executing: ${event.payload.server}::${event.payload.tool}`);
+                set((state) => ({
+                    toolExecution: {
+                        ...state.toolExecution,
+                        currentTool: { server: event.payload.server, tool: event.payload.tool },
+                    }
+                }));
+            });
+
+            const toolResultListener = await listen<ToolResultEvent>('tool-result', (event) => {
+                console.log(`[ChatStore] Tool result: ${event.payload.server}::${event.payload.tool}, error=${event.payload.is_error}`);
+                set((state) => ({
+                    toolExecution: {
+                        ...state.toolExecution,
+                        currentTool: null,
+                        lastResult: {
+                            server: event.payload.server,
+                            tool: event.payload.tool,
+                            result: event.payload.result,
+                            isError: event.payload.is_error,
+                        },
+                    }
+                }));
+            });
+
+            const toolLoopFinishedListener = await listen<ToolLoopFinishedEvent>('tool-loop-finished', (event) => {
+                console.log(`[ChatStore] Tool loop finished: ${event.payload.iterations} iterations, hadToolCalls=${event.payload.had_tool_calls}`);
+                set((state) => ({
+                    toolExecution: {
+                        ...state.toolExecution,
+                        currentTool: null,
+                        totalIterations: event.payload.iterations,
+                        hadToolCalls: event.payload.had_tool_calls,
+                    },
+                    pendingToolApproval: null, // Clear any pending approval
+                }));
+            });
+
             // Critical check: did cleanup happen (invalidating this setup) while we were awaiting?
             if (listenerGeneration !== myGeneration) {
                 console.log(`[ChatStore] Setup aborted due to generation mismatch (${myGeneration} vs ${listenerGeneration}). Cleaning up new listeners.`);
@@ -516,6 +622,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 modelSelectedListener();
                 chatSavedListener();
                 sidebarUpdateListener();
+                toolCallsPendingListener();
+                toolExecutingListener();
+                toolResultListener();
+                toolLoopFinishedListener();
                 isSettingUp = false;
                 return;
             }
@@ -524,6 +634,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenToken = tokenListener;
             unlistenFinished = finishedListener;
             unlistenModelSelected = modelSelectedListener;
+            unlistenToolCallsPending = toolCallsPendingListener;
+            unlistenToolExecuting = toolExecutingListener;
+            unlistenToolResult = toolResultListener;
+            unlistenToolLoopFinished = toolLoopFinishedListener;
             unlistenChatSaved = chatSavedListener;
             unlistenSidebarUpdate = sidebarUpdateListener;
 
@@ -539,6 +653,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // Also fetch cached models (for the dropdown)
             get().fetchCachedModels().catch((e) => {
                 console.error("[ChatStore] Background cached models fetch failed:", e);
+            });
+            
+            // Fetch model info with capabilities (toolCalling, vision, etc.)
+            get().fetchModelInfo().catch((e) => {
+                console.error("[ChatStore] Background model info fetch failed:", e);
             });
         } catch (e) {
             console.error("[ChatStore] Failed to setup listeners:", e);
@@ -567,6 +686,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenSidebarUpdate) {
             unlistenSidebarUpdate();
             unlistenSidebarUpdate = undefined;
+        }
+        if (unlistenToolCallsPending) {
+            unlistenToolCallsPending();
+            unlistenToolCallsPending = undefined;
+        }
+        if (unlistenToolExecuting) {
+            unlistenToolExecuting();
+            unlistenToolExecuting = undefined;
+        }
+        if (unlistenToolResult) {
+            unlistenToolResult();
+            unlistenToolResult = undefined;
+        }
+        if (unlistenToolLoopFinished) {
+            unlistenToolLoopFinished();
+            unlistenToolLoopFinished = undefined;
         }
         set({ isListening: false });
         isSettingUp = false; // Reset setup guard
@@ -652,6 +787,43 @@ export const useChatStore = create<ChatState>((set, get) => ({
             set({ attachedPaths: [], ragChunkCount: 0 });
         } catch (e: any) {
             console.error('[ChatStore] Failed to clear RAG context:', e);
+        }
+    },
+
+    // Tool Execution State
+    pendingToolApproval: null,
+    toolExecution: {
+        currentTool: null,
+        lastResult: null,
+        totalIterations: 0,
+        hadToolCalls: false,
+    },
+    
+    approveCurrentToolCall: async () => {
+        const pending = get().pendingToolApproval;
+        if (!pending) {
+            console.warn('[ChatStore] No pending tool approval to approve');
+            return;
+        }
+        
+        console.log(`[ChatStore] Approving tool call: ${pending.approvalKey}`);
+        const success = await approveToolCall(pending.approvalKey);
+        if (success) {
+            set({ pendingToolApproval: null });
+        }
+    },
+    
+    rejectCurrentToolCall: async () => {
+        const pending = get().pendingToolApproval;
+        if (!pending) {
+            console.warn('[ChatStore] No pending tool approval to reject');
+            return;
+        }
+        
+        console.log(`[ChatStore] Rejecting tool call: ${pending.approvalKey}`);
+        const success = await rejectToolCall(pending.approvalKey);
+        if (success) {
+            set({ pendingToolApproval: null });
         }
     }
 }))

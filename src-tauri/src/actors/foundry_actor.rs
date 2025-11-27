@@ -1,5 +1,5 @@
 use tokio::sync::mpsc;
-use crate::protocol::{FoundryMsg, CachedModel};
+use crate::protocol::{FoundryMsg, CachedModel, ModelInfo};
 use serde_json::json;
 use tokio::process::Command;
 use std::time::Duration;
@@ -16,6 +16,7 @@ pub struct FoundryActor {
     port: Option<u16>,
     model_id: Option<String>,
     available_models: Vec<String>,
+    model_info: Vec<ModelInfo>,
     app_handle: AppHandle,
     embedding_model: Option<Arc<TextEmbedding>>,
 }
@@ -27,6 +28,7 @@ impl FoundryActor {
             port: None, 
             model_id: None, 
             available_models: Vec::new(), 
+            model_info: Vec::new(),
             app_handle,
             embedding_model: None,
         }
@@ -109,6 +111,13 @@ impl FoundryActor {
                     }
                     let _ = respond_to.send(self.available_models.clone());
                 }
+                FoundryMsg::GetModelInfo { respond_to } => {
+                    if self.port.is_none() || self.model_info.is_empty() {
+                        // Retry with exponential backoff if still not connected
+                        self.update_connection_info_with_retry(3, Duration::from_secs(1)).await;
+                    }
+                    let _ = respond_to.send(self.model_info.clone());
+                }
                 FoundryMsg::GetCachedModels { respond_to } => {
                     let cached = self.get_cached_models().await;
                     let _ = respond_to.send(cached);
@@ -149,17 +158,36 @@ impl FoundryActor {
                          
                          let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
                          
+                         // Log incoming messages for debugging
+                         println!("\n[FoundryActor] Received {} messages:", history.len());
+                         for (i, msg) in history.iter().enumerate() {
+                             let preview: String = msg.content.chars().take(100).collect();
+                             println!("  [{}] role={}, len={}, preview: {}...", 
+                                 i, msg.role, msg.content.len(), preview);
+                         }
+                         
                          // For reasoning models, ensure we have a system message that instructs
                          // the model to provide a final answer after thinking
                          let mut messages = history.clone();
                          let has_system_msg = messages.iter().any(|m| m.role == "system");
                          
+                         println!("[FoundryActor] has_system_msg={}", has_system_msg);
+                         
                          if !has_system_msg {
                              // Prepend system message for reasoning models
+                             println!("[FoundryActor] WARNING: No system message found, adding default!");
                              messages.insert(0, crate::protocol::ChatMessage {
                                  role: "system".to_string(),
                                  content: "You are a helpful AI assistant. When answering questions, you may use <think></think> tags to show your reasoning process. After your thinking, always provide a clear, concise final answer outside the think tags.".to_string(),
                              });
+                         } else {
+                             // Log the actual system message being used
+                             if let Some(sys_msg) = messages.iter().find(|m| m.role == "system") {
+                                 println!("[FoundryActor] Using system message ({} chars)", sys_msg.content.len());
+                                 // Log first 500 chars of system prompt
+                                 let sys_preview: String = sys_msg.content.chars().take(500).collect();
+                                 println!("[FoundryActor] System prompt preview:\n{}", sys_preview);
+                             }
                          }
                          
                          // Convert history to messages
@@ -254,8 +282,31 @@ impl FoundryActor {
                          Ok(json) => {
                              println!("Available models: {}", json);
                             if let Some(data) = json["data"].as_array() {
+                                // Extract just model IDs for backwards compatibility
                                 self.available_models = data.iter()
                                     .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                                    .collect();
+                                
+                                // Parse full model info including capabilities
+                                self.model_info = data.iter()
+                                    .filter_map(|m| {
+                                        let id = m["id"].as_str()?.to_string();
+                                        let tool_calling = m["toolCalling"].as_bool().unwrap_or(false);
+                                        let vision = m["vision"].as_bool().unwrap_or(false);
+                                        let max_input_tokens = m["maxInputTokens"].as_u64().unwrap_or(4096) as u32;
+                                        let max_output_tokens = m["maxOutputTokens"].as_u64().unwrap_or(4096) as u32;
+                                        
+                                        println!("  Model: {} | toolCalling: {} | vision: {} | maxIn: {} | maxOut: {}", 
+                                            id, tool_calling, vision, max_input_tokens, max_output_tokens);
+                                        
+                                        Some(ModelInfo {
+                                            id,
+                                            tool_calling,
+                                            vision,
+                                            max_input_tokens,
+                                            max_output_tokens,
+                                        })
+                                    })
                                     .collect();
                                 
                                 if self.model_id.is_none() {

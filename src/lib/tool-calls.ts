@@ -14,9 +14,35 @@ export type ToolCallStatus = 'pending' | 'approved' | 'rejected' | 'executing' |
 // Tool call with execution state
 export interface ToolCallState extends ParsedToolCall {
     id: string;
+    approvalKey?: string;
     status: ToolCallStatus;
     result?: string;
     error?: string;
+}
+
+// Event payloads from backend
+export interface ToolCallsPendingEvent {
+    approval_key: string;
+    calls: ParsedToolCall[];
+    iteration: number;
+}
+
+export interface ToolExecutingEvent {
+    server: string;
+    tool: string;
+    arguments: Record<string, unknown>;
+}
+
+export interface ToolResultEvent {
+    server: string;
+    tool: string;
+    result: string;
+    is_error: boolean;
+}
+
+export interface ToolLoopFinishedEvent {
+    iterations: number;
+    had_tool_calls: boolean;
 }
 
 // Detect tool calls in content
@@ -79,5 +105,37 @@ export function formatToolResult(call: ParsedToolCall, result: string, isError: 
     return `<tool_result server="${call.server}" tool="${call.tool}" ${isError ? 'error="true"' : ''}>
 ${result}
 </tool_result>`;
+}
+
+// Approve a pending tool call
+export async function approveToolCall(approvalKey: string): Promise<boolean> {
+    try {
+        const result = await invoke<boolean>('approve_tool_call', { approvalKey });
+        return result;
+    } catch (e) {
+        console.error('[ToolCalls] Failed to approve tool call:', e);
+        return false;
+    }
+}
+
+// Reject a pending tool call
+export async function rejectToolCall(approvalKey: string): Promise<boolean> {
+    try {
+        const result = await invoke<boolean>('reject_tool_call', { approvalKey });
+        return result;
+    } catch (e) {
+        console.error('[ToolCalls] Failed to reject tool call:', e);
+        return false;
+    }
+}
+
+// Get list of pending tool approvals
+export async function getPendingToolApprovals(): Promise<string[]> {
+    try {
+        return await invoke<string[]>('get_pending_tool_approvals');
+    } catch (e) {
+        console.error('[ToolCalls] Failed to get pending approvals:', e);
+        return [];
+    }
 }
 

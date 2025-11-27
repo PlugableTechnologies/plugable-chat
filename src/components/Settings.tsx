@@ -67,6 +67,53 @@ function TagInput({
         }
     };
     
+    const handlePaste = (e: React.ClipboardEvent) => {
+        e.preventDefault();
+        const pasted = e.clipboardData.getData('text');
+        // Set input and immediately trigger split
+        setInput(prev => prev + pasted);
+        // Use setTimeout to process after state update
+        setTimeout(() => {
+            const trimmed = (input + pasted).trim();
+            if (!trimmed) return;
+            
+            // Split on spaces, but preserve quoted strings
+            const parts: string[] = [];
+            let current = '';
+            let inQuote = false;
+            let quoteChar = '';
+            
+            for (let i = 0; i < trimmed.length; i++) {
+                const char = trimmed[i];
+                
+                if ((char === '"' || char === "'") && !inQuote) {
+                    inQuote = true;
+                    quoteChar = char;
+                } else if (char === quoteChar && inQuote) {
+                    inQuote = false;
+                    quoteChar = '';
+                } else if (char === ' ' && !inQuote) {
+                    if (current) {
+                        parts.push(current);
+                        current = '';
+                    }
+                } else {
+                    current += char;
+                }
+            }
+            if (current) {
+                parts.push(current);
+            }
+            
+            // Filter out duplicates and empty strings
+            const newParts = parts.filter(p => p && !tags.includes(p));
+            if (newParts.length > 0) {
+                onChange([...tags, ...newParts]);
+            }
+            setInput('');
+        }, 0);
+    };
+    
     const removeTag = (index: number) => {
         const newTags = tags.filter((_, i) => i !== index);
         onChange(newTags);
@@ -94,6 +141,7 @@ function TagInput({
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
+                    onPaste={handlePaste}
                     onBlur={addTags}
                     placeholder={tags.length === 0 ? placeholder : ''}
                     className="flex-1 min-w-[100px] outline-none text-sm bg-transparent font-mono"

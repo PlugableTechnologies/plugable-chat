@@ -30,9 +30,13 @@ function ErrorBanner() {
 }
 
 function App() {
-  const { currentModel, cachedModels, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, setModel } = useChatStore();
+  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, setModel } = useChatStore();
   const effortOptions: ReasoningEffort[] = ['low', 'medium', 'high'];
   console.log("App component rendering...");
+  
+  // Check if current model supports tool calling
+  const currentModelInfo = modelInfo.find(m => m.id === currentModel);
+  const hasToolCalling = currentModelInfo?.tool_calling ?? false;
 
 
   const debugLayout = async () => {
@@ -203,11 +207,24 @@ function App() {
                 Unavailable (retry)
               </button>
             ) : cachedModels.length > 0 ? (
-              <select value={currentModel} onChange={(e) => setModel(e.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none max-w-[200px]" title="Select a cached model">
-                {cachedModels.map((model) => (
-                  <option key={model.model_id} value={model.model_id}>{model.alias}{currentModel === model.model_id ? ' ✓' : ''}</option>
-                ))}
-              </select>
+              <div className="flex items-center gap-1.5">
+                <select value={currentModel} onChange={(e) => setModel(e.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none max-w-[200px]" title="Select a cached model">
+                  {cachedModels.map((model) => {
+                    const info = modelInfo.find(m => m.id === model.model_id);
+                    const toolBadge = info?.tool_calling ? ' 🔧' : '';
+                    return (
+                      <option key={model.model_id} value={model.model_id}>
+                        {model.alias}{toolBadge}{currentModel === model.model_id ? ' ✓' : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+                {hasToolCalling && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-100 text-green-700 border border-green-200" title="This model supports native tool calling">
+                    🔧 Tools
+                  </span>
+                )}
+              </div>
             ) : (
               <span className="text-gray-700">{currentModel === 'Loading...' ? 'Loading...' : currentModel}</span>
             )}

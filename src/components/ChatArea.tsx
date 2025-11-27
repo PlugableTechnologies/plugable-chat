@@ -111,6 +111,93 @@ const SearchingIndicator = ({ startTime, stage }: { startTime: number, stage: 'i
     );
 };
 
+// Tool execution indicator component
+const ToolExecutionIndicator = ({ server, tool }: { server: string; tool: string }) => {
+    const [elapsed, setElapsed] = useState(0);
+    const startTime = useRef(Date.now());
+    
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
+        }, 1000);
+        return () => clearInterval(interval);
+    }, []);
+
+    return (
+        <div className="flex items-center gap-2 text-xs text-gray-500 mt-2 mb-1">
+            <div className="flex gap-1">
+                <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" />
+                <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
+                <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '600ms' }} />
+            </div>
+            <span className="font-medium text-gray-500">
+                Executing tool <code className="bg-purple-100 px-1 py-0.5 rounded text-purple-700">{tool}</code> on {server}
+                {elapsed >= 1 ? ` · ${formatTime(elapsed)}` : '...'}
+            </span>
+        </div>
+    );
+};
+
+// Tool approval dialog component
+const ToolApprovalDialog = ({ 
+    calls, 
+    onApprove, 
+    onReject 
+}: { 
+    calls: { server: string; tool: string; arguments: Record<string, unknown> }[];
+    onApprove: () => void;
+    onReject: () => void;
+}) => {
+    return (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 my-4">
+            <div className="flex items-start gap-3">
+                <span className="text-xl">⚠️</span>
+                <div className="flex-1">
+                    <h4 className="font-semibold text-amber-900 mb-2">Tool Execution Requires Approval</h4>
+                    <div className="space-y-2 mb-4">
+                        {calls.map((call, idx) => (
+                            <div key={idx} className="bg-white rounded-lg p-3 border border-amber-100">
+                                <div className="flex items-center gap-2 text-sm">
+                                    <span className="font-medium text-gray-700">Server:</span>
+                                    <code className="bg-gray-100 px-1.5 py-0.5 rounded text-gray-800">{call.server}</code>
+                                </div>
+                                <div className="flex items-center gap-2 text-sm mt-1">
+                                    <span className="font-medium text-gray-700">Tool:</span>
+                                    <code className="bg-purple-100 px-1.5 py-0.5 rounded text-purple-800">{call.tool}</code>
+                                </div>
+                                {Object.keys(call.arguments).length > 0 && (
+                                    <details className="mt-2">
+                                        <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+                                            View arguments
+                                        </summary>
+                                        <pre className="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto">
+                                            {JSON.stringify(call.arguments, null, 2)}
+                                        </pre>
+                                    </details>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                    <div className="flex gap-3">
+                        <button
+                            onClick={onApprove}
+                            className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition-colors"
+                        >
+                            ✓ Approve
+                        </button>
+                        <button
+                            onClick={onReject}
+                            className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-300 transition-colors"
+                        >
+                            ✕ Reject
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 // Attachment Menu Component
 const AttachmentMenu = ({ 
     isOpen, 
@@ -416,7 +503,9 @@ export function ChatArea() {
         triggerRelevanceSearch, clearRelevanceSearch, isConnecting,
         // RAG state
         attachedPaths, addAttachment, clearAttachments,
-        processRagDocuments, searchRagContext, clearRagContext
+        processRagDocuments, searchRagContext, clearRagContext,
+        // Tool execution state
+        pendingToolApproval, toolExecution, approveCurrentToolCall, rejectCurrentToolCall
     } = useChatStore();
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -780,6 +869,31 @@ export function ChatArea() {
                 <div className="flex-shrink-0 px-4 sm:px-6">
                     <div className="max-w-[900px] mx-auto">
                         <SearchingIndicator startTime={ragStartTime} stage={ragStage} />
+                    </div>
+                </div>
+            )}
+
+            {/* Tool Execution Indicator */}
+            {toolExecution.currentTool && (
+                <div className="flex-shrink-0 px-4 sm:px-6">
+                    <div className="max-w-[900px] mx-auto">
+                        <ToolExecutionIndicator 
+                            server={toolExecution.currentTool.server} 
+                            tool={toolExecution.currentTool.tool} 
+                        />
+                    </div>
+                </div>
+            )}
+
+            {/* Tool Approval Dialog */}
+            {pendingToolApproval && (
+                <div className="flex-shrink-0 px-4 sm:px-6">
+                    <div className="max-w-[900px] mx-auto">
+                        <ToolApprovalDialog
+                            calls={pendingToolApproval.calls}
+                            onApprove={approveCurrentToolCall}
+                            onReject={rejectCurrentToolCall}
+                        />
                     </div>
                 </div>
             )}

@@ -13,6 +13,40 @@ pub struct ParsedToolCall {
     pub raw: String,
 }
 
+// ============ Tool Execution Event Payloads ============
+
+/// Event payload when tool calls are detected and awaiting approval
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallsPendingEvent {
+    pub approval_key: String,
+    pub calls: Vec<ParsedToolCall>,
+    pub iteration: usize,
+}
+
+/// Event payload when a tool starts executing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolExecutingEvent {
+    pub server: String,
+    pub tool: String,
+    pub arguments: serde_json::Value,
+}
+
+/// Event payload when a tool finishes executing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultEvent {
+    pub server: String,
+    pub tool: String,
+    pub result: String,
+    pub is_error: bool,
+}
+
+/// Event payload when the agentic loop completes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolLoopFinishedEvent {
+    pub iterations: usize,
+    pub had_tool_calls: bool,
+}
+
 /// Parse tool calls from assistant response
 /// Looks for <tool_call>{"server": "...", "tool": "...", "arguments": {...}}</tool_call>
 pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
@@ -51,6 +85,16 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
 pub struct CachedModel {
     pub alias: String,
     pub model_id: String,
+}
+
+/// Model info from the running Foundry service with capability flags
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub tool_calling: bool,
+    pub vision: bool,
+    pub max_input_tokens: u32,
+    pub max_output_tokens: u32,
 }
 
 /// A chunk of text from a document with its source information
@@ -143,6 +187,10 @@ pub enum FoundryMsg {
     /// Get available models from running service
     GetModels {
         respond_to: oneshot::Sender<Vec<String>>,
+    },
+    /// Get model info with capabilities from running service
+    GetModelInfo {
+        respond_to: oneshot::Sender<Vec<ModelInfo>>,
     },
     /// Get cached models from `foundry cache ls`
     GetCachedModels {
