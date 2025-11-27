@@ -1,10 +1,13 @@
 pub mod protocol;
 pub mod actors;
+pub mod settings;
 
-use protocol::{VectorMsg, FoundryMsg, RagMsg, ChatMessage, CachedModel, RagChunk, RagIndexResult};
+use protocol::{VectorMsg, FoundryMsg, RagMsg, McpHostMsg, ChatMessage, CachedModel, RagChunk, RagIndexResult, ParsedToolCall, parse_tool_calls};
 use actors::vector_actor::VectorActor;
 use actors::foundry_actor::FoundryActor;
 use actors::rag_actor::RagActor;
+use actors::mcp_host_actor::{McpHostActor, McpTool, McpToolResult};
+use settings::{AppSettings, McpServerConfig};
 use tauri::{State, Manager, Emitter};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -17,11 +20,68 @@ struct ActorHandles {
     vector_tx: mpsc::Sender<VectorMsg>,
     foundry_tx: mpsc::Sender<FoundryMsg>,
     rag_tx: mpsc::Sender<RagMsg>,
+    mcp_host_tx: mpsc::Sender<McpHostMsg>,
 }
 
 // Shared embedding model for RAG operations
 struct EmbeddingModelState {
     model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+}
+
+// Shared settings state
+struct SettingsState {
+    settings: Arc<RwLock<AppSettings>>,
+}
+
+/// Build the full system prompt with MCP tool descriptions
+fn build_system_prompt(base_prompt: &str, tool_descriptions: &[(String, Vec<McpTool>)]) -> String {
+    let mut prompt = base_prompt.to_string();
+    
+    // Check if there are any tools to describe
+    let has_tools = tool_descriptions.iter().any(|(_, tools)| !tools.is_empty());
+    
+    if has_tools {
+        prompt.push_str("\n\n## Available Tools\n\n");
+        prompt.push_str("You have access to the following tools from connected MCP servers. ");
+        prompt.push_str("To use a tool, respond with a tool call in this format:\n\n");
+        prompt.push_str("<tool_call>{\"server\": \"server_id\", \"tool\": \"tool_name\", \"arguments\": {...}}</tool_call>\n\n");
+        
+        for (server_id, tools) in tool_descriptions {
+            if tools.is_empty() {
+                continue;
+            }
+            
+            prompt.push_str(&format!("### Server: {}\n\n", server_id));
+            
+            for tool in tools {
+                prompt.push_str(&format!("**{}**", tool.name));
+                if let Some(desc) = &tool.description {
+                    prompt.push_str(&format!(": {}", desc));
+                }
+                prompt.push('\n');
+                
+                if let Some(schema) = &tool.input_schema {
+                    if let Some(properties) = schema.get("properties") {
+                        if let Some(props) = properties.as_object() {
+                            prompt.push_str("  Arguments:\n");
+                            for (name, prop_schema) in props {
+                                let prop_type = prop_schema.get("type")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("any");
+                                let prop_desc = prop_schema.get("description")
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("");
+                                prompt.push_str(&format!("  - `{}` ({}): {}\n", name, prop_type, prop_desc));
+                            }
+                        }
+                    }
+                }
+                prompt.push('\n');
+            }
+        }
+    }
+    
+    prompt
 }
 
 #[tauri::command]
@@ -99,17 +159,78 @@ async fn chat(
     history: Vec<ChatMessage>,
     reasoning_effort: String,
     handles: State<'_, ActorHandles>,
+    settings_state: State<'_, SettingsState>,
     app_handle: tauri::AppHandle
 ) -> Result<String, String> {
     let chat_id = chat_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let chat_id_return = chat_id.clone(); // Clone for return value
     let title = title.unwrap_or_else(|| message.chars().take(50).collect::<String>());
     
+    // Get system prompt from settings
+    let settings = settings_state.settings.read().await;
+    let base_system_prompt = settings.system_prompt.clone();
+    drop(settings);
+    
+    // Get tool descriptions from MCP Host Actor
+    let (tools_tx, tools_rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::GetAllToolDescriptions { respond_to: tools_tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    let tool_descriptions = tools_rx.await.map_err(|_| "MCP Host actor died".to_string())?;
+    
+    // Build the full system prompt with tool descriptions
+    let system_prompt = build_system_prompt(&base_system_prompt, &tool_descriptions);
+    
+    // === LOGGING: System prompt and MCP tool descriptions ===
+    println!("\n╔══════════════════════════════════════════════════════════════╗");
+    println!("║              CHAT CONTEXT - NEW MESSAGE                      ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║ BASE SYSTEM PROMPT ({} chars):                               ", base_system_prompt.len());
+    println!("╟──────────────────────────────────────────────────────────────╢");
+    for line in base_system_prompt.lines().take(5) {
+        println!("║ {}", if line.len() > 60 { &line[..60] } else { line });
+    }
+    if base_system_prompt.lines().count() > 5 {
+        println!("║ ... ({} more lines)", base_system_prompt.lines().count() - 5);
+    }
+    println!("╟──────────────────────────────────────────────────────────────╢");
+    println!("║ MCP TOOL DESCRIPTIONS:                                       ");
+    if tool_descriptions.is_empty() {
+        println!("║   (no enabled MCP servers with tools)");
+    } else {
+        for (server_id, tools) in &tool_descriptions {
+            println!("║   Server: {} ({} tools)", server_id, tools.len());
+            for tool in tools {
+                println!("║     - {}: {}", tool.name, tool.description.as_deref().unwrap_or("no description"));
+            }
+        }
+    }
+    println!("╟──────────────────────────────────────────────────────────────╢");
+    println!("║ FINAL SYSTEM PROMPT LENGTH: {} chars                        ", system_prompt.len());
+    println!("╚══════════════════════════════════════════════════════════════╝\n");
+    
     // Use unbounded channel to prevent blocking on long responses
     let (tx, mut rx) = mpsc::unbounded_channel();
     
-    // Add the new message to history
-    let mut full_history = history.clone();
+    // Build full history with system prompt at the beginning
+    let mut full_history = Vec::new();
+    
+    // Add system prompt if we have one
+    if !system_prompt.is_empty() {
+        full_history.push(ChatMessage {
+            role: "system".to_string(),
+            content: system_prompt,
+        });
+    }
+    
+    // Add existing history (skip any existing system messages to avoid duplicates)
+    for msg in history.iter() {
+        if msg.role != "system" {
+            full_history.push(msg.clone());
+        }
+    }
+    
+    // Add the new user message
     full_history.push(ChatMessage {
         role: "user".to_string(),
         content: message.clone(),
@@ -298,6 +419,272 @@ async fn clear_rag_context(handles: State<'_, ActorHandles>) -> Result<bool, Str
     rx.await.map_err(|_| "RAG actor died".to_string())
 }
 
+// ============ Settings Commands ============
+
+#[tauri::command]
+async fn get_settings(settings_state: State<'_, SettingsState>) -> Result<AppSettings, String> {
+    let guard = settings_state.settings.read().await;
+    Ok(guard.clone())
+}
+
+#[tauri::command]
+async fn save_app_settings(
+    new_settings: AppSettings,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    // Save to file
+    settings::save_settings(&new_settings).await?;
+    
+    // Update in-memory state
+    let mut guard = settings_state.settings.write().await;
+    *guard = new_settings;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn add_mcp_server(
+    config: McpServerConfig,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    
+    // Check for duplicate ID
+    if guard.mcp_servers.iter().any(|s| s.id == config.id) {
+        return Err(format!("Server with ID '{}' already exists", config.id));
+    }
+    
+    guard.mcp_servers.push(config);
+    settings::save_settings(&guard).await?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_mcp_server(
+    config: McpServerConfig,
+    settings_state: State<'_, SettingsState>,
+    handles: State<'_, ActorHandles>,
+) -> Result<(), String> {
+    let configs_for_sync;
+    {
+        let mut guard = settings_state.settings.write().await;
+        
+        if let Some(server) = guard.mcp_servers.iter_mut().find(|s| s.id == config.id) {
+            *server = config;
+            settings::save_settings(&guard).await?;
+            configs_for_sync = guard.mcp_servers.clone();
+        } else {
+            return Err(format!("Server with ID '{}' not found", config.id));
+        }
+    }
+    
+    // Sync enabled servers after settings change
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::SyncEnabledServers { 
+        configs: configs_for_sync, 
+        respond_to: tx 
+    }).await.map_err(|e| e.to_string())?;
+    
+    let results = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
+    for (server_id, result) in results {
+        match result {
+            Ok(()) => println!("[Settings] Server {} sync successful", server_id),
+            Err(e) => println!("[Settings] Server {} sync failed: {}", server_id, e),
+        }
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn remove_mcp_server(
+    server_id: String,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    
+    let initial_len = guard.mcp_servers.len();
+    guard.mcp_servers.retain(|s| s.id != server_id);
+    
+    if guard.mcp_servers.len() < initial_len {
+        settings::save_settings(&guard).await?;
+        Ok(())
+    } else {
+        Err(format!("Server with ID '{}' not found", server_id))
+    }
+}
+
+#[tauri::command]
+async fn update_system_prompt(
+    prompt: String,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.system_prompt = prompt;
+    settings::save_settings(&guard).await?;
+    Ok(())
+}
+
+// ============ MCP Commands ============
+
+#[tauri::command]
+async fn sync_mcp_servers(
+    handles: State<'_, ActorHandles>,
+    settings_state: State<'_, SettingsState>,
+) -> Result<Vec<(String, bool)>, String> {
+    let settings = settings_state.settings.read().await;
+    let configs = settings.mcp_servers.clone();
+    drop(settings);
+    
+    println!("[MCP] Syncing {} server configs...", configs.len());
+    
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::SyncEnabledServers { 
+        configs, 
+        respond_to: tx 
+    }).await.map_err(|e| e.to_string())?;
+    
+    let results = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
+    
+    // Convert to (server_id, success) tuples
+    Ok(results.into_iter().map(|(id, r)| (id, r.is_ok())).collect())
+}
+
+#[tauri::command]
+async fn connect_mcp_server(
+    server_id: String,
+    handles: State<'_, ActorHandles>,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    // Get the server config from settings
+    let settings = settings_state.settings.read().await;
+    let config = settings.mcp_servers.iter()
+        .find(|s| s.id == server_id)
+        .cloned()
+        .ok_or_else(|| format!("Server {} not found in settings", server_id))?;
+    drop(settings);
+    
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::ConnectServer { config, respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    rx.await.map_err(|_| "MCP Host actor died".to_string())?
+}
+
+#[tauri::command]
+async fn disconnect_mcp_server(
+    server_id: String,
+    handles: State<'_, ActorHandles>,
+) -> Result<(), String> {
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::DisconnectServer { server_id, respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    rx.await.map_err(|_| "MCP Host actor died".to_string())?
+}
+
+#[tauri::command]
+async fn list_mcp_tools(
+    server_id: String,
+    handles: State<'_, ActorHandles>,
+) -> Result<Vec<McpTool>, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::ListTools { server_id, respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    rx.await.map_err(|_| "MCP Host actor died".to_string())?
+}
+
+#[tauri::command]
+async fn execute_mcp_tool(
+    server_id: String,
+    tool_name: String,
+    arguments: serde_json::Value,
+    handles: State<'_, ActorHandles>,
+) -> Result<McpToolResult, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::ExecuteTool { 
+        server_id, 
+        tool_name, 
+        arguments, 
+        respond_to: tx 
+    })
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    rx.await.map_err(|_| "MCP Host actor died".to_string())?
+}
+
+#[tauri::command]
+async fn get_mcp_server_status(
+    server_id: String,
+    handles: State<'_, ActorHandles>,
+) -> Result<bool, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::GetServerStatus { server_id, respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    Ok(rx.await.map_err(|_| "MCP Host actor died".to_string())?)
+}
+
+#[tauri::command]
+async fn get_all_mcp_tool_descriptions(
+    handles: State<'_, ActorHandles>,
+) -> Result<Vec<(String, Vec<McpTool>)>, String> {
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::GetAllToolDescriptions { respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    Ok(rx.await.map_err(|_| "MCP Host actor died".to_string())?)
+}
+
+#[tauri::command]
+fn detect_tool_calls(content: String) -> Vec<ParsedToolCall> {
+    parse_tool_calls(&content)
+}
+
+/// Execute a tool call and return the result
+#[tauri::command]
+async fn execute_tool_call(
+    server_id: String,
+    tool_name: String,
+    arguments: serde_json::Value,
+    handles: State<'_, ActorHandles>,
+) -> Result<String, String> {
+    println!("[ToolCall] Executing {}::{} with args: {:?}", server_id, tool_name, arguments);
+    
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::ExecuteTool { 
+        server_id, 
+        tool_name: tool_name.clone(),
+        arguments, 
+        respond_to: tx 
+    })
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    let result = rx.await.map_err(|_| "MCP Host actor died".to_string())??;
+    
+    // Convert the result to a string for display
+    let result_text = result.content.iter()
+        .filter_map(|c| c.text.as_ref())
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    
+    if result.is_error {
+        Err(format!("Tool error: {}", result_text))
+    } else {
+        Ok(result_text)
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -307,9 +694,10 @@ pub fn run() {
              let (vector_tx, vector_rx) = mpsc::channel(32);
              let (foundry_tx, foundry_rx) = mpsc::channel(32);
              let (rag_tx, rag_rx) = mpsc::channel(32);
+             let (mcp_host_tx, mcp_host_rx) = mpsc::channel(32);
              
              // Store handles in state
-             app.manage(ActorHandles { vector_tx, foundry_tx, rag_tx });
+             app.manage(ActorHandles { vector_tx, foundry_tx, rag_tx, mcp_host_tx });
              
              // Initialize shared embedding model state
              let embedding_model_state = EmbeddingModelState {
@@ -317,6 +705,16 @@ pub fn run() {
              };
              let embedding_model_arc = embedding_model_state.model.clone();
              app.manage(embedding_model_state);
+             
+             // Initialize settings state (load from config file)
+             let settings = tauri::async_runtime::block_on(async {
+                 settings::load_settings().await
+             });
+             println!("Settings loaded: {} MCP servers configured", settings.mcp_servers.len());
+             let settings_state = SettingsState {
+                 settings: Arc::new(RwLock::new(settings)),
+             };
+             app.manage(settings_state);
 
              let app_handle = app.handle();
              // Spawn Vector Actor
@@ -342,6 +740,13 @@ pub fn run() {
              tauri::async_runtime::spawn(async move {
                  println!("Starting RAG Actor...");
                  let actor = RagActor::new(rag_rx);
+                 actor.run().await;
+             });
+             
+             // Spawn MCP Host Actor
+             tauri::async_runtime::spawn(async move {
+                 println!("Starting MCP Host Actor...");
+                 let actor = McpHostActor::new(mcp_host_rx);
                  actor.run().await;
              });
              
@@ -388,7 +793,24 @@ pub fn run() {
             select_folder,
             process_rag_documents,
             search_rag_context,
-            clear_rag_context
+            clear_rag_context,
+            // Settings commands
+            get_settings,
+            save_app_settings,
+            add_mcp_server,
+            update_mcp_server,
+            remove_mcp_server,
+            update_system_prompt,
+            // MCP commands
+            sync_mcp_servers,
+            connect_mcp_server,
+            disconnect_mcp_server,
+            list_mcp_tools,
+            execute_mcp_tool,
+            get_mcp_server_status,
+            get_all_mcp_tool_descriptions,
+            detect_tool_calls,
+            execute_tool_call
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

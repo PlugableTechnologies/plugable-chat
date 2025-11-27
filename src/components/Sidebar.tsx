@@ -1,6 +1,7 @@
 import { useChatStore } from '../store/chat-store';
+import { useSettingsStore } from '../store/settings-store';
 import { useEffect, useState, useRef } from 'react';
-import { MoreHorizontal, Pin, Trash, Edit, MessageSquare, Plus, Search, Loader2 } from 'lucide-react';
+import { MoreHorizontal, Pin, Trash, Edit, MessageSquare, Plus, Search, Loader2, Settings } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 
 type SidebarProps = {
@@ -203,10 +204,14 @@ export function Sidebar({ className = "" }: SidebarProps) {
             </div>
 
             {/* Bottom Actions */}
-            <div className="p-3 space-y-1">
-                <div className="pt-2 mt-2">
-                    {/* Empty for now, user profile removed */}
-                </div>
+            <div className="p-3 border-t border-gray-300">
+                <button
+                    onClick={() => useSettingsStore.getState().openSettings()}
+                    className="flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded-lg transition-colors"
+                >
+                    <Settings size={16} />
+                    <span>Settings</span>
+                </button>
             </div>
         </div>
     )

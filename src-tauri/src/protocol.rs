@@ -2,6 +2,50 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use std::sync::Arc;
 use fastembed::TextEmbedding;
+use regex::Regex;
+
+/// Parsed tool call from assistant response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedToolCall {
+    pub server: String,
+    pub tool: String,
+    pub arguments: serde_json::Value,
+    pub raw: String,
+}
+
+/// Parse tool calls from assistant response
+/// Looks for <tool_call>{"server": "...", "tool": "...", "arguments": {...}}</tool_call>
+pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+    
+    // Use lazy_static or just create the regex here
+    let re = Regex::new(r"<tool_call>(.*?)</tool_call>").unwrap();
+    
+    for cap in re.captures_iter(content) {
+        if let Some(json_match) = cap.get(1) {
+            let json_str = json_match.as_str().trim();
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+                if let (Some(server), Some(tool)) = (
+                    parsed.get("server").and_then(|v| v.as_str()),
+                    parsed.get("tool").and_then(|v| v.as_str()),
+                ) {
+                    let arguments = parsed.get("arguments")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    
+                    calls.push(ParsedToolCall {
+                        server: server.to_string(),
+                        tool: tool.to_string(),
+                        arguments,
+                        raw: cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+                    });
+                }
+            }
+        }
+    }
+    
+    calls
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedModel {
@@ -115,6 +159,49 @@ pub enum McpMsg {
     ExecuteTool {
         tool_name: String,
         args: serde_json::Value,
+    },
+}
+
+use crate::settings::McpServerConfig;
+use crate::actors::mcp_host_actor::{McpTool, McpToolResult};
+
+/// Messages for the MCP Host Actor
+pub enum McpHostMsg {
+    /// Connect to an MCP server
+    ConnectServer {
+        config: McpServerConfig,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Disconnect from an MCP server
+    DisconnectServer {
+        server_id: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// List tools available from a server
+    ListTools {
+        server_id: String,
+        respond_to: oneshot::Sender<Result<Vec<McpTool>, String>>,
+    },
+    /// Execute a tool on a server
+    ExecuteTool {
+        server_id: String,
+        tool_name: String,
+        arguments: serde_json::Value,
+        respond_to: oneshot::Sender<Result<McpToolResult, String>>,
+    },
+    /// Get all tool descriptions from enabled servers (for system prompt)
+    GetAllToolDescriptions {
+        respond_to: oneshot::Sender<Vec<(String, Vec<McpTool>)>>,
+    },
+    /// Check if a server is connected
+    GetServerStatus {
+        server_id: String,
+        respond_to: oneshot::Sender<bool>,
+    },
+    /// Sync enabled servers - connect enabled ones, disconnect disabled ones
+    SyncEnabledServers {
+        configs: Vec<McpServerConfig>,
+        respond_to: oneshot::Sender<Vec<(String, Result<(), String>)>>,
     },
 }
 

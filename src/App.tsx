@@ -3,7 +3,9 @@ import { useEffect } from "react";
 import type { ReasoningEffort } from "./store/chat-store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
+import { SettingsModal } from "./components/Settings";
 import { useChatStore } from "./store/chat-store";
+import { useSettingsStore } from "./store/settings-store";
 import { AlertTriangle, X } from "lucide-react";
 
 function ErrorBanner() {
@@ -156,6 +158,12 @@ function App() {
 
     return () => clearTimeout(timer);
   }, []);
+  
+  // Fetch settings and sync MCP servers on app startup
+  useEffect(() => {
+    console.log('[App] Fetching settings and syncing MCP servers...');
+    useSettingsStore.getState().fetchSettings();
+  }, []);
 
   // Set up keyboard shortcut: Ctrl+Shift+L
   useEffect(() => {
@@ -172,6 +180,8 @@ function App() {
   }, []);
 
   return (
+    <>
+    <SettingsModal />
     <div className="h-screen w-screen fixed inset-0 bg-white text-gray-800 overflow-hidden font-sans antialiased flex items-start justify-center pt-0 pb-3">
       <div className="w-[calc(100%-24px)] h-[calc(100%-12px)] sm:w-[calc(100%-32px)] sm:h-[calc(100%-16px)] bg-white rounded-b-2xl shadow-lg overflow-hidden flex flex-col">
         {/* Header */}
@@ -221,6 +231,7 @@ function App() {
         </div>
       </div>
     </div>
+    </>
   );
 }
 

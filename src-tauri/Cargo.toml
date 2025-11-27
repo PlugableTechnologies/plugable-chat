@@ -35,6 +35,12 @@ fastembed = "4"
 # File hashing for cache invalidation
 sha2 = "0.10"
 
+# Home directory detection for config files
+dirs = "5"
+
+# Regex for parsing tool calls
+regex = "1"
+
 [dependencies.tauri-plugin-opener]
 version = "2"
 
