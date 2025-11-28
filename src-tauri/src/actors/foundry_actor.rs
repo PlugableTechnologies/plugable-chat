@@ -127,7 +127,7 @@ impl FoundryActor {
                     self.emit_model_selected(&model_id);
                     let _ = respond_to.send(true);
                 }
-                FoundryMsg::Chat { history, reasoning_effort, respond_to } => {
+                FoundryMsg::Chat { history, reasoning_effort, tools, respond_to } => {
                      // Check if we need to restart/reconnect
                      if self.port.is_none() || self.available_models.is_empty() {
                          println!("FoundryActor: No models found or port missing. Attempting to restart service...");
@@ -173,14 +173,14 @@ impl FoundryActor {
                          
                          println!("[FoundryActor] has_system_msg={}", has_system_msg);
                          
-                         if !has_system_msg {
-                             // Prepend system message for reasoning models
-                             println!("[FoundryActor] WARNING: No system message found, adding default!");
-                             messages.insert(0, crate::protocol::ChatMessage {
-                                 role: "system".to_string(),
-                                 content: "You are a helpful AI assistant. When answering questions, you may use <think></think> tags to show your reasoning process. After your thinking, always provide a clear, concise final answer outside the think tags.".to_string(),
-                             });
-                         } else {
+                        if !has_system_msg {
+                            // Prepend system message
+                            println!("[FoundryActor] WARNING: No system message found, adding default!");
+                            messages.insert(0, crate::protocol::ChatMessage {
+                                role: "system".to_string(),
+                                content: "You are a helpful AI assistant.".to_string(),
+                            });
+                        } else {
                              // Log the actual system message being used
                              if let Some(sys_msg) = messages.iter().find(|m| m.role == "system") {
                                  println!("[FoundryActor] Using system message ({} chars)", sys_msg.content.len());
@@ -196,37 +196,56 @@ impl FoundryActor {
                             .map(|m| m.reasoning)
                             .unwrap_or_else(|| model.to_lowercase().contains("reasoning"));
                         
-                        // Build request body - only include reasoning_effort for reasoning models
-                        let body = if model_supports_reasoning {
-                            println!("[FoundryActor] Model supports reasoning, using effort: {}", reasoning_effort);
-                            json!({
-                                "model": model, 
-                                "messages": messages,
-                                "stream": true,
-                                "max_tokens": 16384,
-                                "reasoning_effort": reasoning_effort
-                            })
-                        } else {
-                            println!("[FoundryActor] Model does not support reasoning, omitting reasoning_effort");
-                            json!({
-                                "model": model, 
-                                "messages": messages,
-                                "stream": true,
-                                "max_tokens": 16384
-                            })
-                        };
+                        // Check if this model supports native tool calling
+                        let model_supports_tools = self.model_info.iter()
+                            .find(|m| m.id == model)
+                            .map(|m| m.tool_calling)
+                            .unwrap_or(false);
+                        
+                        // Only use native tools if model supports them AND tools were provided
+                        let use_native_tools = model_supports_tools && tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
+                        
+                        if use_native_tools {
+                            println!("[FoundryActor] Model supports native tool calling, including {} tools in request", 
+                                tools.as_ref().map(|t| t.len()).unwrap_or(0));
+                        } else if tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
+                            println!("[FoundryActor] Model does NOT support native tool calling, falling back to text-based tools");
+                        }
+                        
+                       // Build request body
+                       let body = if model_supports_reasoning {
+                           println!("[FoundryActor] Model supports reasoning, using effort: {}", reasoning_effort);
+                           // Note: Don't include tools with reasoning models - they typically don't support both
+                           json!({
+                               "model": model, 
+                               "messages": messages,
+                               "stream": true,
+                               "max_tokens": 8192,
+                               "reasoning_effort": reasoning_effort
+                           })
+                       } else if use_native_tools {
+                           println!("[FoundryActor] Including native tools in request");
+                           json!({
+                               "model": model, 
+                               "messages": messages,
+                               "stream": true,
+                               "max_tokens": 16384,
+                               "tools": tools
+                           })
+                       } else {
+                           println!("[FoundryActor] Standard chat request (no native tools)");
+                           json!({
+                               "model": model, 
+                               "messages": messages,
+                               "stream": true,
+                               "max_tokens": 16384
+                           })
+                       };
                          
                          println!("Sending streaming request to Foundry at {}", url);
                          
-                         // We need to clone client/url/body or move them. 
-                         // Since we are in a loop, we clone the client (cheap).
                          let client_clone = client.clone();
-                         let respond_to_clone = respond_to.clone(); // Mpsc sender is clonable
-                         
-                         // Spawn a task to handle the streaming response so we don't block the actor loop?
-                         // Actually, blocking the actor loop per user request is fine for a single-user desktop app 
-                         // to ensure sequential processing, but streaming might take time.
-                         // Let's do it inline for now to simplify.
+                         let respond_to_clone = respond_to.clone();
                          
                          match client_clone.post(&url).json(&body).send().await {
                             Ok(mut resp) => {
@@ -238,6 +257,11 @@ impl FoundryActor {
                                 } else {
                                     let mut buffer = String::new();
                                     println!("Foundry stream started.");
+                                    
+                                    // Note: In streaming mode, Foundry Local provides tool calls in the 
+                                    // content field using Hermes-style <tool_call> XML format, not in the
+                                    // structured tool_calls array. Our text-based parser handles this.
+                                    
                                     while let Ok(Some(chunk)) = resp.chunk().await {
                                         if let Ok(s) = String::from_utf8(chunk.to_vec()) {
                                             buffer.push_str(&s);
@@ -255,10 +279,9 @@ impl FoundryActor {
                                                         break;
                                                     }
                                                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                                        // Check for content delta
+                                                        // Stream content tokens (includes tool calls in <tool_call> format)
                                                         if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                                                             if !content.is_empty() {
-                                                                // println!("Token: {:?}", content); // Uncomment for verbose logging
                                                                 let _ = respond_to_clone.send(content.to_string());
                                                             }
                                                         }
@@ -267,6 +290,7 @@ impl FoundryActor {
                                             }
                                         }
                                     }
+                                    
                                     println!("Foundry stream loop finished.");
                                 }
                             },
@@ -289,14 +313,17 @@ impl FoundryActor {
         if let Some(p) = self.port {
             println!("Foundry service detected on port {}", p);
             
-            // Fetch available models
+            // Get CLI-reported capabilities (more reliable than API for some models)
+            let cli_capabilities = self.get_model_capabilities_from_cli().await;
+            
+            // Fetch available models from API
             let client = reqwest::Client::new();
             let models_url = format!("http://127.0.0.1:{}/v1/models", p);
             match client.get(&models_url).send().await {
                 Ok(resp) => {
                      match resp.json::<serde_json::Value>().await {
                          Ok(json) => {
-                             println!("Available models: {}", json);
+                             println!("Available models from API: {}", json);
                             if let Some(data) = json["data"].as_array() {
                                 // Extract just model IDs for backwards compatibility
                                 self.available_models = data.iter()
@@ -307,7 +334,21 @@ impl FoundryActor {
                                 self.model_info = data.iter()
                                     .filter_map(|m| {
                                         let id = m["id"].as_str()?.to_string();
-                                        let tool_calling = m["toolCalling"].as_bool().unwrap_or(false);
+                                        
+                                        // Get tool_calling from API
+                                        let api_tool_calling = m["toolCalling"].as_bool().unwrap_or(false);
+                                        
+                                        // Check CLI capabilities - this is more reliable
+                                        // The API sometimes incorrectly reports toolCalling: false
+                                        let cli_tool_calling = cli_capabilities.get(&id).copied().unwrap_or(false);
+                                        
+                                        // Use CLI value if it says tools are supported (API might be wrong)
+                                        let tool_calling = api_tool_calling || cli_tool_calling;
+                                        
+                                        if cli_tool_calling && !api_tool_calling {
+                                            println!("  Model: {} | API says toolCalling: false, but CLI says tools supported - using CLI", id);
+                                        }
+                                        
                                         let vision = m["vision"].as_bool().unwrap_or(false);
                                         // Check API field first, fallback to heuristic (model name contains "reasoning")
                                         let reasoning = m["reasoning"].as_bool().unwrap_or_else(|| {
@@ -463,6 +504,82 @@ impl FoundryActor {
                 None
             }
         }
+    }
+
+    /// Get model capabilities from `foundry model list`
+    /// This is more reliable than the /v1/models API which sometimes incorrectly reports capabilities
+    /// Returns a map of model_id -> supports_tools
+    async fn get_model_capabilities_from_cli(&self) -> std::collections::HashMap<String, bool> {
+        println!("FoundryActor: Getting model capabilities via 'foundry model list'...");
+        
+        let child = Command::new("foundry")
+            .args(&["model", "list"])
+            .output();
+            
+        match timeout(Duration::from_secs(10), child).await {
+            Ok(Ok(output)) => {
+                if !output.status.success() {
+                    println!("FoundryActor: 'foundry model list' failed");
+                    return std::collections::HashMap::new();
+                }
+                
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                self.parse_model_list_capabilities(&stdout)
+            }
+            Ok(Err(e)) => {
+                println!("FoundryActor: Failed to run 'foundry model list': {}", e);
+                std::collections::HashMap::new()
+            }
+            Err(_) => {
+                println!("FoundryActor: 'foundry model list' timed out.");
+                std::collections::HashMap::new()
+            }
+        }
+    }
+
+    /// Parse the output of `foundry model list` to extract tool capability
+    /// Format:
+    /// ```
+    /// Alias                          Device     Task           File Size    License      Model ID            
+    /// qwen2.5-0.5b                   GPU        chat, tools    0.68 GB      apache-2.0   qwen2.5-0.5b-instruct-generic-gpu:4
+    /// phi-4                          GPU        chat           8.37 GB      MIT          Phi-4-generic-gpu:1 
+    /// ```
+    fn parse_model_list_capabilities(&self, output: &str) -> std::collections::HashMap<String, bool> {
+        let mut capabilities = std::collections::HashMap::new();
+        
+        for line in output.lines() {
+            let trimmed = line.trim();
+            
+            // Skip empty lines, headers, and separator lines
+            if trimmed.is_empty() 
+                || trimmed.starts_with("Alias")
+                || trimmed.starts_with("---")
+                || trimmed.starts_with("-")
+            {
+                continue;
+            }
+            
+            // Check if line contains "tools" in the Task column
+            // The Task column comes after Device (GPU/CPU) and before File Size
+            let has_tools = trimmed.contains("tools");
+            
+            // Extract the Model ID (last column, contains a colon like "model-name:version")
+            // Split by multiple spaces and find the last token that looks like a model ID
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if let Some(model_id) = parts.iter().rev().find(|p| p.contains(':') && !p.contains("://")) {
+                let model_id_str = model_id.to_string();
+                // Only insert if not already present (first GPU entry takes precedence)
+                if !capabilities.contains_key(&model_id_str) {
+                    capabilities.insert(model_id_str.clone(), has_tools);
+                    if has_tools {
+                        println!("FoundryActor: Model {} supports tools (from CLI)", model_id_str);
+                    }
+                }
+            }
+        }
+        
+        println!("FoundryActor: Found {} models with capabilities from CLI", capabilities.len());
+        capabilities
     }
 
     /// Get cached models from `foundry cache ls`

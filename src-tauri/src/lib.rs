@@ -2,7 +2,7 @@ pub mod protocol;
 pub mod actors;
 pub mod settings;
 
-use protocol::{VectorMsg, FoundryMsg, RagMsg, McpHostMsg, ChatMessage, CachedModel, ModelInfo, RagChunk, RagIndexResult, ParsedToolCall, parse_tool_calls, ToolCallsPendingEvent, ToolExecutingEvent, ToolResultEvent, ToolLoopFinishedEvent};
+use protocol::{VectorMsg, FoundryMsg, RagMsg, McpHostMsg, ChatMessage, CachedModel, ModelInfo, RagChunk, RagIndexResult, ParsedToolCall, parse_tool_calls, ToolCallsPendingEvent, ToolExecutingEvent, ToolResultEvent, ToolLoopFinishedEvent, OpenAITool};
 use actors::vector_actor::VectorActor;
 use actors::foundry_actor::FoundryActor;
 use actors::rag_actor::RagActor;
@@ -105,6 +105,38 @@ fn format_tool_result_message(call: &ParsedToolCall, result: &str, is_error: boo
     }
 }
 
+/// Try to resolve an unknown server ID by finding which server has the given tool
+async fn resolve_server_for_tool(
+    mcp_host_tx: &mpsc::Sender<McpHostMsg>,
+    tool_name: &str,
+) -> Option<String> {
+    println!("[resolve_server_for_tool] Searching for tool '{}' across servers...", tool_name);
+    
+    // Get all tool descriptions from connected servers
+    let (tx, rx) = oneshot::channel();
+    if mcp_host_tx.send(McpHostMsg::GetAllToolDescriptions { respond_to: tx }).await.is_err() {
+        return None;
+    }
+    
+    let tool_descriptions = match rx.await {
+        Ok(descriptions) => descriptions,
+        Err(_) => return None,
+    };
+    
+    // Search for the tool in each server
+    for (server_id, tools) in tool_descriptions {
+        for tool in tools {
+            if tool.name == tool_name {
+                println!("[resolve_server_for_tool] Found tool '{}' on server '{}'", tool_name, server_id);
+                return Some(server_id);
+            }
+        }
+    }
+    
+    println!("[resolve_server_for_tool] Tool '{}' not found on any connected server", tool_name);
+    None
+}
+
 /// Run the agentic loop: call model, detect tool calls, execute, repeat
 async fn run_agentic_loop(
     foundry_tx: mpsc::Sender<FoundryMsg>,
@@ -118,6 +150,7 @@ async fn run_agentic_loop(
     chat_id: String,
     title: String,
     original_message: String,
+    openai_tools: Option<Vec<OpenAITool>>,
 ) {
     let mut iteration = 0;
     let mut had_tool_calls = false;
@@ -133,6 +166,7 @@ async fn run_agentic_loop(
         if let Err(e) = foundry_tx.send(FoundryMsg::Chat {
             history: full_history.clone(),
             reasoning_effort: reasoning_effort.clone(),
+            tools: openai_tools.clone(),
             respond_to: tx,
         }).await {
             println!("[AgenticLoop] ERROR: Failed to send to Foundry: {}", e);
@@ -190,17 +224,46 @@ async fn run_agentic_loop(
         let mut any_executed = false;
         
         for (idx, call) in tool_calls.iter().enumerate() {
+            // Resolve server ID if unknown
+            let resolved_server = if call.server == "unknown" {
+                match resolve_server_for_tool(&mcp_host_tx, &call.tool).await {
+                    Some(server_id) => {
+                        println!("[AgenticLoop] Resolved unknown server to '{}' for tool '{}'", server_id, call.tool);
+                        server_id
+                    }
+                    None => {
+                        println!("[AgenticLoop] ERROR: Could not resolve server for tool '{}', skipping", call.tool);
+                        tool_results.push(format_tool_result_message(
+                            call,
+                            &format!("Could not find server for tool '{}'. Make sure an MCP server with this tool is connected.", call.tool),
+                            true,
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                call.server.clone()
+            };
+            
+            // Create a modified call with the resolved server
+            let resolved_call = ParsedToolCall {
+                server: resolved_server.clone(),
+                tool: call.tool.clone(),
+                arguments: call.arguments.clone(),
+                raw: call.raw.clone(),
+            };
+            
             println!("[AgenticLoop] Processing tool call {}/{}: {}::{}", 
-                idx + 1, tool_calls.len(), call.server, call.tool);
+                idx + 1, tool_calls.len(), resolved_call.server, resolved_call.tool);
             
             // Check if this server allows auto-approve
             let auto_approve = server_configs.iter()
-                .find(|s| s.id == call.server)
+                .find(|s| s.id == resolved_call.server)
                 .map(|s| s.auto_approve_tools)
                 .unwrap_or(false);
             
             if !auto_approve {
-                println!("[AgenticLoop] Server {} requires manual approval, emitting pending event", call.server);
+                println!("[AgenticLoop] Server {} requires manual approval, emitting pending event", resolved_call.server);
                 
                 // Create a unique approval key for this tool call
                 let approval_key = format!("{}-{}-{}", chat_id, iteration, idx);
@@ -208,7 +271,7 @@ async fn run_agentic_loop(
                 // Emit pending event for manual approval
                 let _ = app_handle.emit("tool-calls-pending", ToolCallsPendingEvent {
                     approval_key: approval_key.clone(),
-                    calls: vec![call.clone()],
+                    calls: vec![resolved_call.clone()],
                     iteration,
                 });
                 
@@ -241,7 +304,7 @@ async fn run_agentic_loop(
                     Ok(Ok(ToolApprovalDecision::Rejected)) => {
                         println!("[AgenticLoop] Tool call rejected by user");
                         tool_results.push(format_tool_result_message(
-                            call,
+                            &resolved_call,
                             "Tool execution was rejected by the user.",
                             true,
                         ));
@@ -250,7 +313,7 @@ async fn run_agentic_loop(
                     Ok(Err(_)) => {
                         println!("[AgenticLoop] Approval channel closed unexpectedly");
                         tool_results.push(format_tool_result_message(
-                            call,
+                            &resolved_call,
                             "Tool approval was cancelled.",
                             true,
                         ));
@@ -259,7 +322,7 @@ async fn run_agentic_loop(
                     Err(_) => {
                         println!("[AgenticLoop] Approval timed out after 5 minutes");
                         tool_results.push(format_tool_result_message(
-                            call,
+                            &resolved_call,
                             "Tool approval timed out. Tool call was skipped.",
                             true,
                         ));
@@ -270,33 +333,33 @@ async fn run_agentic_loop(
             
             // Emit executing event
             let _ = app_handle.emit("tool-executing", ToolExecutingEvent {
-                server: call.server.clone(),
-                tool: call.tool.clone(),
-                arguments: call.arguments.clone(),
+                server: resolved_call.server.clone(),
+                tool: resolved_call.tool.clone(),
+                arguments: resolved_call.arguments.clone(),
             });
             
             // Execute the tool
-            let (result_text, is_error) = match execute_tool_internal(&mcp_host_tx, call).await {
+            let (result_text, is_error) = match execute_tool_internal(&mcp_host_tx, &resolved_call).await {
                 Ok(result) => {
-                    println!("[AgenticLoop] Tool {} succeeded: {} chars", call.tool, result.len());
+                    println!("[AgenticLoop] Tool {} succeeded: {} chars", resolved_call.tool, result.len());
                     (result, false)
                 }
                 Err(e) => {
-                    println!("[AgenticLoop] Tool {} failed: {}", call.tool, e);
+                    println!("[AgenticLoop] Tool {} failed: {}", resolved_call.tool, e);
                     (e, true)
                 }
             };
             
             // Emit result event
             let _ = app_handle.emit("tool-result", ToolResultEvent {
-                server: call.server.clone(),
-                tool: call.tool.clone(),
+                server: resolved_call.server.clone(),
+                tool: resolved_call.tool.clone(),
                 result: result_text.clone(),
                 is_error,
             });
             
             // Format and collect tool result
-            tool_results.push(format_tool_result_message(call, &result_text, is_error));
+            tool_results.push(format_tool_result_message(&resolved_call, &result_text, is_error));
             any_executed = true;
         }
         
@@ -365,38 +428,27 @@ async fn run_agentic_loop(
 }
 
 /// Build the full system prompt with MCP tool descriptions
-fn build_system_prompt(base_prompt: &str, tool_descriptions: &[(String, Vec<McpTool>)]) -> String {
+fn build_system_prompt(
+    base_prompt: &str, 
+    tool_descriptions: &[(String, Vec<McpTool>)],
+    server_configs: &[McpServerConfig],
+) -> String {
     let mut prompt = base_prompt.to_string();
     
     // Check if there are any tools to describe
     let has_tools = tool_descriptions.iter().any(|(_, tools)| !tools.is_empty());
     
     if has_tools {
-        prompt.push_str("\n\n## IMPORTANT: Tool Calling Instructions\n\n");
-        prompt.push_str("You have access to external tools. When the user asks you to do something that requires a tool, you MUST actually call the tool by outputting the exact XML format below. Do NOT just explain how to call it - actually call it!\n\n");
-        prompt.push_str("**REQUIRED FORMAT** (you must output this exact structure):\n");
-        prompt.push_str("```\n<tool_call>{\"server\": \"SERVER_ID\", \"tool\": \"TOOL_NAME\", \"arguments\": {\"arg1\": \"value1\"}}</tool_call>\n```\n\n");
-        prompt.push_str("**RULES:**\n");
-        prompt.push_str("1. Output the <tool_call>...</tool_call> tags exactly as shown - the system parses them automatically\n");
-        prompt.push_str("2. The JSON inside must be valid with proper quoting\n");
-        prompt.push_str("3. Use the exact server ID and tool name from the list below\n");
-        prompt.push_str("4. After outputting a tool call, STOP and wait for the result\n\n");
+        prompt.push_str("\n\n## Tool Calling Format\n\n");
+        prompt.push_str("Use this EXACT format:\n");
+        prompt.push_str("<tool_call>{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg1\": \"value1\"}}</tool_call>\n\n");
         
-        // Collect first available server and tool for example
-        let mut example_server = String::new();
-        let mut example_tool = String::new();
-        for (server_id, tools) in tool_descriptions {
-            if !tools.is_empty() {
-                example_server = server_id.clone();
-                example_tool = tools[0].name.clone();
-                break;
-            }
-        }
-        
-        if !example_server.is_empty() {
-            prompt.push_str("**EXAMPLE** (using your actual available tools):\n");
-            prompt.push_str(&format!("```\n<tool_call>{{\"server\": \"{}\", \"tool\": \"{}\", \"arguments\": {{}}}}</tool_call>\n```\n\n", example_server, example_tool));
-        }
+        prompt.push_str("CRITICAL ARGUMENT RULES:\n");
+        prompt.push_str("- Each argument value must be a SIMPLE value (string, number, boolean)\n");
+        prompt.push_str("- WRONG: {\"dataset\": {\"id\": \"x\", \"project\": \"y\"}}\n");
+        prompt.push_str("- RIGHT: {\"dataset\": \"my_dataset\", \"project\": \"my_project\"}\n");
+        prompt.push_str("- NEVER nest JSON objects inside argument values\n");
+        prompt.push_str("- NEVER guess project/dataset/table names - use list_* tools first\n\n");
         
         prompt.push_str("## Available Tools\n\n");
         
@@ -406,6 +458,22 @@ fn build_system_prompt(base_prompt: &str, tool_descriptions: &[(String, Vec<McpT
             }
             
             prompt.push_str(&format!("### Server: `{}`\n\n", server_id));
+            
+            // Include server environment variables as context for the model
+            if let Some(config) = server_configs.iter().find(|c| c.id == *server_id) {
+                if !config.env.is_empty() {
+                    prompt.push_str("**Server Configuration** (use these values for this server's tools):\n");
+                    for (key, value) in &config.env {
+                        // Skip sensitive keys
+                        let key_lower = key.to_lowercase();
+                        if key_lower.contains("secret") || key_lower.contains("password") || key_lower.contains("token") || key_lower.contains("key") {
+                            continue;
+                        }
+                        prompt.push_str(&format!("- `{}`: `{}`\n", key, value));
+                    }
+                    prompt.push_str("\n");
+                }
+            }
             
             for tool in tools {
                 prompt.push_str(&format!("**{}**", tool.name));
@@ -417,20 +485,50 @@ fn build_system_prompt(base_prompt: &str, tool_descriptions: &[(String, Vec<McpT
                 if let Some(schema) = &tool.input_schema {
                     if let Some(properties) = schema.get("properties") {
                         if let Some(props) = properties.as_object() {
+                            let required_fields: Vec<&str> = schema.get("required")
+                                .and_then(|r| r.as_array())
+                                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                                .unwrap_or_default();
+                            
                             prompt.push_str("  Arguments:\n");
                             for (name, prop_schema) in props {
                                 let prop_type = prop_schema.get("type")
                                     .and_then(|t| t.as_str())
-                                    .unwrap_or("any");
+                                    .unwrap_or("string");
                                 let prop_desc = prop_schema.get("description")
                                     .and_then(|d| d.as_str())
                                     .unwrap_or("");
-                                let required = schema.get("required")
-                                    .and_then(|r| r.as_array())
-                                    .map(|arr| arr.iter().any(|v| v.as_str() == Some(name)))
-                                    .unwrap_or(false);
-                                let req_marker = if required { " [required]" } else { "" };
-                                prompt.push_str(&format!("  - `{}` ({}){}: {}\n", name, prop_type, req_marker, prop_desc));
+                                let is_required = required_fields.contains(&name.as_str());
+                                let req_marker = if is_required { " [REQUIRED]" } else { "" };
+                                
+                                // Show example value based on type
+                                let example = match prop_type {
+                                    "string" => format!("\"{}\"", name),
+                                    "number" | "integer" => "123".to_string(),
+                                    "boolean" => "true".to_string(),
+                                    _ => format!("\"{}\"", name),
+                                };
+                                
+                                prompt.push_str(&format!("  - `{}` ({}){}: {} Example: {}\n", 
+                                    name, prop_type, req_marker, prop_desc, example));
+                            }
+                            
+                            // Show a complete example call for this tool
+                            if !props.is_empty() {
+                                prompt.push_str("  Example call:\n");
+                                let example_args: Vec<String> = props.iter().map(|(name, prop_schema)| {
+                                    let prop_type = prop_schema.get("type")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("string");
+                                    let value = match prop_type {
+                                        "boolean" => "true".to_string(),
+                                        "number" | "integer" => "123".to_string(),
+                                        _ => format!("\"example_{}\"", name),
+                                    };
+                                    format!("\"{}\": {}", name, value)
+                                }).collect();
+                                prompt.push_str(&format!("  <tool_call>{{\"name\": \"{}\", \"arguments\": {{{}}}}}</tool_call>\n", 
+                                    tool.name, example_args.join(", ")));
                             }
                         }
                     }
@@ -438,8 +536,6 @@ fn build_system_prompt(base_prompt: &str, tool_descriptions: &[(String, Vec<McpT
                 prompt.push('\n');
             }
         }
-        
-        prompt.push_str("\nRemember: When asked to use a tool, OUTPUT the <tool_call> tags directly - don't just describe them!\n");
     }
     
     prompt
@@ -550,42 +646,50 @@ async fn chat(
         .map_err(|e| e.to_string())?;
     let tool_descriptions = tools_rx.await.map_err(|_| "MCP Host actor died".to_string())?;
     
+    // Convert MCP tools to OpenAI format for native tool calling
+    let openai_tools: Vec<OpenAITool> = tool_descriptions.iter()
+        .flat_map(|(server_id, tools)| {
+            tools.iter().map(move |tool| OpenAITool::from_mcp(server_id, tool))
+        })
+        .collect();
+    
+    let has_tools = !openai_tools.is_empty();
+    println!("[Chat] Converted {} MCP tools to OpenAI format", openai_tools.len());
+    
     // Build the full system prompt with tool descriptions
-    let system_prompt = build_system_prompt(&base_system_prompt, &tool_descriptions);
+    // Note: We still include text-based tool instructions as a fallback for models
+    // that don't support native tool calling
+    let system_prompt = build_system_prompt(&base_system_prompt, &tool_descriptions, &server_configs);
     
     // === LOGGING: System prompt and MCP tool descriptions ===
-    println!("\n╔══════════════════════════════════════════════════════════════╗");
-    println!("║              CHAT CONTEXT - NEW MESSAGE                      ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║ BASE SYSTEM PROMPT ({} chars):                               ", base_system_prompt.len());
-    println!("╟──────────────────────────────────────────────────────────────╢");
-    for line in base_system_prompt.lines().take(5) {
-        println!("║ {}", if line.len() > 60 { &line[..60] } else { line });
-    }
-    if base_system_prompt.lines().count() > 5 {
-        println!("║ ... ({} more lines)", base_system_prompt.lines().count() - 5);
-    }
-    println!("╟──────────────────────────────────────────────────────────────╢");
-    println!("║ MCP TOOL DESCRIPTIONS:                                       ");
+    println!("\n=== CHAT CONTEXT - NEW MESSAGE ===");
+    println!("\n[BASE SYSTEM PROMPT] ({} chars):", base_system_prompt.len());
+    println!("{}", base_system_prompt);
+    println!("\n[MCP TOOL DESCRIPTIONS]:");
     if tool_descriptions.is_empty() {
-        println!("║   (no enabled MCP servers with tools)");
+        println!("  (no enabled MCP servers with tools)");
     } else {
         for (server_id, tools) in &tool_descriptions {
-            println!("║   Server: {} ({} tools)", server_id, tools.len());
+            println!("  Server: {} ({} tools)", server_id, tools.len());
             for tool in tools {
-                println!("║     - {}: {}", tool.name, tool.description.as_deref().unwrap_or("no description"));
+                println!("    - {}: {}", tool.name, tool.description.as_deref().unwrap_or("no description"));
             }
         }
     }
-    println!("╟──────────────────────────────────────────────────────────────╢");
-    println!("║ FINAL SYSTEM PROMPT LENGTH: {} chars                        ", system_prompt.len());
-    println!("║ AUTO-APPROVE SERVERS:                                        ");
-    for cfg in &server_configs {
-        if cfg.auto_approve_tools {
-            println!("║   - {} ({})", cfg.name, cfg.id);
+    println!("\n[FINAL SYSTEM PROMPT] ({} chars):", system_prompt.len());
+    println!("{}", system_prompt);
+    println!("\n[AUTO-APPROVE SERVERS]:");
+    let auto_approve_count = server_configs.iter().filter(|c| c.auto_approve_tools).count();
+    if auto_approve_count == 0 {
+        println!("  (none)");
+    } else {
+        for cfg in &server_configs {
+            if cfg.auto_approve_tools {
+                println!("  - {} ({})", cfg.name, cfg.id);
+            }
         }
     }
-    println!("╚══════════════════════════════════════════════════════════════╝\n");
+    println!("\n=== END CHAT CONTEXT ===\n");
     
     // Build full history with system prompt at the beginning
     let mut full_history = Vec::new();
@@ -619,6 +723,7 @@ async fn chat(
     let chat_id_task = chat_id.clone();
     let title_task = title.clone();
     let message_task = message.clone();
+    let openai_tools_task = if has_tools { Some(openai_tools) } else { None };
 
     // Spawn the agentic loop task
     tauri::async_runtime::spawn(async move {
@@ -634,6 +739,7 @@ async fn chat(
             chat_id_task,
             title_task,
             message_task,
+            openai_tools_task,
         ).await;
     });
 

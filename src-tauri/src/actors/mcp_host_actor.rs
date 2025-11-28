@@ -450,22 +450,70 @@ impl McpHostActor {
     }
 
     async fn execute_tool(&self, server_id: &str, tool_name: &str, arguments: Value) -> Result<McpToolResult, String> {
-        println!("McpHostActor: Executing tool {} on server {}", tool_name, server_id);
+        // Log the input
+        println!("\n╔══════════════════════════════════════════════════════════════");
+        println!("║ MCP TOOL CALL INPUT");
+        println!("╠══════════════════════════════════════════════════════════════");
+        println!("║ Server:    {}", server_id);
+        println!("║ Tool:      {}", tool_name);
+        println!("║ Arguments: {}", serde_json::to_string_pretty(&arguments).unwrap_or_else(|_| arguments.to_string()));
+        println!("╚══════════════════════════════════════════════════════════════\n");
         
         let mut connections = self.connections.write().await;
         let connection = connections.get_mut(server_id)
-            .ok_or_else(|| format!("Server {} not connected", server_id))?;
+            .ok_or_else(|| {
+                println!("║ ERROR: Server {} not connected", server_id);
+                format!("Server {} not connected", server_id)
+            })?;
         
         let result = connection.send_request("tools/call", Some(json!({
             "name": tool_name,
             "arguments": arguments
-        }))).await?;
+        }))).await;
 
-        // Parse the result
-        let tool_result: McpToolResult = serde_json::from_value(result)
-            .map_err(|e| format!("Failed to parse tool result: {}", e))?;
-        
-        Ok(tool_result)
+        match result {
+            Ok(raw_result) => {
+                // Parse the result
+                let tool_result: McpToolResult = serde_json::from_value(raw_result.clone())
+                    .map_err(|e| format!("Failed to parse tool result: {}", e))?;
+                
+                // Log the output
+                println!("\n╔══════════════════════════════════════════════════════════════");
+                println!("║ MCP TOOL CALL OUTPUT");
+                println!("╠══════════════════════════════════════════════════════════════");
+                println!("║ Server:   {}", server_id);
+                println!("║ Tool:     {}", tool_name);
+                println!("║ Is Error: {}", tool_result.is_error);
+                println!("║ Content:");
+                for content in &tool_result.content {
+                    if let Some(text) = &content.text {
+                        // Indent multi-line output
+                        for line in text.lines() {
+                            println!("║   {}", line);
+                        }
+                    }
+                    if let Some(data) = &content.data {
+                        let preview: String = data.chars().take(200).collect();
+                        println!("║   [Binary data: {} bytes, preview: {}...]", data.len(), preview);
+                    }
+                }
+                println!("╚══════════════════════════════════════════════════════════════\n");
+                
+                Ok(tool_result)
+            }
+            Err(e) => {
+                // Log the error
+                println!("\n╔══════════════════════════════════════════════════════════════");
+                println!("║ MCP TOOL CALL ERROR");
+                println!("╠══════════════════════════════════════════════════════════════");
+                println!("║ Server: {}", server_id);
+                println!("║ Tool:   {}", tool_name);
+                println!("║ Error:  {}", e);
+                println!("╚══════════════════════════════════════════════════════════════\n");
+                
+                Err(e)
+            }
+        }
     }
 
     async fn get_all_tool_descriptions(&self) -> Vec<(String, Vec<McpTool>)> {
