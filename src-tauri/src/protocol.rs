@@ -93,6 +93,7 @@ pub struct ModelInfo {
     pub id: String,
     pub tool_calling: bool,
     pub vision: bool,
+    pub reasoning: bool,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
 }

@@ -34,9 +34,10 @@ function App() {
   const effortOptions: ReasoningEffort[] = ['low', 'medium', 'high'];
   console.log("App component rendering...");
   
-  // Check if current model supports tool calling
+  // Check if current model supports tool calling and reasoning
   const currentModelInfo = modelInfo.find(m => m.id === currentModel);
   const hasToolCalling = currentModelInfo?.tool_calling ?? false;
+  const hasReasoning = currentModelInfo?.reasoning ?? currentModel.toLowerCase().includes('reasoning');
 
 
   const debugLayout = async () => {
@@ -228,12 +229,16 @@ function App() {
             ) : (
               <span className="text-gray-700">{currentModel === 'Loading...' ? 'Loading...' : currentModel}</span>
             )}
-            <span style={{ marginLeft: '24px' }}>Reasoning:</span>
-            <select value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none">
-              {effortOptions.map((option) => (
-                <option key={option} value={option}>{option.charAt(0).toUpperCase() + option.slice(1)}</option>
-              ))}
-            </select>
+            {hasReasoning && (
+              <>
+                <span style={{ marginLeft: '24px' }}>Reasoning:</span>
+                <select value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none">
+                  {effortOptions.map((option) => (
+                    <option key={option} value={option}>{option.charAt(0).toUpperCase() + option.slice(1)}</option>
+                  ))}
+                </select>
+              </>
+            )}
           </div>
         </div>
         {/* Main Content */}

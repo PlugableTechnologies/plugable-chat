@@ -83,13 +83,26 @@ async fn execute_tool_internal(
 
 /// Format a tool result for injection into the chat history
 fn format_tool_result_message(call: &ParsedToolCall, result: &str, is_error: bool) -> String {
-    format!(
-        "<tool_result server=\"{}\" tool=\"{}\"{}>\n{}\n</tool_result>",
-        call.server,
-        call.tool,
-        if is_error { " error=\"true\"" } else { "" },
-        result
-    )
+    if is_error {
+        format!(
+            "<tool_result server=\"{}\" tool=\"{}\" error=\"true\">\n{}\n</tool_result>\n\n\
+            **TOOL ERROR**: The tool call failed with the error above. Please:\n\
+            1. Carefully analyze the error message for hints about what went wrong\n\
+            2. Identify the incorrect parameters or arguments\n\
+            3. Call the tool again with corrected parameters\n\
+            If you cannot determine how to fix the error after reviewing the message, explain the issue to the user.",
+            call.server,
+            call.tool,
+            result
+        )
+    } else {
+        format!(
+            "<tool_result server=\"{}\" tool=\"{}\">\n{}\n</tool_result>",
+            call.server,
+            call.tool,
+            result
+        )
+    }
 }
 
 /// Run the agentic loop: call model, detect tool calls, execute, repeat

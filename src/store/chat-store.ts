@@ -21,6 +21,7 @@ export interface ModelInfo {
     id: string;
     tool_calling: boolean;
     vision: boolean;
+    reasoning: boolean;
     max_input_tokens: number;
     max_output_tokens: number;
 }

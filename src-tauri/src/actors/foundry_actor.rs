@@ -190,15 +190,31 @@ impl FoundryActor {
                              }
                          }
                          
-                         // Convert history to messages
-                         // For reasoning models: they output thinking in <think> tags, then a final answer
-                        let body = json!({
-                            "model": model, 
-                            "messages": messages,
-                            "stream": true,
-                            "max_tokens": 16384,
-                            "reasoning_effort": reasoning_effort
-                        });
+                         // Check if this model supports reasoning
+                        let model_supports_reasoning = self.model_info.iter()
+                            .find(|m| m.id == model)
+                            .map(|m| m.reasoning)
+                            .unwrap_or_else(|| model.to_lowercase().contains("reasoning"));
+                        
+                        // Build request body - only include reasoning_effort for reasoning models
+                        let body = if model_supports_reasoning {
+                            println!("[FoundryActor] Model supports reasoning, using effort: {}", reasoning_effort);
+                            json!({
+                                "model": model, 
+                                "messages": messages,
+                                "stream": true,
+                                "max_tokens": 16384,
+                                "reasoning_effort": reasoning_effort
+                            })
+                        } else {
+                            println!("[FoundryActor] Model does not support reasoning, omitting reasoning_effort");
+                            json!({
+                                "model": model, 
+                                "messages": messages,
+                                "stream": true,
+                                "max_tokens": 16384
+                            })
+                        };
                          
                          println!("Sending streaming request to Foundry at {}", url);
                          
@@ -293,16 +309,21 @@ impl FoundryActor {
                                         let id = m["id"].as_str()?.to_string();
                                         let tool_calling = m["toolCalling"].as_bool().unwrap_or(false);
                                         let vision = m["vision"].as_bool().unwrap_or(false);
+                                        // Check API field first, fallback to heuristic (model name contains "reasoning")
+                                        let reasoning = m["reasoning"].as_bool().unwrap_or_else(|| {
+                                            id.to_lowercase().contains("reasoning")
+                                        });
                                         let max_input_tokens = m["maxInputTokens"].as_u64().unwrap_or(4096) as u32;
                                         let max_output_tokens = m["maxOutputTokens"].as_u64().unwrap_or(4096) as u32;
                                         
-                                        println!("  Model: {} | toolCalling: {} | vision: {} | maxIn: {} | maxOut: {}", 
-                                            id, tool_calling, vision, max_input_tokens, max_output_tokens);
+                                        println!("  Model: {} | toolCalling: {} | vision: {} | reasoning: {} | maxIn: {} | maxOut: {}", 
+                                            id, tool_calling, vision, reasoning, max_input_tokens, max_output_tokens);
                                         
                                         Some(ModelInfo {
                                             id,
                                             tool_calling,
                                             vision,
+                                            reasoning,
                                             max_input_tokens,
                                             max_output_tokens,
                                         })
