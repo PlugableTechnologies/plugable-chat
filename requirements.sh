@@ -199,6 +199,22 @@ install_requirements() {
     echo -e "${GRAY}  rustc --version${NC}"
     echo -e "${GRAY}  cargo --version${NC}"
     echo ""
+    
+    if $all_succeeded; then
+        echo -e "${CYAN}========================================${NC}"
+        echo -e "${CYAN}  To run the application:              ${NC}"
+        echo -e "${CYAN}========================================${NC}"
+        echo ""
+        echo "  1. Install Node.js dependencies:"
+        echo -e "${YELLOW}     npm install${NC}"
+        echo ""
+        echo "  2. Run the app in development mode:"
+        echo -e "${YELLOW}     npx tauri dev${NC}"
+        echo ""
+        echo "  Or build for production:"
+        echo -e "${YELLOW}     npx tauri build${NC}"
+        echo ""
+    fi
 }
 
 # Run the installation

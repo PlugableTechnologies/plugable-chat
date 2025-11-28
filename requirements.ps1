@@ -136,6 +136,22 @@ function Install-Requirements {
     Write-Host "  rustc --version" -ForegroundColor Gray
     Write-Host "  cargo --version" -ForegroundColor Gray
     Write-Host ""
+    
+    if ($allSucceeded) {
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "  To run the application:              " -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "  1. Install Node.js dependencies:" -ForegroundColor White
+        Write-Host "     npm install" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  2. Run the app in development mode:" -ForegroundColor White
+        Write-Host "     npx tauri dev" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  Or build for production:" -ForegroundColor White
+        Write-Host "     npx tauri build" -ForegroundColor Yellow
+        Write-Host ""
+    }
 }
 
 # Run the installation
