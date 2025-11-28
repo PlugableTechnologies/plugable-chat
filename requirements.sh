@@ -21,7 +21,14 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 GRAY='\033[0;90m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
+
+# Track what was newly installed (for PATH guidance)
+INSTALLED_HOMEBREW=false
+INSTALLED_NODE=false
+INSTALLED_RUST=false
+INSTALLED_ANYTHING=false
 
 # Check if a command exists
 command_exists() {
@@ -56,6 +63,7 @@ install_xcode_clt() {
     
     if check_xcode_clt; then
         echo -e "  -> ${GREEN}Installed successfully${NC}"
+        INSTALLED_ANYTHING=true
         return 0
     else
         echo -e "  -> ${RED}Installation may have failed. Please install manually.${NC}"
@@ -76,13 +84,20 @@ install_homebrew() {
     
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     
-    # Add Homebrew to PATH for Apple Silicon Macs
+    # Add Homebrew to PATH for Apple Silicon Macs (for current session)
     if [[ -f /opt/homebrew/bin/brew ]]; then
+        echo "  -> Adding Homebrew to PATH for this session..."
         eval "$(/opt/homebrew/bin/brew shellenv)"
+        INSTALLED_HOMEBREW=true
+    elif [[ -f /usr/local/bin/brew ]]; then
+        # Intel Macs - Homebrew is in /usr/local which is usually already in PATH
+        eval "$(/usr/local/bin/brew shellenv)"
+        INSTALLED_HOMEBREW=true
     fi
     
     if command_exists brew; then
         echo -e "  -> ${GREEN}Installed successfully${NC}"
+        INSTALLED_ANYTHING=true
         return 0
     else
         echo -e "  -> ${RED}Installation failed${NC}"
@@ -106,6 +121,13 @@ install_brew_formula() {
     
     if brew install "$formula"; then
         echo -e "  -> ${GREEN}Installed successfully${NC}"
+        INSTALLED_ANYTHING=true
+        
+        # Track specific installs for PATH guidance
+        if [[ "$formula" == "node" ]]; then
+            INSTALLED_NODE=true
+        fi
+        
         return 0
     else
         echo -e "  -> ${RED}Installation failed${NC}"
@@ -129,14 +151,72 @@ install_rust() {
     
     # Source cargo env for current session
     if [[ -f "$HOME/.cargo/env" ]]; then
+        echo "  -> Adding Rust to PATH for this session..."
         source "$HOME/.cargo/env"
+        INSTALLED_RUST=true
     fi
     
     if command_exists rustc && command_exists cargo; then
         echo -e "  -> ${GREEN}Installed successfully${NC}"
+        INSTALLED_ANYTHING=true
         return 0
     else
         echo -e "  -> ${RED}Installation failed${NC}"
+        return 1
+    fi
+}
+
+# Verify that critical commands are available
+verify_commands() {
+    local all_available=true
+    
+    echo ""
+    echo "Verifying installations..."
+    echo ""
+    
+    echo -n "  node: "
+    if command_exists node; then
+        echo -e "${GREEN}$(node --version)${NC}"
+    else
+        echo -e "${RED}not found${NC}"
+        all_available=false
+    fi
+    
+    echo -n "  npm:  "
+    if command_exists npm; then
+        echo -e "${GREEN}$(npm --version)${NC}"
+    else
+        echo -e "${RED}not found${NC}"
+        all_available=false
+    fi
+    
+    echo -n "  rustc: "
+    if command_exists rustc; then
+        echo -e "${GREEN}$(rustc --version | cut -d' ' -f2)${NC}"
+    else
+        echo -e "${RED}not found${NC}"
+        all_available=false
+    fi
+    
+    echo -n "  cargo: "
+    if command_exists cargo; then
+        echo -e "${GREEN}$(cargo --version | cut -d' ' -f2)${NC}"
+    else
+        echo -e "${RED}not found${NC}"
+        all_available=false
+    fi
+    
+    echo -n "  protoc: "
+    if command_exists protoc; then
+        echo -e "${GREEN}$(protoc --version | cut -d' ' -f2)${NC}"
+    else
+        echo -e "${RED}not found${NC}"
+        all_available=false
+    fi
+    
+    if $all_available; then
+        return 0
+    else
         return 1
     fi
 }
@@ -193,36 +273,76 @@ install_requirements() {
         echo -e "${YELLOW}========================================${NC}"
     fi
     
-    echo ""
-    echo -e "${CYAN}IMPORTANT: After installation, you may need to:${NC}"
-    echo "  1. Restart your terminal to refresh PATH"
-    echo "  2. Run 'source ~/.cargo/env' to add Rust to current session"
-    echo ""
-    echo -e "${CYAN}To verify installations, run:${NC}"
-    echo -e "${GRAY}  node --version${NC}"
-    echo -e "${GRAY}  npm --version${NC}"
-    echo -e "${GRAY}  rustc --version${NC}"
-    echo -e "${GRAY}  cargo --version${NC}"
-    echo -e "${GRAY}  protoc --version${NC}"
-    echo ""
-    
-    if $all_succeeded; then
-        echo -e "${CYAN}========================================${NC}"
-        echo -e "${CYAN}  To run the application:              ${NC}"
-        echo -e "${CYAN}========================================${NC}"
+    # Verify all commands are available in current session
+    if verify_commands; then
         echo ""
-        echo "  1. Install Node.js dependencies:"
-        echo -e "${YELLOW}     npm install${NC}"
+        echo -e "${GREEN}All tools are available in this session!${NC}"
+        
+        # Check if we're in the project directory (has package.json)
+        if [[ -f "package.json" ]]; then
+            echo ""
+            echo -e "${CYAN}========================================${NC}"
+            echo -e "${CYAN}  Running npm install...               ${NC}"
+            echo -e "${CYAN}========================================${NC}"
+            echo ""
+            
+            if npm install; then
+                echo ""
+                echo -e "${GREEN}========================================${NC}"
+                echo -e "${GREEN}  Setup complete! Ready to run.        ${NC}"
+                echo -e "${GREEN}========================================${NC}"
+                echo ""
+                echo -e "  Start the app with:"
+                echo -e "  ${YELLOW}npx tauri dev${NC}"
+                echo ""
+                echo -e "  Or build for production:"
+                echo -e "  ${YELLOW}npx tauri build${NC}"
+                echo ""
+            else
+                echo -e "${RED}npm install failed. Please check the errors above.${NC}"
+            fi
+        else
+            echo ""
+            echo -e "${CYAN}========================================${NC}"
+            echo -e "${CYAN}  Next Steps                           ${NC}"
+            echo -e "${CYAN}========================================${NC}"
+            echo ""
+            echo "  1. Navigate to the project directory"
+            echo "  2. Run: ${YELLOW}npm install${NC}"
+            echo "  3. Run: ${YELLOW}npx tauri dev${NC}"
+            echo ""
+        fi
+    else
+        # Some commands are missing - need terminal restart
         echo ""
-        echo "  2. Run the app in development mode:"
-        echo -e "${YELLOW}     npx tauri dev${NC}"
+        echo -e "${YELLOW}========================================${NC}"
+        echo -e "${YELLOW}  Terminal Restart Required            ${NC}"
+        echo -e "${YELLOW}========================================${NC}"
         echo ""
-        echo "  Or build for production:"
-        echo -e "${YELLOW}     npx tauri build${NC}"
+        echo -e "${BOLD}Some tools are not yet available in this terminal session.${NC}"
+        echo ""
+        echo -e "Please do the following:"
+        echo ""
+        echo -e "  ${BOLD}1.${NC} Close this terminal completely"
+        echo -e "  ${BOLD}2.${NC} Open a new terminal"
+        echo -e "  ${BOLD}3.${NC} Navigate back to this directory:"
+        echo -e "     ${GRAY}cd $(pwd)${NC}"
+        echo -e "  ${BOLD}4.${NC} Run the setup commands:"
+        echo -e "     ${YELLOW}npm install${NC}"
+        echo -e "     ${YELLOW}npx tauri dev${NC}"
+        echo ""
+        
+        # Provide manual PATH fix as alternative
+        echo -e "${GRAY}Alternatively, you can try refreshing PATH manually:${NC}"
+        if $INSTALLED_HOMEBREW && [[ -f /opt/homebrew/bin/brew ]]; then
+            echo -e "${GRAY}  eval \"\$(/opt/homebrew/bin/brew shellenv)\"${NC}"
+        fi
+        if $INSTALLED_RUST; then
+            echo -e "${GRAY}  source ~/.cargo/env${NC}"
+        fi
         echo ""
     fi
 }
 
 # Run the installation
 install_requirements
-
