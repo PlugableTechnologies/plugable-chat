@@ -395,119 +395,111 @@ impl FoundryActor {
         if let Some(p) = self.port {
             println!("Foundry service detected on port {}", p);
             
-            // Get CLI-reported capabilities (more reliable than API for some models)
-            let cli_capabilities = self.get_model_capabilities_from_cli().await;
+            // AIRGAP MODE: Use `foundry cache ls` as the primary source of models
+            // This avoids calling `foundry model list` which requires internet connectivity
+            let cached_models = self.get_cached_models().await;
             
-            // Fetch available models from API
-            let client = reqwest::Client::new();
-            let models_url = format!("http://127.0.0.1:{}/v1/models", p);
-            match client.get(&models_url).send().await {
-                Ok(resp) => {
-                     match resp.json::<serde_json::Value>().await {
-                         Ok(json) => {
-                             println!("Available models from API: {}", json);
-                            if let Some(data) = json["data"].as_array() {
-                                // Extract just model IDs for backwards compatibility
-                                self.available_models = data.iter()
-                                    .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
-                                    .collect();
-                                
-                                // Parse full model info including capabilities
-                                self.model_info = data.iter()
-                                    .filter_map(|m| {
-                                        let id = m["id"].as_str()?.to_string();
-                                        
-                                        // Detect model family from ID
-                                        let family = ModelFamily::from_model_id(&id);
-                                        
-                                        // Get tool_calling from API
-                                        let api_tool_calling = m["toolCalling"].as_bool().unwrap_or(false);
-                                        
-                                        // Check CLI capabilities - this is more reliable
-                                        // The API sometimes incorrectly reports toolCalling: false
-                                        let cli_tool_calling = cli_capabilities.get(&id).copied().unwrap_or(false);
-                                        
-                                        // Use CLI value if it says tools are supported (API might be wrong)
-                                        let tool_calling = api_tool_calling || cli_tool_calling;
-                                        
-                                        if cli_tool_calling && !api_tool_calling {
-                                            println!("  Model: {} | API says toolCalling: false, but CLI says tools supported - using CLI", id);
-                                        }
-                                        
-                                        // Determine tool format based on model family and capabilities
-                                        let tool_format = if !tool_calling {
-                                            ToolFormat::TextBased
-                                        } else {
-                                            match family {
-                                                ModelFamily::GptOss => ToolFormat::OpenAI,
-                                                ModelFamily::Gemma => ToolFormat::Gemini,
-                                                ModelFamily::Phi => ToolFormat::Hermes,
-                                                ModelFamily::Granite => ToolFormat::Granite,
-                                                ModelFamily::Generic => ToolFormat::OpenAI,
-                                            }
-                                        };
-                                        
-                                        let vision = m["vision"].as_bool().unwrap_or(false);
-                                        // Check API field first, fallback to heuristic (model name contains "reasoning")
-                                        let reasoning = m["reasoning"].as_bool().unwrap_or_else(|| {
-                                            id.to_lowercase().contains("reasoning")
-                                        });
-                                        
-                                        // Determine reasoning format based on model family
-                                        let reasoning_format = if !reasoning {
-                                            ReasoningFormat::None
-                                        } else {
-                                            match family {
-                                                ModelFamily::GptOss => ReasoningFormat::ChannelBased,
-                                                ModelFamily::Phi => ReasoningFormat::ThinkTags,
-                                                ModelFamily::Granite => ReasoningFormat::ThinkingTags,
-                                                _ => ReasoningFormat::None,
-                                            }
-                                        };
-                                        
-                                        let max_input_tokens = m["maxInputTokens"].as_u64().unwrap_or(4096) as u32;
-                                        let max_output_tokens = m["maxOutputTokens"].as_u64().unwrap_or(4096) as u32;
-                                        
-                                        // Parameter support flags based on model family
-                                        let supports_temperature = true; // Most models support this
-                                        let supports_top_p = true; // Most models support this
-                                        let supports_reasoning_effort = reasoning && matches!(family, ModelFamily::Phi);
-                                        
-                                        println!("  Model: {} | family: {:?} | toolCalling: {} ({:?}) | vision: {} | reasoning: {} ({:?}) | maxIn: {} | maxOut: {}", 
-                                            id, family, tool_calling, tool_format, vision, reasoning, reasoning_format, max_input_tokens, max_output_tokens);
-                                        
-                                        Some(ModelInfo {
-                                            id,
-                                            family,
-                                            tool_calling,
-                                            tool_format,
-                                            vision,
-                                            reasoning,
-                                            reasoning_format,
-                                            max_input_tokens,
-                                            max_output_tokens,
-                                            supports_temperature,
-                                            supports_top_p,
-                                            supports_reasoning_effort,
-                                        })
-                                    })
-                                    .collect();
-                                
-                                if self.model_id.is_none() {
-                                if let Some(first) = self.available_models.first() {
-                                    println!("Selected default model: {}", first);
-                                    self.model_id = Some(first.clone());
-                                    self.emit_model_selected(first);
-                                    }
-                                }
-                                return !self.available_models.is_empty();
-                            }
-                         },
-                         Err(e) => println!("Failed to parse models response: {}", e),
-                     }
-                },
-                Err(e) => println!("Failed to query models: {}", e),
+            if cached_models.is_empty() {
+                println!("FoundryActor: No cached models found via 'foundry cache ls'");
+                // Return true to indicate service is running but with no models
+                // The frontend will handle showing help to the user
+                self.available_models = Vec::new();
+                self.model_info = Vec::new();
+                return true; // Service is reachable, just no models cached
             }
+            
+            // Build available_models and model_info from cached models
+            self.available_models = cached_models.iter()
+                .map(|m| m.model_id.clone())
+                .collect();
+            
+            // Build model info with inferred capabilities from model names
+            self.model_info = cached_models.iter()
+                .map(|cached| {
+                    let id = cached.model_id.clone();
+                    let alias_lower = cached.alias.to_lowercase();
+                    let id_lower = id.to_lowercase();
+                    
+                    // Detect model family from ID
+                    let family = ModelFamily::from_model_id(&id);
+                    
+                    // Infer tool calling support from alias/model name
+                    // Models with "coder" or specific known tool-capable models
+                    let tool_calling = alias_lower.contains("coder") 
+                        || alias_lower.contains("qwen")
+                        || id_lower.contains("qwen");
+                    
+                    // Determine tool format based on model family and capabilities
+                    let tool_format = if !tool_calling {
+                        ToolFormat::TextBased
+                    } else {
+                        match family {
+                            ModelFamily::GptOss => ToolFormat::OpenAI,
+                            ModelFamily::Gemma => ToolFormat::Gemini,
+                            ModelFamily::Phi => ToolFormat::Hermes,
+                            ModelFamily::Granite => ToolFormat::Granite,
+                            ModelFamily::Generic => ToolFormat::OpenAI,
+                        }
+                    };
+                    
+                    // Infer reasoning support from model name
+                    let reasoning = alias_lower.contains("reasoning") || id_lower.contains("reasoning");
+                    
+                    // Determine reasoning format based on model family
+                    let reasoning_format = if !reasoning {
+                        ReasoningFormat::None
+                    } else {
+                        match family {
+                            ModelFamily::GptOss => ReasoningFormat::ChannelBased,
+                            ModelFamily::Phi => ReasoningFormat::ThinkTags,
+                            ModelFamily::Granite => ReasoningFormat::ThinkingTags,
+                            _ => ReasoningFormat::None,
+                        }
+                    };
+                    
+                    // Use conservative defaults for token limits (actual values would come from API)
+                    let max_input_tokens = 4096;
+                    let max_output_tokens = 4096;
+                    
+                    // Parameter support flags based on model family
+                    let supports_temperature = true;
+                    let supports_top_p = true;
+                    let supports_reasoning_effort = reasoning && matches!(family, ModelFamily::Phi);
+                    
+                    // Vision support inferred from model name
+                    let vision = alias_lower.contains("vision") || id_lower.contains("vision");
+                    
+                    println!("  Model: {} (alias: {}) | family: {:?} | toolCalling: {} ({:?}) | vision: {} | reasoning: {} ({:?})", 
+                        id, cached.alias, family, tool_calling, tool_format, vision, reasoning, reasoning_format);
+                    
+                    ModelInfo {
+                        id,
+                        family,
+                        tool_calling,
+                        tool_format,
+                        vision,
+                        reasoning,
+                        reasoning_format,
+                        max_input_tokens,
+                        max_output_tokens,
+                        supports_temperature,
+                        supports_top_p,
+                        supports_reasoning_effort,
+                    }
+                })
+                .collect();
+            
+            // Select first model as default if none selected
+            if self.model_id.is_none() {
+                if let Some(first) = self.available_models.first() {
+                    println!("Selected default model: {}", first);
+                    self.model_id = Some(first.clone());
+                    self.emit_model_selected(first);
+                }
+            }
+            
+            println!("FoundryActor: Found {} cached models (airgap mode)", self.available_models.len());
+            return true;
 
         } else {
              println!("Warning: Could not detect Foundry service port.");
@@ -628,83 +620,9 @@ impl FoundryActor {
         }
     }
 
-    /// Get model capabilities from `foundry model list`
-    /// This is more reliable than the /v1/models API which sometimes incorrectly reports capabilities
-    /// Returns a map of model_id -> supports_tools
-    async fn get_model_capabilities_from_cli(&self) -> std::collections::HashMap<String, bool> {
-        println!("FoundryActor: Getting model capabilities via 'foundry model list'...");
-        
-        let child = Command::new("foundry")
-            .args(&["model", "list"])
-            .output();
-            
-        match timeout(Duration::from_secs(10), child).await {
-            Ok(Ok(output)) => {
-                if !output.status.success() {
-                    println!("FoundryActor: 'foundry model list' failed");
-                    return std::collections::HashMap::new();
-                }
-                
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                self.parse_model_list_capabilities(&stdout)
-            }
-            Ok(Err(e)) => {
-                println!("FoundryActor: Failed to run 'foundry model list': {}", e);
-                std::collections::HashMap::new()
-            }
-            Err(_) => {
-                println!("FoundryActor: 'foundry model list' timed out.");
-                std::collections::HashMap::new()
-            }
-        }
-    }
-
-    /// Parse the output of `foundry model list` to extract tool capability
-    /// Format:
-    /// ```
-    /// Alias                          Device     Task           File Size    License      Model ID            
-    /// qwen2.5-0.5b                   GPU        chat, tools    0.68 GB      apache-2.0   qwen2.5-0.5b-instruct-generic-gpu:4
-    /// phi-4                          GPU        chat           8.37 GB      MIT          Phi-4-generic-gpu:1 
-    /// ```
-    fn parse_model_list_capabilities(&self, output: &str) -> std::collections::HashMap<String, bool> {
-        let mut capabilities = std::collections::HashMap::new();
-        
-        for line in output.lines() {
-            let trimmed = line.trim();
-            
-            // Skip empty lines, headers, and separator lines
-            if trimmed.is_empty() 
-                || trimmed.starts_with("Alias")
-                || trimmed.starts_with("---")
-                || trimmed.starts_with("-")
-            {
-                continue;
-            }
-            
-            // Check if line contains "tools" in the Task column
-            // The Task column comes after Device (GPU/CPU) and before File Size
-            let has_tools = trimmed.contains("tools");
-            
-            // Extract the Model ID (last column, contains a colon like "model-name:version")
-            // Split by multiple spaces and find the last token that looks like a model ID
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if let Some(model_id) = parts.iter().rev().find(|p| p.contains(':') && !p.contains("://")) {
-                let model_id_str = model_id.to_string();
-                // Only insert if not already present (first GPU entry takes precedence)
-                if !capabilities.contains_key(&model_id_str) {
-                    capabilities.insert(model_id_str.clone(), has_tools);
-                    if has_tools {
-                        println!("FoundryActor: Model {} supports tools (from CLI)", model_id_str);
-                    }
-                }
-            }
-        }
-        
-        println!("FoundryActor: Found {} models with capabilities from CLI", capabilities.len());
-        capabilities
-    }
-
     /// Get cached models from `foundry cache ls`
+    /// NOTE: In airgap mode, this is the ONLY source of model information.
+    /// We do NOT call `foundry model list` as it requires internet connectivity.
     /// Parses output like:
     /// ```
     /// Models cached on device:

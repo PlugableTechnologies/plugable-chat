@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { ReasoningEffort } from "./store/chat-store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
@@ -7,6 +7,39 @@ import { SettingsModal } from "./components/Settings";
 import { useChatStore } from "./store/chat-store";
 import { useSettingsStore } from "./store/settings-store";
 import { AlertTriangle, X } from "lucide-react";
+
+// Help message shown when no models are cached
+const NO_MODELS_HELP_MESSAGE = `## Welcome to Plugable Chat! 👋
+
+It looks like you don't have any AI models cached locally yet.
+
+To get started, you'll need to install a model using the **Foundry CLI**:
+
+### Quick Start
+
+1. Open a terminal (Command Prompt on Windows, Terminal on Mac/Linux)
+2. Run the following command:
+   \`\`\`bash
+   foundry model install phi-4-mini-reasoning
+   \`\`\`
+3. Wait for the download to complete (this may take a few minutes)
+4. Once finished, click the **"No models (click to refresh)"** dropdown in the header to reload
+
+### Popular Models to Try
+
+| Model | Description | Command |
+|-------|-------------|---------|
+| **phi-4-mini-reasoning** | Compact model with reasoning | \`foundry model install phi-4-mini-reasoning\` |
+| **phi-4** | Microsoft's capable Phi-4 model | \`foundry model install phi-4\` |
+| **qwen2.5-coder-0.5b** | Small coding-focused model | \`foundry model install qwen2.5-coder-0.5b\` |
+
+### Need Help?
+
+If you're having trouble, make sure:
+- Microsoft Foundry Local is installed (visit [Microsoft AI Toolkit](https://github.com/microsoft/vscode-ai-toolkit) for installation)
+- The Foundry service is running (\`foundry service start\`)
+
+Once you've installed a model, this chat will work normally! 🚀`;
 
 function ErrorBanner() {
   const { backendError, clearError } = useChatStore();
@@ -46,8 +79,9 @@ function getModelFamilyBadge(family: string | undefined): { name: string; color:
 }
 
 function App() {
-  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, setModel } = useChatStore();
+  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, setModel, fetchCachedModels, startSystemChat, messages, hasFetchedCachedModels } = useChatStore();
   const effortOptions: ReasoningEffort[] = ['low', 'medium', 'high'];
+  const hasShownHelpChat = useRef(false);
   console.log("App component rendering...");
   
   // Check if current model supports various features
@@ -57,6 +91,30 @@ function App() {
   const supportsReasoningEffort = currentModelInfo?.supports_reasoning_effort ?? false;
   const modelFamily = currentModelInfo?.family;
   const familyBadge = getModelFamilyBadge(modelFamily);
+  
+  // Detect when startup is fully complete but no models are available
+  // Show help chat to guide user on installing models
+  useEffect(() => {
+    // Only trigger once, when:
+    // 1. Not connecting anymore
+    // 2. We've actually completed fetching cached models (hasFetchedCachedModels)
+    // 3. No cached models were found
+    // 4. Haven't shown help chat before
+    // 5. No existing messages in chat
+    if (!isConnecting && hasFetchedCachedModels && cachedModels.length === 0 && !hasShownHelpChat.current && messages.length === 0) {
+      hasShownHelpChat.current = true;
+      console.log('[App] No cached models found after startup complete. Showing help chat.');
+      startSystemChat(NO_MODELS_HELP_MESSAGE, 'Getting Started');
+    }
+  }, [isConnecting, hasFetchedCachedModels, cachedModels.length, startSystemChat, messages.length]);
+  
+  // Handle clicking on the "no models" dropdown to refresh
+  const handleRefreshModels = async () => {
+    console.log('[App] Refreshing cached models...');
+    await fetchCachedModels();
+    // Also retry connection to update availableModels
+    await retryConnection();
+  };
 
 
   const debugLayout = async () => {
@@ -249,8 +307,16 @@ function App() {
                   </span>
                 )}
               </div>
+            ) : currentModel === 'Loading...' ? (
+              <span className="text-gray-500">Loading...</span>
             ) : (
-              <span className="text-gray-700">{currentModel === 'Loading...' ? 'Loading...' : currentModel}</span>
+              <button 
+                onClick={handleRefreshModels}
+                className="text-amber-600 hover:text-amber-800 text-[11px] font-semibold underline underline-offset-2 transition-colors"
+                title="No models cached. Click to check for newly installed models."
+              >
+                No models (click to refresh)
+              </button>
             )}
             {familyBadge && (
               <span 

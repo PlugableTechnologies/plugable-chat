@@ -619,9 +619,9 @@ async fn chat(
     let chat_id_return = chat_id.clone();
     let title = title.unwrap_or_else(|| message.chars().take(50).collect::<String>());
     
-    // Get system prompt and server configs from settings
+    // Get server configs from settings
     let settings = settings_state.settings.read().await;
-    let base_system_prompt = settings.system_prompt.clone();
+    let configured_system_prompt = settings.system_prompt.clone();
     let server_configs = settings.mcp_servers.clone();
     drop(settings);
     
@@ -631,6 +631,16 @@ async fn chat(
         .await
         .map_err(|e| e.to_string())?;
     let tool_descriptions = tools_rx.await.map_err(|_| "MCP Host actor died".to_string())?;
+    
+    // Select system prompt based on MCP availability:
+    // - If MCP servers with tools are available, use the configured prompt (which has tool instructions)
+    // - Otherwise, use a simple fallback prompt
+    let has_mcp_tools = tool_descriptions.iter().any(|(_, tools)| !tools.is_empty());
+    let base_system_prompt = if has_mcp_tools {
+        configured_system_prompt
+    } else {
+        "You are a helpful assistant".to_string()
+    };
     
     // Convert MCP tools to OpenAI format for native tool calling
     let openai_tools: Vec<OpenAITool> = tool_descriptions.iter()
@@ -649,6 +659,7 @@ async fn chat(
     
     // === LOGGING: System prompt and MCP tool descriptions ===
     println!("\n=== CHAT CONTEXT - NEW MESSAGE ===");
+    println!("[SYSTEM PROMPT MODE]: {}", if has_mcp_tools { "MCP (full)" } else { "Simple fallback" });
     println!("\n[BASE SYSTEM PROMPT] ({} chars):", base_system_prompt.len());
     println!("{}", base_system_prompt);
     println!("\n[MCP TOOL DESCRIPTIONS]:");

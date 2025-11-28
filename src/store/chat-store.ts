@@ -102,6 +102,7 @@ interface ChatState {
     modelInfo: ModelInfo[];
     currentModel: string;
     isConnecting: boolean;
+    hasFetchedCachedModels: boolean; // True after first fetchCachedModels completes
     fetchModels: () => Promise<void>;
     fetchCachedModels: () => Promise<void>;
     fetchModelInfo: () => Promise<void>;
@@ -160,6 +161,9 @@ interface ChatState {
     toolExecution: ToolExecutionState;
     approveCurrentToolCall: () => Promise<void>;
     rejectCurrentToolCall: () => Promise<void>;
+
+    // System-initiated chat (for help messages, onboarding, etc.)
+    startSystemChat: (assistantMessage: string, title?: string) => void;
 }
 
 // Module-level variables to hold unlisten functions
@@ -210,6 +214,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     modelInfo: [],
     currentModel: 'Loading...',
     isConnecting: false,
+    hasFetchedCachedModels: false,
     reasoningEffort: 'low',
     fetchModels: async () => {
         if (modelFetchPromise) {
@@ -297,10 +302,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         try {
             console.log('[ChatStore] Fetching cached models...');
             const cached = await invoke<CachedModel[]>('get_cached_models');
-            set({ cachedModels: cached });
+            set({ cachedModels: cached, hasFetchedCachedModels: true });
             console.log(`[ChatStore] Found ${cached.length} cached model(s)`);
         } catch (e: any) {
             console.error('[ChatStore] Failed to fetch cached models:', e);
+            // Still mark as fetched so we don't block forever
+            set({ hasFetchedCachedModels: true });
         }
     },
     fetchModelInfo: async () => {
@@ -841,5 +848,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (success) {
             set({ pendingToolApproval: null });
         }
+    },
+
+    // System-initiated chat for help messages
+    startSystemChat: (assistantMessage: string, title?: string) => {
+        const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+        const chatId = (cryptoObj && typeof cryptoObj.randomUUID === 'function')
+            ? cryptoObj.randomUUID()
+            : `system-chat-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        
+        console.log(`[ChatStore] Starting system chat: ${chatId.slice(0, 8)} "${title || 'System Message'}"`);
+        
+        set({
+            messages: [{
+                id: Date.now().toString(),
+                role: 'assistant',
+                content: assistantMessage,
+                timestamp: Date.now()
+            }],
+            currentChatId: null, // Don't set a chat ID - this is a non-persistent help chat
+            input: '',
+        });
     }
 }))
