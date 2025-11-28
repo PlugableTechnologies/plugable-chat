@@ -8,47 +8,7 @@ import rehypeRaw from 'rehype-raw';
 import 'katex/dist/katex.min.css';
 import { invoke } from '../lib/api';
 import { useEffect, useRef, useState } from 'react';
-
-// Helper to parse thinking blocks
-const parseMessageContent = (content: string) => {
-    const parts: { type: 'text' | 'think', content: string }[] = [];
-    let current = content;
-
-    while (current.length > 0) {
-        const start = current.indexOf('<think>');
-        if (start === -1) {
-            if (current.trim()) parts.push({ type: 'text', content: current });
-            break;
-        }
-
-        // Text before <think>
-        if (start > 0) {
-            parts.push({ type: 'text', content: current.substring(0, start) });
-        }
-
-        const rest = current.substring(start + 7); // 7 is length of <think>
-        const end = rest.indexOf('</think>');
-
-        if (end === -1) {
-            // Unclosed think block (streaming)
-            parts.push({ type: 'think', content: rest });
-            break;
-        }
-
-        parts.push({ type: 'think', content: rest.substring(0, end) });
-        current = rest.substring(end + 8); // 8 is length of </think>
-    }
-    return parts;
-};
-
-// Check if message has only think content (no visible text)
-const hasOnlyThinkContent = (content: string): boolean => {
-    const parts = parseMessageContent(content);
-    const textParts = parts.filter(p => p.type === 'text');
-    const thinkParts = parts.filter(p => p.type === 'think');
-    // Has think content but no meaningful visible text
-    return thinkParts.length > 0 && textParts.every(p => !p.content.trim());
-};
+import { parseMessageContent, hasOnlyThinkContent } from '../lib/response-parser';
 
 // Format elapsed time helper
 const formatTime = (seconds: number) => {

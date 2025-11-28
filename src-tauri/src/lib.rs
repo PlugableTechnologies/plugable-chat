@@ -1,8 +1,10 @@
 pub mod protocol;
 pub mod actors;
 pub mod settings;
+pub mod tool_adapters;
 
-use protocol::{VectorMsg, FoundryMsg, RagMsg, McpHostMsg, ChatMessage, CachedModel, ModelInfo, RagChunk, RagIndexResult, ParsedToolCall, parse_tool_calls, ToolCallsPendingEvent, ToolExecutingEvent, ToolResultEvent, ToolLoopFinishedEvent, OpenAITool};
+use protocol::{VectorMsg, FoundryMsg, RagMsg, McpHostMsg, ChatMessage, CachedModel, ModelInfo, ModelFamily, ToolFormat, RagChunk, RagIndexResult, ParsedToolCall, parse_tool_calls, ToolCallsPendingEvent, ToolExecutingEvent, ToolResultEvent, ToolLoopFinishedEvent, OpenAITool};
+use tool_adapters::{parse_tool_calls_for_model, format_tool_result};
 use actors::vector_actor::VectorActor;
 use actors::foundry_actor::FoundryActor;
 use actors::rag_actor::RagActor;
@@ -81,30 +83,6 @@ async fn execute_tool_internal(
     }
 }
 
-/// Format a tool result for injection into the chat history
-fn format_tool_result_message(call: &ParsedToolCall, result: &str, is_error: bool) -> String {
-    if is_error {
-        format!(
-            "<tool_result server=\"{}\" tool=\"{}\" error=\"true\">\n{}\n</tool_result>\n\n\
-            **TOOL ERROR**: The tool call failed with the error above. Please:\n\
-            1. Carefully analyze the error message for hints about what went wrong\n\
-            2. Identify the incorrect parameters or arguments\n\
-            3. Call the tool again with corrected parameters\n\
-            If you cannot determine how to fix the error after reviewing the message, explain the issue to the user.",
-            call.server,
-            call.tool,
-            result
-        )
-    } else {
-        format!(
-            "<tool_result server=\"{}\" tool=\"{}\">\n{}\n</tool_result>",
-            call.server,
-            call.tool,
-            result
-        )
-    }
-}
-
 /// Try to resolve an unknown server ID by finding which server has the given tool
 async fn resolve_server_for_tool(
     mcp_host_tx: &mpsc::Sender<McpHostMsg>,
@@ -151,10 +129,14 @@ async fn run_agentic_loop(
     title: String,
     original_message: String,
     openai_tools: Option<Vec<OpenAITool>>,
+    model_family: ModelFamily,
+    tool_format: ToolFormat,
 ) {
     let mut iteration = 0;
     let mut had_tool_calls = false;
     let mut final_response = String::new();
+    
+    println!("[AgenticLoop] Starting with model_family={:?}, tool_format={:?}", model_family, tool_format);
     
     loop {
         println!("\n[AgenticLoop] Iteration {} starting...", iteration);
@@ -183,8 +165,8 @@ async fn run_agentic_loop(
         
         println!("[AgenticLoop] Response complete ({} chars)", assistant_response.len());
         
-        // Check for tool calls in the response
-        let tool_calls = parse_tool_calls(&assistant_response);
+        // Check for tool calls in the response using model-appropriate parser
+        let tool_calls = parse_tool_calls_for_model(&assistant_response, model_family, tool_format);
         
         if tool_calls.is_empty() {
             println!("[AgenticLoop] No tool calls detected, loop complete");
@@ -233,10 +215,11 @@ async fn run_agentic_loop(
                     }
                     None => {
                         println!("[AgenticLoop] ERROR: Could not resolve server for tool '{}', skipping", call.tool);
-                        tool_results.push(format_tool_result_message(
+                        tool_results.push(format_tool_result(
                             call,
                             &format!("Could not find server for tool '{}'. Make sure an MCP server with this tool is connected.", call.tool),
                             true,
+                            tool_format,
                         ));
                         continue;
                     }
@@ -303,28 +286,31 @@ async fn run_agentic_loop(
                     }
                     Ok(Ok(ToolApprovalDecision::Rejected)) => {
                         println!("[AgenticLoop] Tool call rejected by user");
-                        tool_results.push(format_tool_result_message(
+                        tool_results.push(format_tool_result(
                             &resolved_call,
                             "Tool execution was rejected by the user.",
                             true,
+                            tool_format,
                         ));
                         continue;
                     }
                     Ok(Err(_)) => {
                         println!("[AgenticLoop] Approval channel closed unexpectedly");
-                        tool_results.push(format_tool_result_message(
+                        tool_results.push(format_tool_result(
                             &resolved_call,
                             "Tool approval was cancelled.",
                             true,
+                            tool_format,
                         ));
                         continue;
                     }
                     Err(_) => {
                         println!("[AgenticLoop] Approval timed out after 5 minutes");
-                        tool_results.push(format_tool_result_message(
+                        tool_results.push(format_tool_result(
                             &resolved_call,
                             "Tool approval timed out. Tool call was skipped.",
                             true,
+                            tool_format,
                         ));
                         continue;
                     }
@@ -358,8 +344,8 @@ async fn run_agentic_loop(
                 is_error,
             });
             
-            // Format and collect tool result
-            tool_results.push(format_tool_result_message(&resolved_call, &result_text, is_error));
+            // Format and collect tool result using model-appropriate format
+            tool_results.push(format_tool_result(&resolved_call, &result_text, is_error, tool_format));
             any_executed = true;
         }
         
@@ -715,6 +701,23 @@ async fn chat(
         content: message.clone(),
     });
 
+    // Get current model info for model-specific handling
+    let (model_info_tx, model_info_rx) = oneshot::channel();
+    handles.foundry_tx.send(FoundryMsg::GetModelInfo { respond_to: model_info_tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    let model_info_list = model_info_rx.await.map_err(|_| "Foundry actor died".to_string())?;
+    
+    // Get the current model's family and tool format
+    // Default to Generic/TextBased if model info not available
+    let (model_family, tool_format) = if let Some(first_model) = model_info_list.first() {
+        println!("[Chat] Using model family {:?} with tool format {:?}", first_model.family, first_model.tool_format);
+        (first_model.family, first_model.tool_format)
+    } else {
+        println!("[Chat] No model info available, using Generic/TextBased defaults");
+        (ModelFamily::Generic, ToolFormat::TextBased)
+    };
+
     // Clone handles for the async task
     let foundry_tx = handles.foundry_tx.clone();
     let mcp_host_tx = handles.mcp_host_tx.clone();
@@ -740,6 +743,8 @@ async fn chat(
             title_task,
             message_task,
             openai_tools_task,
+            model_family,
+            tool_format,
         ).await;
     });
 

@@ -1,6 +1,6 @@
 use tokio::sync::mpsc;
-use crate::protocol::{FoundryMsg, CachedModel, ModelInfo};
-use serde_json::json;
+use crate::protocol::{FoundryMsg, CachedModel, ModelInfo, ModelFamily, ToolFormat, ReasoningFormat, ChatMessage, OpenAITool};
+use serde_json::{json, Value};
 use tokio::process::Command;
 use std::time::Duration;
 use std::sync::Arc;
@@ -10,6 +10,93 @@ use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 
 /// Target embedding dimension (must match LanceDB schema)
 const EMBEDDING_DIM: usize = 384;
+
+/// Build a chat request body with model-family-specific parameters
+fn build_chat_request_body(
+    model: &str,
+    family: ModelFamily,
+    messages: &[ChatMessage],
+    tools: &Option<Vec<OpenAITool>>,
+    use_native_tools: bool,
+    supports_reasoning: bool,
+    supports_reasoning_effort: bool,
+    reasoning_effort: &str,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+    });
+    
+    // Add model-family-specific parameters
+    match family {
+        ModelFamily::GptOss => {
+            // GPT-OSS models: standard OpenAI-compatible parameters
+            body["max_tokens"] = json!(16384);
+            body["temperature"] = json!(0.7);
+            
+            if use_native_tools {
+                body["tools"] = json!(tools);
+            }
+        }
+        ModelFamily::Phi => {
+            // Phi models: may support reasoning_effort
+            if supports_reasoning && supports_reasoning_effort {
+                println!("[FoundryActor] Phi model with reasoning, using effort: {}", reasoning_effort);
+                body["max_tokens"] = json!(8192);
+                body["reasoning_effort"] = json!(reasoning_effort);
+                // Note: Reasoning models typically don't use tools in the same request
+            } else if use_native_tools {
+                body["max_tokens"] = json!(16384);
+                body["tools"] = json!(tools);
+            } else {
+                body["max_tokens"] = json!(16384);
+            }
+        }
+        ModelFamily::Gemma => {
+            // Gemma models: support temperature and top_k
+            body["max_tokens"] = json!(8192);
+            body["temperature"] = json!(0.7);
+            // Gemma supports top_k which is useful for controlling randomness
+            body["top_k"] = json!(40);
+            
+            if use_native_tools {
+                // Gemma may use a different tool format, but Foundry handles this
+                body["tools"] = json!(tools);
+            }
+        }
+        ModelFamily::Granite => {
+            // IBM Granite models: support repetition_penalty
+            body["max_tokens"] = json!(8192);
+            body["temperature"] = json!(0.7);
+            // Granite models benefit from repetition penalty
+            body["repetition_penalty"] = json!(1.05);
+            
+            if supports_reasoning {
+                // Granite reasoning models use <|thinking|> tags internally
+                println!("[FoundryActor] Granite model with reasoning support");
+            }
+            
+            if use_native_tools {
+                body["tools"] = json!(tools);
+            }
+        }
+        ModelFamily::Generic => {
+            // Generic/unknown models: use safe defaults
+            if supports_reasoning && supports_reasoning_effort {
+                body["max_tokens"] = json!(8192);
+                body["reasoning_effort"] = json!(reasoning_effort);
+            } else if use_native_tools {
+                body["max_tokens"] = json!(16384);
+                body["tools"] = json!(tools);
+            } else {
+                body["max_tokens"] = json!(16384);
+            }
+        }
+    }
+    
+    body
+}
 
 pub struct FoundryActor {
     rx: mpsc::Receiver<FoundryMsg>,
@@ -190,57 +277,52 @@ impl FoundryActor {
                              }
                          }
                          
-                         // Check if this model supports reasoning
-                        let model_supports_reasoning = self.model_info.iter()
+                        // Get model info for this model
+                        let model_info = self.model_info.iter()
                             .find(|m| m.id == model)
+                            .cloned();
+                        
+                        // Determine capabilities from model info or heuristics
+                        let model_supports_reasoning = model_info.as_ref()
                             .map(|m| m.reasoning)
                             .unwrap_or_else(|| model.to_lowercase().contains("reasoning"));
                         
-                        // Check if this model supports native tool calling
-                        let model_supports_tools = self.model_info.iter()
-                            .find(|m| m.id == model)
+                        let model_supports_tools = model_info.as_ref()
                             .map(|m| m.tool_calling)
                             .unwrap_or(false);
+                        
+                        let supports_reasoning_effort = model_info.as_ref()
+                            .map(|m| m.supports_reasoning_effort)
+                            .unwrap_or(false);
+                        
+                        let model_family = model_info.as_ref()
+                            .map(|m| m.family)
+                            .unwrap_or(ModelFamily::Generic);
                         
                         // Only use native tools if model supports them AND tools were provided
                         let use_native_tools = model_supports_tools && tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
                         
+                        println!("[FoundryActor] Model: {} | family: {:?} | reasoning: {} | tools: {} | reasoning_effort: {}",
+                            model, model_family, model_supports_reasoning, use_native_tools, supports_reasoning_effort);
+                        
                         if use_native_tools {
-                            println!("[FoundryActor] Model supports native tool calling, including {} tools in request", 
+                            println!("[FoundryActor] Including {} native tools in request", 
                                 tools.as_ref().map(|t| t.len()).unwrap_or(0));
                         } else if tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
                             println!("[FoundryActor] Model does NOT support native tool calling, falling back to text-based tools");
                         }
                         
-                       // Build request body
-                       let body = if model_supports_reasoning {
-                           println!("[FoundryActor] Model supports reasoning, using effort: {}", reasoning_effort);
-                           // Note: Don't include tools with reasoning models - they typically don't support both
-                           json!({
-                               "model": model, 
-                               "messages": messages,
-                               "stream": true,
-                               "max_tokens": 8192,
-                               "reasoning_effort": reasoning_effort
-                           })
-                       } else if use_native_tools {
-                           println!("[FoundryActor] Including native tools in request");
-                           json!({
-                               "model": model, 
-                               "messages": messages,
-                               "stream": true,
-                               "max_tokens": 16384,
-                               "tools": tools
-                           })
-                       } else {
-                           println!("[FoundryActor] Standard chat request (no native tools)");
-                           json!({
-                               "model": model, 
-                               "messages": messages,
-                               "stream": true,
-                               "max_tokens": 16384
-                           })
-                       };
+                        // Build request body with model-family-specific parameters
+                        let body = build_chat_request_body(
+                            &model,
+                            model_family,
+                            &messages,
+                            &tools,
+                            use_native_tools,
+                            model_supports_reasoning,
+                            supports_reasoning_effort,
+                            &reasoning_effort,
+                        );
                          
                          println!("Sending streaming request to Foundry at {}", url);
                          
@@ -335,6 +417,9 @@ impl FoundryActor {
                                     .filter_map(|m| {
                                         let id = m["id"].as_str()?.to_string();
                                         
+                                        // Detect model family from ID
+                                        let family = ModelFamily::from_model_id(&id);
+                                        
                                         // Get tool_calling from API
                                         let api_tool_calling = m["toolCalling"].as_bool().unwrap_or(false);
                                         
@@ -349,24 +434,61 @@ impl FoundryActor {
                                             println!("  Model: {} | API says toolCalling: false, but CLI says tools supported - using CLI", id);
                                         }
                                         
+                                        // Determine tool format based on model family and capabilities
+                                        let tool_format = if !tool_calling {
+                                            ToolFormat::TextBased
+                                        } else {
+                                            match family {
+                                                ModelFamily::GptOss => ToolFormat::OpenAI,
+                                                ModelFamily::Gemma => ToolFormat::Gemini,
+                                                ModelFamily::Phi => ToolFormat::Hermes,
+                                                ModelFamily::Granite => ToolFormat::Granite,
+                                                ModelFamily::Generic => ToolFormat::OpenAI,
+                                            }
+                                        };
+                                        
                                         let vision = m["vision"].as_bool().unwrap_or(false);
                                         // Check API field first, fallback to heuristic (model name contains "reasoning")
                                         let reasoning = m["reasoning"].as_bool().unwrap_or_else(|| {
                                             id.to_lowercase().contains("reasoning")
                                         });
+                                        
+                                        // Determine reasoning format based on model family
+                                        let reasoning_format = if !reasoning {
+                                            ReasoningFormat::None
+                                        } else {
+                                            match family {
+                                                ModelFamily::GptOss => ReasoningFormat::ChannelBased,
+                                                ModelFamily::Phi => ReasoningFormat::ThinkTags,
+                                                ModelFamily::Granite => ReasoningFormat::ThinkingTags,
+                                                _ => ReasoningFormat::None,
+                                            }
+                                        };
+                                        
                                         let max_input_tokens = m["maxInputTokens"].as_u64().unwrap_or(4096) as u32;
                                         let max_output_tokens = m["maxOutputTokens"].as_u64().unwrap_or(4096) as u32;
                                         
-                                        println!("  Model: {} | toolCalling: {} | vision: {} | reasoning: {} | maxIn: {} | maxOut: {}", 
-                                            id, tool_calling, vision, reasoning, max_input_tokens, max_output_tokens);
+                                        // Parameter support flags based on model family
+                                        let supports_temperature = true; // Most models support this
+                                        let supports_top_p = true; // Most models support this
+                                        let supports_reasoning_effort = reasoning && matches!(family, ModelFamily::Phi);
+                                        
+                                        println!("  Model: {} | family: {:?} | toolCalling: {} ({:?}) | vision: {} | reasoning: {} ({:?}) | maxIn: {} | maxOut: {}", 
+                                            id, family, tool_calling, tool_format, vision, reasoning, reasoning_format, max_input_tokens, max_output_tokens);
                                         
                                         Some(ModelInfo {
                                             id,
+                                            family,
                                             tool_calling,
+                                            tool_format,
                                             vision,
                                             reasoning,
+                                            reasoning_format,
                                             max_input_tokens,
                                             max_output_tokens,
+                                            supports_temperature,
+                                            supports_top_p,
+                                            supports_reasoning_effort,
                                         })
                                     })
                                     .collect();

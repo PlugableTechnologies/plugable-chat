@@ -17,13 +17,28 @@ export interface CachedModel {
     model_id: string;
 }
 
+// Model family for format-specific handling
+export type ModelFamily = 'gpt_oss' | 'gemma' | 'phi' | 'granite' | 'generic';
+
+// Tool calling format supported by the model
+export type ToolFormat = 'openai' | 'hermes' | 'gemini' | 'granite' | 'text_based';
+
+// Reasoning/thinking output format
+export type ReasoningFormat = 'none' | 'think_tags' | 'channel_based' | 'thinking_tags';
+
 export interface ModelInfo {
     id: string;
+    family: ModelFamily;
     tool_calling: boolean;
+    tool_format: ToolFormat;
     vision: boolean;
     reasoning: boolean;
+    reasoning_format: ReasoningFormat;
     max_input_tokens: number;
     max_output_tokens: number;
+    supports_temperature: boolean;
+    supports_top_p: boolean;
+    supports_reasoning_effort: boolean;
 }
 
 export interface ChatSummary {

@@ -29,15 +29,34 @@ function ErrorBanner() {
   );
 }
 
+// Helper to get model family display name and color
+function getModelFamilyBadge(family: string | undefined): { name: string; color: string } | null {
+  switch (family) {
+    case 'gpt_oss':
+      return { name: 'GPT-OSS', color: 'bg-blue-100 text-blue-700 border-blue-200' };
+    case 'gemma':
+      return { name: 'Gemma', color: 'bg-purple-100 text-purple-700 border-purple-200' };
+    case 'phi':
+      return { name: 'Phi', color: 'bg-amber-100 text-amber-700 border-amber-200' };
+    case 'granite':
+      return { name: 'Granite', color: 'bg-slate-100 text-slate-700 border-slate-200' };
+    default:
+      return null;
+  }
+}
+
 function App() {
   const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, setModel } = useChatStore();
   const effortOptions: ReasoningEffort[] = ['low', 'medium', 'high'];
   console.log("App component rendering...");
   
-  // Check if current model supports tool calling and reasoning
+  // Check if current model supports various features
   const currentModelInfo = modelInfo.find(m => m.id === currentModel);
   const hasToolCalling = currentModelInfo?.tool_calling ?? false;
   const hasReasoning = currentModelInfo?.reasoning ?? currentModel.toLowerCase().includes('reasoning');
+  const supportsReasoningEffort = currentModelInfo?.supports_reasoning_effort ?? false;
+  const modelFamily = currentModelInfo?.family;
+  const familyBadge = getModelFamilyBadge(modelFamily);
 
 
   const debugLayout = async () => {
@@ -209,13 +228,17 @@ function App() {
               </button>
             ) : cachedModels.length > 0 ? (
               <div className="flex items-center gap-1.5">
-                <select value={currentModel} onChange={(e) => setModel(e.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none max-w-[200px]" title="Select a cached model">
+                <select value={currentModel} onChange={(e) => setModel(e.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none max-w-[240px]" title="Select a cached model">
                   {cachedModels.map((model) => {
                     const info = modelInfo.find(m => m.id === model.model_id);
                     const toolBadge = info?.tool_calling ? ' 🔧' : '';
+                    const reasoningBadge = info?.reasoning ? ' 🧠' : '';
+                    const familyPrefix = info?.family && info.family !== 'generic' 
+                      ? `[${info.family.replace('_', '-').toUpperCase()}] ` 
+                      : '';
                     return (
                       <option key={model.model_id} value={model.model_id}>
-                        {model.alias}{toolBadge}{currentModel === model.model_id ? ' ✓' : ''}
+                        {familyPrefix}{model.alias}{toolBadge}{reasoningBadge}{currentModel === model.model_id ? ' ✓' : ''}
                       </option>
                     );
                   })}
@@ -229,7 +252,15 @@ function App() {
             ) : (
               <span className="text-gray-700">{currentModel === 'Loading...' ? 'Loading...' : currentModel}</span>
             )}
-            {hasReasoning && (
+            {familyBadge && (
+              <span 
+                className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold border ${familyBadge.color}`}
+                title={`Model family: ${familyBadge.name}`}
+              >
+                {familyBadge.name}
+              </span>
+            )}
+            {hasReasoning && supportsReasoningEffort && (
               <>
                 <span style={{ marginLeft: '24px' }}>Reasoning:</span>
                 <select value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none">
@@ -238,6 +269,14 @@ function App() {
                   ))}
                 </select>
               </>
+            )}
+            {hasReasoning && !supportsReasoningEffort && (
+              <span 
+                className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-yellow-100 text-yellow-700 border border-yellow-200"
+                title="This model has built-in reasoning capabilities"
+              >
+                🧠 Reasoning
+              </span>
             )}
           </div>
         </div>

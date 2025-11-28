@@ -385,15 +385,95 @@ pub struct CachedModel {
     pub model_id: String,
 }
 
+/// Model family for determining response format and capabilities
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFamily {
+    /// GPT-OSS models (gpt-oss-20b, gpt-oss-120b) - use channel-based response format
+    GptOss,
+    /// Google Gemma models - standard response format
+    Gemma,
+    /// Microsoft Phi models - use <think> tags for reasoning variants
+    Phi,
+    /// IBM Granite models - use <|thinking|> tags for reasoning
+    Granite,
+    /// Generic/unknown models - standard OpenAI-compatible format
+    #[default]
+    Generic,
+}
+
+impl ModelFamily {
+    /// Detect model family from model ID string
+    pub fn from_model_id(model_id: &str) -> Self {
+        let lower = model_id.to_lowercase();
+        
+        if lower.contains("gpt-oss") {
+            ModelFamily::GptOss
+        } else if lower.contains("gemma") {
+            ModelFamily::Gemma
+        } else if lower.contains("phi") {
+            ModelFamily::Phi
+        } else if lower.contains("granite") {
+            ModelFamily::Granite
+        } else {
+            ModelFamily::Generic
+        }
+    }
+}
+
+/// Tool calling format supported by the model
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolFormat {
+    /// OpenAI-compatible tool_calls array in response
+    #[default]
+    OpenAI,
+    /// Hermes-style <tool_call> XML format (Phi, Qwen)
+    Hermes,
+    /// Gemini function_call format
+    Gemini,
+    /// Granite <function_call> XML format
+    Granite,
+    /// No native tool calling support - use text-based fallback
+    TextBased,
+}
+
+/// Reasoning/thinking output format
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningFormat {
+    /// No reasoning output
+    #[default]
+    None,
+    /// Phi-style <think>...</think> tags
+    ThinkTags,
+    /// GPT-OSS channel-based: <|channel|>analysis<|message|>...<|end|>
+    ChannelBased,
+    /// Granite-style <|thinking|>...<|/thinking|> tags
+    ThinkingTags,
+}
+
 /// Model info from the running Foundry service with capability flags
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
+    /// Model family for format-specific handling
+    pub family: ModelFamily,
     pub tool_calling: bool,
+    /// Native tool calling format used by this model
+    pub tool_format: ToolFormat,
     pub vision: bool,
     pub reasoning: bool,
+    /// Format used for reasoning/thinking output
+    pub reasoning_format: ReasoningFormat,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
+    /// Whether the model supports temperature parameter
+    pub supports_temperature: bool,
+    /// Whether the model supports top_p parameter
+    pub supports_top_p: bool,
+    /// Whether the model supports reasoning_effort parameter
+    pub supports_reasoning_effort: bool,
 }
 
 /// OpenAI-compatible tool definition for native tool calling
