@@ -342,8 +342,80 @@ const createChatPreviewFromMessage = (message: string) => {
     return `${cleaned.substring(0, 77)}...`;
 };
 
+// Strip OpenAI special tokens that may leak through
+const stripOpenAITokens = (content: string): string => {
+    // Remove common OpenAI special tokens
+    // Patterns: <|start|>, <|end|>, <|im_start|>, <|im_end|>, <|endoftext|>
+    // Also handles role markers like <|start|>assistant, <|im_start|>user, etc.
+    return content
+        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>(?:assistant|user|system)?/gi, '')
+        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>/gi, '')
+        // Clean up any leftover newlines at the start from removed tokens
+        .replace(/^\n+/, '');
+};
+
+// Convert LaTeX bracket/paren delimiters to dollar signs for remark-math
+const convertLatexDelimiters = (content: string): string => {
+    let result = content;
+    
+    // Convert \[...\] to $$...$$ (display math)
+    // Use a non-greedy match to handle multiple blocks
+    result = result.replace(/\\\[([\s\S]*?)\\\]/g, (_match, inner) => {
+        return `$$${inner}$$`;
+    });
+    
+    // Convert \(...\) to $...$ (inline math)
+    result = result.replace(/\\\(([\s\S]*?)\\\)/g, (_match, inner) => {
+        return `$${inner}$`;
+    });
+    
+    // Handle bare brackets [ ... ] that contain LaTeX (has backslash commands)
+    // Be careful not to match markdown links or array-like content
+    // Only match if the content has LaTeX patterns like \frac, \text, \times, etc.
+    result = result.replace(/(?<!\[)\[\s*((?:\\[a-zA-Z]+|[^[\]]*)+)\s*\](?!\()/g, (match, inner) => {
+        // Check if content looks like LaTeX (has backslash commands like \frac, \text, etc.)
+        const hasLatexCommands = /\\[a-zA-Z]+/.test(inner);
+        // Also check for common math patterns
+        const hasMathPatterns = /[_^{}]|\\[a-zA-Z]/.test(inner);
+        
+        if (hasLatexCommands || hasMathPatterns) {
+            return `$$${inner.trim()}$$`;
+        }
+        return match; // Leave as-is if not LaTeX
+    });
+    
+    // Handle bare parentheses ( ... ) that contain LaTeX
+    // Be more conservative here since parentheses are common
+    // Only convert if content has clear LaTeX commands
+    result = result.replace(/\(\s*((?:[^()]*\\[a-zA-Z]+[^()]*)+)\s*\)/g, (match, inner) => {
+        // Check for any LaTeX command (backslash followed by letters)
+        const hasLatexCommand = /\\[a-zA-Z]{2,}/.test(inner);
+        // Also check for subscript/superscript patterns common in math
+        const hasMathNotation = /[_^]/.test(inner) && /\\/.test(inner);
+        // Scientific notation pattern
+        const hasScientificNotation = /\\times\s*10\s*\^/.test(inner);
+        
+        // Exclude things that look like file paths
+        const looksLikePath = /^\/[a-zA-Z]/.test(inner.trim());
+        
+        if ((hasLatexCommand || hasMathNotation || hasScientificNotation) && !looksLikePath) {
+            return `$${inner.trim()}$`;
+        }
+        return match; // Leave as-is if not clearly LaTeX
+    });
+    
+    return result;
+};
+
 // Helper to wrap raw \boxed{} in math delimiters to ensure they render
 const preprocessLaTeX = (content: string) => {
+    // First strip OpenAI tokens
+    let processed = stripOpenAITokens(content);
+    
+    // Then convert LaTeX delimiters
+    processed = convertLatexDelimiters(processed);
+    
+    // Now handle \boxed{} and other special cases
     let result = '';
     let i = 0;
 
@@ -351,15 +423,15 @@ const preprocessLaTeX = (content: string) => {
     let inMath: false | '$' | '$$' = false;
     let inCode: false | '`' | '```' = false;
 
-    while (i < content.length) {
+    while (i < processed.length) {
         // 1. Handle Code Blocks
-        if (!inMath && !inCode && content.startsWith('```', i)) {
+        if (!inMath && !inCode && processed.startsWith('```', i)) {
             inCode = '```';
             result += '```';
             i += 3;
             continue;
         }
-        if (!inMath && inCode === '```' && content.startsWith('```', i)) {
+        if (!inMath && inCode === '```' && processed.startsWith('```', i)) {
             inCode = false;
             result += '```';
             i += 3;
@@ -367,13 +439,13 @@ const preprocessLaTeX = (content: string) => {
         }
 
         // 2. Handle Inline Code
-        if (!inMath && !inCode && content.startsWith('`', i)) {
+        if (!inMath && !inCode && processed.startsWith('`', i)) {
             inCode = '`';
             result += '`';
             i += 1;
             continue;
         }
-        if (!inMath && inCode === '`' && content.startsWith('`', i)) {
+        if (!inMath && inCode === '`' && processed.startsWith('`', i)) {
             inCode = false;
             result += '`';
             i += 1;
@@ -382,27 +454,27 @@ const preprocessLaTeX = (content: string) => {
 
         // If in code, just consume
         if (inCode) {
-            result += content[i];
+            result += processed[i];
             i++;
             continue;
         }
 
         // 3. Handle Math Delimiters
         // Escaped dollar? \$
-        if (content.startsWith('\\$', i)) {
+        if (processed.startsWith('\\$', i)) {
             result += '\\$';
             i += 2;
             continue;
         }
 
-        if (content.startsWith('$$', i)) {
+        if (processed.startsWith('$$', i)) {
             if (inMath === '$$') inMath = false;
             else if (!inMath) inMath = '$$';
             result += '$$';
             i += 2;
             continue;
         }
-        if (content.startsWith('$', i)) {
+        if (processed.startsWith('$', i)) {
             if (inMath === '$') inMath = false;
             else if (!inMath) inMath = '$';
             result += '$';
@@ -411,24 +483,24 @@ const preprocessLaTeX = (content: string) => {
         }
 
         // 4. Handle \boxed{
-        if (!inMath && content.startsWith('\\boxed{', i)) {
+        if (!inMath && processed.startsWith('\\boxed{', i)) {
             // Look ahead to find matching brace
             let braceCount = 1;
             let ptr = i + 7; // skip \boxed{
 
-            while (ptr < content.length && braceCount > 0) {
-                if (content[ptr] === '\\') {
+            while (ptr < processed.length && braceCount > 0) {
+                if (processed[ptr] === '\\') {
                     ptr += 2; // skip escaped char
                     continue;
                 }
-                if (content[ptr] === '{') braceCount++;
-                if (content[ptr] === '}') braceCount--;
+                if (processed[ptr] === '{') braceCount++;
+                if (processed[ptr] === '}') braceCount--;
                 ptr++;
             }
 
             if (braceCount === 0) {
                 // Found complete block - extract the inner content
-                const innerContent = content.substring(i + 7, ptr - 1);
+                const innerContent = processed.substring(i + 7, ptr - 1);
                 
                 // Check if content contains LaTeX commands like \text{}, \mathbf{}, etc.
                 const hasLatexCommands = /\\[a-zA-Z]+\{/.test(innerContent);
@@ -451,7 +523,7 @@ const preprocessLaTeX = (content: string) => {
             // If not found (unclosed), fall through to default char handling
         }
 
-        result += content[i];
+        result += processed[i];
         i++;
     }
     return result;

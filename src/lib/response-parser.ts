@@ -10,6 +10,19 @@
  * - Generic: Plain text (no special formatting)
  */
 
+/**
+ * Strip OpenAI special tokens that may leak through from models
+ * These include: <|start|>, <|end|>, <|im_start|>, <|im_end|>, <|endoftext|>, etc.
+ * Also handles role markers like <|start|>assistant, <|im_start|>user, etc.
+ */
+function stripOpenAITokens(content: string): string {
+    return content
+        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>(?:assistant|user|system)?/gi, '')
+        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>/gi, '')
+        // Clean up any leftover newlines at the start from removed tokens
+        .replace(/^\s*\n+/, '');
+}
+
 export type MessagePartType = 'text' | 'think';
 
 export interface MessagePart {
@@ -214,30 +227,33 @@ function parsePlainText(content: string): MessagePart[] {
  * @returns Array of MessagePart objects with normalized type and content
  */
 export function parseMessageContent(content: string, modelFamily?: ModelFamily): MessagePart[] {
+    // First, strip any leaked OpenAI special tokens
+    const cleanedContent = stripOpenAITokens(content);
+    
     // Auto-detect format if not specified
-    const format = modelFamily || detectResponseFormat(content);
+    const format = modelFamily || detectResponseFormat(cleanedContent);
     
     switch (format) {
         case 'gpt_oss':
-            return parseChannelFormat(content);
+            return parseChannelFormat(cleanedContent);
         case 'phi':
-            return parseThinkFormat(content);
+            return parseThinkFormat(cleanedContent);
         case 'granite':
-            return parseGraniteThinkingFormat(content);
+            return parseGraniteThinkingFormat(cleanedContent);
         case 'gemma':
         case 'generic':
         default:
             // Check if content actually has any special format markers (auto-detect fallback)
-            if (content.includes('<|channel|>')) {
-                return parseChannelFormat(content);
+            if (cleanedContent.includes('<|channel|>')) {
+                return parseChannelFormat(cleanedContent);
             }
-            if (content.includes('<think>')) {
-                return parseThinkFormat(content);
+            if (cleanedContent.includes('<think>')) {
+                return parseThinkFormat(cleanedContent);
             }
-            if (content.includes('<|thinking|>')) {
-                return parseGraniteThinkingFormat(content);
+            if (cleanedContent.includes('<|thinking|>')) {
+                return parseGraniteThinkingFormat(cleanedContent);
             }
-            return parsePlainText(content);
+            return parsePlainText(cleanedContent);
     }
 }
 
@@ -258,8 +274,11 @@ export function hasOnlyThinkContent(content: string): boolean {
  * Useful for previews, search, etc.
  */
 export function stripFormatMarkers(content: string): string {
+    // First strip OpenAI special tokens
+    let result = stripOpenAITokens(content);
+    
     // Remove gpt-oss channel markers
-    let result = content.replace(/<\|channel\|>\w+<\|message\|>/g, '');
+    result = result.replace(/<\|channel\|>\w+<\|message\|>/g, '');
     result = result.replace(/<\|end\|>/g, '');
     
     // Remove phi think markers
