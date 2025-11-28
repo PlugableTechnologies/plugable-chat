@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 use sha2::{Sha256, Digest};
 use fastembed::TextEmbedding;
 
@@ -27,6 +28,15 @@ struct IndexedChunk {
 struct ManifestEntry {
     file_hash: String,
     chunk_count: usize,
+}
+
+/// Statistics from processing a single file
+struct FileProcessingStats {
+    chunks_added: usize,
+    bytes_processed: usize,
+    chars_processed: usize,
+    embedding_time_ms: u128,
+    was_cached: bool,
 }
 
 /// The RAG Actor handles document processing and retrieval
@@ -84,9 +94,17 @@ impl RagActor {
         paths: Vec<String>,
         embedding_model: Arc<TextEmbedding>,
     ) -> Result<RagIndexResult, String> {
+        let indexing_start = Instant::now();
         let mut total_chunks = 0;
         let mut files_processed = 0;
         let mut cache_hits = 0;
+        let mut total_bytes: usize = 0;
+        let mut total_chars: usize = 0;
+        let mut embedding_time_ms: u128 = 0;
+
+        println!("\n╔══════════════════════════════════════════════════════════════╗");
+        println!("║                    RAG INDEXING STARTED                      ║");
+        println!("╚══════════════════════════════════════════════════════════════╝");
 
         // Determine cache directory from the first path
         if let Some(first_path) = paths.first() {
@@ -127,11 +145,14 @@ impl RagActor {
 
         // Process each file
         for file_path in files_to_process {
-            match self.process_single_file(&file_path, &embedding_model).await {
-                Ok((chunks_added, was_cached)) => {
-                    total_chunks += chunks_added;
+            match self.process_single_file_with_stats(&file_path, &embedding_model).await {
+                Ok(stats) => {
+                    total_chunks += stats.chunks_added;
+                    total_bytes += stats.bytes_processed;
+                    total_chars += stats.chars_processed;
+                    embedding_time_ms += stats.embedding_time_ms;
                     files_processed += 1;
-                    if was_cached {
+                    if stats.was_cached {
                         cache_hits += 1;
                     }
                 }
@@ -144,10 +165,38 @@ impl RagActor {
         // Save manifest
         self.save_manifest().await;
 
-        println!(
-            "RagActor: Processed {} files, {} total chunks, {} cache hits",
-            files_processed, total_chunks, cache_hits
-        );
+        let total_time = indexing_start.elapsed();
+        let vector_dim = if !self.chunks.is_empty() {
+            self.chunks[0].vector.len()
+        } else {
+            0
+        };
+        let avg_chunk_chars = if total_chunks > 0 {
+            total_chars / total_chunks
+        } else {
+            0
+        };
+        let memory_estimate_kb = (self.chunks.len() * (std::mem::size_of::<IndexedChunk>() + vector_dim * 4 + 500)) / 1024;
+
+        println!("\n┌──────────────────────────────────────────────────────────────┐");
+        println!("│                  RAG INDEXING SUMMARY                        │");
+        println!("├──────────────────────────────────────────────────────────────┤");
+        println!("│  Files processed:      {:>8}                              │", files_processed);
+        println!("│  Cache hits:           {:>8}                              │", cache_hits);
+        println!("│  Total chunks:         {:>8}                              │", total_chunks);
+        println!("│  Total bytes:          {:>8} ({:.2} KB)                   │", total_bytes, total_bytes as f64 / 1024.0);
+        println!("│  Total chars:          {:>8}                              │", total_chars);
+        println!("│  Avg chunk size:       {:>8} chars                        │", avg_chunk_chars);
+        println!("│  Vector dimension:     {:>8}                              │", vector_dim);
+        println!("├──────────────────────────────────────────────────────────────┤");
+        println!("│  Embedding time:       {:>8} ms                           │", embedding_time_ms);
+        println!("│  Total time:           {:>8} ms                           │", total_time.as_millis());
+        println!("│  Throughput:           {:>8.1} chunks/sec                  │", 
+            if total_time.as_secs_f64() > 0.0 { total_chunks as f64 / total_time.as_secs_f64() } else { 0.0 });
+        println!("├──────────────────────────────────────────────────────────────┤");
+        println!("│  Total chunks in index:{:>8}                              │", self.chunks.len());
+        println!("│  Est. memory usage:    {:>8} KB                           │", memory_estimate_kb);
+        println!("└──────────────────────────────────────────────────────────────┘\n");
 
         Ok(RagIndexResult {
             total_chunks,
@@ -194,17 +243,20 @@ impl RagActor {
         }
     }
 
-    async fn process_single_file(
+    async fn process_single_file_with_stats(
         &mut self,
         file_path: &Path,
         embedding_model: &Arc<TextEmbedding>,
-    ) -> Result<(usize, bool), String> {
+    ) -> Result<FileProcessingStats, String> {
         let path_str = file_path.to_string_lossy().to_string();
+        let mut was_cached = false;
         
         // Read file content
         let content = tokio::fs::read_to_string(file_path)
             .await
             .map_err(|e| format!("Failed to read file: {}", e))?;
+        
+        let bytes_processed = content.len();
         
         // Compute content hash
         let content_hash = self.compute_hash(&content);
@@ -215,33 +267,44 @@ impl RagActor {
                 // File hasn't changed, but we need to ensure chunks are loaded
                 // For now, we'll re-process but mark as cache hit
                 println!("RagActor: Cache hit for {:?}", file_path);
+                was_cached = true;
                 // In a full implementation, we'd load chunks from disk cache here
             }
         }
         
         // Parse content based on file type
         let text_content = self.extract_text(file_path, &content)?;
+        let chars_processed = text_content.chars().count();
         
         // Chunk the content
         let text_chunks = self.chunk_text(&text_content);
         let chunk_count = text_chunks.len();
         
         if chunk_count == 0 {
-            return Ok((0, false));
+            return Ok(FileProcessingStats {
+                chunks_added: 0,
+                bytes_processed,
+                chars_processed,
+                embedding_time_ms: 0,
+                was_cached,
+            });
         }
         
-        println!("RagActor: Chunking {:?} into {} chunks", file_path, chunk_count);
+        println!("RagActor: Chunking {:?} into {} chunks ({} bytes, {} chars)", 
+            file_path, chunk_count, bytes_processed, chars_processed);
         
         // Generate embeddings for all chunks
         let model = Arc::clone(embedding_model);
         let chunks_clone = text_chunks.clone();
         
+        let embed_start = Instant::now();
         let embeddings = tokio::task::spawn_blocking(move || {
             model.embed(chunks_clone, None)
         })
         .await
         .map_err(|e| format!("Embedding task failed: {}", e))?
         .map_err(|e| format!("Embedding generation failed: {}", e))?;
+        let embedding_time_ms = embed_start.elapsed().as_millis();
         
         // Store indexed chunks
         let file_name = file_path.file_name()
@@ -266,7 +329,13 @@ impl RagActor {
             chunk_count,
         });
         
-        Ok((chunk_count, false))
+        Ok(FileProcessingStats {
+            chunks_added: chunk_count,
+            bytes_processed,
+            chars_processed,
+            embedding_time_ms,
+            was_cached,
+        })
     }
 
     fn extract_text(&self, file_path: &Path, content: &str) -> Result<String, String> {
@@ -410,11 +479,17 @@ impl RagActor {
     }
 
     fn search_documents(&self, query_vector: Vec<f32>, limit: usize) -> Vec<RagChunk> {
+        let search_start = Instant::now();
+        
         if self.chunks.is_empty() {
+            println!("\n┌─────────────────────────────────────────────────────────────┐");
+            println!("│                   RAG SEARCH (empty index)                  │");
+            println!("└─────────────────────────────────────────────────────────────┘\n");
             return Vec::new();
         }
         
         // Compute cosine similarity with all chunks
+        let similarity_start = Instant::now();
         let mut scored: Vec<(f32, &IndexedChunk)> = self.chunks
             .iter()
             .map(|chunk| {
@@ -422,12 +497,19 @@ impl RagActor {
                 (score, chunk)
             })
             .collect();
+        let similarity_time = similarity_start.elapsed();
         
         // Sort by score descending
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         
+        // Calculate score statistics
+        let all_scores: Vec<f32> = scored.iter().map(|(s, _)| *s).collect();
+        let min_score = all_scores.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_score = all_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let avg_score: f32 = all_scores.iter().sum::<f32>() / all_scores.len() as f32;
+        
         // Take top results
-        scored
+        let results: Vec<RagChunk> = scored
             .into_iter()
             .take(limit)
             .map(|(score, chunk)| RagChunk {
@@ -437,7 +519,67 @@ impl RagActor {
                 chunk_index: chunk.chunk_index,
                 score,
             })
-            .collect()
+            .collect();
+        
+        let total_time = search_start.elapsed();
+        
+        // Calculate top-K statistics
+        let top_scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+        let top_min = top_scores.iter().cloned().fold(f32::INFINITY, f32::min);
+        let top_max = top_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let top_avg: f32 = if !top_scores.is_empty() {
+            top_scores.iter().sum::<f32>() / top_scores.len() as f32
+        } else {
+            0.0
+        };
+        
+        // Collect unique source files in results
+        let unique_sources: std::collections::HashSet<&str> = results
+            .iter()
+            .map(|r| r.source_file.as_str())
+            .collect();
+        
+        println!("\n┌─────────────────────────────────────────────────────────────┐");
+        println!("│                      RAG SEARCH RESULTS                     │");
+        println!("├─────────────────────────────────────────────────────────────┤");
+        println!("│  Query vector dim:     {:>8}                             │", query_vector.len());
+        println!("│  Chunks searched:      {:>8}                             │", self.chunks.len());
+        println!("│  Results returned:     {:>8}                             │", results.len());
+        println!("├─────────────────────────────────────────────────────────────┤");
+        println!("│  All Scores (cosine similarity):                           │");
+        println!("│    Min:                {:>8.4}                             │", min_score);
+        println!("│    Max:                {:>8.4}                             │", max_score);
+        println!("│    Avg:                {:>8.4}                             │", avg_score);
+        println!("├─────────────────────────────────────────────────────────────┤");
+        println!("│  Top-{} Scores:                                             │", limit);
+        println!("│    Min:                {:>8.4}                             │", top_min);
+        println!("│    Max:                {:>8.4}                             │", top_max);
+        println!("│    Avg:                {:>8.4}                             │", top_avg);
+        println!("├─────────────────────────────────────────────────────────────┤");
+        println!("│  Source files in results: {}                               │", unique_sources.len());
+        for source in unique_sources.iter().take(5) {
+            println!("│    - {:<52} │", truncate_str(source, 52));
+        }
+        if unique_sources.len() > 5 {
+            println!("│    ... and {} more                                         │", unique_sources.len() - 5);
+        }
+        println!("├─────────────────────────────────────────────────────────────┤");
+        println!("│  Similarity calc:      {:>8.2} ms                         │", similarity_time.as_secs_f64() * 1000.0);
+        println!("│  Total search time:    {:>8.2} ms                         │", total_time.as_secs_f64() * 1000.0);
+        println!("└─────────────────────────────────────────────────────────────┘\n");
+        
+        // Log individual top results
+        if !results.is_empty() {
+            println!("Top {} results:", results.len().min(5));
+            for (i, result) in results.iter().take(5).enumerate() {
+                let preview = truncate_str(&result.content.replace('\n', " "), 60);
+                println!("  {}. [{}] score={:.4}: \"{}\"", 
+                    i + 1, result.source_file, result.score, preview);
+            }
+            println!();
+        }
+        
+        results
     }
 
     async fn load_manifest(&mut self) {
@@ -479,5 +621,16 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
     
     dot / (norm_a * norm_b)
+}
+
+/// Truncate a string to a maximum length, adding ellipsis if needed
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else if max_len > 3 {
+        format!("{}...", &s[..max_len - 3])
+    } else {
+        s[..max_len].to_string()
+    }
 }
 
