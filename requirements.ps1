@@ -108,6 +108,11 @@ function Install-Requirements {
         $allSucceeded = $false
     }
     
+    # Protocol Buffers (protoc) - Required for compiling lance-embedding and other protobuf-dependent crates
+    if (-not (Install-WingetPackage -PackageId "Google.Protobuf" -DisplayName "Protocol Buffers (protoc)")) {
+        $allSucceeded = $false
+    }
+    
     Write-Host ""
     
     if ($allSucceeded) {
@@ -135,6 +140,7 @@ function Install-Requirements {
     Write-Host "  npm --version" -ForegroundColor Gray
     Write-Host "  rustc --version" -ForegroundColor Gray
     Write-Host "  cargo --version" -ForegroundColor Gray
+    Write-Host "  protoc --version" -ForegroundColor Gray
     Write-Host ""
     
     if ($allSucceeded) {

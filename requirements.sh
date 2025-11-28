@@ -176,6 +176,11 @@ install_requirements() {
         all_succeeded=false
     fi
     
+    # Step 6: Protocol Buffers (protoc) - Required for compiling lance-embedding
+    if ! install_brew_formula "protobuf" "Protocol Buffers (protoc)"; then
+        all_succeeded=false
+    fi
+    
     echo ""
     
     if $all_succeeded; then
@@ -198,6 +203,7 @@ install_requirements() {
     echo -e "${GRAY}  npm --version${NC}"
     echo -e "${GRAY}  rustc --version${NC}"
     echo -e "${GRAY}  cargo --version${NC}"
+    echo -e "${GRAY}  protoc --version${NC}"
     echo ""
     
     if $all_succeeded; then
