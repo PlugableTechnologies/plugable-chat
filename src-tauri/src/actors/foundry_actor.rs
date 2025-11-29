@@ -21,7 +21,6 @@ fn build_chat_request_body(
     supports_reasoning: bool,
     supports_reasoning_effort: bool,
     reasoning_effort: &str,
-    execution_provider: Option<&str>,
 ) -> Value {
     let mut body = json!({
         "model": model,
@@ -29,11 +28,8 @@ fn build_chat_request_body(
         "stream": true,
     });
     
-    // Add execution provider if specified (e.g., NvTensorRTRTXExecutionProvider for NVIDIA GPUs)
-    if let Some(ep) = execution_provider {
-        body["ep"] = json!(ep);
-        println!("[FoundryActor] Using execution provider: {}", ep);
-    }
+    // Note: EP (execution provider) parameter is not passed to completions
+    // as it didn't work reliably. Foundry will auto-select the best EP.
     
     // Add model-family-specific parameters
     match family {
@@ -357,12 +353,7 @@ impl FoundryActor {
                                  url.clone()
                              };
                              
-                             // Rebuild body with potentially updated EP after restart
-                             let current_ep = if self.valid_eps.contains(&"NvTensorRTRTXExecutionProvider".to_string()) {
-                                 Some("NvTensorRTRTXExecutionProvider")
-                             } else {
-                                 None
-                             };
+                             // Rebuild body in case anything changed after restart
                              let current_body = build_chat_request_body(
                                  &model,
                                  model_family,
@@ -372,7 +363,6 @@ impl FoundryActor {
                                  model_supports_reasoning,
                                  supports_reasoning_effort,
                                  &reasoning_effort,
-                                 current_ep,
                              );
                              
                              match client_clone.post(&current_url).json(&current_body).send().await {
