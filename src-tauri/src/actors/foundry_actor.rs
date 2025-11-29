@@ -21,12 +21,19 @@ fn build_chat_request_body(
     supports_reasoning: bool,
     supports_reasoning_effort: bool,
     reasoning_effort: &str,
+    execution_provider: Option<&str>,
 ) -> Value {
     let mut body = json!({
         "model": model,
         "messages": messages,
         "stream": true,
     });
+    
+    // Add execution provider if specified (e.g., NvTensorRTRTXExecutionProvider for NVIDIA GPUs)
+    if let Some(ep) = execution_provider {
+        body["ep"] = json!(ep);
+        println!("[FoundryActor] Using execution provider: {}", ep);
+    }
     
     // Add model-family-specific parameters
     match family {
@@ -98,6 +105,13 @@ fn build_chat_request_body(
     body
 }
 
+/// Result of parsing `foundry service status` output
+struct ServiceStatus {
+    port: Option<u16>,
+    registered_eps: Vec<String>,
+    valid_eps: Vec<String>,
+}
+
 pub struct FoundryActor {
     rx: mpsc::Receiver<FoundryMsg>,
     port: Option<u16>,
@@ -106,6 +120,10 @@ pub struct FoundryActor {
     model_info: Vec<ModelInfo>,
     app_handle: AppHandle,
     embedding_model: Option<Arc<TextEmbedding>>,
+    /// Execution Providers successfully registered by Foundry
+    registered_eps: Vec<String>,
+    /// All valid Execution Providers available on this system
+    valid_eps: Vec<String>,
 }
 
 impl FoundryActor {
@@ -118,6 +136,8 @@ impl FoundryActor {
             model_info: Vec::new(),
             app_handle,
             embedding_model: None,
+            registered_eps: Vec::new(),
+            valid_eps: Vec::new(),
         }
     }
 
@@ -206,7 +226,14 @@ impl FoundryActor {
                     let _ = respond_to.send(self.model_info.clone());
                 }
                 FoundryMsg::GetCachedModels { respond_to } => {
-                    let cached = self.get_cached_models().await;
+                    // Use REST API to get models (same as available_models)
+                    // Convert to CachedModel format for compatibility
+                    let cached: Vec<CachedModel> = self.available_models.iter()
+                        .map(|model_id| CachedModel {
+                            alias: model_id.clone(), // Use model_id as alias since REST API doesn't provide aliases
+                            model_id: model_id.clone(),
+                        })
+                        .collect();
                     let _ = respond_to.send(cached);
                 }
                 FoundryMsg::SetModel { model_id, respond_to } => {
@@ -312,74 +339,154 @@ impl FoundryActor {
                             println!("[FoundryActor] Model does NOT support native tool calling, falling back to text-based tools");
                         }
                         
-                        // Build request body with model-family-specific parameters
-                        let body = build_chat_request_body(
-                            &model,
-                            model_family,
-                            &messages,
-                            &tools,
-                            use_native_tools,
-                            model_supports_reasoning,
-                            supports_reasoning_effort,
-                            &reasoning_effort,
-                        );
-                         
-                         println!("Sending streaming request to Foundry at {}", url);
+                        println!("Sending streaming request to Foundry at {}", url);
                          
                          let client_clone = client.clone();
                          let respond_to_clone = respond_to.clone();
                          
-                         match client_clone.post(&url).json(&body).send().await {
-                            Ok(mut resp) => {
-                                let status = resp.status();
-                                if !status.is_success() {
-                                     let text = resp.text().await.unwrap_or_default();
-                                     println!("Foundry error ({}): {}", status, text);
-                                     let _ = respond_to_clone.send(format!("Error: {}", text));
-                                } else {
-                                    let mut buffer = String::new();
-                                    println!("Foundry stream started.");
+                         // Retry logic with exponential backoff for 4XX errors
+                         const MAX_RETRIES: u32 = 3;
+                         let mut retry_delay = Duration::from_secs(2);
+                         let mut last_error: Option<String>;
+                         
+                         for attempt in 1..=MAX_RETRIES {
+                             // Rebuild URL in case port changed after restart
+                             let current_url = if let Some(p) = self.port {
+                                 format!("http://127.0.0.1:{}/v1/chat/completions", p)
+                             } else {
+                                 url.clone()
+                             };
+                             
+                             // Rebuild body with potentially updated EP after restart
+                             let current_ep = if self.valid_eps.contains(&"NvTensorRTRTXExecutionProvider".to_string()) {
+                                 Some("NvTensorRTRTXExecutionProvider")
+                             } else {
+                                 None
+                             };
+                             let current_body = build_chat_request_body(
+                                 &model,
+                                 model_family,
+                                 &messages,
+                                 &tools,
+                                 use_native_tools,
+                                 model_supports_reasoning,
+                                 supports_reasoning_effort,
+                                 &reasoning_effort,
+                                 current_ep,
+                             );
+                             
+                             match client_clone.post(&current_url).json(&current_body).send().await {
+                                Ok(mut resp) => {
+                                    let status = resp.status();
                                     
-                                    // Note: In streaming mode, Foundry Local provides tool calls in the 
-                                    // content field using Hermes-style <tool_call> XML format, not in the
-                                    // structured tool_calls array. Our text-based parser handles this.
-                                    
-                                    while let Ok(Some(chunk)) = resp.chunk().await {
-                                        if let Ok(s) = String::from_utf8(chunk.to_vec()) {
-                                            buffer.push_str(&s);
+                                    // Handle 4XX client errors with retry and service restart
+                                    if status.is_client_error() {
+                                        let text = resp.text().await.unwrap_or_default();
+                                        println!("FoundryActor: 4XX error ({}) on attempt {}/{}: {}", 
+                                            status, attempt, MAX_RETRIES, text);
+                                        last_error = Some(format!("HTTP {}: {}", status, text));
+                                        
+                                        if attempt < MAX_RETRIES {
+                                            // Restart service and re-detect port/EPs
+                                            println!("FoundryActor: Restarting service due to 4XX error...");
+                                            if let Err(e) = self.restart_service().await {
+                                                println!("FoundryActor: Service restart failed: {}", e);
+                                            }
                                             
-                                            // Process lines
-                                            while let Some(idx) = buffer.find('\n') {
-                                                let line = buffer[..idx].to_string();
-                                                buffer = buffer[idx + 1..].to_string();
+                                            // Re-detect port and EPs after restart
+                                            let status = self.detect_port_and_eps().await;
+                                            self.port = status.port;
+                                            self.registered_eps = status.registered_eps;
+                                            self.valid_eps = status.valid_eps;
+                                            
+                                            println!("FoundryActor: Waiting {:?} before retry...", retry_delay);
+                                            sleep(retry_delay).await;
+                                            retry_delay = Duration::from_millis(
+                                                (retry_delay.as_millis() as f64 * 1.5) as u64
+                                            ).min(Duration::from_secs(10));
+                                            continue;
+                                        }
+                                    } else if !status.is_success() {
+                                        // Other non-success errors (5XX, etc.)
+                                        let text = resp.text().await.unwrap_or_default();
+                                        println!("Foundry error ({}): {}", status, text);
+                                        let _ = respond_to_clone.send(format!("Error: {}", text));
+                                        break;
+                                    } else {
+                                        // Success - stream the response
+                                        let mut buffer = String::new();
+                                        println!("Foundry stream started.");
+                                        
+                                        // Note: In streaming mode, Foundry Local provides tool calls in the 
+                                        // content field using Hermes-style <tool_call> XML format, not in the
+                                        // structured tool_calls array. Our text-based parser handles this.
+                                        
+                                        while let Ok(Some(chunk)) = resp.chunk().await {
+                                            if let Ok(s) = String::from_utf8(chunk.to_vec()) {
+                                                buffer.push_str(&s);
                                                 
-                                                let trimmed = line.trim();
-                                                if trimmed.starts_with("data: ") {
-                                                    let data = &trimmed["data: ".len()..];
-                                                    if data == "[DONE]" {
-                                                        println!("Foundry stream DONE.");
-                                                        break;
-                                                    }
-                                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                                        // Stream content tokens (includes tool calls in <tool_call> format)
-                                                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                                            if !content.is_empty() {
-                                                                let _ = respond_to_clone.send(content.to_string());
+                                                // Process lines
+                                                while let Some(idx) = buffer.find('\n') {
+                                                    let line = buffer[..idx].to_string();
+                                                    buffer = buffer[idx + 1..].to_string();
+                                                    
+                                                    let trimmed = line.trim();
+                                                    if trimmed.starts_with("data: ") {
+                                                        let data = &trimmed["data: ".len()..];
+                                                        if data == "[DONE]" {
+                                                            println!("Foundry stream DONE.");
+                                                            break;
+                                                        }
+                                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                                            // Stream content tokens (includes tool calls in <tool_call> format)
+                                                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                                                if !content.is_empty() {
+                                                                    let _ = respond_to_clone.send(content.to_string());
+                                                                }
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
+                                        
+                                        println!("Foundry stream loop finished.");
+                                        break; // Success, exit retry loop
                                     }
+                                },
+                                Err(e) => {
+                                    println!("Failed to call Foundry (attempt {}/{}): {}", attempt, MAX_RETRIES, e);
+                                    last_error = Some(format!("Connection error: {}", e));
                                     
-                                    println!("Foundry stream loop finished.");
+                                    if attempt < MAX_RETRIES {
+                                        // Restart service on connection errors too
+                                        println!("FoundryActor: Restarting service due to connection error...");
+                                        if let Err(restart_err) = self.restart_service().await {
+                                            println!("FoundryActor: Service restart failed: {}", restart_err);
+                                        }
+                                        
+                                        // Re-detect port and EPs
+                                        let status = self.detect_port_and_eps().await;
+                                        self.port = status.port;
+                                        self.registered_eps = status.registered_eps;
+                                        self.valid_eps = status.valid_eps;
+                                        
+                                        sleep(retry_delay).await;
+                                        retry_delay = Duration::from_millis(
+                                            (retry_delay.as_millis() as f64 * 1.5) as u64
+                                        ).min(Duration::from_secs(10));
+                                        continue;
+                                    }
                                 }
-                            },
-                            Err(e) => {
-                                println!("Failed to call Foundry: {}", e);
-                                let _ = respond_to_clone.send(format!("Error connecting to local model: {}", e));
-                            }
+                             }
+                             
+                             // If we get here with an error after max retries, report it
+                             if let Some(err) = &last_error {
+                                 if attempt == MAX_RETRIES {
+                                     let _ = respond_to_clone.send(format!("Error after {} retries: {}", MAX_RETRIES, err));
+                                 }
+                             }
+                             break;
                          }
                      } else {
                          println!("Foundry endpoint not available (port not found).");
@@ -391,16 +498,21 @@ impl FoundryActor {
     }
 
     async fn update_connection_info(&mut self) -> bool {
-        self.port = self.detect_port().await;
+        // Get port and EPs from foundry service status
+        let status = self.detect_port_and_eps().await;
+        self.port = status.port;
+        self.registered_eps = status.registered_eps;
+        self.valid_eps = status.valid_eps;
+        
         if let Some(p) = self.port {
             println!("Foundry service detected on port {}", p);
+            println!("FoundryActor: Valid EPs: {:?}", self.valid_eps);
             
-            // AIRGAP MODE: Use `foundry cache ls` as the primary source of models
-            // This avoids calling `foundry model list` which requires internet connectivity
-            let cached_models = self.get_cached_models().await;
+            // Get models via REST API instead of CLI
+            let models = self.get_models_via_rest(p).await;
             
-            if cached_models.is_empty() {
-                println!("FoundryActor: No cached models found via 'foundry cache ls'");
+            if models.is_empty() {
+                println!("FoundryActor: No models found via REST API");
                 // Return true to indicate service is running but with no models
                 // The frontend will handle showing help to the user
                 self.available_models = Vec::new();
@@ -408,25 +520,21 @@ impl FoundryActor {
                 return true; // Service is reachable, just no models cached
             }
             
-            // Build available_models and model_info from cached models
-            self.available_models = cached_models.iter()
-                .map(|m| m.model_id.clone())
-                .collect();
+            // Build available_models and model_info from REST API response
+            self.available_models = models.clone();
             
             // Build model info with inferred capabilities from model names
-            self.model_info = cached_models.iter()
-                .map(|cached| {
-                    let id = cached.model_id.clone();
-                    let alias_lower = cached.alias.to_lowercase();
+            self.model_info = models.iter()
+                .map(|model_id| {
+                    let id = model_id.clone();
                     let id_lower = id.to_lowercase();
                     
                     // Detect model family from ID
                     let family = ModelFamily::from_model_id(&id);
                     
-                    // Infer tool calling support from alias/model name
+                    // Infer tool calling support from model name
                     // Models with "coder" or specific known tool-capable models
-                    let tool_calling = alias_lower.contains("coder") 
-                        || alias_lower.contains("qwen")
+                    let tool_calling = id_lower.contains("coder") 
                         || id_lower.contains("qwen");
                     
                     // Determine tool format based on model family and capabilities
@@ -443,7 +551,7 @@ impl FoundryActor {
                     };
                     
                     // Infer reasoning support from model name
-                    let reasoning = alias_lower.contains("reasoning") || id_lower.contains("reasoning");
+                    let reasoning = id_lower.contains("reasoning");
                     
                     // Determine reasoning format based on model family
                     let reasoning_format = if !reasoning {
@@ -467,10 +575,10 @@ impl FoundryActor {
                     let supports_reasoning_effort = reasoning && matches!(family, ModelFamily::Phi);
                     
                     // Vision support inferred from model name
-                    let vision = alias_lower.contains("vision") || id_lower.contains("vision");
+                    let vision = id_lower.contains("vision");
                     
-                    println!("  Model: {} (alias: {}) | family: {:?} | toolCalling: {} ({:?}) | vision: {} | reasoning: {} ({:?})", 
-                        id, cached.alias, family, tool_calling, tool_format, vision, reasoning, reasoning_format);
+                    println!("  Model: {} | family: {:?} | toolCalling: {} ({:?}) | vision: {} | reasoning: {} ({:?})", 
+                        id, family, tool_calling, tool_format, vision, reasoning, reasoning_format);
                     
                     ModelInfo {
                         id,
@@ -498,13 +606,46 @@ impl FoundryActor {
                 }
             }
             
-            println!("FoundryActor: Found {} cached models (airgap mode)", self.available_models.len());
+            println!("FoundryActor: Found {} models via REST API", self.available_models.len());
             return true;
 
         } else {
              println!("Warning: Could not detect Foundry service port.");
         }
         false
+    }
+    
+    /// Get models via REST API: GET /openai/models
+    /// Returns a list of model names as strings
+    async fn get_models_via_rest(&self, port: u16) -> Vec<String> {
+        let url = format!("http://127.0.0.1:{}/openai/models", port);
+        println!("FoundryActor: Fetching models via REST API: {}", url);
+        
+        let client = reqwest::Client::new();
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    // Response is an array of model names: ["model1", "model2"]
+                    match resp.json::<Vec<String>>().await {
+                        Ok(models) => {
+                            println!("FoundryActor: REST API returned {} models", models.len());
+                            models
+                        }
+                        Err(e) => {
+                            println!("FoundryActor: Failed to parse models response: {}", e);
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    println!("FoundryActor: REST API error: {}", resp.status());
+                    Vec::new()
+                }
+            }
+            Err(e) => {
+                println!("FoundryActor: Failed to call REST API: {}", e);
+                Vec::new()
+            }
+        }
     }
     
     /// Try to update connection info with exponential backoff
@@ -585,118 +726,87 @@ impl FoundryActor {
         Ok(())
     }
 
-    async fn detect_port(&self) -> Option<u16> {
-        println!("FoundryActor: Detecting port via 'foundry service status'...");
-        // Try `foundry service status` to get endpoint
-        // Expected output often contains "http://127.0.0.1:PORT"
+    /// Detect port and Execution Providers via `foundry service status`
+    /// 
+    /// Parses output like:
+    /// ```
+    /// 🟢 Model management service is running on http://127.0.0.1:54657/openai/status
+    /// EP autoregistration status: Successfully downloaded and registered the following EPs: NvTensorRTRTXExecutionProvider, OpenVINOExecutionProvider.
+    /// Valid EPs: CPUExecutionProvider, WebGpuExecutionProvider, NvTensorRTRTXExecutionProvider, OpenVINOExecutionProvider, CUDAExecutionProvider
+    /// ```
+    async fn detect_port_and_eps(&self) -> ServiceStatus {
+        println!("FoundryActor: Detecting port and EPs via 'foundry service status'...");
+        
         let child = Command::new("foundry")
             .args(&["service", "status"])
             .output();
             
-        match timeout(Duration::from_secs(5), child).await 
-        {
+        match timeout(Duration::from_secs(5), child).await {
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                // Look for pattern http://127.0.0.1:(\d+)
-                // Simple parsing:
-                if let Some(start_idx) = stdout.find("http://127.0.0.1:") {
-                    let rest = &stdout[start_idx + "http://127.0.0.1:".len()..];
-                    let port_str: String = rest.chars().take_while(|c| c.is_digit(10)).collect();
-                    if let Ok(port) = port_str.parse::<u16>() {
-                        return Some(port);
-                    }
-                }
-                // Fallback: check logs if command doesn't output it directly but we saw it in logs earlier
-                None
+                self.parse_service_status(&stdout)
             }
             Ok(Err(e)) => {
                 println!("Failed to run foundry status: {}", e);
-                None
+                ServiceStatus { port: None, registered_eps: Vec::new(), valid_eps: Vec::new() }
             }
             Err(_) => {
                 println!("FoundryActor: 'foundry service status' timed out.");
-                None
+                ServiceStatus { port: None, registered_eps: Vec::new(), valid_eps: Vec::new() }
             }
         }
     }
-
-    /// Get cached models from `foundry cache ls`
-    /// NOTE: In airgap mode, this is the ONLY source of model information.
-    /// We do NOT call `foundry model list` as it requires internet connectivity.
-    /// Parses output like:
-    /// ```
-    /// Models cached on device:
-    ///
-    ///    Alias                                             Model ID
-    ///
-    /// 💾 qwen2.5-coder-0.5b                                qwen2.5-coder-0.5b-instruct-generic-gpu:4
-    /// 💾 phi-4-mini-reasoning                              Phi-4-mini-reasoning-generic-gpu:3
-    /// ```
-    async fn get_cached_models(&self) -> Vec<CachedModel> {
-        println!("FoundryActor: Getting cached models via 'foundry cache ls'...");
-        
-        let child = Command::new("foundry")
-            .args(&["cache", "ls"])
-            .output();
-            
-        match timeout(Duration::from_secs(10), child).await {
-            Ok(Ok(output)) => {
-                if !output.status.success() {
-                    println!("FoundryActor: 'foundry cache ls' failed");
-                    return Vec::new();
-                }
-                
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                self.parse_cache_ls_output(&stdout)
-            }
-            Ok(Err(e)) => {
-                println!("FoundryActor: Failed to run 'foundry cache ls': {}", e);
-                Vec::new()
-            }
-            Err(_) => {
-                println!("FoundryActor: 'foundry cache ls' timed out.");
-                Vec::new()
-            }
-        }
-    }
-
-    /// Parse the output of `foundry cache ls`
-    fn parse_cache_ls_output(&self, output: &str) -> Vec<CachedModel> {
-        let mut models = Vec::new();
+    
+    /// Parse the output of `foundry service status`
+    fn parse_service_status(&self, output: &str) -> ServiceStatus {
+        let mut port = None;
+        let mut registered_eps = Vec::new();
+        let mut valid_eps = Vec::new();
         
         for line in output.lines() {
-            let trimmed = line.trim();
-            
-            // Skip empty lines and header lines
-            if trimmed.is_empty() 
-                || trimmed.starts_with("Models cached")
-                || trimmed.starts_with("Alias")
-                || trimmed.starts_with("---") 
-            {
-                continue;
+            // Parse port from URL: "http://127.0.0.1:54657" or "https://127.0.0.1:54657"
+            if let Some(start_idx) = line.find("http://127.0.0.1:") {
+                let rest = &line[start_idx + "http://127.0.0.1:".len()..];
+                let port_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(p) = port_str.parse::<u16>() {
+                    port = Some(p);
+                    println!("FoundryActor: Detected port {}", p);
+                }
+            } else if let Some(start_idx) = line.find("https://127.0.0.1:") {
+                let rest = &line[start_idx + "https://127.0.0.1:".len()..];
+                let port_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(p) = port_str.parse::<u16>() {
+                    port = Some(p);
+                    println!("FoundryActor: Detected port {} (https)", p);
+                }
             }
             
-            // Lines with models start with 💾 emoji
-            // Format: "💾 alias                                             model_id"
-            if trimmed.starts_with("💾") || trimmed.starts_with("💾") {
-                // Remove the emoji and parse
-                let rest = trimmed.trim_start_matches("💾").trim_start_matches("💾").trim();
-                
-                // Split on multiple spaces (the columns are separated by many spaces)
-                // Find where alias ends and model_id begins by looking for multiple spaces
-                if let Some(split_pos) = rest.find("  ") {
-                    let alias = rest[..split_pos].trim().to_string();
-                    let model_id = rest[split_pos..].trim().to_string();
-                    
-                    if !alias.is_empty() && !model_id.is_empty() {
-                        println!("FoundryActor: Found cached model: {} -> {}", alias, model_id);
-                        models.push(CachedModel { alias, model_id });
-                    }
-                }
+            // Parse registered EPs: "registered the following EPs: EP1, EP2."
+            if let Some(start_idx) = line.find("registered the following EPs:") {
+                let rest = &line[start_idx + "registered the following EPs:".len()..];
+                // Remove trailing period and parse comma-separated list
+                let eps_str = rest.trim().trim_end_matches('.');
+                registered_eps = eps_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                println!("FoundryActor: Registered EPs: {:?}", registered_eps);
+            }
+            
+            // Parse valid EPs: "Valid EPs: EP1, EP2, EP3"
+            if let Some(start_idx) = line.find("Valid EPs:") {
+                let rest = &line[start_idx + "Valid EPs:".len()..];
+                valid_eps = rest
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                println!("FoundryActor: Valid EPs: {:?}", valid_eps);
             }
         }
         
-        println!("FoundryActor: Found {} cached models", models.len());
-        models
+        ServiceStatus { port, registered_eps, valid_eps }
     }
+
 }
