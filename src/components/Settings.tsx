@@ -1,6 +1,7 @@
-import { useSettingsStore, createNewServerConfig, type McpServerConfig } from '../store/settings-store';
+import { useSettingsStore, createNewServerConfig, type McpServerConfig, type McpTool } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, PlugZap } from 'lucide-react';
+import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, PlugZap, Play, CheckCircle, XCircle, Loader2 } from 'lucide-react';
+import { invoke } from '../lib/api';
 
 // Tag input component for args - auto-splits on spaces
 function TagInput({ 
@@ -222,6 +223,13 @@ function EnvVarInput({
     );
 }
 
+// Test result type
+interface TestResult {
+    success: boolean;
+    tools?: McpTool[];
+    error?: string;
+}
+
 // Single MCP Server configuration card
 function McpServerCard({ 
     config, 
@@ -240,6 +248,10 @@ function McpServerCard({
     const configIdRef = useRef(config.id);
     const { serverStatuses } = useSettingsStore();
     const status = serverStatuses[config.id];
+    
+    // Test connection state
+    const [isTesting, setIsTesting] = useState(false);
+    const [testResult, setTestResult] = useState<TestResult | null>(null);
     
     // Sync with external config when it changes (e.g., after save from backend)
     useEffect(() => {
@@ -275,10 +287,36 @@ function McpServerCard({
         }
     }, [updateField]);
     
-    const handleSave = useCallback(() => {
+    const handleSave = useCallback(async () => {
         onSave(localConfig);
         setIsDirty(false);
+        
+        // Automatically test the connection after saving
+        setIsTesting(true);
+        setTestResult(null);
+        try {
+            const tools = await invoke<McpTool[]>('test_mcp_server_config', { config: localConfig });
+            setTestResult({ success: true, tools });
+        } catch (e: any) {
+            setTestResult({ success: false, error: e.message || String(e) });
+        } finally {
+            setIsTesting(false);
+        }
     }, [localConfig, onSave]);
+    
+    // Manual test without saving
+    const handleTest = useCallback(async () => {
+        setIsTesting(true);
+        setTestResult(null);
+        try {
+            const tools = await invoke<McpTool[]>('test_mcp_server_config', { config: localConfig });
+            setTestResult({ success: true, tools });
+        } catch (e: any) {
+            setTestResult({ success: false, error: e.message || String(e) });
+        } finally {
+            setIsTesting(false);
+        }
+    }, [localConfig]);
     
     // Check if this is the built-in test server
     const isTestServer = config.id === 'mcp-test-server';
@@ -426,10 +464,61 @@ function McpServerCard({
                         </button>
                     </div>
                     
-                    {/* Status message */}
-                    {status?.error && (
-                        <div className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">
-                            {status.error}
+                    {/* Status message from sync */}
+                    {status?.error && !testResult && (
+                        <div className="text-xs text-red-700 bg-red-50 px-3 py-2 rounded-lg max-h-48 overflow-y-auto">
+                            <pre className="font-mono whitespace-pre-wrap">
+                                {status.error}
+                            </pre>
+                        </div>
+                    )}
+                    
+                    {/* Test result display */}
+                    {testResult && (
+                        <div className={`rounded-lg p-3 ${testResult.success ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}>
+                            <div className="flex items-center gap-2 mb-2">
+                                {testResult.success ? (
+                                    <>
+                                        <CheckCircle size={16} className="text-green-600" />
+                                        <span className="text-sm font-medium text-green-700">Connection Successful</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <XCircle size={16} className="text-red-600" />
+                                        <span className="text-sm font-medium text-red-700">Connection Failed</span>
+                                    </>
+                                )}
+                            </div>
+                            {testResult.success && testResult.tools && (
+                                <div className="text-xs text-green-700">
+                                    <span className="font-medium">{testResult.tools.length} tool{testResult.tools.length !== 1 ? 's' : ''} available:</span>
+                                    <ul className="mt-1 space-y-0.5 ml-2">
+                                        {testResult.tools.map((tool, i) => (
+                                            <li key={i} className="font-mono">
+                                                • {tool.name}
+                                                {tool.description && (
+                                                    <span className="text-green-600 font-sans"> - {tool.description}</span>
+                                                )}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                            {testResult.error && (
+                                <div className="text-xs text-red-700 max-h-48 overflow-y-auto">
+                                    <pre className="font-mono whitespace-pre-wrap bg-red-100/50 p-2 rounded mt-1">
+                                        {testResult.error}
+                                    </pre>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    
+                    {/* Testing indicator */}
+                    {isTesting && (
+                        <div className="flex items-center gap-2 text-xs text-blue-600 bg-blue-50 px-3 py-2 rounded-lg">
+                            <Loader2 size={14} className="animate-spin" />
+                            Testing connection...
                         </div>
                     )}
                     
@@ -444,14 +533,25 @@ function McpServerCard({
                             <Trash2 size={14} />
                             Remove
                         </button>
-                        <button
-                            onClick={handleSave}
-                            disabled={!isDirty}
-                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            <Save size={14} />
-                            Save
-                        </button>
+                        <div className="flex gap-2">
+                            <button
+                                onClick={handleTest}
+                                disabled={isTesting || !localConfig.command}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Test connection without saving"
+                            >
+                                {isTesting ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                                Test
+                            </button>
+                            <button
+                                onClick={handleSave}
+                                disabled={!isDirty || isTesting}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                <Save size={14} />
+                                Save
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
@@ -464,6 +564,9 @@ function SystemPromptTab() {
     const { settings, updateSystemPrompt, error } = useSettingsStore();
     const [localPrompt, setLocalPrompt] = useState(settings?.system_prompt || '');
     const [hasChanges, setHasChanges] = useState(false);
+    const [preview, setPreview] = useState<string | null>(null);
+    const [showPreview, setShowPreview] = useState(false);
+    const [loadingPreview, setLoadingPreview] = useState(false);
     
     useEffect(() => {
         if (settings?.system_prompt) {
@@ -472,9 +575,31 @@ function SystemPromptTab() {
         }
     }, [settings?.system_prompt]);
     
+    // Fetch preview when showing it
+    useEffect(() => {
+        if (showPreview) {
+            setLoadingPreview(true);
+            invoke<string>('get_system_prompt_preview')
+                .then(setPreview)
+                .catch(e => {
+                    console.error('Failed to get preview:', e);
+                    setPreview('Failed to load preview');
+                })
+                .finally(() => setLoadingPreview(false));
+        }
+    }, [showPreview, settings?.mcp_servers]);
+    
     const handleSave = async () => {
         await updateSystemPrompt(localPrompt);
         setHasChanges(false);
+        // Refresh preview after save
+        if (showPreview) {
+            setLoadingPreview(true);
+            invoke<string>('get_system_prompt_preview')
+                .then(setPreview)
+                .catch(() => setPreview('Failed to load preview'))
+                .finally(() => setLoadingPreview(false));
+        }
     };
     
     const handleChange = (value: string) => {
@@ -482,11 +607,14 @@ function SystemPromptTab() {
         setHasChanges(value !== settings?.system_prompt);
     };
     
+    // Count enabled MCP servers
+    const enabledServers = settings?.mcp_servers?.filter(s => s.enabled).length || 0;
+    
     return (
         <div className="space-y-4">
             <div>
                 <div className="flex items-center justify-between mb-2">
-                    <label className="text-sm font-medium text-gray-700">System Prompt</label>
+                    <label className="text-sm font-medium text-gray-700">Base System Prompt</label>
                     {hasChanges && (
                         <span className="text-xs text-amber-600">Unsaved changes</span>
                     )}
@@ -494,13 +622,49 @@ function SystemPromptTab() {
                 <textarea
                     value={localPrompt}
                     onChange={(e) => handleChange(e.target.value)}
-                    rows={12}
+                    rows={8}
                     className="w-full px-4 py-3 text-sm font-mono border border-gray-200 rounded-xl focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none bg-gray-50"
                     placeholder="Enter your system prompt..."
                 />
                 <p className="mt-2 text-xs text-gray-500">
-                    This prompt is sent at the beginning of every conversation. MCP tool descriptions will be appended automatically.
+                    This is the base prompt. MCP tool descriptions are appended automatically based on enabled servers.
                 </p>
+            </div>
+            
+            {/* Preview toggle */}
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+                <button
+                    onClick={() => setShowPreview(!showPreview)}
+                    className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-sm font-medium text-gray-700"
+                >
+                    <span className="flex items-center gap-2">
+                        <MessageSquare size={16} />
+                        Full System Prompt Preview
+                        {enabledServers > 0 && (
+                            <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+                                {enabledServers} MCP server{enabledServers !== 1 ? 's' : ''} enabled
+                            </span>
+                        )}
+                    </span>
+                    {showPreview ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </button>
+                
+                {showPreview && (
+                    <div className="p-4 bg-white border-t border-gray-200">
+                        {loadingPreview ? (
+                            <div className="flex items-center justify-center py-8">
+                                <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                            </div>
+                        ) : (
+                            <pre className="text-xs font-mono whitespace-pre-wrap text-gray-700 max-h-80 overflow-y-auto bg-gray-50 p-3 rounded-lg">
+                                {preview || 'No preview available'}
+                            </pre>
+                        )}
+                        <p className="mt-2 text-xs text-gray-500">
+                            This is exactly what will be sent to the model as the system prompt.
+                        </p>
+                    </div>
+                )}
             </div>
             
             {error && (

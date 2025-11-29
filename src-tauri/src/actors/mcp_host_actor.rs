@@ -238,6 +238,10 @@ impl McpHostActor {
                     let results = self.sync_enabled_servers(configs).await;
                     let _ = respond_to.send(results);
                 }
+                McpHostMsg::TestServerConfig { config, respond_to } => {
+                    let result = self.test_server_config(config).await;
+                    let _ = respond_to.send(result);
+                }
             }
         }
 
@@ -295,7 +299,7 @@ impl McpHostActor {
         cmd.kill_on_drop(true);
 
         let mut child = cmd.spawn()
-            .map_err(|e| format!("Failed to spawn MCP server process: {}", e))?;
+            .map_err(|e| format!("Failed to spawn MCP server process '{}': {}", command, e))?;
 
         let stdin = child.stdin.take()
             .ok_or_else(|| "Failed to open stdin".to_string())?;
@@ -303,8 +307,11 @@ impl McpHostActor {
             .ok_or_else(|| "Failed to open stdout".to_string())?;
         let stderr = child.stderr.take();
 
-        // Spawn a task to log stderr and track when server is ready
+        // Capture stderr in a shared buffer for error reporting AND track readiness
+        let stderr_buffer = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let stderr_buffer_clone = stderr_buffer.clone();
         let (stderr_ready_tx, mut stderr_ready_rx) = tokio::sync::mpsc::channel::<()>(1);
+        
         if let Some(stderr) = stderr {
             let server_id_clone = config.id.clone();
             let command_clone = command.clone();
@@ -314,6 +321,16 @@ impl McpHostActor {
                 let mut signaled_ready = false;
                 while let Ok(Some(line)) = lines.next_line().await {
                     println!("McpHostActor [{}] stderr: {}", server_id_clone, line);
+                    
+                    // Store in buffer for error reporting (keep last 50 lines)
+                    {
+                        let mut buffer = stderr_buffer_clone.lock().await;
+                        if buffer.len() >= 50 {
+                            buffer.remove(0);
+                        }
+                        buffer.push(line.clone());
+                    }
+                    
                     // For cargo run, detect when the actual server starts
                     if !signaled_ready && command_clone == "cargo" && 
                        (line.contains("MCP Test Server starting") || line.contains("Running `")) {
@@ -357,16 +374,37 @@ impl McpHostActor {
         };
         tokio::time::sleep(startup_delay).await;
         
+        // Helper to format error with captured output
+        let format_error_with_output = |base_error: String, stderr_buf: &[String]| -> String {
+            let mut error = base_error;
+            if !stderr_buf.is_empty() {
+                error.push_str("\n\n--- stderr output ---\n");
+                error.push_str(&stderr_buf.join("\n"));
+            }
+            error
+        };
+        
         // Check if process is still running
         match connection.process.try_wait() {
             Ok(Some(status)) => {
-                return Err(format!("Server process exited before initialization with status: {}", status));
+                // Wait a moment for stderr to be collected
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let stderr_output = stderr_buffer.lock().await;
+                return Err(format_error_with_output(
+                    format!("Server process exited before initialization with status: {}", status),
+                    &stderr_output
+                ));
             }
             Ok(None) => {
                 println!("McpHostActor: Server process is still running, proceeding with initialization");
             }
             Err(e) => {
-                println!("McpHostActor: Warning: Could not check process status: {}", e);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let stderr_output = stderr_buffer.lock().await;
+                return Err(format_error_with_output(
+                    format!("Could not check process status: {}", e),
+                    &stderr_output
+                ));
             }
         }
 
@@ -394,7 +432,12 @@ impl McpHostActor {
             Err(e) => {
                 println!("McpHostActor: Failed to initialize server {}: {}", server_id, e);
                 let _ = connection.process.kill().await;
-                return Err(format!("Failed to initialize MCP server: {}", e));
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let stderr_output = stderr_buffer.lock().await;
+                return Err(format_error_with_output(
+                    format!("Failed to initialize MCP server: {}", e),
+                    &stderr_output
+                ));
             }
         }
 
@@ -580,5 +623,190 @@ impl McpHostActor {
         println!("McpHostActor: Sync complete - {} servers now connected", connected_count);
         
         results
+    }
+    
+    /// Test a server config by connecting, getting tools, then cleaning up
+    /// This does NOT store the connection - it's purely for testing
+    async fn test_server_config(&self, config: McpServerConfig) -> Result<Vec<McpTool>, String> {
+        println!("McpHostActor: Testing server config: {} ({})", config.name, config.id);
+        
+        match &config.transport {
+            Transport::Stdio => {
+                self.test_stdio_server_config(config).await
+            }
+            Transport::Sse { url } => {
+                Err(format!("SSE transport not yet implemented for URL: {}", url))
+            }
+        }
+    }
+    
+    /// Test a stdio server config - spawns process, initializes, gets tools, then cleans up
+    /// Captures stdout/stderr and includes them in error messages for debugging
+    async fn test_stdio_server_config(&self, config: McpServerConfig) -> Result<Vec<McpTool>, String> {
+        let command = config.command.clone()
+            .ok_or_else(|| "No command specified for stdio transport".to_string())?;
+
+        println!("McpHostActor: Test - Spawning process: {} {:?}", command, config.args);
+
+        let mut cmd = Command::new(&command);
+        cmd.args(&config.args);
+        
+        // Set environment variables
+        for (key, value) in &config.env {
+            cmd.env(key, value);
+        }
+        
+        // Set up stdio pipes
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        
+        // Kill process on drop
+        cmd.kill_on_drop(true);
+
+        let mut child = cmd.spawn()
+            .map_err(|e| format!("Failed to spawn MCP server process '{}': {}", command, e))?;
+
+        let stdin = child.stdin.take()
+            .ok_or_else(|| "Failed to open stdin".to_string())?;
+        let stdout = child.stdout.take()
+            .ok_or_else(|| "Failed to open stdout".to_string())?;
+        let stderr = child.stderr.take();
+
+        // Capture stderr in a shared buffer for error reporting
+        let stderr_buffer = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let stderr_buffer_clone = stderr_buffer.clone();
+        let server_id_clone = config.id.clone();
+        
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    println!("McpHostActor [TEST {}] stderr: {}", server_id_clone, line);
+                    let mut buffer = stderr_buffer_clone.lock().await;
+                    // Keep last 50 lines to avoid memory issues
+                    if buffer.len() >= 50 {
+                        buffer.remove(0);
+                    }
+                    buffer.push(line);
+                }
+            });
+        }
+
+        let stdout_lines = BufReader::new(stdout).lines();
+        
+        // Create temporary connection
+        let mut connection = McpServerConnection {
+            config: config.clone(),
+            process: child,
+            stdin,
+            stdout_lines,
+            tools: Vec::new(),
+            request_id: 0,
+        };
+
+        // Wait for server to start
+        let startup_delay = if command == "cargo" {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(500)
+        };
+        tokio::time::sleep(startup_delay).await;
+        
+        // Helper to format error with captured output
+        let format_error_with_output = |base_error: String, stderr_buf: &[String]| -> String {
+            let mut error = base_error;
+            if !stderr_buf.is_empty() {
+                error.push_str("\n\n--- stderr output ---\n");
+                error.push_str(&stderr_buf.join("\n"));
+            }
+            error
+        };
+        
+        // Check if process is still running
+        match connection.process.try_wait() {
+            Ok(Some(status)) => {
+                // Wait a moment for stderr to be collected
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let stderr_output = stderr_buffer.lock().await;
+                return Err(format_error_with_output(
+                    format!("Server process exited before initialization with status: {}", status),
+                    &stderr_output
+                ));
+            }
+            Ok(None) => {
+                // Process still running, good
+            }
+            Err(e) => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let stderr_output = stderr_buffer.lock().await;
+                return Err(format_error_with_output(
+                    format!("Could not check process status: {}", e),
+                    &stderr_output
+                ));
+            }
+        }
+
+        // Send initialize request
+        let init_result = connection.send_request("initialize", Some(json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {}
+            },
+            "clientInfo": {
+                "name": "plugable-chat-test",
+                "version": "0.1.0"
+            }
+        }))).await;
+
+        match init_result {
+            Ok(_response) => {
+                // Send initialized notification
+                let _ = connection.send_notification("notifications/initialized", None).await;
+            }
+            Err(e) => {
+                let _ = connection.process.kill().await;
+                // Wait a moment to collect any final stderr output
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let stderr_output = stderr_buffer.lock().await;
+                return Err(format_error_with_output(
+                    format!("Failed to initialize MCP server: {}", e),
+                    &stderr_output
+                ));
+            }
+        }
+
+        // Fetch available tools
+        let tools: Vec<McpTool> = match connection.send_request("tools/list", None).await {
+            Ok(tools_response) => {
+                if let Some(tools_array) = tools_response.get("tools").and_then(|t| t.as_array()) {
+                    tools_array.iter()
+                        .filter_map(|t| serde_json::from_value::<McpTool>(t.clone()).ok())
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            Err(e) => {
+                let _ = connection.process.kill().await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let stderr_output = stderr_buffer.lock().await;
+                return Err(format_error_with_output(
+                    format!("Failed to fetch tools: {}", e),
+                    &stderr_output
+                ));
+            }
+        };
+
+        // Clean up - kill the process
+        let _ = connection.process.kill().await;
+        
+        println!("McpHostActor: Test complete - found {} tools", tools.len());
+        for tool in &tools {
+            println!("McpHostActor: Test -   {}: {}", tool.name, tool.description.as_deref().unwrap_or("(no description)"));
+        }
+        
+        Ok(tools)
     }
 }

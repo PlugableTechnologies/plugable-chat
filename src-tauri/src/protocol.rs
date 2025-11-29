@@ -666,6 +666,11 @@ pub enum McpHostMsg {
         configs: Vec<McpServerConfig>,
         respond_to: oneshot::Sender<Vec<(String, Result<(), String>)>>,
     },
+    /// Test a server config without storing it - returns tools on success
+    TestServerConfig {
+        config: McpServerConfig,
+        respond_to: oneshot::Sender<Result<Vec<McpTool>, String>>,
+    },
 }
 
 /// Messages for the RAG (Retrieval Augmented Generation) actor

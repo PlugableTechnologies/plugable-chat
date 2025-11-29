@@ -982,11 +982,19 @@ async fn update_system_prompt(
 
 // ============ MCP Commands ============
 
+/// Result of syncing an MCP server - includes error message if failed
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpSyncResult {
+    pub server_id: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
 #[tauri::command]
 async fn sync_mcp_servers(
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
-) -> Result<Vec<(String, bool)>, String> {
+) -> Result<Vec<McpSyncResult>, String> {
     let settings = settings_state.settings.read().await;
     let configs = settings.mcp_servers.clone();
     drop(settings);
@@ -1001,8 +1009,26 @@ async fn sync_mcp_servers(
     
     let results = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
     
-    // Convert to (server_id, success) tuples
-    Ok(results.into_iter().map(|(id, r)| (id, r.is_ok())).collect())
+    // Convert to McpSyncResult with error messages
+    let sync_results: Vec<McpSyncResult> = results.into_iter().map(|(id, r)| {
+        match r {
+            Ok(()) => McpSyncResult {
+                server_id: id,
+                success: true,
+                error: None,
+            },
+            Err(e) => {
+                println!("[MCP] Server {} sync failed: {}", id, e);
+                McpSyncResult {
+                    server_id: id,
+                    success: false,
+                    error: Some(e),
+                }
+            }
+        }
+    }).collect();
+    
+    Ok(sync_results)
 }
 
 #[tauri::command]
@@ -1096,6 +1122,48 @@ async fn get_all_mcp_tool_descriptions(
         .map_err(|e| e.to_string())?;
     
     Ok(rx.await.map_err(|_| "MCP Host actor died".to_string())?)
+}
+
+/// Test an MCP server config and return its tools without storing the connection
+#[tauri::command]
+async fn test_mcp_server_config(
+    config: McpServerConfig,
+    handles: State<'_, ActorHandles>,
+) -> Result<Vec<McpTool>, String> {
+    println!("[MCP] Testing server config: {} ({})", config.name, config.id);
+    
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::TestServerConfig { config, respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    rx.await.map_err(|_| "MCP Host actor died".to_string())?
+}
+
+/// Get a preview of the final system prompt with MCP tool descriptions
+#[tauri::command]
+async fn get_system_prompt_preview(
+    handles: State<'_, ActorHandles>,
+    settings_state: State<'_, SettingsState>,
+) -> Result<String, String> {
+    // Get current settings
+    let settings = settings_state.settings.read().await;
+    let base_prompt = settings.system_prompt.clone();
+    let server_configs = settings.mcp_servers.clone();
+    drop(settings);
+    
+    // Get current tool descriptions from connected servers
+    let (tx, rx) = oneshot::channel();
+    handles.mcp_host_tx.send(McpHostMsg::GetAllToolDescriptions { respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    let tool_descriptions = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
+    
+    // Build the full system prompt
+    let preview = build_system_prompt(&base_prompt, &tool_descriptions, &server_configs);
+    
+    Ok(preview)
 }
 
 #[tauri::command]
@@ -1315,6 +1383,8 @@ pub fn run() {
             execute_mcp_tool,
             get_mcp_server_status,
             get_all_mcp_tool_descriptions,
+            test_mcp_server_config,
+            get_system_prompt_preview,
             detect_tool_calls,
             execute_tool_call,
             approve_tool_call,

@@ -118,13 +118,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             // Sync MCP servers after fetching settings
             try {
                 console.log('[SettingsStore] Syncing MCP servers...');
-                const results = await invoke<[string, boolean][]>('sync_mcp_servers');
+                const results = await invoke<{ server_id: string; success: boolean; error: string | null }[]>('sync_mcp_servers');
                 console.log('[SettingsStore] MCP server sync results:', results);
                 
                 // Update server statuses based on sync results
                 const newStatuses: Record<string, McpServerStatus> = {};
-                for (const [serverId, success] of results) {
-                    newStatuses[serverId] = { connected: success };
+                for (const result of results) {
+                    newStatuses[result.server_id] = { 
+                        connected: result.success,
+                        error: result.error || undefined,
+                    };
                 }
                 set(state => ({
                     serverStatuses: { ...state.serverStatuses, ...newStatuses }
