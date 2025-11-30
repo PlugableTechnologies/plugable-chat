@@ -83,14 +83,20 @@ pub fn parse_tool_calls_for_model(
             parse_granite_tool_calls(response)
         }
         ToolFormat::TextBased => {
-            // For text-based, we use the generic XML-style parser
-            parse_hermes_tool_calls(response)
+            // Text-based models like Gemma use <function_call> tags (same as Granite)
+            // Falls back to Hermes parser if no <function_call> tags found
+            parse_granite_tool_calls(response)
         }
     }
 }
 
 /// Parse Hermes-style tool calls: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
 /// This is used by Phi, Qwen, and as a fallback for other formats.
+/// Also handles:
+/// - markdown code blocks (for smaller models that ignore instructions)
+/// - `tool_name`/`tool_args` format (GPT-OSS legacy)
+/// - `parameters` as alias for `arguments` (Llama)
+/// - `<function=name>{...}</function>` format (Braintrust Llama recipe)
 pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
     
@@ -113,9 +119,7 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                     parsed.get("server").and_then(|v| v.as_str()),
                     parsed.get("tool").and_then(|v| v.as_str()),
                 ) {
-                    let arguments = parsed.get("arguments")
-                        .cloned()
-                        .unwrap_or(Value::Object(serde_json::Map::new()));
+                    let arguments = extract_arguments(&parsed);
                     
                     calls.push(ParsedToolCall {
                         server: server.to_string(),
@@ -126,13 +130,11 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                     continue;
                 }
                 
-                // Try Format 2: {"name": "server___tool", "arguments": {...}}
-                if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
-                    let arguments = parsed.get("arguments")
-                        .cloned()
-                        .unwrap_or(Value::Object(serde_json::Map::new()));
+                // Try Format 2: {"name": "...", "arguments": {...}} or {"tool_name": "...", "tool_args": {...}}
+                if let Some(name) = extract_tool_name(&parsed) {
+                    let arguments = extract_arguments(&parsed);
                     
-                    let (server, tool) = parse_combined_tool_name(name);
+                    let (server, tool) = parse_combined_tool_name(&name);
                     calls.push(ParsedToolCall {
                         server,
                         tool,
@@ -155,12 +157,10 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                         let fixed_json = fix_llm_json(&balanced_json);
                         
                         if let Ok(parsed) = serde_json::from_str::<Value>(&fixed_json) {
-                            if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
-                                let arguments = parsed.get("arguments")
-                                    .cloned()
-                                    .unwrap_or(Value::Object(serde_json::Map::new()));
+                            if let Some(name) = extract_tool_name(&parsed) {
+                                let arguments = extract_arguments(&parsed);
                                 
-                                let (server, tool) = parse_combined_tool_name(name);
+                                let (server, tool) = parse_combined_tool_name(&name);
                                 calls.push(ParsedToolCall {
                                     server,
                                     tool,
@@ -170,6 +170,111 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+    
+    // Fallback: check for Braintrust-style <function=name>{...}</function> format (Llama)
+    if calls.is_empty() {
+        calls = parse_braintrust_function_calls(content);
+    }
+    
+    // Fallback: check for markdown code blocks containing JSON tool calls
+    // This handles smaller models that output ```json {...} ``` instead of <tool_call>
+    if calls.is_empty() {
+        calls = parse_markdown_json_tool_calls(content);
+    }
+    
+    calls
+}
+
+/// Parse Braintrust-style function calls: <function=get_weather>{"location": "Tokyo"}</function>
+/// This format is used by some Llama 3.x recipes
+fn parse_braintrust_function_calls(content: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+    
+    // Match <function=name>{...}</function>
+    let re = Regex::new(r"(?s)<function=([^>]+)>\s*(\{.*?\})\s*</function>").ok();
+    
+    if let Some(re) = re {
+        for cap in re.captures_iter(content) {
+            let function_name = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+            let json_str = cap.get(2).map(|m| m.as_str().trim()).unwrap_or("{}");
+            
+            if function_name.is_empty() {
+                continue;
+            }
+            
+            let fixed_json = fix_llm_json(json_str);
+            let arguments = serde_json::from_str::<Value>(&fixed_json)
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+            
+            let raw = cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
+            let (server, tool) = parse_combined_tool_name(function_name);
+            
+            println!("[parse_braintrust_function_calls] Found tool call: {} (server: {})", tool, server);
+            
+            calls.push(ParsedToolCall {
+                server,
+                tool,
+                arguments,
+                raw,
+            });
+        }
+    }
+    
+    calls
+}
+
+/// Parse tool calls from markdown JSON code blocks.
+/// Handles formats like:
+/// ```json
+/// {"name": "tool_name", "arguments": {...}}
+/// {"tool_name": "...", "tool_args": {...}}  // GPT-OSS
+/// {"name": "...", "parameters": {...}}       // Llama
+/// ```
+/// This is a fallback for smaller models that ignore <tool_call> format instructions.
+fn parse_markdown_json_tool_calls(content: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+    
+    // Match markdown code blocks: ```json ... ``` or ``` ... ```
+    // (?s) for DOTALL mode, optional language specifier (json, etc.)
+    let code_block_re = Regex::new(r"(?s)```(?:json)?\s*\n?(.*?)\n?```").unwrap();
+    
+    for cap in code_block_re.captures_iter(content) {
+        if let Some(json_match) = cap.get(1) {
+            let json_str = json_match.as_str().trim();
+            
+            // Skip if it doesn't look like a tool call JSON (must have name-like field)
+            if !json_str.contains("\"name\"") && !json_str.contains("\"tool_name\"") {
+                continue;
+            }
+            
+            let fixed_json = fix_llm_json(json_str);
+            
+            if let Ok(parsed) = serde_json::from_str::<Value>(&fixed_json) {
+                let raw = cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
+                
+                // Check if this looks like a tool call (has name-like field)
+                if let Some(name) = extract_tool_name(&parsed) {
+                    // Skip if it doesn't look like a tool name (e.g., just random JSON)
+                    // Tool names should be simple identifiers, not long strings
+                    if name.len() > 100 || name.contains('\n') {
+                        continue;
+                    }
+                    
+                    let arguments = extract_arguments(&parsed);
+                    let (server, tool) = parse_combined_tool_name(&name);
+                    
+                    println!("[parse_markdown_json_tool_calls] Found tool call in code block: {} (server: {})", tool, server);
+                    
+                    calls.push(ParsedToolCall {
+                        server,
+                        tool,
+                        arguments,
+                        raw,
+                    });
                 }
             }
         }
@@ -218,11 +323,12 @@ pub fn parse_gemini_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     calls
 }
 
-/// Parse Granite <function_call> format
+/// Parse Granite <function_call> format (also used by Gemma)
+/// Handles JSON inside <function_call> tags with flexible field names
 pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
     
-    // Granite uses <function_call> tags
+    // Granite/Gemma uses <function_call> tags
     let re = Regex::new(r"(?s)<function_call>\s*(.*?)\s*</function_call>").ok();
     
     if let Some(re) = re {
@@ -231,14 +337,13 @@ pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                 let call_content = inner.as_str().trim();
                 
                 // Try parsing as JSON first
-                if let Ok(parsed) = serde_json::from_str::<Value>(call_content) {
-                    if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
-                        let arguments = parsed.get("arguments")
-                            .or_else(|| parsed.get("parameters"))
-                            .cloned()
-                            .unwrap_or(Value::Object(serde_json::Map::new()));
+                let fixed_json = fix_llm_json(call_content);
+                if let Ok(parsed) = serde_json::from_str::<Value>(&fixed_json) {
+                    // Use helper functions for flexible field name extraction
+                    if let Some(name) = extract_tool_name(&parsed) {
+                        let arguments = extract_arguments(&parsed);
+                        let (server, tool) = parse_combined_tool_name(&name);
                         
-                        let (server, tool) = parse_combined_tool_name(name);
                         calls.push(ParsedToolCall {
                             server,
                             tool,
@@ -373,8 +478,44 @@ fn fix_llm_json(json_str: &str) -> String {
     result
 }
 
+/// Extract tool name from parsed JSON, supporting multiple formats:
+/// - `name` (standard)
+/// - `tool_name` (GPT-OSS legacy)
+fn extract_tool_name(parsed: &Value) -> Option<String> {
+    // Try "name" first (standard format)
+    if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
+        return Some(name.to_string());
+    }
+    // Try "tool_name" (GPT-OSS legacy format)
+    if let Some(name) = parsed.get("tool_name").and_then(|v| v.as_str()) {
+        return Some(name.to_string());
+    }
+    None
+}
+
+/// Extract arguments from parsed JSON, supporting multiple formats:
+/// - `arguments` (standard)
+/// - `parameters` (Llama format)
+/// - `tool_args` (GPT-OSS legacy)
+fn extract_arguments(parsed: &Value) -> Value {
+    // Try "arguments" first (standard format)
+    if let Some(args) = parsed.get("arguments") {
+        return args.clone();
+    }
+    // Try "parameters" (Llama format)
+    if let Some(args) = parsed.get("parameters") {
+        return args.clone();
+    }
+    // Try "tool_args" (GPT-OSS legacy format)
+    if let Some(args) = parsed.get("tool_args") {
+        return args.clone();
+    }
+    // Default to empty object
+    Value::Object(serde_json::Map::new())
+}
+
 /// Parse a combined "server___tool" name into (server, tool)
-fn parse_combined_tool_name(combined: &str) -> (String, String) {
+pub fn parse_combined_tool_name(combined: &str) -> (String, String) {
     let parts: Vec<&str> = combined.splitn(2, "___").collect();
     if parts.len() == 2 {
         (parts[0].to_string(), parts[1].to_string())
@@ -455,6 +596,120 @@ Done."#;
         let result = format_tool_result(&call, "Hello, World!", false, ToolFormat::Hermes);
         assert!(result.contains("<tool_response>"));
         assert!(result.contains("Hello, World!"));
+    }
+    
+    #[test]
+    fn test_parse_markdown_json_tool_call() {
+        // Test case based on actual model output
+        let content = r#"To calculate 17 * 23 + 456, I'll use the code_execution tool.
+
+```json
+{
+  "name": "code_execution",
+  "arguments": {
+    "code": ["result = 17 * 23 + 456", "print(f'Answer: {result}')"]
+  }
+}
+```
+"#;
+        
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1, "Expected 1 tool call, found {}", calls.len());
+        assert_eq!(calls[0].server, "unknown");
+        assert_eq!(calls[0].tool, "code_execution");
+        assert!(calls[0].arguments.get("code").is_some());
+    }
+    
+    #[test]
+    fn test_parse_markdown_json_without_language() {
+        // Test markdown code block without language specifier
+        let content = r#"
+```
+{"name": "test_tool", "arguments": {"param": "value"}}
+```
+"#;
+        
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "test_tool");
+    }
+    
+    #[test]
+    fn test_parse_markdown_json_ignores_non_tool_json() {
+        // Should not match JSON without "name" field
+        let content = r#"Here's some config:
+
+```json
+{
+  "database": "postgres",
+  "port": 5432
+}
+```
+"#;
+        
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 0, "Should not parse non-tool JSON as tool calls");
+    }
+    
+    #[test]
+    fn test_parse_gpt_oss_legacy_format() {
+        // GPT-OSS uses tool_name and tool_args instead of name and arguments
+        let content = r#"<tool_call>{"tool_name": "get_weather", "tool_args": {"location": "Seattle"}}</tool_call>"#;
+        
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "get_weather");
+        assert_eq!(calls[0].arguments.get("location").and_then(|v| v.as_str()), Some("Seattle"));
+    }
+    
+    #[test]
+    fn test_parse_llama_parameters_format() {
+        // Llama uses "parameters" instead of "arguments"
+        let content = r#"<tool_call>{"name": "search", "parameters": {"query": "rust programming"}}</tool_call>"#;
+        
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "search");
+        assert_eq!(calls[0].arguments.get("query").and_then(|v| v.as_str()), Some("rust programming"));
+    }
+    
+    #[test]
+    fn test_parse_braintrust_function_format() {
+        // Braintrust Llama recipe uses <function=name>{...}</function>
+        let content = r#"Let me check the weather.
+<function=get_weather>{"location": "Tokyo, JP"}</function>
+The weather is..."#;
+        
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "get_weather");
+        assert_eq!(calls[0].arguments.get("location").and_then(|v| v.as_str()), Some("Tokyo, JP"));
+    }
+    
+    #[test]
+    fn test_parse_gemma_function_call_format() {
+        // Gemma uses <function_call> tags like Granite
+        let content = r#"<function_call>{"name": "get_product_details", "arguments": {"product_id": "1234"}}</function_call>"#;
+        
+        let calls = parse_granite_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "get_product_details");
+        assert_eq!(calls[0].arguments.get("product_id").and_then(|v| v.as_str()), Some("1234"));
+    }
+    
+    #[test]
+    fn test_parse_markdown_gpt_oss_format() {
+        // GPT-OSS in markdown code block with legacy field names
+        let content = r#"
+```json
+{"tool_name": "calculate", "tool_args": {"expression": "2 + 2"}}
+```
+"#;
+        
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "calculate");
+        assert_eq!(calls[0].arguments.get("expression").and_then(|v| v.as_str()), Some("2 + 2"));
     }
 }
 

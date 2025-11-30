@@ -136,12 +136,23 @@ impl PythonActor {
         input: CodeExecutionInput,
         _context: ExecutionContext,
     ) -> Result<CodeExecutionOutput, String> {
+        use std::io::Write;
+        
         let start_time = Instant::now();
         
+        println!("[PythonActor] ========== EXECUTE CODE START ==========");
         println!("[PythonActor] Executing code ({} lines)", input.code.len());
+        for (i, line) in input.code.iter().enumerate() {
+            println!("[PythonActor]   {}: {}", i + 1, line);
+        }
+        let _ = std::io::stdout().flush();
         
         // Validate input
+        println!("[PythonActor] Validating input...");
+        let _ = std::io::stdout().flush();
         crate::tools::code_execution::CodeExecutionExecutor::validate_input(&input)?;
+        println!("[PythonActor] Input validated");
+        let _ = std::io::stdout().flush();
         
         // Get available tools from registry
         let available_tools = self.get_available_tools().await;
@@ -168,10 +179,20 @@ impl PythonActor {
                 ));
             }
             
-            println!("[PythonActor] Execution round {}", round);
+            println!("[PythonActor] ========== Execution round {} ==========", round);
+            println!("[PythonActor] Calling python_sandbox::execute...");
+            let _ = std::io::stdout().flush();
             
             // Execute the Python code using the sandbox
             let result = python_sandbox::execute(&request);
+            
+            println!("[PythonActor] python_sandbox::execute returned");
+            println!("[PythonActor] Status: {:?}", result.status);
+            println!("[PythonActor] stdout ({} chars): {}", result.stdout.len(), result.stdout);
+            if !result.stderr.is_empty() {
+                println!("[PythonActor] stderr: {}", result.stderr);
+            }
+            let _ = std::io::stdout().flush();
             
             // Accumulate stdout/stderr
             output.stdout.push_str(&result.stdout);
@@ -234,6 +255,12 @@ impl PythonActor {
             output.stdout.truncate(MAX_OUTPUT_SIZE);
             output.stdout.push_str("\n... [output truncated]");
         }
+        
+        println!("[PythonActor] ========== EXECUTE CODE COMPLETE ==========");
+        println!("[PythonActor] Success: {}, Duration: {}ms, Tool calls: {}", 
+            output.success, output.duration_ms, output.tool_calls_made);
+        println!("[PythonActor] Final stdout ({} chars): {}", output.stdout.len(), &output.stdout);
+        let _ = std::io::stdout().flush();
         
         Ok(output)
     }

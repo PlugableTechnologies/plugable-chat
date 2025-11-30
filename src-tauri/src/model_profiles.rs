@@ -360,8 +360,8 @@ Once discovered, tools become available as Python functions in code execution.
         let mut prompt = String::from("You are a helpful assistant.\n\n");
         
         prompt.push_str("## Tool Calling\n\n");
-        prompt.push_str("When you need to use a tool, output ONLY a JSON object in this exact format:\n");
-        prompt.push_str("{\"name\": \"tool_name\", \"arguments\": {\"arg1\": \"value1\"}}\n\n");
+        prompt.push_str("When you need to use a tool, output ONLY in this exact format:\n");
+        prompt.push_str("<function_call>{\"name\": \"tool_name\", \"arguments\": {\"arg1\": \"value1\"}}</function_call>\n\n");
         prompt.push_str("Do not include any other text when making a tool call.\n\n");
         
         if options.code_mode_enabled {

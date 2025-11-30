@@ -1,15 +1,104 @@
 use tokio::sync::mpsc;
-use crate::protocol::{FoundryMsg, CachedModel, ModelInfo, ModelFamily, ToolFormat, ReasoningFormat, ChatMessage, OpenAITool};
+use crate::protocol::{FoundryMsg, CachedModel, ModelInfo, ModelFamily, ToolFormat, ReasoningFormat, ChatMessage, OpenAITool, ParsedToolCall};
 use serde_json::{json, Value};
 use tokio::process::Command;
 use std::time::Duration;
 use std::sync::Arc;
+use std::collections::HashMap;
 use tokio::time::{sleep, timeout};
 use tauri::{AppHandle, Emitter};
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
+use crate::tool_adapters::parse_combined_tool_name;
 
 /// Target embedding dimension (must match LanceDB schema)
 const EMBEDDING_DIM: usize = 384;
+
+/// Accumulator for OpenAI-style streaming tool calls.
+/// 
+/// In the OpenAI streaming format, tool calls arrive incrementally:
+/// - First chunk contains `id`, `type`, and `function.name`
+/// - Subsequent chunks contain `function.arguments` fragments
+/// - Multiple tool calls are indexed by their `index` field
+#[derive(Default)]
+struct StreamingToolCalls {
+    /// Map of index -> (id, name, accumulated_arguments)
+    calls: HashMap<usize, (String, String, String)>,
+}
+
+impl StreamingToolCalls {
+    /// Process a delta.tool_calls array from a streaming chunk
+    fn process_delta(&mut self, tool_calls: &[Value]) {
+        for tc in tool_calls {
+            let index = tc["index"].as_u64().unwrap_or(0) as usize;
+            let entry = self.calls.entry(index).or_insert_with(|| {
+                (String::new(), String::new(), String::new())
+            });
+            
+            // First chunk has id/name
+            if let Some(id) = tc["id"].as_str() {
+                entry.0 = id.to_string();
+            }
+            if let Some(name) = tc["function"]["name"].as_str() {
+                entry.1 = name.to_string();
+            }
+            // Accumulate arguments (streamed incrementally)
+            if let Some(args) = tc["function"]["arguments"].as_str() {
+                entry.2.push_str(args);
+            }
+        }
+    }
+    
+    /// Check if any tool calls have been accumulated
+    fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+    }
+    
+    /// Convert accumulated tool calls to ParsedToolCall format
+    fn into_parsed_calls(self) -> Vec<ParsedToolCall> {
+        let mut result = Vec::new();
+        
+        // Sort by index to maintain order
+        let mut indexed: Vec<_> = self.calls.into_iter().collect();
+        indexed.sort_by_key(|(idx, _)| *idx);
+        
+        for (_index, (_id, name, arguments_str)) in indexed {
+            // Skip entries without a name (incomplete)
+            if name.is_empty() {
+                continue;
+            }
+            
+            // Parse the accumulated arguments JSON
+            let arguments = if arguments_str.is_empty() {
+                Value::Object(serde_json::Map::new())
+            } else {
+                serde_json::from_str(&arguments_str).unwrap_or_else(|e| {
+                    println!("[StreamingToolCalls] Failed to parse arguments for {}: {}", name, e);
+                    println!("[StreamingToolCalls] Raw arguments: {}", arguments_str);
+                    Value::Object(serde_json::Map::new())
+                })
+            };
+            
+            // Parse the tool name (may be "server___tool" format)
+            let (server, tool) = parse_combined_tool_name(&name);
+            
+            // Build raw representation for display
+            let raw = format!(
+                "<tool_call>{{\"name\": \"{}\", \"arguments\": {}}}</tool_call>",
+                name,
+                serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
+            );
+            
+            result.push(ParsedToolCall {
+                server,
+                tool,
+                arguments,
+                raw,
+            });
+        }
+        
+        result
+    }
+}
 
 /// Build a chat request body with model-family-specific parameters
 fn build_chat_request_body(
@@ -421,11 +510,12 @@ impl FoundryActor {
                                     } else {
                                         // Success - stream the response
                                         let mut buffer = String::new();
+                                        let mut streaming_tool_calls = StreamingToolCalls::default();
                                         println!("Foundry stream started.");
                                         
-                                        // Note: In streaming mode, Foundry Local provides tool calls in the 
-                                        // content field using Hermes-style <tool_call> XML format, not in the
-                                        // structured tool_calls array. Our text-based parser handles this.
+                                        // Note: Tool calls can arrive in two formats:
+                                        // 1. Text-based: in content field as <tool_call>JSON</tool_call>
+                                        // 2. Native OpenAI: in delta.tool_calls array (accumulated here)
                                         
                                         while let Ok(Some(chunk)) = resp.chunk().await {
                                             if let Ok(s) = String::from_utf8(chunk.to_vec()) {
@@ -450,9 +540,30 @@ impl FoundryActor {
                                                                     let _ = respond_to_clone.send(content.to_string());
                                                                 }
                                                             }
+                                                            
+                                                            // Accumulate native OpenAI tool calls (delta.tool_calls)
+                                                            if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
+                                                                streaming_tool_calls.process_delta(tool_calls);
+                                                            }
                                                         }
                                                     }
                                                 }
+                                            }
+                                        }
+                                        
+                                        // After stream ends, emit any accumulated native tool calls as text
+                                        // so the existing agentic loop parser can detect them
+                                        if !streaming_tool_calls.is_empty() {
+                                            let native_calls = streaming_tool_calls.into_parsed_calls();
+                                            println!("[FoundryActor] Emitting {} native tool calls as text", native_calls.len());
+                                            for call in &native_calls {
+                                                // Emit in <tool_call> format for parser compatibility
+                                                let tool_call_text = format!(
+                                                    "\n<tool_call>{{\"name\": \"{}\", \"arguments\": {}}}</tool_call>\n",
+                                                    call.tool,
+                                                    serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string())
+                                                );
+                                                let _ = respond_to_clone.send(tool_call_text);
                                             }
                                         }
                                         

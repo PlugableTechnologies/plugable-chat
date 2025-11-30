@@ -99,18 +99,34 @@ async fn execute_code_execution(
     tool_registry: SharedToolRegistry,
     python_tx: &mpsc::Sender<PythonMsg>,
 ) -> Result<CodeExecutionOutput, String> {
+    // Log the code about to be executed
+    println!("[code_execution] exec_id={}", exec_id);
+    println!("[code_execution] Code to execute ({} lines):", input.code.len());
+    for (i, line) in input.code.iter().enumerate() {
+        println!("[code_execution]   {}: {}", i + 1, line);
+    }
+    // Flush stdout to ensure logs appear immediately
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    
     // Get available tools for the execution context
     let available_tools = {
         let registry = tool_registry.read().await;
         registry.get_visible_tools()
     };
     
+    println!("[code_execution] Available tools: {}", available_tools.len());
+    let _ = std::io::stdout().flush();
+    
     // Create execution context
     let context = CodeExecutionExecutor::create_context(
-        exec_id,
+        exec_id.clone(),
         available_tools,
         input.context.clone(),
     );
+    
+    println!("[code_execution] Sending to Python actor...");
+    let _ = std::io::stdout().flush();
     
     // Send to Python actor for execution
     let (respond_to, rx) = oneshot::channel();
@@ -120,7 +136,15 @@ async fn execute_code_execution(
         respond_to,
     }).await.map_err(|e| format!("Failed to send to Python actor: {}", e))?;
     
-    rx.await.map_err(|_| "Python actor died".to_string())?
+    println!("[code_execution] Waiting for Python actor response...");
+    let _ = std::io::stdout().flush();
+    
+    let result = rx.await.map_err(|_| "Python actor died".to_string())?;
+    
+    println!("[code_execution] Python execution complete: success={}", result.as_ref().map(|r| r.success).unwrap_or(false));
+    let _ = std::io::stdout().flush();
+    
+    result
 }
 
 /// Helper to execute a single tool call via McpHostActor
@@ -282,7 +306,11 @@ async fn run_agentic_loop(
         
         for (idx, call) in tool_calls.iter().enumerate() {
             // Resolve server ID if unknown
-            let resolved_server = if call.server == "unknown" {
+            // Built-in tools (code_execution, tool_search) use "builtin" as their server
+            let resolved_server = if is_builtin_tool(&call.tool) {
+                println!("[AgenticLoop] Built-in tool '{}' detected, using 'builtin' server", call.tool);
+                "builtin".to_string()
+            } else if call.server == "unknown" {
                 match resolve_server_for_tool(&mcp_host_tx, &call.tool).await {
                     Some(server_id) => {
                         println!("[AgenticLoop] Resolved unknown server to '{}' for tool '{}'", server_id, call.tool);
@@ -315,10 +343,15 @@ async fn run_agentic_loop(
                 idx + 1, tool_calls.len(), resolved_call.server, resolved_call.tool);
             
             // Check if this server allows auto-approve
-            let auto_approve = server_configs.iter()
-                .find(|s| s.id == resolved_call.server)
-                .map(|s| s.auto_approve_tools)
-                .unwrap_or(false);
+            // Built-in tools are always auto-approved
+            let auto_approve = if is_builtin_tool(&resolved_call.tool) {
+                true
+            } else {
+                server_configs.iter()
+                    .find(|s| s.id == resolved_call.server)
+                    .map(|s| s.auto_approve_tools)
+                    .unwrap_or(false)
+            };
             
             if !auto_approve {
                 println!("[AgenticLoop] Server {} requires manual approval, emitting pending event", resolved_call.server);

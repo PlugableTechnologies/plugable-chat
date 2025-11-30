@@ -51,3 +51,99 @@
   - **Guardrail**: When modifying the schema (adding fields like `messages`, `pinned`, etc.), you must handle migration. The current approach is destructive—consider implementing proper data migration if preserving history is critical.
 - **Common Symptom**: `RecordBatch` errors like `number of columns(6) must match number of fields(4)` indicate a schema mismatch between code and persisted table.
 - **Debugging**: Check terminal logs for `VectorActor: Schema mismatch detected!` or `VectorActor: Table schema is up to date`.
+
+## Model-Specific Tool Calling Architecture
+
+The system supports multiple model families with different tool calling behaviors. Model-specific handling flows through four layers:
+
+### 1. Model Profiles (`src-tauri/src/model_profiles.rs`)
+
+Each model has a `ModelProfile` that defines its capabilities:
+- **`ModelFamily`**: `GptOss`, `Phi`, `Gemma`, `Granite`, `Generic`
+- **`ToolFormat`**: How the model outputs tool calls
+  - `OpenAI`: Native `tool_calls` array in streaming response
+  - `Hermes`: `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` XML tags
+  - `Granite`: `<function_call>...</function_call>` XML tags
+  - `Gemini`: `function_call` JSON format
+  - `TextBased`: Generic JSON detection (fallback)
+- **`ReasoningFormat`**: `None`, `ThinkTags`, `ThinkingTags`, `ChannelBased`
+
+Profile resolution: `resolve_profile(model_name)` matches model ID patterns to profiles.
+
+### 2. Execution Parameters (`src-tauri/src/actors/foundry_actor.rs`)
+
+The `build_chat_request_body()` function sets model-family-specific parameters:
+- **GptOss**: `max_tokens=16384`, `temperature=0.7`, native tools
+- **Phi**: Supports `reasoning_effort` parameter when reasoning model
+- **Gemma**: `top_k=40` for controlled randomness
+- **Granite**: `repetition_penalty=1.05`
+
+Native tools are included in the request when `model_info.tool_calling == true`.
+
+### 3. System Prompt Building (`src-tauri/src/lib.rs`)
+
+`build_system_prompt()` constructs tool instructions based on available tools:
+- Always documents `code_execution` (built-in Python sandbox)
+- Adds `tool_search` when MCP servers are connected
+- Includes tool calling format instructions (though smaller models may ignore them)
+
+The system prompt tells models to use: `<tool_call>{"name": "TOOL_NAME", "arguments": {...}}</tool_call>`
+
+### 4. Response Parsing (`src-tauri/src/tool_adapters.rs`)
+
+`parse_tool_calls_for_model()` routes to the appropriate parser:
+
+```
+ToolFormat::OpenAI   → parse_hermes_tool_calls() (fallback to text)
+ToolFormat::Hermes   → parse_hermes_tool_calls()
+ToolFormat::Granite  → parse_granite_tool_calls()
+ToolFormat::Gemini   → parse_gemini_tool_calls()
+ToolFormat::TextBased → parse_granite_tool_calls() (Gemma uses <function_call>)
+```
+
+**Flexible field name extraction**:
+- Tool name: `name` (standard) or `tool_name` (GPT-OSS legacy)
+- Arguments: `arguments` (standard), `parameters` (Llama), or `tool_args` (GPT-OSS)
+
+**Fallback chain** (each parser tries these in order):
+1. Native format tags (`<tool_call>`, `<function_call>`, etc.)
+2. Unclosed tags (streaming incomplete)
+3. Braintrust format: `<function=name>{...}</function>` (Llama recipes)
+4. Markdown JSON code blocks (` ```json ... ``` `) — for smaller models that ignore format instructions
+
+**Native OpenAI streaming** (`delta.tool_calls`):
+- Accumulated by `StreamingToolCalls` in `foundry_actor.rs`
+- Converted to `<tool_call>` text at stream end for parser compatibility
+
+### 5. Agentic Loop Processing (`src-tauri/src/lib.rs`)
+
+The `run_agentic_loop()` function handles tool execution:
+
+1. **Server Resolution**: 
+   - Built-in tools (`code_execution`, `tool_search`) → `"builtin"` server
+   - MCP tools → resolved via `resolve_server_for_tool()`
+
+2. **Auto-Approval**:
+   - Built-in tools: Always auto-approved
+   - MCP tools: Check `server_configs[].auto_approve_tools`
+
+3. **Execution**:
+   - `code_execution` → `execute_code_execution()` → `PythonActor`
+   - `tool_search` → `execute_tool_search()` → `ToolRegistry`
+   - MCP tools → `execute_tool_internal()` → `McpHostActor`
+
+4. **Result Formatting**: `format_tool_result()` formats results per `ToolFormat`
+
+### Debugging Tool Calls
+
+Key log prefixes to watch:
+- `[FoundryActor]` - Request building, model capabilities
+- `[AgenticLoop]` - Tool detection, server resolution, execution
+- `[parse_markdown_json_tool_calls]` - Fallback JSON parsing
+- `[code_execution]` - Python code about to execute
+- `[PythonActor]` - Sandbox execution details
+
+**Common Issues**:
+- "Could not resolve server for tool" → Tool not recognized as built-in or MCP
+- "No tool calls detected" → Model output doesn't match any parser format
+- Logs appear to hang → Check `std::io::stdout().flush()` is called after prints
