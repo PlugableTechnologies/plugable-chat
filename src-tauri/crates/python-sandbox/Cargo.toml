@@ -1,0 +1,33 @@
+[package]
+name = "python-sandbox"
+version = "0.1.0"
+edition = "2021"
+description = "Sandboxed Python execution environment using RustPython"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# RustPython VM for embedded Python execution
+# Need compiler feature for vm.compile() and freeze-stdlib for built-in modules
+rustpython-vm = { version = "0.4", default-features = false, features = ["compiler", "freeze-stdlib"] }
+rustpython-stdlib = { version = "0.4", default-features = false }
+rustpython-compiler = { version = "0.4", default-features = false }
+rustpython-derive = { version = "0.4" }
+
+# Serialization for host-WASM communication
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# UUID for tool call IDs
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# WASI-specific dependencies if needed
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+

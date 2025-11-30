@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/python-sandbox"]
+
 [package]
 name = "plugable-chat"
 version = "0.1.0"
@@ -40,6 +43,19 @@ dirs = "5"
 
 # Regex for parsing tool calls
 regex = "1"
+
+# Lazy static for profile registry
+lazy_static = "1.4"
+
+# WASM runtime for Python sandbox
+wasmtime = "22"
+wasmtime-wasi = "22"
+
+# Async channel for WASM callbacks  
+async-channel = "2"
+
+# Python sandbox for code execution
+python-sandbox = { path = "crates/python-sandbox" }
 
 [dependencies.tauri-plugin-opener]
 version = "2"

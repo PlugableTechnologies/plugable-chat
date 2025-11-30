@@ -4,6 +4,167 @@ use std::sync::Arc;
 use fastembed::TextEmbedding;
 use regex::Regex;
 
+// ============ Tool Schema with Code Mode Extensions ============
+
+/// Extended tool schema supporting code mode features
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSchema {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+    /// Tool type identifier (e.g., "code_execution_20250825", "tool_search_20251201")
+    #[serde(default)]
+    pub tool_type: Option<String>,
+    /// Which tool types are allowed to call this tool (e.g., ["code_execution_20250825"])
+    #[serde(default)]
+    pub allowed_callers: Option<Vec<String>>,
+    /// Whether this tool should be deferred (not shown initially, discovered via tool_search)
+    #[serde(default)]
+    pub defer_loading: bool,
+    /// Precomputed embedding for semantic tool search
+    #[serde(skip)]
+    pub embedding: Option<Vec<f32>>,
+}
+
+impl ToolSchema {
+    /// Create a new tool schema with minimal required fields
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            tool_type: None,
+            allowed_callers: None,
+            defer_loading: false,
+            embedding: None,
+        }
+    }
+    
+    /// Check if this tool can be called by a given caller type
+    pub fn can_be_called_by(&self, caller_type: Option<&str>) -> bool {
+        match (&self.allowed_callers, caller_type) {
+            (None, _) => true, // No restrictions
+            (Some(allowed), Some(caller)) => allowed.iter().any(|a| a == caller),
+            (Some(_), None) => false, // Has restrictions but no caller type specified
+        }
+    }
+    
+    /// Check if this is the code_execution built-in tool
+    pub fn is_code_execution(&self) -> bool {
+        self.tool_type.as_deref() == Some("code_execution_20250825")
+    }
+    
+    /// Check if this is the tool_search built-in tool
+    pub fn is_tool_search(&self) -> bool {
+        self.tool_type.as_deref() == Some("tool_search_20251201")
+    }
+}
+
+// ============ Prompt Building Options ============
+
+/// Reasoning style for prompt building
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningStyle {
+    #[default]
+    Default,
+    EncourageCot,
+    SuppressCot,
+}
+
+/// Options for building model prompts
+#[derive(Debug, Clone, Default)]
+pub struct PromptOptions {
+    /// Whether any tools are available (MCP, internal, or code mode)
+    pub tools_available: bool,
+    /// Whether code mode is enabled (code_execution and tool_search available)
+    pub code_mode_enabled: bool,
+    /// Reasoning style preference
+    pub reasoning_style: ReasoningStyle,
+}
+
+/// Result of building a prompt for a specific model
+#[derive(Debug, Clone)]
+pub struct ModelInput {
+    /// Messages to send to the model
+    pub messages: Vec<ChatMessage>,
+    /// OpenAI-style tools for models that support native tool calling
+    pub tools: Option<Vec<OpenAITool>>,
+    /// Additional request parameters (model-specific)
+    pub extra_params: serde_json::Value,
+}
+
+impl Default for ModelInput {
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            tools: None,
+            extra_params: serde_json::json!({}),
+        }
+    }
+}
+
+// ============ Tool Call Extensions ============
+
+/// Kind of tool call for special handling
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallKind {
+    #[default]
+    Normal,
+    CodeExecution,
+    ToolSearch,
+}
+
+/// Extended parsed tool call with code mode metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendedToolCall {
+    /// Base tool call info
+    pub server: String,
+    pub tool: String,
+    pub arguments: serde_json::Value,
+    pub raw: String,
+    /// Kind of tool call for special handling
+    #[serde(default)]
+    pub kind: ToolCallKind,
+    /// For nested calls: the parent tool that invoked this one
+    #[serde(default)]
+    pub caller: Option<ToolCallCaller>,
+}
+
+/// Information about what invoked a tool call (for nested calls from code_execution)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallCaller {
+    /// Type of the caller (e.g., "code_execution_20250825")
+    pub caller_type: String,
+    /// ID of the parent tool call
+    pub tool_id: String,
+}
+
+impl From<ParsedToolCall> for ExtendedToolCall {
+    fn from(call: ParsedToolCall) -> Self {
+        // Detect kind based on tool name
+        let kind = if call.tool == "code_execution" {
+            ToolCallKind::CodeExecution
+        } else if call.tool == "tool_search" {
+            ToolCallKind::ToolSearch
+        } else {
+            ToolCallKind::Normal
+        };
+        
+        Self {
+            server: call.server,
+            tool: call.tool,
+            arguments: call.arguments,
+            raw: call.raw,
+            kind,
+            caller: None,
+        }
+    }
+}
+
 /// Parsed tool call from assistant response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedToolCall {

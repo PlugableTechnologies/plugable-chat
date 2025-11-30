@@ -49,11 +49,37 @@ export interface ChatSummary {
     pinned: boolean;
 }
 
+// A single tool call execution record for display
+export interface ToolCallRecord {
+    id: string;
+    server: string;
+    tool: string;
+    arguments: Record<string, unknown>;
+    result: string;
+    isError: boolean;
+    durationMs?: number;
+}
+
+// A code execution record for display
+export interface CodeExecutionRecord {
+    id: string;
+    code: string[];
+    stdout: string;
+    stderr: string;
+    success: boolean;
+    durationMs: number;
+    innerToolCalls: ToolCallRecord[];
+}
+
 export interface Message {
     id: string;
     role: 'user' | 'assistant';
     content: string;
     timestamp: number;
+    /** Tool calls made during this assistant message */
+    toolCalls?: ToolCallRecord[];
+    /** Code execution blocks during this assistant message */
+    codeExecutions?: CodeExecutionRecord[];
 }
 
 export interface RagChunk {
@@ -78,10 +104,51 @@ export interface PendingToolApproval {
 }
 
 export interface ToolExecutionState {
-    currentTool: { server: string; tool: string } | null;
+    currentTool: { 
+        server: string; 
+        tool: string; 
+        arguments?: Record<string, unknown>;
+        startTime?: number;
+    } | null;
     lastResult: { server: string; tool: string; result: string; isError: boolean } | null;
     totalIterations: number;
     hadToolCalls: boolean;
+}
+
+// Code execution state for code_execution tool
+export interface CodeExecutionState {
+    /** Whether code is currently running */
+    isRunning: boolean;
+    /** The code being executed */
+    currentCode: string[];
+    /** Number of inner tool calls made during execution */
+    innerToolCalls: number;
+    /** Stdout from the execution */
+    stdout: string;
+    /** Stderr from the execution */
+    stderr: string;
+    /** Whether the execution succeeded */
+    success: boolean | null;
+    /** Duration of execution in milliseconds */
+    durationMs: number;
+}
+
+// Tool search result from tool_search tool
+export interface ToolSearchResult {
+    name: string;
+    description?: string;
+    score: number;
+    server_id: string;
+}
+
+// Tool search state
+export interface ToolSearchState {
+    /** Whether a search is in progress */
+    isSearching: boolean;
+    /** The queries used for the search */
+    queries: string[];
+    /** Results from the search */
+    results: ToolSearchResult[];
 }
 
 interface ChatState {
@@ -161,6 +228,12 @@ interface ChatState {
     toolExecution: ToolExecutionState;
     approveCurrentToolCall: () => Promise<void>;
     rejectCurrentToolCall: () => Promise<void>;
+
+    // Code Execution State (for code_execution built-in tool)
+    codeExecution: CodeExecutionState;
+    
+    // Tool Search State (for tool_search built-in tool)
+    toolSearch: ToolSearchState;
 
     // System-initiated chat (for help messages, onboarding, etc.)
     startSystemChat: (assistantMessage: string, title?: string) => void;
@@ -603,25 +676,59 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 set((state) => ({
                     toolExecution: {
                         ...state.toolExecution,
-                        currentTool: { server: event.payload.server, tool: event.payload.tool },
+                        currentTool: { 
+                            server: event.payload.server, 
+                            tool: event.payload.tool,
+                            arguments: event.payload.arguments,
+                            startTime: Date.now(),
+                        },
                     }
                 }));
             });
 
             const toolResultListener = await listen<ToolResultEvent>('tool-result', (event) => {
                 console.log(`[ChatStore] Tool result: ${event.payload.server}::${event.payload.tool}, error=${event.payload.is_error}`);
-                set((state) => ({
-                    toolExecution: {
-                        ...state.toolExecution,
-                        currentTool: null,
-                        lastResult: {
-                            server: event.payload.server,
-                            tool: event.payload.tool,
-                            result: event.payload.result,
-                            isError: event.payload.is_error,
-                        },
+                set((state) => {
+                    // Calculate duration if we have a start time
+                    const startTime = state.toolExecution.currentTool?.startTime;
+                    const durationMs = startTime ? Date.now() - startTime : undefined;
+                    
+                    // Create tool call record
+                    const toolCallRecord: ToolCallRecord = {
+                        id: `tool-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                        server: event.payload.server,
+                        tool: event.payload.tool,
+                        arguments: state.toolExecution.currentTool?.arguments || {},
+                        result: event.payload.result,
+                        isError: event.payload.is_error,
+                        durationMs,
+                    };
+                    
+                    // Append to last assistant message's toolCalls
+                    const newMessages = [...state.messages];
+                    const lastIdx = newMessages.length - 1;
+                    if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+                        const existingToolCalls = newMessages[lastIdx].toolCalls || [];
+                        newMessages[lastIdx] = {
+                            ...newMessages[lastIdx],
+                            toolCalls: [...existingToolCalls, toolCallRecord],
+                        };
                     }
-                }));
+                    
+                    return {
+                        messages: newMessages,
+                        toolExecution: {
+                            ...state.toolExecution,
+                            currentTool: null,
+                            lastResult: {
+                                server: event.payload.server,
+                                tool: event.payload.tool,
+                                result: event.payload.result,
+                                isError: event.payload.is_error,
+                            },
+                        },
+                    };
+                });
             });
 
             const toolLoopFinishedListener = await listen<ToolLoopFinishedEvent>('tool-loop-finished', (event) => {
@@ -848,6 +955,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (success) {
             set({ pendingToolApproval: null });
         }
+    },
+
+    // Code Execution State (for code_execution built-in tool)
+    codeExecution: {
+        isRunning: false,
+        currentCode: [],
+        innerToolCalls: 0,
+        stdout: '',
+        stderr: '',
+        success: null,
+        durationMs: 0,
+    },
+    
+    // Tool Search State (for tool_search built-in tool)
+    toolSearch: {
+        isSearching: false,
+        queries: [],
+        results: [],
     },
 
     // System-initiated chat for help messages

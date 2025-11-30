@@ -2,13 +2,21 @@ pub mod protocol;
 pub mod actors;
 pub mod settings;
 pub mod tool_adapters;
+pub mod model_profiles;
+pub mod tool_registry;
+pub mod tools;
 
-use protocol::{VectorMsg, FoundryMsg, RagMsg, McpHostMsg, ChatMessage, CachedModel, ModelInfo, ModelFamily, ToolFormat, RagChunk, RagIndexResult, ParsedToolCall, parse_tool_calls, ToolCallsPendingEvent, ToolExecutingEvent, ToolResultEvent, ToolLoopFinishedEvent, OpenAITool};
+use protocol::{VectorMsg, FoundryMsg, RagMsg, McpHostMsg, ChatMessage, CachedModel, ModelInfo, RagChunk, RagIndexResult, ParsedToolCall, parse_tool_calls, ToolCallsPendingEvent, ToolExecutingEvent, ToolResultEvent, ToolLoopFinishedEvent, OpenAITool};
 use tool_adapters::{parse_tool_calls_for_model, format_tool_result};
+use model_profiles::resolve_profile;
+use tool_registry::{SharedToolRegistry, ToolSearchResult, create_shared_registry};
+use tools::tool_search::{ToolSearchExecutor, ToolSearchInput};
+use tools::code_execution::{CodeExecutionInput, CodeExecutionOutput, CodeExecutionExecutor};
 use actors::vector_actor::VectorActor;
 use actors::foundry_actor::FoundryActor;
 use actors::rag_actor::RagActor;
 use actors::mcp_host_actor::{McpHostActor, McpTool, McpToolResult};
+use actors::python_actor::{PythonActor, PythonMsg};
 use settings::{AppSettings, McpServerConfig};
 use tauri::{State, Manager, Emitter};
 use tokio::sync::{mpsc, oneshot};
@@ -34,6 +42,12 @@ struct ActorHandles {
     foundry_tx: mpsc::Sender<FoundryMsg>,
     rag_tx: mpsc::Sender<RagMsg>,
     mcp_host_tx: mpsc::Sender<McpHostMsg>,
+    python_tx: mpsc::Sender<PythonMsg>,
+}
+
+// Shared tool registry state
+struct ToolRegistryState {
+    registry: SharedToolRegistry,
 }
 
 // Shared embedding model for RAG operations
@@ -53,6 +67,61 @@ struct ToolApprovalState {
 
 /// Maximum number of tool call iterations before stopping (safety limit)
 const MAX_TOOL_ITERATIONS: usize = 20;
+
+/// Check if a tool call is for a built-in tool (code_execution or tool_search)
+fn is_builtin_tool(tool_name: &str) -> bool {
+    tool_name == "code_execution" || tool_name == "tool_search"
+}
+
+/// Execute the tool_search built-in tool
+async fn execute_tool_search(
+    input: ToolSearchInput,
+    tool_registry: SharedToolRegistry,
+    embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+) -> Result<(String, Vec<ToolSearchResult>), String> {
+    let executor = ToolSearchExecutor::new(tool_registry.clone(), embedding_model);
+    let output = executor.execute(input).await?;
+    
+    // Materialize discovered tools
+    executor.materialize_results(&output.tools).await;
+    
+    // Format result as JSON for the model
+    let result_json = serde_json::to_string_pretty(&output.tools)
+        .unwrap_or_else(|_| "[]".to_string());
+    
+    Ok((result_json, output.tools))
+}
+
+/// Execute the code_execution built-in tool
+async fn execute_code_execution(
+    input: CodeExecutionInput,
+    exec_id: String,
+    tool_registry: SharedToolRegistry,
+    python_tx: &mpsc::Sender<PythonMsg>,
+) -> Result<CodeExecutionOutput, String> {
+    // Get available tools for the execution context
+    let available_tools = {
+        let registry = tool_registry.read().await;
+        registry.get_visible_tools()
+    };
+    
+    // Create execution context
+    let context = CodeExecutionExecutor::create_context(
+        exec_id,
+        available_tools,
+        input.context.clone(),
+    );
+    
+    // Send to Python actor for execution
+    let (respond_to, rx) = oneshot::channel();
+    python_tx.send(PythonMsg::Execute {
+        input,
+        context,
+        respond_to,
+    }).await.map_err(|e| format!("Failed to send to Python actor: {}", e))?;
+    
+    rx.await.map_err(|_| "Python actor died".to_string())?
+}
 
 /// Helper to execute a single tool call via McpHostActor
 async fn execute_tool_internal(
@@ -120,6 +189,9 @@ async fn run_agentic_loop(
     foundry_tx: mpsc::Sender<FoundryMsg>,
     mcp_host_tx: mpsc::Sender<McpHostMsg>,
     vector_tx: mpsc::Sender<VectorMsg>,
+    python_tx: mpsc::Sender<PythonMsg>,
+    tool_registry: SharedToolRegistry,
+    embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
     pending_approvals: PendingApprovals,
     app_handle: tauri::AppHandle,
     mut full_history: Vec<ChatMessage>,
@@ -129,9 +201,12 @@ async fn run_agentic_loop(
     title: String,
     original_message: String,
     openai_tools: Option<Vec<OpenAITool>>,
-    model_family: ModelFamily,
-    tool_format: ToolFormat,
+    model_name: String,
 ) {
+    // Resolve model profile from model name
+    let profile = resolve_profile(&model_name);
+    let model_family = profile.family;
+    let tool_format = profile.tool_format;
     let mut iteration = 0;
     let mut had_tool_calls = false;
     let mut final_response = String::new();
@@ -324,15 +399,65 @@ async fn run_agentic_loop(
                 arguments: resolved_call.arguments.clone(),
             });
             
-            // Execute the tool
-            let (result_text, is_error) = match execute_tool_internal(&mcp_host_tx, &resolved_call).await {
-                Ok(result) => {
-                    println!("[AgenticLoop] Tool {} succeeded: {} chars", resolved_call.tool, result.len());
-                    (result, false)
+            // Execute the tool - check for built-in tools first
+            let (result_text, is_error) = if is_builtin_tool(&resolved_call.tool) {
+                match resolved_call.tool.as_str() {
+                    "tool_search" => {
+                        // Parse tool_search input
+                        let input: ToolSearchInput = serde_json::from_value(resolved_call.arguments.clone())
+                            .map_err(|e| format!("Invalid tool_search arguments: {}", e))
+                            .unwrap_or(ToolSearchInput { queries: vec![], top_k: 10 });
+                        
+                        match execute_tool_search(input, tool_registry.clone(), embedding_model.clone()).await {
+                            Ok((result, discovered_tools)) => {
+                                println!("[AgenticLoop] tool_search found {} tools", discovered_tools.len());
+                                (result, false)
+                            }
+                            Err(e) => {
+                                println!("[AgenticLoop] tool_search failed: {}", e);
+                                (e, true)
+                            }
+                        }
+                    }
+                    "code_execution" => {
+                        // Parse code_execution input
+                        let input: CodeExecutionInput = serde_json::from_value(resolved_call.arguments.clone())
+                            .map_err(|e| format!("Invalid code_execution arguments: {}", e))
+                            .unwrap_or(CodeExecutionInput { code: vec![], context: None });
+                        
+                        let exec_id = format!("{}-{}-{}", chat_id, iteration, idx);
+                        match execute_code_execution(input, exec_id, tool_registry.clone(), &python_tx).await {
+                            Ok(output) => {
+                                println!("[AgenticLoop] code_execution completed: {} chars stdout", output.stdout.len());
+                                let result = if output.success {
+                                    output.stdout
+                                } else {
+                                    format!("Error: {}", output.stderr)
+                                };
+                                (result, !output.success)
+                            }
+                            Err(e) => {
+                                println!("[AgenticLoop] code_execution failed: {}", e);
+                                (e, true)
+                            }
+                        }
+                    }
+                    _ => {
+                        // Unknown built-in tool
+                        (format!("Unknown built-in tool: {}", resolved_call.tool), true)
+                    }
                 }
-                Err(e) => {
-                    println!("[AgenticLoop] Tool {} failed: {}", resolved_call.tool, e);
-                    (e, true)
+            } else {
+                // Execute MCP tool
+                match execute_tool_internal(&mcp_host_tx, &resolved_call).await {
+                    Ok(result) => {
+                        println!("[AgenticLoop] Tool {} succeeded: {} chars", resolved_call.tool, result.len());
+                        (result, false)
+                    }
+                    Err(e) => {
+                        println!("[AgenticLoop] Tool {} failed: {}", resolved_call.tool, e);
+                        (e, true)
+                    }
                 }
             };
             
@@ -613,6 +738,8 @@ async fn chat(
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
     approval_state: State<'_, ToolApprovalState>,
+    tool_registry_state: State<'_, ToolRegistryState>,
+    embedding_state: State<'_, EmbeddingModelState>,
     app_handle: tauri::AppHandle
 ) -> Result<String, String> {
     let chat_id = chat_id.unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -719,21 +846,21 @@ async fn chat(
         .map_err(|e| e.to_string())?;
     let model_info_list = model_info_rx.await.map_err(|_| "Foundry actor died".to_string())?;
     
-    // Get the current model's family and tool format
-    // Default to Generic/TextBased if model info not available
-    let (model_family, tool_format) = if let Some(first_model) = model_info_list.first() {
-        println!("[Chat] Using model family {:?} with tool format {:?}", first_model.family, first_model.tool_format);
-        (first_model.family, first_model.tool_format)
-    } else {
-        println!("[Chat] No model info available, using Generic/TextBased defaults");
-        (ModelFamily::Generic, ToolFormat::TextBased)
-    };
+    // Get the current model name for profile resolution
+    let model_name = model_info_list.first()
+        .map(|m| m.id.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    
+    println!("[Chat] Using model: {}", model_name);
 
     // Clone handles for the async task
     let foundry_tx = handles.foundry_tx.clone();
     let mcp_host_tx = handles.mcp_host_tx.clone();
     let vector_tx = handles.vector_tx.clone();
+    let python_tx = handles.python_tx.clone();
     let pending_approvals = approval_state.pending.clone();
+    let tool_registry = tool_registry_state.registry.clone();
+    let embedding_model = embedding_state.model.clone();
     let chat_id_task = chat_id.clone();
     let title_task = title.clone();
     let message_task = message.clone();
@@ -745,6 +872,9 @@ async fn chat(
             foundry_tx,
             mcp_host_tx,
             vector_tx,
+            python_tx,
+            tool_registry,
+            embedding_model,
             pending_approvals,
             app_handle,
             full_history,
@@ -754,8 +884,7 @@ async fn chat(
             title_task,
             message_task,
             openai_tools_task,
-            model_family,
-            tool_format,
+            model_name,
         ).await;
     });
 
@@ -1262,9 +1391,10 @@ pub fn run() {
              let (foundry_tx, foundry_rx) = mpsc::channel(32);
              let (rag_tx, rag_rx) = mpsc::channel(32);
              let (mcp_host_tx, mcp_host_rx) = mpsc::channel(32);
+             let (python_tx, python_rx) = mpsc::channel(32);
              
              // Store handles in state
-             app.manage(ActorHandles { vector_tx, foundry_tx, rag_tx, mcp_host_tx });
+             app.manage(ActorHandles { vector_tx, foundry_tx, rag_tx, mcp_host_tx, python_tx });
              
              // Initialize shared embedding model state
              let embedding_model_state = EmbeddingModelState {
@@ -1272,6 +1402,13 @@ pub fn run() {
              };
              let embedding_model_arc = embedding_model_state.model.clone();
              app.manage(embedding_model_state);
+             
+             // Initialize shared tool registry
+             let tool_registry = create_shared_registry();
+             let tool_registry_state = ToolRegistryState {
+                 registry: tool_registry.clone(),
+             };
+             app.manage(tool_registry_state);
              
              // Initialize settings state (load from config file)
              let settings = tauri::async_runtime::block_on(async {
@@ -1320,6 +1457,14 @@ pub fn run() {
              tauri::async_runtime::spawn(async move {
                  println!("Starting MCP Host Actor...");
                  let actor = McpHostActor::new(mcp_host_rx);
+                 actor.run().await;
+             });
+             
+             // Spawn Python Actor for code execution
+             let python_tool_registry = tool_registry.clone();
+             tauri::async_runtime::spawn(async move {
+                 println!("Starting Python Actor...");
+                 let actor = PythonActor::new(python_rx, python_tool_registry);
                  actor.run().await;
              });
              

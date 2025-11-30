@@ -1,11 +1,48 @@
 import { invoke } from './api';
 
+// ============ Tool Schema with Code Mode Extensions ============
+
+// JSON Schema for tool parameters
+export type JSONSchema = Record<string, unknown>;
+
+// Extended tool schema supporting code mode features
+export interface ToolSchema {
+    name: string;
+    description?: string;
+    parameters: JSONSchema;
+    /** Tool type identifier (e.g., "code_execution_20250825", "tool_search_20251201") */
+    tool_type?: string;
+    /** Which tool types are allowed to call this tool (e.g., ["code_execution_20250825"]) */
+    allowed_callers?: string[];
+    /** Whether this tool should be deferred (not shown initially, discovered via tool_search) */
+    defer_loading?: boolean;
+}
+
+// Kind of tool call for special handling
+export type ToolCallKind = 'normal' | 'code_execution' | 'tool_search';
+
 // Parsed tool call from backend
 export interface ParsedToolCall {
     server: string;
     tool: string;
     arguments: Record<string, unknown>;
     raw: string;
+}
+
+// Extended tool call with code mode metadata
+export interface ExtendedToolCall extends ParsedToolCall {
+    /** Kind of tool call for special handling */
+    kind: ToolCallKind;
+    /** For nested calls: the parent tool that invoked this one */
+    caller?: ToolCallCaller;
+}
+
+// Information about what invoked a tool call (for nested calls from code_execution)
+export interface ToolCallCaller {
+    /** Type of the caller (e.g., "code_execution_20250825") */
+    caller_type: string;
+    /** ID of the parent tool call */
+    tool_id: string;
 }
 
 // Tool call execution status

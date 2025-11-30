@@ -91,7 +91,7 @@ pub fn parse_tool_calls_for_model(
 
 /// Parse Hermes-style tool calls: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
 /// This is used by Phi, Qwen, and as a fallback for other formats.
-fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
+pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
     
     // Match <tool_call> with optional whitespace
@@ -179,7 +179,7 @@ fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
 }
 
 /// Parse Gemini function_call format
-fn parse_gemini_tool_calls(content: &str) -> Vec<ParsedToolCall> {
+pub fn parse_gemini_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
     
     // Gemini may output function calls in JSON format
@@ -219,7 +219,7 @@ fn parse_gemini_tool_calls(content: &str) -> Vec<ParsedToolCall> {
 }
 
 /// Parse Granite <function_call> format
-fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
+pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
     
     // Granite uses <function_call> tags
