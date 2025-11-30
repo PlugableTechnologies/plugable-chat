@@ -1,0 +1,8 @@
+# Ignore generated/build files that don't need watching
+target/
+wasm/
+data/
+gen/
+check_output.txt
+*.log
+

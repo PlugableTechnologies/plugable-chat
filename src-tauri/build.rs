@@ -64,7 +64,8 @@ fn find_rustup() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Check if the wasm32-wasi target is installed
+/// Check if the wasm32-wasip1 target is installed
+/// Note: wasm32-wasi was renamed to wasm32-wasip1 in Rust 1.78+
 fn is_wasm_target_installed(rustup: &Path) -> bool {
     let output = Command::new(rustup)
         .args(["target", "list", "--installed"])
@@ -73,27 +74,30 @@ fn is_wasm_target_installed(rustup: &Path) -> bool {
     match output {
         Ok(out) => {
             let installed = String::from_utf8_lossy(&out.stdout);
-            installed.lines().any(|line| line.trim() == "wasm32-wasi")
+            installed.lines().any(|line| {
+                let trimmed = line.trim();
+                trimmed == "wasm32-wasip1" || trimmed == "wasm32-wasi"
+            })
         }
         Err(_) => false,
     }
 }
 
-/// Try to install the wasm32-wasi target via rustup
+/// Try to install the wasm32-wasip1 target via rustup
 fn try_install_wasm_target(rustup: &Path) -> bool {
-    println!("cargo:warning=Installing wasm32-wasi target via rustup...");
+    println!("cargo:warning=Installing wasm32-wasip1 target via rustup...");
     
     let status = Command::new(rustup)
-        .args(["target", "add", "wasm32-wasi"])
+        .args(["target", "add", "wasm32-wasip1"])
         .status();
     
     match status {
         Ok(s) if s.success() => {
-            println!("cargo:warning=Successfully installed wasm32-wasi target");
+            println!("cargo:warning=Successfully installed wasm32-wasip1 target");
             true
         }
         Ok(_) => {
-            println!("cargo:warning=Failed to install wasm32-wasi target");
+            println!("cargo:warning=Failed to install wasm32-wasip1 target");
             false
         }
         Err(e) => {
@@ -120,41 +124,41 @@ fn build_python_sandbox_wasm(manifest_path: &Path) {
         return;
     }
     
-    // Find rustup and check/install the wasm32-wasi target
+    // Find rustup and check/install the wasm32-wasip1 target
     let rustup = match find_rustup() {
         Some(path) => path,
         None => {
-            println!("cargo:warning=rustup not found, cannot auto-install wasm32-wasi target");
+            println!("cargo:warning=rustup not found, cannot auto-install wasm32-wasip1 target");
             println!("cargo:warning=To enable WASM sandboxing, install rustup and run:");
-            println!("cargo:warning=  rustup target add wasm32-wasi");
+            println!("cargo:warning=  rustup target add wasm32-wasip1");
             println!("cargo:warning=");
             println!("cargo:warning=code_execution will use RustPython directly (still sandboxed at Python level)");
             return;
         }
     };
     
-    // Check if wasm32-wasi target is installed, try to install if not
+    // Check if wasm32-wasip1 target is installed, try to install if not
     if !is_wasm_target_installed(&rustup) {
-        println!("cargo:warning=wasm32-wasi target not found, attempting to install...");
+        println!("cargo:warning=wasm32-wasip1 target not found, attempting to install...");
         if !try_install_wasm_target(&rustup) {
             println!("cargo:warning=");
-            println!("cargo:warning=Could not auto-install wasm32-wasi target.");
+            println!("cargo:warning=Could not auto-install wasm32-wasip1 target.");
             println!("cargo:warning=To enable WASM sandboxing, manually run:");
-            println!("cargo:warning=  rustup target add wasm32-wasi");
+            println!("cargo:warning=  rustup target add wasm32-wasip1");
             println!("cargo:warning=");
             println!("cargo:warning=code_execution will use RustPython directly (still sandboxed at Python level)");
             return;
         }
     }
     
-    // Try to build for wasm32-wasi target
+    // Try to build for wasm32-wasip1 target
     println!("cargo:warning=Building python-sandbox for WASM...");
     
     let status = Command::new("cargo")
         .args([
             "build",
             "-p", "python-sandbox",
-            "--target", "wasm32-wasi",
+            "--target", "wasm32-wasip1",
             "--release",
         ])
         .current_dir(manifest_path)
@@ -165,7 +169,7 @@ fn build_python_sandbox_wasm(manifest_path: &Path) {
             // Copy the built WASM to the wasm directory
             let built_wasm = manifest_path
                 .join("target")
-                .join("wasm32-wasi")
+                .join("wasm32-wasip1")
                 .join("release")
                 .join("python_sandbox.wasm");
             

@@ -136,15 +136,34 @@ install_brew_formula() {
 }
 
 # Install Rust via rustup if not already installed
+# Note: We specifically check for rustup, not just rustc/cargo,
+# because rustup is needed to manage targets like wasm32-wasip1
 install_rust() {
-    echo -n "Checking Rust... "
+    echo -n "Checking Rust (rustup)... "
     
-    if command_exists rustc && command_exists cargo; then
+    # First, check if rustup is installed
+    if command_exists rustup; then
         echo -e "${GREEN}already installed${NC}"
         return 0
     fi
     
-    echo -e "${YELLOW}installing...${NC}"
+    # Check if Rust is installed via Homebrew (without rustup)
+    if brew list rust >/dev/null 2>&1; then
+        echo -e "${YELLOW}found Homebrew Rust${NC}"
+        echo "  -> Homebrew Rust must be uninstalled to use rustup (the official Rust installer)"
+        echo "  -> rustup is required for toolchain management (e.g., wasm32-wasip1 target)"
+        echo ""
+        echo -n "  -> Uninstalling Homebrew Rust... "
+        if brew uninstall rust 2>/dev/null; then
+            echo -e "${GREEN}done${NC}"
+        else
+            echo -e "${RED}failed${NC}"
+            echo "  -> Please manually run: brew uninstall rust"
+            return 1
+        fi
+    fi
+    
+    echo -e "  -> ${YELLOW}Installing rustup...${NC}"
     
     # Install via rustup (official method)
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -156,12 +175,40 @@ install_rust() {
         INSTALLED_RUST=true
     fi
     
-    if command_exists rustc && command_exists cargo; then
+    if command_exists rustup && command_exists rustc && command_exists cargo; then
         echo -e "  -> ${GREEN}Installed successfully${NC}"
         INSTALLED_ANYTHING=true
         return 0
     else
         echo -e "  -> ${RED}Installation failed${NC}"
+        return 1
+    fi
+}
+
+# Install the wasm32-wasip1 target for WASM sandboxing
+# Note: wasm32-wasi was renamed to wasm32-wasip1 in Rust 1.78+
+install_wasm_target() {
+    echo -n "Checking wasm32-wasip1 target... "
+    
+    if ! command_exists rustup; then
+        echo -e "${RED}rustup not found, skipping${NC}"
+        return 1
+    fi
+    
+    # Check if target is already installed (check both old and new names)
+    if rustup target list --installed 2>/dev/null | grep -qE "wasm32-wasi(p1)?$"; then
+        echo -e "${GREEN}already installed${NC}"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}installing...${NC}"
+    
+    if rustup target add wasm32-wasip1; then
+        echo -e "  -> ${GREEN}Installed successfully${NC}"
+        return 0
+    else
+        echo -e "  -> ${RED}Installation failed${NC}"
+        echo -e "  -> ${GRAY}(WASM sandboxing will be disabled, but Python sandboxing still works)${NC}"
         return 1
     fi
 }
@@ -201,6 +248,14 @@ verify_commands() {
     echo -n "  cargo: "
     if command_exists cargo; then
         echo -e "${GREEN}$(cargo --version | cut -d' ' -f2)${NC}"
+    else
+        echo -e "${RED}not found${NC}"
+        all_available=false
+    fi
+    
+    echo -n "  rustup: "
+    if command_exists rustup; then
+        echo -e "${GREEN}$(rustup --version 2>/dev/null | head -1 | cut -d' ' -f2)${NC}"
     else
         echo -e "${RED}not found${NC}"
         all_available=false
@@ -250,6 +305,10 @@ install_requirements() {
     if ! install_rust; then
         all_succeeded=false
     fi
+    
+    # Step 4b: wasm32-wasip1 target - Required for WASM sandboxing of Python code execution
+    # This is optional but recommended for enhanced security
+    install_wasm_target  # Don't fail if this doesn't work
     
     # Step 5: Git (usually pre-installed on macOS, but ensure it's available)
     if ! install_brew_formula "git" "Git"; then

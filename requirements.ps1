@@ -115,6 +115,42 @@ function Test-CommandExists {
     }
 }
 
+# Install the wasm32-wasip1 target for WASM sandboxing
+# Note: wasm32-wasi was renamed to wasm32-wasip1 in Rust 1.78+
+function Install-WasmTarget {
+    Write-Host ""
+    Write-Host "Checking wasm32-wasip1 target... " -NoNewline
+    
+    if (-not (Test-CommandExists "rustup")) {
+        Write-Host "rustup not found, skipping" -ForegroundColor Red
+        return
+    }
+    
+    # Check if target is already installed (check both old and new names)
+    $installedTargets = rustup target list --installed 2>&1
+    if ($installedTargets -match "wasm32-wasi(p1)?$") {
+        Write-Host "already installed" -ForegroundColor Green
+        return
+    }
+    
+    Write-Host "installing..." -ForegroundColor Yellow
+    
+    try {
+        rustup target add wasm32-wasip1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  -> Installed successfully" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  -> Installation failed" -ForegroundColor Red
+            Write-Host "  -> (WASM sandboxing will be disabled, but Python sandboxing still works)" -ForegroundColor Gray
+        }
+    }
+    catch {
+        Write-Host "  -> Installation failed: $_" -ForegroundColor Red
+        Write-Host "  -> (WASM sandboxing will be disabled, but Python sandboxing still works)" -ForegroundColor Gray
+    }
+}
+
 # Verify that critical commands are available
 function Test-AllCommands {
     $allAvailable = $true
@@ -157,6 +193,17 @@ function Test-AllCommands {
     Write-Host "  cargo: " -NoNewline
     if (Test-CommandExists "cargo") {
         $version = cargo --version 2>&1
+        $version = ($version -split " ")[1]
+        Write-Host "$version" -ForegroundColor Green
+    }
+    else {
+        Write-Host "not found" -ForegroundColor Red
+        $allAvailable = $false
+    }
+    
+    Write-Host "  rustup: " -NoNewline
+    if (Test-CommandExists "rustup") {
+        $version = rustup --version 2>&1
         $version = ($version -split " ")[1]
         Write-Host "$version" -ForegroundColor Green
     }
@@ -272,6 +319,9 @@ function Install-Requirements {
             rustup default stable
         }
     }
+    
+    # Install wasm32-wasi target for WASM sandboxing (optional but recommended)
+    Install-WasmTarget
     
     # Verify all commands are available
     if (Test-AllCommands) {
