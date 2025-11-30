@@ -32,6 +32,10 @@ pub struct McpServerConfig {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub auto_approve_tools: bool,
+    /// If true, tools from this server are deferred (hidden initially, discovered via tool_search)
+    /// If false (default), tools are active (immediately visible to the model)
+    #[serde(default)]
+    pub defer_tools: bool,
 }
 
 impl McpServerConfig {
@@ -45,6 +49,7 @@ impl McpServerConfig {
             args: Vec::new(),
             env: HashMap::new(),
             auto_approve_tools: false,
+            defer_tools: false,
         }
     }
 }
@@ -96,6 +101,7 @@ fn default_mcp_test_server() -> McpServerConfig {
             args: vec![],
             env: HashMap::new(),
             auto_approve_tools: true,  // Auto-approve for dev testing
+            defer_tools: false,  // Tools immediately visible
         }
     } else {
         // Fall back to cargo run if binary not found
@@ -113,6 +119,7 @@ fn default_mcp_test_server() -> McpServerConfig {
             ],
             env: HashMap::new(),
             auto_approve_tools: true,  // Auto-approve for dev testing
+            defer_tools: false,  // Tools immediately visible
         }
     }
 }
@@ -219,6 +226,7 @@ mod tests {
             args: vec!["server.js".to_string()],
             env: HashMap::from([("DEBUG".to_string(), "true".to_string())]),
             auto_approve_tools: false,
+            defer_tools: false,
         });
 
         let json = serde_json::to_string(&settings).unwrap();

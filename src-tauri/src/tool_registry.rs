@@ -188,6 +188,11 @@ impl ToolRegistry {
             .collect()
     }
     
+    /// Get all domain tools (for semantic search - includes both deferred and non-deferred)
+    pub fn get_all_domain_tools(&self) -> Vec<(&String, &ToolSchema)> {
+        self.domain_tools.iter().collect()
+    }
+    
     /// Get a specific tool by key (server___name)
     pub fn get_tool(&self, key: &str) -> Option<&ToolSchema> {
         // Check internal tools first
@@ -224,9 +229,11 @@ impl ToolRegistry {
         self.materialized_tools.clear();
     }
     
-    /// Perform semantic search over deferred tools
+    /// Perform semantic search over all domain tools
     ///
     /// Returns the top-k tools that match the query embeddings, sorted by score.
+    /// Searches ALL domain tools (both deferred and non-deferred) so models can
+    /// discover relevant tools even if they're already visible.
     pub fn search_tools(
         &self,
         query_embeddings: &[Vec<f32>],
@@ -234,7 +241,7 @@ impl ToolRegistry {
     ) -> Vec<ToolSearchResult> {
         let mut results: Vec<ToolSearchResult> = Vec::new();
         
-        for (key, schema) in self.get_deferred_tools() {
+        for (key, schema) in self.get_all_domain_tools() {
             if let Some(tool_embedding) = self.tool_embeddings.get(key) {
                 // Calculate max cosine similarity across all query embeddings
                 let max_score = query_embeddings

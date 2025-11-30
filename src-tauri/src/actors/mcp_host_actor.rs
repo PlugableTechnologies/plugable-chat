@@ -448,9 +448,10 @@ impl McpHostActor {
                     connection.tools = tools_array.iter()
                         .filter_map(|t| serde_json::from_value(t.clone()).ok())
                         .collect();
-                    println!("McpHostActor: Server {} has {} tools", server_id, connection.tools.len());
+                    let mode = if connection.config.defer_tools { "DEFERRED" } else { "ACTIVE" };
+                    println!("McpHostActor: Server {} has {} tools [{}]", server_id, connection.tools.len(), mode);
                     for tool in &connection.tools {
-                        println!("McpHostActor:   - {}: {}", tool.name, tool.description.as_deref().unwrap_or("(no description)"));
+                        println!("McpHostActor:   - {} [{}]: {}", tool.name, mode, tool.description.as_deref().unwrap_or("(no description)"));
                     }
                 }
             }
@@ -569,7 +570,12 @@ impl McpHostActor {
         
         println!("McpHostActor: get_all_tool_descriptions returning {} servers", result.len());
         for (id, tools) in &result {
-            println!("McpHostActor:   {} has {} tools", id, tools.len());
+            if let Some(conn) = connections.get(id) {
+                let mode = if conn.config.defer_tools { "DEFERRED" } else { "ACTIVE" };
+                println!("McpHostActor:   {} has {} tools [{}]", id, tools.len(), mode);
+            } else {
+                println!("McpHostActor:   {} has {} tools", id, tools.len());
+            }
         }
         
         result
@@ -802,9 +808,10 @@ impl McpHostActor {
         // Clean up - kill the process
         let _ = connection.process.kill().await;
         
-        println!("McpHostActor: Test complete - found {} tools", tools.len());
+        let mode = if config.defer_tools { "DEFERRED" } else { "ACTIVE" };
+        println!("McpHostActor: Test complete - found {} tools [{}]", tools.len(), mode);
         for tool in &tools {
-            println!("McpHostActor: Test -   {}: {}", tool.name, tool.description.as_deref().unwrap_or("(no description)"));
+            println!("McpHostActor: Test -   {} [{}]: {}", tool.name, mode, tool.description.as_deref().unwrap_or("(no description)"));
         }
         
         Ok(tools)

@@ -125,10 +125,11 @@ pub async fn precompute_tool_embeddings(
         .ok_or_else(|| "Embedding model not initialized".to_string())?;
     drop(model_guard);
     
-    // Get all deferred tools that need embeddings
+    // Get all domain tools that need embeddings (both deferred and non-deferred)
+    // This ensures tool_search can find any domain tool, not just deferred ones
     let tools_to_embed: Vec<(String, String)> = {
         let registry_guard = registry.read().await;
-        registry_guard.get_deferred_tools()
+        registry_guard.get_all_domain_tools()
             .iter()
             .map(|(key, schema)| {
                 // Create embedding text from name and description
@@ -143,7 +144,7 @@ pub async fn precompute_tool_embeddings(
     };
     
     if tools_to_embed.is_empty() {
-        println!("[ToolSearch] No deferred tools to embed");
+        println!("[ToolSearch] No domain tools to embed");
         return Ok(0);
     }
     

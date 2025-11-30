@@ -10,7 +10,7 @@ use protocol::{VectorMsg, FoundryMsg, RagMsg, McpHostMsg, ChatMessage, CachedMod
 use tool_adapters::{parse_tool_calls_for_model, format_tool_result};
 use model_profiles::resolve_profile;
 use tool_registry::{SharedToolRegistry, ToolSearchResult, create_shared_registry};
-use tools::tool_search::{ToolSearchExecutor, ToolSearchInput};
+use tools::tool_search::{ToolSearchExecutor, ToolSearchInput, precompute_tool_embeddings};
 use tools::code_execution::{CodeExecutionInput, CodeExecutionOutput, CodeExecutionExecutor};
 use actors::vector_actor::VectorActor;
 use actors::foundry_actor::FoundryActor;
@@ -841,19 +841,41 @@ async fn chat(
         registry.clear_materialized();
         
         for (server_id, tools) in &tool_descriptions {
-            // Register MCP tools in the registry (non-deferred so they're immediately visible)
-            // This makes them available for code_execution to call
-            registry.register_mcp_tools(server_id, tools, false);
+            // Get the defer_tools setting from server config (default to false if not found)
+            let defer = server_configs.iter()
+                .find(|c| c.id == *server_id)
+                .map(|c| c.defer_tools)
+                .unwrap_or(false);
             
-            // Also add to OpenAI tools list for direct model access
-            for tool in tools {
-                openai_tools.push(OpenAITool::from_mcp(server_id, tool));
+            let mode = if defer { "DEFERRED" } else { "ACTIVE" };
+            println!("[Chat] Registering {} tools from {} [{}]", tools.len(), server_id, mode);
+            
+            // Register MCP tools in the registry
+            registry.register_mcp_tools(server_id, tools, defer);
+            
+            // Only add to OpenAI tools list for direct model access if NOT deferred
+            // Deferred tools are discovered via tool_search
+            if !defer {
+                for tool in tools {
+                    openai_tools.push(OpenAITool::from_mcp(server_id, tool));
+                }
             }
         }
         
         let stats = registry.stats();
         println!("[Chat] Tool registry: {} internal, {} domain, {} deferred, {} materialized",
             stats.internal_tools, stats.domain_tools, stats.deferred_tools, stats.materialized_tools);
+    }
+    
+    // Pre-compute embeddings for all domain tools so tool_search can find them
+    if !tool_descriptions.is_empty() {
+        match precompute_tool_embeddings(
+            tool_registry_state.registry.clone(),
+            embedding_state.model.clone(),
+        ).await {
+            Ok(count) => println!("[Chat] Pre-computed embeddings for {} tools", count),
+            Err(e) => println!("[Chat] Warning: Failed to pre-compute tool embeddings: {}", e),
+        }
     }
     
     let has_tools = !openai_tools.is_empty();
