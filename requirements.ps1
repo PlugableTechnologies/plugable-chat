@@ -203,8 +203,17 @@ function Test-AllCommands {
     
     Write-Host "  rustup: " -NoNewline
     if (Test-CommandExists "rustup") {
-        $version = rustup --version 2>&1
-        $version = ($version -split " ")[1]
+        # rustup writes to stderr even on success, which triggers terminating
+        # errors when $ErrorActionPreference = "Stop". Temporarily set to Continue.
+        $previousErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $versionOutput = rustup --version 2>$null
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorPreference
+        }
+        $version = ($versionOutput -split ' ')[1]
         Write-Host "$version" -ForegroundColor Green
     }
     else {
