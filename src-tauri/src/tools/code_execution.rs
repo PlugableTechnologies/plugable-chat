@@ -195,6 +195,15 @@ pub struct CodeExecutionExecutor {
     _placeholder: (),
 }
 
+/// Modules allowed in the Python sandbox (matches python_sandbox::ALLOWED_MODULES)
+const ALLOWED_MODULES: &[&str] = &[
+    "math", "json", "random", "re", "datetime", "collections",
+    "itertools", "functools", "operator", "string", "textwrap",
+    "copy", "types", "typing", "abc", "numbers", "decimal",
+    "fractions", "statistics", "hashlib", "base64", "binascii",
+    "html",
+];
+
 impl CodeExecutionExecutor {
     pub fn new() -> Self {
         Self { _placeholder: () }
@@ -209,11 +218,8 @@ impl CodeExecutionExecutor {
         // Check for obviously problematic patterns
         let code_str = input.code.join("\n");
         
-        // These are soft checks - the WASM sandbox provides real security
+        // These are soft checks - the sandbox provides real security
         let blocked_patterns = [
-            "import os",
-            "import sys",
-            "import subprocess",
             "__import__",
             "eval(",
             "exec(",
@@ -230,7 +236,64 @@ impl CodeExecutionExecutor {
             }
         }
         
+        // Check for imports of disallowed modules and provide helpful error message
+        if let Some(err) = Self::check_imports(&code_str) {
+            return Err(err);
+        }
+        
         Ok(())
+    }
+    
+    /// Check imports and return helpful error if disallowed module is used
+    fn check_imports(code: &str) -> Option<String> {
+        use regex::Regex;
+        
+        // Match various import patterns:
+        // - import foo
+        // - import foo, bar
+        // - import foo as f
+        // - from foo import bar
+        // - from foo.bar import baz
+        let import_re = Regex::new(r"(?m)^\s*(?:import\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\s*,\s*[a-zA-Z_][a-zA-Z0-9_]*)*)|from\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*\s+import)").ok()?;
+        
+        let mut disallowed = Vec::new();
+        
+        for cap in import_re.captures_iter(code) {
+            // Check "import x" style
+            if let Some(modules) = cap.get(1) {
+                for module in modules.as_str().split(',') {
+                    let module = module.split_whitespace().next().unwrap_or("").trim();
+                    if !module.is_empty() && !ALLOWED_MODULES.contains(&module) && module != "builtins" {
+                        disallowed.push(module.to_string());
+                    }
+                }
+            }
+            // Check "from x import" style
+            if let Some(module) = cap.get(2) {
+                let module = module.as_str().trim();
+                if !ALLOWED_MODULES.contains(&module) && module != "builtins" {
+                    disallowed.push(module.to_string());
+                }
+            }
+        }
+        
+        if !disallowed.is_empty() {
+            disallowed.sort();
+            disallowed.dedup();
+            
+            let allowed_list = ALLOWED_MODULES.join(", ");
+            
+            return Some(format!(
+                "Cannot import '{}' - not available in the sandbox. \
+                The sandbox provides a restricted Python environment for safe code execution. \
+                Allowed modules: {}. \
+                For data analysis, use the built-in math, statistics, collections, and itertools modules instead of pandas/numpy.",
+                disallowed.join("', '"),
+                allowed_list
+            ));
+        }
+        
+        None
     }
     
     /// Create an execution context for a code execution request
@@ -283,7 +346,62 @@ mod tests {
             code: vec!["import os".to_string()],
             context: None,
         };
-        assert!(CodeExecutionExecutor::validate_input(&bad_input).is_err());
+        let err = CodeExecutionExecutor::validate_input(&bad_input).unwrap_err();
+        assert!(err.contains("Cannot import 'os'"));
+        assert!(err.contains("Allowed modules:"));
+    }
+    
+    #[test]
+    fn test_blocked_imports_with_helpful_message() {
+        // Test pandas
+        let pandas_input = CodeExecutionInput {
+            code: vec!["import pandas".to_string()],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&pandas_input).unwrap_err();
+        assert!(err.contains("Cannot import 'pandas'"), "Error should mention pandas: {}", err);
+        assert!(err.contains("Allowed modules:"), "Error should list allowed modules: {}", err);
+        assert!(err.contains("math"), "Error should list math as allowed: {}", err);
+        
+        // Test numpy
+        let numpy_input = CodeExecutionInput {
+            code: vec!["import numpy as np".to_string()],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&numpy_input).unwrap_err();
+        assert!(err.contains("Cannot import 'numpy'"), "Error should mention numpy: {}", err);
+        
+        // Test from import
+        let from_input = CodeExecutionInput {
+            code: vec!["from pandas import DataFrame".to_string()],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&from_input).unwrap_err();
+        assert!(err.contains("Cannot import 'pandas'"), "Error should mention pandas: {}", err);
+    }
+    
+    #[test]
+    fn test_allowed_imports() {
+        // These should all be allowed
+        let allowed_imports = vec![
+            "import math",
+            "import json",
+            "from datetime import datetime",
+            "import collections",
+            "from itertools import chain",
+            "import statistics",
+        ];
+        
+        for import_stmt in allowed_imports {
+            let input = CodeExecutionInput {
+                code: vec![import_stmt.to_string()],
+                context: None,
+            };
+            assert!(
+                CodeExecutionExecutor::validate_input(&input).is_ok(),
+                "'{}' should be allowed", import_stmt
+            );
+        }
     }
     
     #[test]

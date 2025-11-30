@@ -219,10 +219,34 @@ function parsePlainText(content: string): MessagePart[] {
 }
 
 /**
+ * Check if a JSON string looks like a tool call
+ * Tool calls have "name" field with a known tool name pattern
+ */
+function looksLikeToolCallJson(jsonStr: string): boolean {
+    // Known tool names that should be treated as tool calls
+    const toolPatterns = [
+        '"name"\\s*:\\s*"code_execution"',
+        '"name"\\s*:\\s*"tool_search"',
+        '"tool_name"\\s*:',
+        '"name"\\s*:\\s*"[^"]+___',  // MCP tool format: server___tool
+    ];
+    
+    // Check if it contains name/arguments structure typical of tool calls
+    const hasToolStructure = /"name"\s*:\s*"/.test(jsonStr) && 
+                            (/"arguments"\s*:/.test(jsonStr) || /"parameters"\s*:/.test(jsonStr) || /"code"\s*:/.test(jsonStr));
+    
+    if (!hasToolStructure) return false;
+    
+    // Check against known patterns
+    return toolPatterns.some(pattern => new RegExp(pattern, 'i').test(jsonStr));
+}
+
+/**
  * Extract tool_call blocks from text content.
  * Handles:
  * - <tool_call>...</tool_call> (standard format)
  * - <function_call>...</function_call> (Granite format)
+ * - ```json { "name": "...", "arguments": {...} } ``` (markdown code blocks)
  * - Unclosed tags during streaming
  * 
  * Returns an array of MessageParts with tool_call extracted from text.
@@ -240,26 +264,38 @@ function extractToolCalls(parts: MessagePart[]): MessagePart[] {
         let current = part.content;
         
         while (current.length > 0) {
-            // Find the next tool_call or function_call tag
+            // Find the next tool_call, function_call tag, or JSON code block
             const toolCallStart = current.indexOf('<tool_call>');
             const functionCallStart = current.indexOf('<function_call>');
             
-            // Determine which comes first (or -1 if neither)
+            // Also look for markdown JSON code blocks that might be tool calls
+            const jsonCodeBlockMatch = current.match(/```(?:json)?\s*\n?\s*(\{[\s\S]*?"name"\s*:[\s\S]*?)\n?\s*```/);
+            const jsonCodeBlockStart = jsonCodeBlockMatch ? current.indexOf(jsonCodeBlockMatch[0]) : -1;
+            
+            // Check for unclosed JSON code block (streaming)
+            const unclosedJsonMatch = !jsonCodeBlockMatch ? current.match(/```(?:json)?\s*\n?\s*(\{[\s\S]*?"name"\s*:[\s\S]*)$/) : null;
+            const unclosedJsonStart = unclosedJsonMatch ? current.indexOf(unclosedJsonMatch[0]) : -1;
+            
+            // Determine which comes first
             let tagStart = -1;
-            let tagType: 'tool_call' | 'function_call' | null = null;
+            let tagType: 'tool_call' | 'function_call' | 'json_block' | 'json_block_unclosed' | null = null;
             let openTagLen = 0;
             let closeTag = '';
             
-            if (toolCallStart !== -1 && (functionCallStart === -1 || toolCallStart < functionCallStart)) {
-                tagStart = toolCallStart;
-                tagType = 'tool_call';
-                openTagLen = 11; // '<tool_call>'.length
-                closeTag = '</tool_call>';
-            } else if (functionCallStart !== -1) {
-                tagStart = functionCallStart;
-                tagType = 'function_call';
-                openTagLen = 15; // '<function_call>'.length
-                closeTag = '</function_call>';
+            // Find the earliest match
+            const candidates = [
+                { start: toolCallStart, type: 'tool_call' as const, openLen: 11, close: '</tool_call>' },
+                { start: functionCallStart, type: 'function_call' as const, openLen: 15, close: '</function_call>' },
+                { start: jsonCodeBlockStart, type: 'json_block' as const, openLen: 0, close: '' },
+                { start: unclosedJsonStart, type: 'json_block_unclosed' as const, openLen: 0, close: '' },
+            ].filter(c => c.start !== -1);
+            
+            if (candidates.length > 0) {
+                const earliest = candidates.reduce((a, b) => a.start < b.start ? a : b);
+                tagStart = earliest.start;
+                tagType = earliest.type;
+                openTagLen = earliest.openLen;
+                closeTag = earliest.close;
             }
             
             if (tagStart === -1) {
@@ -278,7 +314,32 @@ function extractToolCalls(parts: MessagePart[]): MessagePart[] {
                 }
             }
             
-            // Find the closing tag
+            // Handle JSON code blocks specially
+            if (tagType === 'json_block' && jsonCodeBlockMatch) {
+                const jsonContent = jsonCodeBlockMatch[1];
+                // Only treat as tool_call if it looks like a tool call JSON
+                if (looksLikeToolCallJson(jsonContent)) {
+                    result.push({ type: 'tool_call', content: jsonContent });
+                } else {
+                    // Not a tool call, keep as text
+                    result.push({ type: 'text', content: jsonCodeBlockMatch[0] });
+                }
+                current = current.substring(tagStart + jsonCodeBlockMatch[0].length);
+                continue;
+            }
+            
+            if (tagType === 'json_block_unclosed' && unclosedJsonMatch) {
+                const jsonContent = unclosedJsonMatch[1];
+                // Only treat as tool_call if it looks like a tool call JSON
+                if (looksLikeToolCallJson(jsonContent)) {
+                    result.push({ type: 'tool_call', content: jsonContent });
+                } else {
+                    result.push({ type: 'text', content: unclosedJsonMatch[0] });
+                }
+                break; // Unclosed means end of content
+            }
+            
+            // Handle standard XML-style tags
             const rest = current.substring(tagStart + openTagLen);
             const endIdx = rest.indexOf(closeTag);
             

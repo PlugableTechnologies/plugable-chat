@@ -166,36 +166,26 @@ impl ModelProfile {
     fn code_execution_explanation() -> String {
         r#"## Code Execution
 
-You have Python code execution available via the `code_execution` tool. Use it when you need:
+`code_execution` runs Python in a secure sandbox. Use for:
+- Math/calculations (deterministic results vs token generation)
+- String manipulation and data transformations
+- Multi-step logic with conditionals
 
-1. **Deterministic logic**: Math calculations, string manipulation, data transformations, or any computation where you want exact, repeatable results instead of generating tokens.
+**Sandbox imports:** math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64, operator, string, textwrap, copy, types, typing, abc, numbers, binascii, html.
+**Not available:** pandas, numpy, requests, or any external packages.
 
-2. **Multi-step tool orchestration**: When a task requires calling multiple tools in sequence with conditional logic between them. Write Python that calls each tool and processes intermediate results, so you only see the final answer without having to process intermediate tokens.
+**Format:** `{"name": "code_execution", "arguments": {"code": ["line1", "line2"]}}`
 
-3. **Complex data processing**: Parsing, filtering, aggregating, or transforming structured data that would be error-prone to do via token generation.
-
-**How it works:**
-- Write Python code in the `code` parameter (array of lines)
-- Any tools you've discovered via `tool_search` are available as async Python functions
-- The final value printed or returned is passed back to you
-- You see only the result, not the intermediate tool call responses
-
-**Example - chaining tools with logic:**
+**Example:**
 ```python
-# Get weather for two cities and compare
-weather_a = await get_weather(city="New York")
-weather_b = await get_weather(city="London")
-temp_diff = weather_a["temp"] - weather_b["temp"]
-print(f"New York is {abs(temp_diff):.1f}°F {'warmer' if temp_diff > 0 else 'colder'} than London")
+import statistics
+data = [23, 45, 67, 89, 12]
+print(f"Mean: {statistics.mean(data):.1f}, Stdev: {statistics.stdev(data):.1f}")
 ```
 
 ## Tool Discovery
 
-Use `tool_search` with semantic queries to discover relevant tools before using `code_execution`. For example:
-- Query: "weather forecast" to find weather-related tools
-- Query: "send email" to find communication tools
-
-Once discovered, tools become available as Python functions in code execution.
+Use `tool_search` to discover MCP tools, which then become available as async Python functions in code_execution.
 
 "#.to_string()
     }

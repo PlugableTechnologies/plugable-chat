@@ -305,6 +305,16 @@ pub fn json_to_pyobject(value: &Value, vm: &VirtualMachine) -> PyResult {
     }
 }
 
+/// The list of modules allowed in the Python sandbox.
+/// This is exposed as a constant so it can be referenced in error messages.
+pub const ALLOWED_MODULES: &[&str] = &[
+    "math", "json", "random", "re", "datetime", "collections",
+    "itertools", "functools", "operator", "string", "textwrap",
+    "copy", "types", "typing", "abc", "numbers", "decimal",
+    "fractions", "statistics", "hashlib", "base64", "binascii",
+    "html",
+];
+
 /// Setup code to inject sandbox helpers into Python
 pub const SANDBOX_SETUP_CODE: &str = r#"
 # Sandbox setup - import sandbox functions
@@ -321,8 +331,9 @@ for _name in _blocked:
     if hasattr(builtins, _name):
         delattr(builtins, _name)
 
-# Restricted import
-_allowed_modules = {
+# Restricted import - NOTE: _sandbox_allowed_modules must NOT be deleted
+# because the _restricted_import closure references it
+_sandbox_allowed_modules = {
     'math', 'json', 'random', 're', 'datetime', 'collections',
     'itertools', 'functools', 'operator', 'string', 'textwrap',
     'copy', 'types', 'typing', 'abc', 'numbers', 'decimal',
@@ -334,14 +345,20 @@ _original_import = builtins.__import__
 
 def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
     top_level = name.split('.')[0]
-    if top_level not in _allowed_modules:
-        raise ImportError(f"Import '{name}' is not allowed in the sandbox")
+    if top_level not in _sandbox_allowed_modules:
+        allowed_list = ', '.join(sorted(m for m in _sandbox_allowed_modules 
+                                        if m not in ('_sandbox', 'builtins')))
+        raise ImportError(
+            f"Import '{name}' is not allowed in the sandbox. "
+            f"Allowed modules: {allowed_list}. "
+            f"For data analysis, use the built-in math, statistics, collections, and itertools modules."
+        )
     return _original_import(name, globals, locals, fromlist, level)
 
 builtins.__import__ = _restricted_import
 
-# Clean up setup variables
-del _blocked, _name, _allowed_modules
+# Clean up setup variables (but NOT _sandbox_allowed_modules - it's needed by the closure)
+del _blocked, _name
 "#;
 
 #[cfg(test)]

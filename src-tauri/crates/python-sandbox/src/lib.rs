@@ -17,7 +17,35 @@ use sandbox::{
     json_to_pyobject, pyobject_to_json, SANDBOX_SETUP_CODE,
 };
 use rustpython_compiler::Mode;
+use rustpython_vm::{VirtualMachine, PyRef, builtins::PyBaseException, AsObject};
 use std::alloc::{alloc, dealloc, Layout};
+
+/// Format a Python exception into a readable error message
+fn format_python_exception(exc: &PyRef<PyBaseException>, vm: &VirtualMachine) -> String {
+    // Try to get the exception type name
+    let type_name = exc.class().name().to_string();
+    
+    // Get the exception message from args
+    let args = exc.args();
+    let args_vec: Vec<String> = args.iter()
+        .filter_map(|arg| {
+            arg.str(vm).ok().map(|s| s.as_str().to_string())
+        })
+        .collect();
+    
+    let args_str = if args_vec.is_empty() {
+        String::new()
+    } else {
+        args_vec.join(", ")
+    };
+    
+    // Format as "TypeName: message" like Python does
+    if args_str.is_empty() {
+        type_name
+    } else {
+        format!("{}: {}", type_name, args_str)
+    }
+}
 
 /// Execute Python code in the sandbox
 ///
@@ -127,10 +155,11 @@ pub fn execute(request: &ExecutionRequest) -> ExecutionResult {
                 }
             }
             Err(exc) => {
-                let exc_str = format!("{:?}", exc);
+                // Extract the actual error message from the Python exception
+                let error_msg = format_python_exception(&exc, vm);
                 let num_pending = pending_calls.len();
                 
-                if exc_str.contains("ToolCallPending:") || !pending_calls.is_empty() {
+                if error_msg.contains("ToolCallPending:") || !pending_calls.is_empty() {
                     ExecutionResult {
                         status: ExecutionStatus::ToolCallsPending,
                         stdout: get_stdout(),
@@ -140,7 +169,6 @@ pub fn execute(request: &ExecutionRequest) -> ExecutionResult {
                         tool_calls_made: num_pending,
                     }
                 } else {
-                    let error_msg = format!("{:?}", exc);
                     ExecutionResult {
                         status: ExecutionStatus::Error(error_msg.clone()),
                         stdout: get_stdout(),
@@ -262,17 +290,49 @@ mod tests {
         
         let result = execute(&request);
         
-        // Import should fail (either our restriction or missing module)
-        // We just verify it doesn't complete successfully
+        // Import should fail with a helpful error message
         match result.status {
             ExecutionStatus::Complete => {
-                // If it completes, make sure 'os' isn't actually usable
-                // This would indicate a security issue
                 panic!("Import 'os' should not be allowed to succeed");
             }
-            _ => {
-                // Any error is acceptable - the import is blocked
+            ExecutionStatus::Error(ref msg) => {
+                // Verify the error message is helpful
+                assert!(msg.contains("not allowed in the sandbox"), 
+                    "Error should mention sandbox restriction: {}", msg);
+                assert!(msg.contains("Allowed modules:"),
+                    "Error should list allowed modules: {}", msg);
             }
+            _ => {
+                // Any error status is acceptable as long as it's not Complete
+            }
+        }
+    }
+    
+    #[test]
+    fn test_blocked_import_pandas() {
+        // Test that pandas import (common for data analysis) gives helpful error
+        let request = ExecutionRequest {
+            code: vec!["import pandas".to_string()],
+            context: None,
+            tool_results: HashMap::new(),
+            available_tools: vec![],
+        };
+        
+        let result = execute(&request);
+        
+        match result.status {
+            ExecutionStatus::Complete => {
+                panic!("Import 'pandas' should not be allowed to succeed");
+            }
+            ExecutionStatus::Error(ref msg) => {
+                assert!(msg.contains("pandas"),
+                    "Error should mention the disallowed module: {}", msg);
+                assert!(msg.contains("Allowed modules:"),
+                    "Error should list allowed modules: {}", msg);
+                assert!(msg.contains("statistics") || msg.contains("math"),
+                    "Error should suggest alternatives: {}", msg);
+            }
+            _ => {}
         }
     }
     
