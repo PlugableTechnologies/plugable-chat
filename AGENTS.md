@@ -147,3 +147,46 @@ Key log prefixes to watch:
 - "Could not resolve server for tool" → Tool not recognized as built-in or MCP
 - "No tool calls detected" → Model output doesn't match any parser format
 - Logs appear to hang → Check `std::io::stdout().flush()` is called after prints
+
+## Python Sandbox Configuration Sync
+
+The Python code execution sandbox has allowed/disallowed modules and builtins defined in **multiple locations** that must be kept in sync:
+
+### Source of Truth Locations
+
+1. **RustPython Sandbox** (`src-tauri/crates/python-sandbox/src/sandbox.rs`)
+   - `ALLOWED_MODULES` constant - defines the whitelist of importable modules
+   - `SANDBOX_SETUP_CODE` - Python code that blocks dangerous builtins (`open`, `eval`, `exec`, `compile`, `input`, `breakpoint`, `globals`, `locals`, `vars`, `memoryview`) and installs the restricted import hook
+
+2. **Input Validation** (`src-tauri/src/tools/code_execution.rs`)
+   - `ALLOWED_MODULES` constant - duplicated list for pre-execution validation
+   - `validate_input()` - blocks patterns like `__import__`, `eval(`, `exec(`, `compile(`
+   - `check_imports()` - validates imports before code reaches the sandbox
+
+3. **Model Prompts** (`src-tauri/src/lib.rs`)
+   - `build_system_prompt()` - tells models what Python capabilities are available
+   - Should accurately describe allowed modules and restrictions
+
+4. **Unit Tests** (`src-tauri/crates/python-sandbox/src/lib.rs`, `src-tauri/src/tools/code_execution.rs`)
+   - Tests verify both allowed and blocked behavior
+   - `test_all_allowed_modules` in code_execution.rs tests validation for every allowed module
+
+### Guardrail: Keeping These in Sync
+
+When modifying allowed/disallowed Python features:
+
+1. **Update `sandbox.rs`** first - this is the actual enforcement layer
+2. **Update `code_execution.rs`** - keep `ALLOWED_MODULES` identical to sandbox.rs
+3. **Update system prompts** in `lib.rs` if the change affects what models should know
+4. **Add/update tests** for both success and failure cases
+5. **Run the full test suite**: `cargo test -p python-sandbox && cargo test code_execution`
+
+### Current Allowed Modules
+
+```
+math, json, random, re, datetime, collections, itertools, functools,
+operator, string, textwrap, copy, types, typing, abc, numbers,
+decimal, fractions, statistics, hashlib, base64, binascii, html
+```
+
+**Note**: Not all modules may be available at runtime due to RustPython's `freeze-stdlib` limitations. The validation layer permits these imports, but the sandbox may return `ModuleNotFoundError` for modules not compiled into the RustPython binary.

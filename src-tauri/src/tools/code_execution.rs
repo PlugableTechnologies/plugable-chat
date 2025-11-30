@@ -449,5 +449,252 @@ mod tests {
         assert!(extended.caller.is_some());
         assert_eq!(extended.caller.unwrap().caller_type, "code_execution_20250825");
     }
+    
+    // ============ Additional Input Validation Tests ============
+    
+    #[test]
+    fn test_empty_code_rejected() {
+        let input = CodeExecutionInput {
+            code: vec![],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&input).unwrap_err();
+        assert!(err.contains("empty") || err.contains("Empty"),
+            "Error should mention empty code: {}", err);
+    }
+    
+    #[test]
+    fn test_eval_pattern_rejected() {
+        let input = CodeExecutionInput {
+            code: vec!["result = eval('1 + 1')".to_string()],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&input).unwrap_err();
+        assert!(err.contains("eval("),
+            "Error should mention eval: {}", err);
+    }
+    
+    #[test]
+    fn test_exec_pattern_rejected() {
+        let input = CodeExecutionInput {
+            code: vec!["exec('x = 1')".to_string()],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&input).unwrap_err();
+        assert!(err.contains("exec("),
+            "Error should mention exec: {}", err);
+    }
+    
+    #[test]
+    fn test_compile_pattern_rejected() {
+        let input = CodeExecutionInput {
+            code: vec!["code = compile('x = 1', '', 'exec')".to_string()],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&input).unwrap_err();
+        assert!(err.contains("compile("),
+            "Error should mention compile: {}", err);
+    }
+    
+    #[test]
+    fn test_dunder_import_pattern_rejected() {
+        let input = CodeExecutionInput {
+            code: vec!["os = __import__('os')".to_string()],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&input).unwrap_err();
+        assert!(err.contains("__import__"),
+            "Error should mention __import__: {}", err);
+    }
+    
+    #[test]
+    fn test_multiple_blocked_imports() {
+        // Multiple disallowed imports in one code block
+        let input = CodeExecutionInput {
+            code: vec![
+                "import os".to_string(),
+                "import sys".to_string(),
+                "import subprocess".to_string(),
+            ],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&input).unwrap_err();
+        // Should mention at least one of them
+        assert!(err.contains("os") || err.contains("sys") || err.contains("subprocess"),
+            "Error should mention blocked imports: {}", err);
+    }
+    
+    #[test]
+    fn test_code_with_context() {
+        let input: CodeExecutionInput = serde_json::from_value(json!({
+            "code": ["print(x + y)"],
+            "context": {"x": 10, "y": 20}
+        })).unwrap();
+        
+        assert_eq!(input.code.len(), 1);
+        assert!(input.context.is_some());
+        let ctx = input.context.unwrap();
+        assert_eq!(ctx["x"], 10);
+        assert_eq!(ctx["y"], 20);
+    }
+    
+    #[test]
+    fn test_allowed_import_with_alias() {
+        let input = CodeExecutionInput {
+            code: vec!["import math as m".to_string()],
+            context: None,
+        };
+        assert!(CodeExecutionExecutor::validate_input(&input).is_ok(),
+            "import math as m should be allowed");
+    }
+    
+    #[test]
+    fn test_allowed_multiple_imports() {
+        let input = CodeExecutionInput {
+            code: vec!["import math, json, random".to_string()],
+            context: None,
+        };
+        // Note: This tests comma-separated imports
+        // Our regex may or may not support this - let's verify behavior
+        let result = CodeExecutionExecutor::validate_input(&input);
+        // All three are allowed, so it should pass
+        assert!(result.is_ok(), 
+            "Multiple allowed imports should pass: {:?}", result);
+    }
+    
+    #[test]
+    fn test_blocked_import_in_middle_of_code() {
+        let input = CodeExecutionInput {
+            code: vec![
+                "x = 1".to_string(),
+                "y = 2".to_string(),
+                "import os".to_string(),  // Blocked import in the middle
+                "z = x + y".to_string(),
+            ],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&input).unwrap_err();
+        assert!(err.contains("os") || err.contains("Cannot import"),
+            "Should detect blocked import in middle of code: {}", err);
+    }
+    
+    #[test]
+    fn test_from_submodule_import() {
+        // from datetime.datetime should work (datetime is allowed)
+        let input = CodeExecutionInput {
+            code: vec!["from datetime import datetime, timedelta".to_string()],
+            context: None,
+        };
+        assert!(CodeExecutionExecutor::validate_input(&input).is_ok(),
+            "from datetime import should be allowed");
+    }
+    
+    #[test]
+    fn test_blocked_from_submodule_import() {
+        // from os.path import join should be blocked (os is not allowed)
+        let input = CodeExecutionInput {
+            code: vec!["from os.path import join".to_string()],
+            context: None,
+        };
+        let err = CodeExecutionExecutor::validate_input(&input).unwrap_err();
+        assert!(err.contains("os") || err.contains("Cannot import"),
+            "from os.path import should be blocked: {}", err);
+    }
+    
+    #[test]
+    fn test_all_allowed_modules() {
+        // Test that all explicitly allowed modules pass validation
+        let allowed = vec![
+            "import math",
+            "import json",
+            "import random",
+            "import re",
+            "import datetime",
+            "import collections",
+            "import itertools",
+            "import functools",
+            "import operator",
+            "import string",
+            "import textwrap",
+            "import copy",
+            "import types",
+            "import typing",
+            "import abc",
+            "import numbers",
+            "import decimal",
+            "import fractions",
+            "import statistics",
+            "import hashlib",
+            "import base64",
+            "import binascii",
+            "import html",
+        ];
+        
+        for import_stmt in allowed {
+            let input = CodeExecutionInput {
+                code: vec![import_stmt.to_string()],
+                context: None,
+            };
+            assert!(
+                CodeExecutionExecutor::validate_input(&input).is_ok(),
+                "'{}' should be allowed", import_stmt
+            );
+        }
+    }
+    
+    #[test]
+    fn test_safe_code_patterns() {
+        // Various safe code patterns should pass validation
+        let safe_patterns = vec![
+            vec!["x = 1", "y = 2", "print(x + y)"],
+            vec!["def foo(): return 42", "print(foo())"],
+            vec!["class Foo: pass", "f = Foo()"],
+            vec!["data = [1, 2, 3]", "print(sum(data))"],
+            vec!["d = {'a': 1}", "print(d['a'])"],
+            vec!["import math", "print(math.pi)"],
+            vec!["from collections import Counter", "c = Counter('abcd')"],
+        ];
+        
+        for pattern in safe_patterns {
+            let input = CodeExecutionInput {
+                code: pattern.iter().map(|s| s.to_string()).collect(),
+                context: None,
+            };
+            assert!(
+                CodeExecutionExecutor::validate_input(&input).is_ok(),
+                "Pattern {:?} should be allowed", pattern
+            );
+        }
+    }
+    
+    #[test]
+    fn test_output_types() {
+        // Verify CodeExecutionOutput serialization
+        let output = CodeExecutionOutput {
+            stdout: "Hello, world!".to_string(),
+            stderr: String::new(),
+            result: Some(json!(42)),
+            success: true,
+            tool_calls_made: 0,
+            duration_ms: 100,
+        };
+        
+        let json = serde_json::to_value(&output).unwrap();
+        assert_eq!(json["stdout"], "Hello, world!");
+        assert_eq!(json["success"], true);
+        assert_eq!(json["result"], 42);
+        assert_eq!(json["duration_ms"], 100);
+    }
+    
+    #[test]
+    fn test_code_execution_output_default() {
+        let default = CodeExecutionOutput::default();
+        assert_eq!(default.stdout, "");
+        assert_eq!(default.stderr, "");
+        assert!(default.result.is_none());
+        assert!(!default.success);
+        assert_eq!(default.tool_calls_made, 0);
+        assert_eq!(default.duration_ms, 0);
+    }
 }
 
