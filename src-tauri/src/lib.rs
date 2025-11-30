@@ -538,7 +538,7 @@ async fn run_agentic_loop(
     }
 }
 
-/// Build the full system prompt with MCP tool descriptions
+/// Build the full system prompt with tool capabilities
 fn build_system_prompt(
     base_prompt: &str, 
     tool_descriptions: &[(String, Vec<McpTool>)],
@@ -546,22 +546,66 @@ fn build_system_prompt(
 ) -> String {
     let mut prompt = base_prompt.to_string();
     
-    // Check if there are any tools to describe
-    let has_tools = tool_descriptions.iter().any(|(_, tools)| !tools.is_empty());
+    // Check if there are any MCP tools available
+    let has_mcp_tools = tool_descriptions.iter().any(|(_, tools)| !tools.is_empty());
     
-    if has_tools {
-        prompt.push_str("\n\n## Tool Calling Format\n\n");
-        prompt.push_str("Use this EXACT format:\n");
-        prompt.push_str("<tool_call>{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg1\": \"value1\"}}</tool_call>\n\n");
-        
-        prompt.push_str("CRITICAL ARGUMENT RULES:\n");
-        prompt.push_str("- Each argument value must be a SIMPLE value (string, number, boolean)\n");
-        prompt.push_str("- WRONG: {\"dataset\": {\"id\": \"x\", \"project\": \"y\"}}\n");
-        prompt.push_str("- RIGHT: {\"dataset\": \"my_dataset\", \"project\": \"my_project\"}\n");
-        prompt.push_str("- NEVER nest JSON objects inside argument values\n");
-        prompt.push_str("- NEVER guess project/dataset/table names - use list_* tools first\n\n");
-        
-        prompt.push_str("## Available Tools\n\n");
+    // Add available tools summary at the top
+    prompt.push_str("\n\n## Available Tools\n\n");
+    prompt.push_str("You have the following tools available:\n");
+    prompt.push_str("- **code_execution**: Execute Python code in a secure sandbox for calculations, data processing, and deterministic operations\n");
+    if has_mcp_tools {
+        prompt.push_str("- **tool_search**: Discover additional tools from connected MCP servers\n");
+        let tool_count: usize = tool_descriptions.iter().map(|(_, t)| t.len()).sum();
+        prompt.push_str(&format!("- **{} MCP tools** from connected servers (listed below)\n", tool_count));
+    }
+    prompt.push_str("\n");
+    
+    // Tool calling format instructions
+    prompt.push_str("## Tool Calling Format\n\n");
+    prompt.push_str("To call a tool, use this EXACT format:\n");
+    prompt.push_str("<tool_call>{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg1\": \"value1\"}}</tool_call>\n\n");
+    
+    prompt.push_str("RULES:\n");
+    prompt.push_str("- Call tools immediately when they can help - don't just describe what you would do\n");
+    prompt.push_str("- Each argument value must be a SIMPLE value (string, number, boolean), never nested objects\n");
+    prompt.push_str("- For ANY math, calculations, or data processing, use code_execution\n\n");
+    
+    // Code execution details
+    prompt.push_str("## code_execution Tool\n\n");
+    prompt.push_str("Use this for:\n");
+    prompt.push_str("- Math and calculations (exact results, not generated tokens)\n");
+    prompt.push_str("- String manipulation and data transformations\n");
+    prompt.push_str("- Multi-step operations with logic between them\n");
+    prompt.push_str("- Any computation requiring deterministic/repeatable results\n\n");
+    prompt.push_str("Example:\n");
+    prompt.push_str("<tool_call>{\"name\": \"code_execution\", \"arguments\": {\"code\": [\"result = 17 * 23 + 456\", \"print(f'Answer: {result}')\"]}}");
+    prompt.push_str("</tool_call>\n\n");
+    
+    // Add tool discovery instructions if MCP tools are available
+    if has_mcp_tools {
+        prompt.push_str("## Tool Discovery (MCP Servers Connected)\n\n");
+        prompt.push_str("You have access to external tools via MCP servers. Use `tool_search` to discover relevant tools:\n\n");
+        prompt.push_str("**Workflow:**\n");
+        prompt.push_str("1. **Search for tools** - Use `tool_search` with semantic queries describing what you need\n");
+        prompt.push_str("2. **Discovered tools become available** - After `tool_search` returns, those tools can be called directly OR used within `code_execution`\n");
+        prompt.push_str("3. **Orchestrate with code** - For complex multi-tool workflows, use `code_execution` to chain discovered tools together\n\n");
+        prompt.push_str("**Example - discovering and using tools:**\n");
+        prompt.push_str("<tool_call>{\"name\": \"tool_search\", \"arguments\": {\"queries\": [\"weather forecast\", \"temperature data\"]}}");
+        prompt.push_str("</tool_call>\n\n");
+        prompt.push_str("After discovery, you can call found tools directly or within code_execution:\n");
+        prompt.push_str("```python\n");
+        prompt.push_str("# Within code_execution, discovered tools are available as async functions:\n");
+        prompt.push_str("weather_a = await get_weather(city=\"New York\")\n");
+        prompt.push_str("weather_b = await get_weather(city=\"London\")\n");
+        prompt.push_str("temp_diff = weather_a[\"temp\"] - weather_b[\"temp\"]\n");
+        prompt.push_str("print(f\"New York is {abs(temp_diff):.1f}° {'warmer' if temp_diff > 0 else 'colder'} than London\")\n");
+        prompt.push_str("```\n\n");
+        prompt.push_str("**Key advantage:** Code execution lets you process multiple tool results with logic, seeing only the final output rather than consuming context with intermediate results.\n\n");
+    }
+    
+    // List available MCP tools if any
+    if has_mcp_tools {
+        prompt.push_str("## Available MCP Tools\n\n");
         
         for (server_id, tools) in tool_descriptions {
             if tools.is_empty() {
@@ -612,34 +656,8 @@ fn build_system_prompt(
                                 let is_required = required_fields.contains(&name.as_str());
                                 let req_marker = if is_required { " [REQUIRED]" } else { "" };
                                 
-                                // Show example value based on type
-                                let example = match prop_type {
-                                    "string" => format!("\"{}\"", name),
-                                    "number" | "integer" => "123".to_string(),
-                                    "boolean" => "true".to_string(),
-                                    _ => format!("\"{}\"", name),
-                                };
-                                
-                                prompt.push_str(&format!("  - `{}` ({}){}: {} Example: {}\n", 
-                                    name, prop_type, req_marker, prop_desc, example));
-                            }
-                            
-                            // Show a complete example call for this tool
-                            if !props.is_empty() {
-                                prompt.push_str("  Example call:\n");
-                                let example_args: Vec<String> = props.iter().map(|(name, prop_schema)| {
-                                    let prop_type = prop_schema.get("type")
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or("string");
-                                    let value = match prop_type {
-                                        "boolean" => "true".to_string(),
-                                        "number" | "integer" => "123".to_string(),
-                                        _ => format!("\"example_{}\"", name),
-                                    };
-                                    format!("\"{}\": {}", name, value)
-                                }).collect();
-                                prompt.push_str(&format!("  <tool_call>{{\"name\": \"{}\", \"arguments\": {{{}}}}}</tool_call>\n", 
-                                    tool.name, example_args.join(", ")));
+                                prompt.push_str(&format!("  - `{}` ({}){}: {}\n", 
+                                    name, prop_type, req_marker, prop_desc));
                             }
                         }
                     }
@@ -759,25 +777,58 @@ async fn chat(
         .map_err(|e| e.to_string())?;
     let tool_descriptions = tools_rx.await.map_err(|_| "MCP Host actor died".to_string())?;
     
-    // Select system prompt based on MCP availability:
-    // - If MCP servers with tools are available, use the configured prompt (which has tool instructions)
-    // - Otherwise, use a simple fallback prompt
+    // Check if there are any MCP tools available
     let has_mcp_tools = tool_descriptions.iter().any(|(_, tools)| !tools.is_empty());
-    let base_system_prompt = if has_mcp_tools {
-        configured_system_prompt
-    } else {
-        "You are a helpful assistant".to_string()
-    };
     
-    // Convert MCP tools to OpenAI format for native tool calling
-    let openai_tools: Vec<OpenAITool> = tool_descriptions.iter()
-        .flat_map(|(server_id, tools)| {
-            tools.iter().map(move |tool| OpenAITool::from_mcp(server_id, tool))
-        })
-        .collect();
+    // Always use the configured system prompt (which should explain tool capabilities)
+    let base_system_prompt = configured_system_prompt;
+    
+    // Build the tools list:
+    // 1. Always include code_execution (for deterministic operations)
+    // 2. Include tool_search when MCP servers with tools are available
+    // 3. Include all MCP tools
+    let mut openai_tools: Vec<OpenAITool> = Vec::new();
+    
+    // Always add code_execution built-in tool
+    let code_exec_tool = tool_registry::code_execution_tool();
+    openai_tools.push(OpenAITool::from_tool_schema(&code_exec_tool));
+    println!("[Chat] Added code_execution built-in tool");
+    
+    // Add tool_search when MCP tools are available (for discovery)
+    if has_mcp_tools {
+        let tool_search_tool = tool_registry::tool_search_tool();
+        openai_tools.push(OpenAITool::from_tool_schema(&tool_search_tool));
+        println!("[Chat] Added tool_search built-in tool (MCP tools available)");
+    }
+    
+    // Add MCP tools to the OpenAI tools list and register them in the tool registry
+    // so they're available for code_execution and tool_search
+    {
+        let mut registry = tool_registry_state.registry.write().await;
+        
+        // Clear any previously materialized tools (fresh start for this chat)
+        registry.clear_materialized();
+        
+        for (server_id, tools) in &tool_descriptions {
+            // Register MCP tools in the registry (non-deferred so they're immediately visible)
+            // This makes them available for code_execution to call
+            registry.register_mcp_tools(server_id, tools, false);
+            
+            // Also add to OpenAI tools list for direct model access
+            for tool in tools {
+                openai_tools.push(OpenAITool::from_mcp(server_id, tool));
+            }
+        }
+        
+        let stats = registry.stats();
+        println!("[Chat] Tool registry: {} internal, {} domain, {} deferred, {} materialized",
+            stats.internal_tools, stats.domain_tools, stats.deferred_tools, stats.materialized_tools);
+    }
     
     let has_tools = !openai_tools.is_empty();
-    println!("[Chat] Converted {} MCP tools to OpenAI format", openai_tools.len());
+    println!("[Chat] Total tools available: {} (built-in + {} MCP tools)", 
+        openai_tools.len(), 
+        tool_descriptions.iter().map(|(_, t)| t.len()).sum::<usize>());
     
     // Build the full system prompt with tool descriptions
     // Note: We still include text-based tool instructions as a fallback for models

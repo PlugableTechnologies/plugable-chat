@@ -568,7 +568,10 @@ impl ModelFamily {
     pub fn from_model_id(model_id: &str) -> Self {
         let lower = model_id.to_lowercase();
         
-        if lower.contains("gpt-oss") {
+        // Qwen, Mistral, LLaMA-Instruct models use OpenAI-compatible tool calling
+        if lower.contains("qwen") || lower.contains("mistral") || lower.contains("llama") {
+            ModelFamily::GptOss
+        } else if lower.contains("gpt-oss") {
             ModelFamily::GptOss
         } else if lower.contains("gemma") {
             ModelFamily::Gemma
@@ -665,6 +668,19 @@ impl OpenAITool {
                 name: format!("{}___{}", server_id, tool.name),
                 description: tool.description.clone(),
                 parameters: tool.input_schema.clone(),
+            },
+        }
+    }
+    
+    /// Create from a built-in ToolSchema (code_execution, tool_search)
+    /// Built-in tools don't need server_id prefix since they're handled internally
+    pub fn from_tool_schema(tool: &ToolSchema) -> Self {
+        Self {
+            tool_type: "function".to_string(),
+            function: OpenAIFunction {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: Some(tool.parameters.clone()),
             },
         }
     }

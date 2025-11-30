@@ -59,25 +59,11 @@ pub struct AppSettings {
 }
 
 fn default_system_prompt() -> String {
-    r#"You are an AI assistant that uses tools to answer questions.
+    r#"You are a helpful AI assistant with tool-calling capabilities.
 
-CRITICAL RULES:
-1. CALL TOOLS IMMEDIATELY - don't explain what you would do
-2. NEVER GUESS parameter values (project names, dataset names, etc.) - use discovery tools first
-3. After calling a tool, STOP and wait for the result
-4. Arguments must be simple values (strings, numbers, booleans) - NOT nested JSON objects
+IMPORTANT: When a task can be helped by a tool, call the tool immediately. Don't explain what you would do - just do it.
 
-ARGUMENT FORMAT - VERY IMPORTANT:
-- String arguments: "value" (just the string, not {"key": "value"})
-- Example: {"dataset": "my_dataset"} NOT {"dataset": {"datasetId": "my_dataset"}}
-
-WORKFLOW FOR DATABASE QUERIES:
-1. First use list_datasets or similar to discover available data
-2. Then use list_tables or get_table_info to understand structure  
-3. Only then execute queries with correct, verified names
-
-BAD: <tool_call>{"name": "list_tables", "arguments": {"dataset": "guessed-name.{\"projectId\":\"x\"}"}}</tool_call>
-GOOD: <tool_call>{"name": "list_tables", "arguments": {"dataset": "actual_dataset_name"}}</tool_call>"#.to_string()
+For any math, calculations, or data processing: use code_execution. It gives exact results, not generated approximations."#.to_string()
 }
 
 /// Create the default MCP test server configuration
@@ -216,7 +202,9 @@ mod tests {
     fn test_default_settings() {
         let settings = AppSettings::default();
         assert!(!settings.system_prompt.is_empty());
-        assert!(settings.mcp_servers.is_empty());
+        // Default settings include the mcp-test-server (disabled by default)
+        assert!(settings.mcp_servers.iter().any(|s| s.id == "mcp-test-server"));
+        assert!(!settings.mcp_servers.iter().find(|s| s.id == "mcp-test-server").unwrap().enabled);
     }
 
     #[test]

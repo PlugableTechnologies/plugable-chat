@@ -328,12 +328,20 @@ impl FoundryActor {
                         println!("[FoundryActor] Model: {} | family: {:?} | reasoning: {} | tools: {} | reasoning_effort: {}",
                             model, model_family, model_supports_reasoning, use_native_tools, supports_reasoning_effort);
                         
-                        if use_native_tools {
-                            println!("[FoundryActor] Including {} native tools in request", 
-                                tools.as_ref().map(|t| t.len()).unwrap_or(0));
-                        } else if tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
-                            println!("[FoundryActor] Model does NOT support native tool calling, falling back to text-based tools");
-                        }
+                            if use_native_tools {
+                                println!("[FoundryActor] Including {} native tools in request", 
+                                    tools.as_ref().map(|t| t.len()).unwrap_or(0));
+                                // Log the tools being sent for debugging
+                                if let Some(ref tool_list) = tools {
+                                    for tool in tool_list {
+                                        println!("[FoundryActor] Tool: {} - {:?}", 
+                                            tool.function.name, 
+                                            tool.function.description.as_deref().unwrap_or("(no description)"));
+                                    }
+                                }
+                            } else if tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
+                                println!("[FoundryActor] Model does NOT support native tool calling, falling back to text-based tools");
+                            }
                         
                         println!("Sending streaming request to Foundry at {}", url);
                          
@@ -364,6 +372,14 @@ impl FoundryActor {
                                  supports_reasoning_effort,
                                  &reasoning_effort,
                              );
+                             
+                             // Log the request body for debugging (truncate large content)
+                             if use_native_tools {
+                                 if let Some(tools_json) = current_body.get("tools") {
+                                     println!("[FoundryActor] Request body 'tools' field:\n{}", 
+                                         serde_json::to_string_pretty(tools_json).unwrap_or_default());
+                                 }
+                             }
                              
                              match client_clone.post(&current_url).json(&current_body).send().await {
                                 Ok(mut resp) => {
@@ -528,15 +544,17 @@ impl FoundryActor {
                         || id_lower.contains("qwen");
                     
                     // Determine tool format based on model family and capabilities
+                    // Note: This should match the format expected by model_profiles.rs
                     let tool_format = if !tool_calling {
                         ToolFormat::TextBased
                     } else {
                         match family {
-                            ModelFamily::GptOss => ToolFormat::OpenAI,
+                            // Qwen, Mistral, LLaMA use Hermes-style <tool_call> format
+                            ModelFamily::GptOss => ToolFormat::Hermes,
                             ModelFamily::Gemma => ToolFormat::Gemini,
                             ModelFamily::Phi => ToolFormat::Hermes,
                             ModelFamily::Granite => ToolFormat::Granite,
-                            ModelFamily::Generic => ToolFormat::OpenAI,
+                            ModelFamily::Generic => ToolFormat::Hermes,
                         }
                     };
                     
