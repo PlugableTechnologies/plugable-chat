@@ -18,6 +18,7 @@ dist-ssr
 # Cargo/Tauri build output
 target
 src-tauri/target
+src-tauri/wasm/
 .cargo
 
 # Tauri/Node caches
