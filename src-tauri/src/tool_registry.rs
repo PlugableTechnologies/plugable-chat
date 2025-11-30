@@ -64,7 +64,7 @@ pub fn tool_search_tool() -> ToolSchema {
                 },
                 "top_k": {
                     "type": "integer",
-                    "description": "Maximum number of tools to return (default: 10)"
+                    "description": "Maximum number of tools to return (default: 3)"
                 }
             },
             "required": ["queries"]

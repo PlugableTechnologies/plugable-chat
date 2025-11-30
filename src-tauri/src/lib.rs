@@ -439,7 +439,7 @@ async fn run_agentic_loop(
                         // Parse tool_search input
                         let input: ToolSearchInput = serde_json::from_value(resolved_call.arguments.clone())
                             .map_err(|e| format!("Invalid tool_search arguments: {}", e))
-                            .unwrap_or(ToolSearchInput { queries: vec![], top_k: 10 });
+                            .unwrap_or(ToolSearchInput { queries: vec![], top_k: 3 });
                         
                         match execute_tool_search(input, tool_registry.clone(), embedding_model.clone()).await {
                             Ok((result, discovered_tools)) => {

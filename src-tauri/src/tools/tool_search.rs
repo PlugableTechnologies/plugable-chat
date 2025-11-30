@@ -15,13 +15,13 @@ use crate::tool_registry::{SharedToolRegistry, ToolSearchResult};
 pub struct ToolSearchInput {
     /// Semantic search queries describing what tools are needed
     pub queries: Vec<String>,
-    /// Maximum number of tools to return (default: 10)
+    /// Maximum number of tools to return (default: 3)
     #[serde(default = "default_top_k")]
     pub top_k: usize,
 }
 
 fn default_top_k() -> usize {
-    10
+    3
 }
 
 /// Output from tool_search
