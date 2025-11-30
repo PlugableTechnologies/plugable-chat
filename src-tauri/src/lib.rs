@@ -579,17 +579,45 @@ fn build_system_prompt(
 ) -> String {
     let mut prompt = base_prompt.to_string();
     
-    // Check if there are any MCP tools available
-    let has_mcp_tools = tool_descriptions.iter().any(|(_, tools)| !tools.is_empty());
+    // Categorize servers by defer status
+    let mut active_servers: Vec<(&String, &Vec<McpTool>)> = Vec::new();
+    let mut deferred_servers: Vec<(&String, &Vec<McpTool>)> = Vec::new();
+    
+    for (server_id, tools) in tool_descriptions {
+        if tools.is_empty() {
+            continue;
+        }
+        let is_deferred = server_configs.iter()
+            .find(|c| c.id == *server_id)
+            .map(|c| c.defer_tools)
+            .unwrap_or(true); // Default to deferred if config not found
+        
+        if is_deferred {
+            deferred_servers.push((server_id, tools));
+        } else {
+            active_servers.push((server_id, tools));
+        }
+    }
+    
+    let has_active_tools = !active_servers.is_empty();
+    let has_deferred_tools = !deferred_servers.is_empty();
+    let has_mcp_tools = has_active_tools || has_deferred_tools;
+    
+    let active_tool_count: usize = active_servers.iter().map(|(_, t)| t.len()).sum();
+    let deferred_tool_count: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
     
     // Add available tools summary at the top
     prompt.push_str("\n\n## Available Tools\n\n");
     prompt.push_str("You have the following tools available:\n");
     prompt.push_str("- **code_execution**: Execute Python code in a secure sandbox for calculations, data processing, and deterministic operations\n");
     if has_mcp_tools {
-        prompt.push_str("- **tool_search**: Discover additional tools from connected MCP servers\n");
-        let tool_count: usize = tool_descriptions.iter().map(|(_, t)| t.len()).sum();
-        prompt.push_str(&format!("- **{} MCP tools** from connected servers (listed below)\n", tool_count));
+        prompt.push_str("- **tool_search**: Discover tools from connected MCP servers (REQUIRED before using MCP tools)\n");
+    }
+    if has_active_tools {
+        prompt.push_str(&format!("- **{} active MCP tools** - ready to use immediately (listed below)\n", active_tool_count));
+    }
+    if has_deferred_tools {
+        prompt.push_str(&format!("- **{} latent MCP tools** - must be discovered via `tool_search` before use\n", deferred_tool_count));
     }
     prompt.push_str("\n");
     
@@ -612,41 +640,60 @@ fn build_system_prompt(
     prompt.push_str("<tool_call>{\"name\": \"code_execution\", \"arguments\": {\"code\": [\"import math\", \"result = math.sqrt(17 * 23 + 456)\", \"print(f'Answer: {result:.2f}')\"]}}");
     prompt.push_str("</tool_call>\n\n");
     
-    // Add tool discovery instructions if MCP tools are available
-    if has_mcp_tools {
-        prompt.push_str("## Tool Discovery (MCP Servers Connected)\n\n");
-        prompt.push_str("You have access to external tools via MCP servers. Use `tool_search` to discover relevant tools:\n\n");
-        prompt.push_str("**Workflow:**\n");
-        prompt.push_str("1. **Search for tools** - Use `tool_search` with semantic queries describing what you need\n");
-        prompt.push_str("2. **Discovered tools become available** - After `tool_search` returns, those tools can be called directly OR used within `code_execution`\n");
-        prompt.push_str("3. **Orchestrate with code** - For complex multi-tool workflows, use `code_execution` to chain discovered tools together\n\n");
-        prompt.push_str("**Example - discovering and using tools:**\n");
-        prompt.push_str("<tool_call>{\"name\": \"tool_search\", \"arguments\": {\"queries\": [\"weather forecast\", \"temperature data\"]}}");
+    // Tool discovery section - critical when there are deferred tools
+    if has_deferred_tools {
+        prompt.push_str("## Tool Discovery (IMPORTANT)\n\n");
+        prompt.push_str("**Most MCP tools are latent and must be discovered before use.**\n\n");
+        prompt.push_str("When the user's request might benefit from external tools (databases, APIs, specialized operations), ");
+        prompt.push_str("your FIRST action should be to search for relevant tools:\n\n");
+        prompt.push_str("<tool_call>{\"name\": \"tool_search\", \"arguments\": {\"queries\": [\"describe what you need\"]}}");
         prompt.push_str("</tool_call>\n\n");
-        prompt.push_str("After discovery, you can call found tools directly or within code_execution:\n");
-        prompt.push_str("```python\n");
-        prompt.push_str("# Within code_execution, discovered tools are available as async functions:\n");
-        prompt.push_str("weather_a = await get_weather(city=\"New York\")\n");
-        prompt.push_str("weather_b = await get_weather(city=\"London\")\n");
-        prompt.push_str("temp_diff = weather_a[\"temp\"] - weather_b[\"temp\"]\n");
-        prompt.push_str("print(f\"New York is {abs(temp_diff):.1f}° {'warmer' if temp_diff > 0 else 'colder'} than London\")\n");
-        prompt.push_str("```\n\n");
-        prompt.push_str("**Key advantage:** Code execution lets you process multiple tool results with logic, seeing only the final output rather than consuming context with intermediate results.\n\n");
+        prompt.push_str("**Workflow:**\n");
+        prompt.push_str("1. **Search first** - Use `tool_search` with semantic queries describing capabilities you need\n");
+        prompt.push_str("2. **Review results** - The search returns tool names, descriptions, and schemas\n");
+        prompt.push_str("3. **Use discovered tools** - After discovery, those tools become available to call directly\n");
+        prompt.push_str("4. **Orchestrate with code** - For complex multi-tool workflows, use `code_execution` to chain tools\n\n");
+        
+        // List what latent capabilities are available (high-level summary)
+        prompt.push_str("**Latent Tool Servers:**\n");
+        for (server_id, tools) in &deferred_servers {
+            let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            prompt.push_str(&format!("- `{}`: {} tools ({}) - use `tool_search` to discover\n", 
+                server_id, tools.len(), tool_names.join(", ")));
+        }
+        prompt.push_str("\n");
+        
+        prompt.push_str("**Example queries for tool_search:**\n");
+        prompt.push_str("- `{\"queries\": [\"execute SQL\", \"query database\"]}` - find data query tools\n");
+        prompt.push_str("- `{\"queries\": [\"weather\", \"forecast\"]}` - find weather-related tools\n");
+        prompt.push_str("- `{\"queries\": [\"list tables\", \"get schema\"]}` - find data exploration tools\n\n");
     }
     
-    // List available MCP tools if any
+    // Tool orchestration with code_execution (always show if there are MCP tools)
     if has_mcp_tools {
-        prompt.push_str("## Available MCP Tools\n\n");
+        prompt.push_str("## Orchestrating Tools with Code\n\n");
+        prompt.push_str("After discovering tools via `tool_search`, you can call them from within `code_execution`:\n");
+        prompt.push_str("```python\n");
+        prompt.push_str("# Discovered tools are available as async functions:\n");
+        prompt.push_str("result_a = await some_tool(param=\"value\")\n");
+        prompt.push_str("result_b = await another_tool(data=result_a[\"output\"])\n");
+        prompt.push_str("# Process and combine results with Python logic\n");
+        prompt.push_str("print(f\"Final answer: {result_b}\")\n");
+        prompt.push_str("```\n\n");
+        prompt.push_str("**Key advantage:** Code execution lets you process multiple tool results with logic, ");
+        prompt.push_str("seeing only the final output rather than consuming context with intermediate results.\n\n");
+    }
+    
+    // List ACTIVE MCP tools in full detail (these can be called immediately)
+    if has_active_tools {
+        prompt.push_str("## Active MCP Tools (Ready to Use)\n\n");
+        prompt.push_str("These tools can be called immediately without `tool_search`:\n\n");
         
-        for (server_id, tools) in tool_descriptions {
-            if tools.is_empty() {
-                continue;
-            }
-            
+        for (server_id, tools) in &active_servers {
             prompt.push_str(&format!("### Server: `{}`\n\n", server_id));
             
             // Include server environment variables as context for the model
-            if let Some(config) = server_configs.iter().find(|c| c.id == *server_id) {
+            if let Some(config) = server_configs.iter().find(|c| c.id == **server_id) {
                 if !config.env.is_empty() {
                     prompt.push_str("**Server Configuration** (use these values for this server's tools):\n");
                     for (key, value) in &config.env {
@@ -661,7 +708,7 @@ fn build_system_prompt(
                 }
             }
             
-            for tool in tools {
+            for tool in *tools {
                 prompt.push_str(&format!("**{}**", tool.name));
                 if let Some(desc) = &tool.description {
                     prompt.push_str(&format!(": {}", desc));

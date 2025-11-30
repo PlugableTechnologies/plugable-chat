@@ -32,10 +32,14 @@ pub struct McpServerConfig {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub auto_approve_tools: bool,
-    /// If true, tools from this server are deferred (hidden initially, discovered via tool_search)
-    /// If false (default), tools are active (immediately visible to the model)
-    #[serde(default)]
+    /// If true (default), tools from this server are deferred (hidden initially, discovered via tool_search)
+    /// If false, tools are active (immediately visible to the model)
+    #[serde(default = "default_defer_tools")]
     pub defer_tools: bool,
+}
+
+fn default_defer_tools() -> bool {
+    true
 }
 
 impl McpServerConfig {
@@ -49,7 +53,7 @@ impl McpServerConfig {
             args: Vec::new(),
             env: HashMap::new(),
             auto_approve_tools: false,
-            defer_tools: false,
+            defer_tools: true,
         }
     }
 }
@@ -101,7 +105,7 @@ fn default_mcp_test_server() -> McpServerConfig {
             args: vec![],
             env: HashMap::new(),
             auto_approve_tools: true,  // Auto-approve for dev testing
-            defer_tools: false,  // Tools immediately visible
+            defer_tools: true,  // Tools deferred by default (discovered via tool_search)
         }
     } else {
         // Fall back to cargo run if binary not found
@@ -119,7 +123,7 @@ fn default_mcp_test_server() -> McpServerConfig {
             ],
             env: HashMap::new(),
             auto_approve_tools: true,  // Auto-approve for dev testing
-            defer_tools: false,  // Tools immediately visible
+            defer_tools: true,  // Tools deferred by default (discovered via tool_search)
         }
     }
 }
@@ -226,7 +230,7 @@ mod tests {
             args: vec!["server.js".to_string()],
             env: HashMap::from([("DEBUG".to_string(), "true".to_string())]),
             auto_approve_tools: false,
-            defer_tools: false,
+            defer_tools: true,
         });
 
         let json = serde_json::to_string(&settings).unwrap();
