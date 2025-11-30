@@ -606,8 +606,8 @@ fn build_system_prompt(
     // Code execution details
     prompt.push_str("## code_execution Tool\n\n");
     prompt.push_str("Sandboxed Python execution. Use for math, string ops, data transformations, multi-step logic.\n");
-    prompt.push_str("Available imports: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64.\n");
-    prompt.push_str("No external packages (pandas, numpy, requests, etc.) - use built-in modules only.\n\n");
+    prompt.push_str("**You must `import` modules before using them.** Allowed: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64.\n");
+    prompt.push_str("No external packages (pandas, numpy, requests, etc.).\n\n");
     prompt.push_str("Example:\n");
     prompt.push_str("<tool_call>{\"name\": \"code_execution\", \"arguments\": {\"code\": [\"import math\", \"result = math.sqrt(17 * 23 + 456)\", \"print(f'Answer: {result:.2f}')\"]}}");
     prompt.push_str("</tool_call>\n\n");

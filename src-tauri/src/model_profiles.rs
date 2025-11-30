@@ -171,16 +171,18 @@ impl ModelProfile {
 - String manipulation and data transformations
 - Multi-step logic with conditionals
 
-**Sandbox imports:** math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64, operator, string, textwrap, copy, types, typing, abc, numbers, binascii, html.
-**Not available:** pandas, numpy, requests, or any external packages.
+**IMPORTANT: You must `import` modules before using them.**
+Allowed imports: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64, operator, string, textwrap, copy, types, typing, abc, numbers, binascii, html.
+Not available: pandas, numpy, requests, or any external packages.
 
-**Format:** `{"name": "code_execution", "arguments": {"code": ["line1", "line2"]}}`
+**Format:** `{"name": "code_execution", "arguments": {"code": ["import math", "result = math.pi", "print(result)"]}}`
 
 **Example:**
 ```python
+import math
 import statistics
 data = [23, 45, 67, 89, 12]
-print(f"Mean: {statistics.mean(data):.1f}, Stdev: {statistics.stdev(data):.1f}")
+print(f"Mean: {statistics.mean(data):.1f}, Sum: {math.fsum(data)}")
 ```
 
 ## Tool Discovery
