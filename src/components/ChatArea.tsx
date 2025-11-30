@@ -8,7 +8,7 @@ import rehypeRaw from 'rehype-raw';
 import 'katex/dist/katex.min.css';
 import { invoke } from '../lib/api';
 import { useEffect, useRef, useState } from 'react';
-import { parseMessageContent, hasOnlyThinkContent } from '../lib/response-parser';
+import { parseMessageContent, hasOnlyThinkContent, hasOnlyToolCallContent } from '../lib/response-parser';
 
 // Format elapsed time helper
 const formatTime = (seconds: number) => {
@@ -71,7 +71,7 @@ const SearchingIndicator = ({ startTime, stage }: { startTime: number, stage: 'i
     );
 };
 
-// Tool execution indicator component
+// Tool execution indicator component (shown in the fixed footer area)
 const ToolExecutionIndicator = ({ server, tool }: { server: string; tool: string }) => {
     const [elapsed, setElapsed] = useState(0);
     const startTime = useRef(Date.now());
@@ -93,6 +93,31 @@ const ToolExecutionIndicator = ({ server, tool }: { server: string; tool: string
             <span className="font-medium text-gray-500">
                 Executing tool <code className="bg-purple-100 px-1 py-0.5 rounded text-purple-700">{tool}</code> on {server}
                 {elapsed >= 1 ? ` · ${formatTime(elapsed)}` : '...'}
+            </span>
+        </div>
+    );
+};
+
+// Tool processing indicator (shown inline in message when only tool_call content exists)
+const ToolProcessingIndicator = ({ startTime }: { startTime: number }) => {
+    const [elapsed, setElapsed] = useState(0);
+    
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setElapsed(Math.floor((Date.now() - startTime) / 1000));
+        }, 1000);
+        return () => clearInterval(interval);
+    }, [startTime]);
+
+    return (
+        <div className="flex items-center gap-2 text-xs text-gray-500 mt-2 mb-1">
+            <div className="flex gap-1">
+                <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" />
+                <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
+                <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '600ms' }} />
+            </div>
+            <span className="font-medium text-gray-500">
+                Processing tool{elapsed >= 1 ? ` · ${formatTime(elapsed)}` : '...'}
             </span>
         </div>
     );
@@ -720,6 +745,7 @@ export function ChatArea() {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const [thinkingStartTime, setThinkingStartTime] = useState<number | null>(null);
+    const [toolProcessingStartTime, setToolProcessingStartTime] = useState<number | null>(null);
     // Local RAG state for UI (controlled directly, not from store)
     const [ragStartTime, setRagStartTime] = useState<number | null>(null);
     const [ragStage, setRagStage] = useState<'indexing' | 'searching'>('indexing');
@@ -738,6 +764,20 @@ export function ChatArea() {
             setThinkingStartTime(null);
         }
     }, [messages, isLoading, thinkingStartTime]);
+
+    // Track when tool processing phase starts (only tool_call content, no visible text)
+    useEffect(() => {
+        const lastMessage = messages[messages.length - 1];
+        const isToolProcessingOnly = lastMessage?.role === 'assistant' && 
+                                      hasOnlyToolCallContent(lastMessage.content) && 
+                                      isLoading;
+        
+        if (isToolProcessingOnly && !toolProcessingStartTime) {
+            setToolProcessingStartTime(Date.now());
+        } else if (!isLoading || (lastMessage?.role === 'assistant' && !hasOnlyToolCallContent(lastMessage.content))) {
+            setToolProcessingStartTime(null);
+        }
+    }, [messages, isLoading, toolProcessingStartTime]);
 
     // Auto-scroll to bottom
     useEffect(() => {
@@ -1005,6 +1045,9 @@ export function ChatArea() {
                                                                 {part.content || "Thinking..."}
                                                             </div>
                                                         </details>
+                                                    ) : part.type === 'tool_call' ? (
+                                                        // Tool calls are hidden - they're displayed in the ToolCallsBlock
+                                                        null
                                                     ) : (
                                                         <ReactMarkdown
                                                             key={idx}
@@ -1049,6 +1092,12 @@ export function ChatArea() {
                                                  messages[messages.length - 1]?.id === m.id && 
                                                  hasOnlyThinkContent(m.content) && (
                                                     <ThinkingIndicator startTime={thinkingStartTime} />
+                                                )}
+                                                {/* Show tool processing indicator when only tool_call content is visible */}
+                                                {toolProcessingStartTime && 
+                                                 messages[messages.length - 1]?.id === m.id && 
+                                                 hasOnlyToolCallContent(m.content) && (
+                                                    <ToolProcessingIndicator startTime={toolProcessingStartTime} />
                                                 )}
                                                 {/* Collapsible tool calls block */}
                                                 {m.toolCalls && m.toolCalls.length > 0 && (

@@ -62,21 +62,6 @@ function ErrorBanner() {
   );
 }
 
-// Helper to get model family display name and color
-function getModelFamilyBadge(family: string | undefined): { name: string; color: string } | null {
-  switch (family) {
-    case 'gpt_oss':
-      return { name: 'GPT-OSS', color: 'bg-blue-100 text-blue-700 border-blue-200' };
-    case 'gemma':
-      return { name: 'Gemma', color: 'bg-purple-100 text-purple-700 border-purple-200' };
-    case 'phi':
-      return { name: 'Phi', color: 'bg-amber-100 text-amber-700 border-amber-200' };
-    case 'granite':
-      return { name: 'Granite', color: 'bg-slate-100 text-slate-700 border-slate-200' };
-    default:
-      return null;
-  }
-}
 
 function App() {
   const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, setModel, fetchCachedModels, startSystemChat, messages, hasFetchedCachedModels } = useChatStore();
@@ -89,8 +74,6 @@ function App() {
   const hasToolCalling = currentModelInfo?.tool_calling ?? false;
   const hasReasoning = currentModelInfo?.reasoning ?? currentModel.toLowerCase().includes('reasoning');
   const supportsReasoningEffort = currentModelInfo?.supports_reasoning_effort ?? false;
-  const modelFamily = currentModelInfo?.family;
-  const familyBadge = getModelFamilyBadge(modelFamily);
   
   // Detect when startup is fully complete but no models are available
   // Show help chat to guide user on installing models
@@ -286,15 +269,9 @@ function App() {
               <div className="flex items-center gap-1.5">
                 <select value={currentModel} onChange={(e) => setModel(e.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none max-w-[240px]" title="Select a cached model">
                   {cachedModels.map((model) => {
-                    const info = modelInfo.find(m => m.id === model.model_id);
-                    const toolBadge = info?.tool_calling ? ' 🔧' : '';
-                    const reasoningBadge = info?.reasoning ? ' 🧠' : '';
-                    const familyPrefix = info?.family && info.family !== 'generic' 
-                      ? `[${info.family.replace('_', '-').toUpperCase()}] ` 
-                      : '';
                     return (
                       <option key={model.model_id} value={model.model_id}>
-                        {familyPrefix}{model.alias}{toolBadge}{reasoningBadge}{currentModel === model.model_id ? ' ✓' : ''}
+                        {model.alias}{currentModel === model.model_id ? ' ✓' : ''}
                       </option>
                     );
                   })}
@@ -315,14 +292,6 @@ function App() {
               >
                 No models (click to refresh)
               </button>
-            )}
-            {familyBadge && (
-              <span 
-                className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold border ${familyBadge.color}`}
-                title={`Model family: ${familyBadge.name}`}
-              >
-                {familyBadge.name}
-              </span>
             )}
             {hasReasoning && supportsReasoningEffort && (
               <>

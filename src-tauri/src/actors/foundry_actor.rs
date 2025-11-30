@@ -650,9 +650,17 @@ impl FoundryActor {
                     let family = ModelFamily::from_model_id(&id);
                     
                     // Infer tool calling support from model name
-                    // Models with "coder" or specific known tool-capable models
-                    let tool_calling = id_lower.contains("coder") 
-                        || id_lower.contains("qwen");
+                    // Most modern instruction-tuned models support tool calling
+                    // Either natively or via text-based format (Hermes-style <tool_call>)
+                    let tool_calling = id_lower.contains("instruct")
+                        || id_lower.contains("coder")
+                        || id_lower.contains("qwen")
+                        || id_lower.contains("phi")
+                        || id_lower.contains("granite")
+                        || id_lower.contains("llama")
+                        || id_lower.contains("mistral")
+                        || id_lower.contains("gemma")
+                        || id_lower.contains("chat");
                     
                     // Determine tool format based on model family and capabilities
                     // Note: This should match the format expected by model_profiles.rs

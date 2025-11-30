@@ -23,7 +23,7 @@ function stripOpenAITokens(content: string): string {
         .replace(/^\s*\n+/, '');
 }
 
-export type MessagePartType = 'text' | 'think';
+export type MessagePartType = 'text' | 'think' | 'tool_call';
 
 export interface MessagePart {
     type: MessagePartType;
@@ -219,6 +219,88 @@ function parsePlainText(content: string): MessagePart[] {
 }
 
 /**
+ * Extract tool_call blocks from text content.
+ * Handles:
+ * - <tool_call>...</tool_call> (standard format)
+ * - <function_call>...</function_call> (Granite format)
+ * - Unclosed tags during streaming
+ * 
+ * Returns an array of MessageParts with tool_call extracted from text.
+ */
+function extractToolCalls(parts: MessagePart[]): MessagePart[] {
+    const result: MessagePart[] = [];
+    
+    for (const part of parts) {
+        if (part.type !== 'text') {
+            // Keep non-text parts as-is
+            result.push(part);
+            continue;
+        }
+        
+        let current = part.content;
+        
+        while (current.length > 0) {
+            // Find the next tool_call or function_call tag
+            const toolCallStart = current.indexOf('<tool_call>');
+            const functionCallStart = current.indexOf('<function_call>');
+            
+            // Determine which comes first (or -1 if neither)
+            let tagStart = -1;
+            let tagType: 'tool_call' | 'function_call' | null = null;
+            let openTagLen = 0;
+            let closeTag = '';
+            
+            if (toolCallStart !== -1 && (functionCallStart === -1 || toolCallStart < functionCallStart)) {
+                tagStart = toolCallStart;
+                tagType = 'tool_call';
+                openTagLen = 11; // '<tool_call>'.length
+                closeTag = '</tool_call>';
+            } else if (functionCallStart !== -1) {
+                tagStart = functionCallStart;
+                tagType = 'function_call';
+                openTagLen = 15; // '<function_call>'.length
+                closeTag = '</function_call>';
+            }
+            
+            if (tagStart === -1) {
+                // No more tool calls - add remaining text
+                if (current.trim()) {
+                    result.push({ type: 'text', content: current });
+                }
+                break;
+            }
+            
+            // Add text before the tag
+            if (tagStart > 0) {
+                const beforeText = current.substring(0, tagStart);
+                if (beforeText.trim()) {
+                    result.push({ type: 'text', content: beforeText });
+                }
+            }
+            
+            // Find the closing tag
+            const rest = current.substring(tagStart + openTagLen);
+            const endIdx = rest.indexOf(closeTag);
+            
+            if (endIdx === -1) {
+                // Unclosed tag (streaming) - capture everything as tool_call
+                result.push({ type: 'tool_call', content: rest });
+                break;
+            }
+            
+            // Extract the tool_call content
+            const toolContent = rest.substring(0, endIdx);
+            result.push({ type: 'tool_call', content: toolContent });
+            
+            // Continue with the rest of the content
+            current = rest.substring(endIdx + closeTag.length);
+        }
+    }
+    
+    return result;
+}
+
+/**
  * Unified message content parser that handles all model response formats.
  * 
  * @param content - The raw response content from the model
@@ -233,28 +315,37 @@ export function parseMessageContent(content: string, modelFamily?: ModelFamily):
     // Auto-detect format if not specified
     const format = modelFamily || detectResponseFormat(cleanedContent);
     
+    let parts: MessagePart[];
+    
     switch (format) {
         case 'gpt_oss':
-            return parseChannelFormat(cleanedContent);
+            parts = parseChannelFormat(cleanedContent);
+            break;
         case 'phi':
-            return parseThinkFormat(cleanedContent);
+            parts = parseThinkFormat(cleanedContent);
+            break;
         case 'granite':
-            return parseGraniteThinkingFormat(cleanedContent);
+            parts = parseGraniteThinkingFormat(cleanedContent);
+            break;
         case 'gemma':
         case 'generic':
         default:
             // Check if content actually has any special format markers (auto-detect fallback)
             if (cleanedContent.includes('<|channel|>')) {
-                return parseChannelFormat(cleanedContent);
+                parts = parseChannelFormat(cleanedContent);
+            } else if (cleanedContent.includes('<think>')) {
+                parts = parseThinkFormat(cleanedContent);
+            } else if (cleanedContent.includes('<|thinking|>')) {
+                parts = parseGraniteThinkingFormat(cleanedContent);
+            } else {
+                parts = parsePlainText(cleanedContent);
             }
-            if (cleanedContent.includes('<think>')) {
-                return parseThinkFormat(cleanedContent);
-            }
-            if (cleanedContent.includes('<|thinking|>')) {
-                return parseGraniteThinkingFormat(cleanedContent);
-            }
-            return parsePlainText(cleanedContent);
+            break;
     }
+    
+    // Post-process to extract tool_call blocks from text parts
+    // This handles <tool_call> and <function_call> tags that can appear in any format
+    return extractToolCalls(parts);
 }
 
 /**
@@ -267,6 +358,26 @@ export function hasOnlyThinkContent(content: string): boolean {
     const thinkParts = parts.filter(p => p.type === 'think');
     // Has think content but no meaningful visible text
     return thinkParts.length > 0 && textParts.every(p => !p.content.trim());
+}
+
+/**
+ * Check if message has only tool_call content (no visible text)
+ * Used to show the "Processing tool..." indicator while tools are executing.
+ */
+export function hasOnlyToolCallContent(content: string): boolean {
+    const parts = parseMessageContent(content);
+    const textParts = parts.filter(p => p.type === 'text');
+    const toolCallParts = parts.filter(p => p.type === 'tool_call');
+    // Has tool_call content but no meaningful visible text
+    return toolCallParts.length > 0 && textParts.every(p => !p.content.trim());
+}
+
+/**
+ * Check if message content contains any tool_call parts
+ */
+export function hasToolCallContent(content: string): boolean {
+    const parts = parseMessageContent(content);
+    return parts.some(p => p.type === 'tool_call');
 }
 
 /**
@@ -287,6 +398,13 @@ export function stripFormatMarkers(content: string): string {
     // Remove granite thinking markers
     result = result.replace(/<\|\/thinking\|>/g, '');
     result = result.replace(/<\|thinking\|>/g, '');
+    
+    // Remove tool_call markers and their content
+    result = result.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '');
+    result = result.replace(/<function_call>[\s\S]*?<\/function_call>/g, '');
+    // Handle unclosed tags (streaming)
+    result = result.replace(/<tool_call>[\s\S]*$/g, '');
+    result = result.replace(/<function_call>[\s\S]*$/g, '');
     
     return result.trim();
 }
