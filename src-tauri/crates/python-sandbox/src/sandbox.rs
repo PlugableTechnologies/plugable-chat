@@ -77,6 +77,12 @@ pub fn create_sandboxed_interpreter() -> Interpreter {
     settings.import_site = false;
     
     Interpreter::with_init(settings, |vm| {
+        // Add stdlib native modules (math, json, random, hashlib, etc.)
+        // These are the Rust implementations of Python stdlib modules
+        for (name, init) in rustpython_stdlib::get_module_inits() {
+            vm.add_native_module(name, init);
+        }
+        
         // Add our sandbox module with tool_call function
         vm.add_native_module("_sandbox".to_owned(), Box::new(make_sandbox_module));
     })

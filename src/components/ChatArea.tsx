@@ -161,18 +161,36 @@ const ToolProcessingBlock = ({ content, startTime }: { content: string; startTim
         .filter((call): call is ParsedToolCallInfo => call !== null);
 
     if (parsedCalls.length === 0) {
-        // Fallback to simple indicator if we can't parse the tool calls
+        // Fallback with expandable raw content if we can't parse the tool calls
+        // Extract the raw tool call content to display
+        const rawToolContent = toolCallParts.map(p => p.content).join('\n\n');
+        
         return (
-            <div className="flex items-center gap-2 text-xs text-gray-500 mt-2 mb-1">
-                <div className="flex gap-1">
-                    <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" />
-                    <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
-                    <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '600ms' }} />
+            <details className="my-2 group/processing border border-purple-300 rounded-xl overflow-hidden bg-purple-50/70">
+                <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-purple-100/50 transition-colors select-none">
+                    <div className="flex gap-1">
+                        <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" />
+                        <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '200ms' }} />
+                        <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '400ms' }} />
+                    </div>
+                    <span className="font-medium text-purple-900 text-sm">
+                        Processing tool
+                    </span>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-purple-200 text-purple-700 animate-pulse">
+                        {elapsed >= 1 ? formatTime(elapsed) : '...'}
+                    </span>
+                    <span className="ml-auto text-xs text-purple-400 group-open/processing:rotate-180 transition-transform">▼</span>
+                </summary>
+                <div className="border-t border-purple-200 px-4 py-3 bg-white/80">
+                    {rawToolContent ? (
+                        <pre className="text-xs bg-gray-50 p-2 rounded overflow-x-auto text-gray-700 whitespace-pre-wrap">
+                            {rawToolContent}
+                        </pre>
+                    ) : (
+                        <p className="text-xs text-gray-500 italic">Tool call content is being streamed...</p>
+                    )}
                 </div>
-                <span className="font-medium text-gray-500">
-                    Processing tool{elapsed >= 1 ? ` · ${formatTime(elapsed)}` : '...'}
-                </span>
-            </div>
+            </details>
         );
     }
 
@@ -655,6 +673,41 @@ const stripOpenAITokens = (content: string): string => {
         .replace(/^\n+/, '');
 };
 
+// Common LaTeX commands that indicate math content
+const LATEX_MATH_COMMANDS = [
+    'frac', 'sqrt', 'sum', 'prod', 'int', 'oint', 'lim', 'infty',
+    'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta',
+    'iota', 'kappa', 'lambda', 'mu', 'nu', 'xi', 'pi', 'rho', 'sigma',
+    'tau', 'upsilon', 'phi', 'chi', 'psi', 'omega',
+    'Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta',
+    'Iota', 'Kappa', 'Lambda', 'Mu', 'Nu', 'Xi', 'Pi', 'Rho', 'Sigma',
+    'Tau', 'Upsilon', 'Phi', 'Chi', 'Psi', 'Omega',
+    'times', 'div', 'pm', 'mp', 'cdot', 'ast', 'star', 'circ',
+    'leq', 'geq', 'neq', 'approx', 'equiv', 'sim', 'simeq', 'cong',
+    'subset', 'supset', 'subseteq', 'supseteq', 'in', 'notin', 'ni',
+    'cup', 'cap', 'setminus', 'emptyset', 'varnothing',
+    'forall', 'exists', 'nexists', 'neg', 'land', 'lor', 'implies', 'iff',
+    'partial', 'nabla', 'degree',
+    'sin', 'cos', 'tan', 'cot', 'sec', 'csc', 'arcsin', 'arccos', 'arctan',
+    'sinh', 'cosh', 'tanh', 'coth',
+    'log', 'ln', 'exp', 'min', 'max', 'arg', 'det', 'dim', 'ker', 'hom',
+    'left', 'right', 'bigl', 'bigr', 'Bigl', 'Bigr',
+    'vec', 'hat', 'bar', 'dot', 'ddot', 'tilde', 'overline', 'underline',
+    'overbrace', 'underbrace',
+    'text', 'textbf', 'textit', 'textrm', 'mathrm', 'mathbf', 'mathit',
+    'mathbb', 'mathcal', 'mathscr', 'mathfrak',
+    'boxed', 'cancel', 'bcancel', 'xcancel',
+    'begin', 'end', 'matrix', 'pmatrix', 'bmatrix', 'vmatrix', 'cases',
+    'hspace', 'vspace', 'quad', 'qquad', 'space',
+    'displaystyle', 'textstyle', 'scriptstyle',
+];
+
+// Build regex pattern for detecting LaTeX commands
+const LATEX_COMMAND_PATTERN = new RegExp(
+    `\\\\(${LATEX_MATH_COMMANDS.join('|')})(?![a-zA-Z])`,
+    'g'
+);
+
 // Convert LaTeX bracket/paren delimiters to dollar signs for remark-math
 const convertLatexDelimiters = (content: string): string => {
     let result = content;
@@ -704,6 +757,110 @@ const convertLatexDelimiters = (content: string): string => {
         }
         return match; // Leave as-is if not clearly LaTeX
     });
+    
+    // NEW: Wrap undelimited LaTeX expressions in inline math delimiters
+    // This catches cases where LaTeX commands appear in plain text without any delimiters
+    result = wrapUndelimitedLatex(result);
+    
+    return result;
+};
+
+// Wrap undelimited LaTeX expressions in $ delimiters
+// This handles cases where the model outputs LaTeX without proper math delimiters
+const wrapUndelimitedLatex = (content: string): string => {
+    // Track positions that are already in math mode or code
+    const mathRanges: [number, number][] = [];
+    const codeRanges: [number, number][] = [];
+    
+    // Find existing math delimiters ($$...$$ and $...$)
+    let match;
+    const displayMathRegex = /\$\$[\s\S]*?\$\$/g;
+    while ((match = displayMathRegex.exec(content)) !== null) {
+        mathRanges.push([match.index, match.index + match[0].length]);
+    }
+    
+    const inlineMathRegex = /\$(?!\$)[^\$\n]+\$(?!\$)/g;
+    while ((match = inlineMathRegex.exec(content)) !== null) {
+        mathRanges.push([match.index, match.index + match[0].length]);
+    }
+    
+    // Find code blocks and inline code
+    const codeBlockRegex = /```[\s\S]*?```/g;
+    while ((match = codeBlockRegex.exec(content)) !== null) {
+        codeRanges.push([match.index, match.index + match[0].length]);
+    }
+    
+    const inlineCodeRegex = /`[^`\n]+`/g;
+    while ((match = inlineCodeRegex.exec(content)) !== null) {
+        codeRanges.push([match.index, match.index + match[0].length]);
+    }
+    
+    // Check if a position is inside math or code
+    const isProtected = (pos: number): boolean => {
+        return mathRanges.some(([start, end]) => pos >= start && pos < end) ||
+               codeRanges.some(([start, end]) => pos >= start && pos < end);
+    };
+    
+    // Find and wrap undelimited LaTeX expressions
+    // Pattern matches: LaTeX command followed by more math content
+    // e.g., \frac{4}{3} \pi r^3 or V = \frac{a}{b}
+    const latexExpressionRegex = /(?:^|[^\\$])((\\(?:frac|sqrt|sum|prod|int|lim)\s*\{[^}]*\}\s*(?:\{[^}]*\})?|\\(?:text|textbf|textit|mathrm|mathbf)\s*\{[^}]*\})(?:\s*[+\-*/=^_]?\s*(?:\\[a-zA-Z]+(?:\s*\{[^}]*\})*|[a-zA-Z0-9.]+|\{[^}]*\}|[+\-*/=^_]))*)/g;
+    
+    const replacements: { start: number; end: number; text: string }[] = [];
+    
+    while ((match = latexExpressionRegex.exec(content)) !== null) {
+        const fullMatch = match[1];
+        const startPos = match.index + match[0].indexOf(fullMatch);
+        
+        // Skip if this position is already in math or code
+        if (isProtected(startPos)) continue;
+        
+        // Only wrap if it contains actual LaTeX commands
+        if (LATEX_COMMAND_PATTERN.test(fullMatch)) {
+            replacements.push({
+                start: startPos,
+                end: startPos + fullMatch.length,
+                text: `$${fullMatch.trim()}$`
+            });
+        }
+        
+        // Reset the regex lastIndex to avoid infinite loops
+        LATEX_COMMAND_PATTERN.lastIndex = 0;
+    }
+    
+    // Also catch simpler patterns: standalone LaTeX commands with arguments
+    // e.g., \times 10^{27} or \approx 1.41
+    const simpleLatexRegex = /(?:^|[\s(=])((\\(?:times|approx|equiv|leq|geq|neq|pm|mp|cdot|div|infty|pi|alpha|beta|gamma|delta|theta|lambda|mu|sigma|omega|phi|psi|partial|nabla|sum|prod|int)\b)(?:\s*[0-9.]+)?(?:\s*\\times\s*[0-9.]+)?(?:\s*\^[\s{]*[-0-9]+\}?)?(?:\s*\\text\{[^}]*\})?)/g;
+    
+    while ((match = simpleLatexRegex.exec(content)) !== null) {
+        const fullMatch = match[1];
+        const startPos = match.index + match[0].indexOf(fullMatch);
+        
+        if (isProtected(startPos)) continue;
+        
+        // Check it's not already inside our planned replacements
+        const overlaps = replacements.some(r => 
+            (startPos >= r.start && startPos < r.end) ||
+            (startPos + fullMatch.length > r.start && startPos + fullMatch.length <= r.end)
+        );
+        
+        if (!overlaps) {
+            replacements.push({
+                start: startPos,
+                end: startPos + fullMatch.length,
+                text: `$${fullMatch.trim()}$`
+            });
+        }
+    }
+    
+    // Sort replacements by position (descending) to apply from end to start
+    replacements.sort((a, b) => b.start - a.start);
+    
+    // Apply replacements
+    let result = content;
+    for (const { start, end, text } of replacements) {
+        result = result.slice(0, start) + text + result.slice(end);
+    }
     
     return result;
 };
@@ -1150,7 +1307,14 @@ export function ChatArea() {
                                                         <ReactMarkdown
                                                             key={idx}
                                                             remarkPlugins={[remarkGfm, remarkMath]}
-                                                            rehypePlugins={[rehypeRaw, rehypeKatex]}
+                                                            rehypePlugins={[
+                                                                rehypeRaw, 
+                                                                [rehypeKatex, { 
+                                                                    throwOnError: false, 
+                                                                    errorColor: '#666666',
+                                                                    strict: false
+                                                                }]
+                                                            ]}
                                                             components={{
                                                                 code({ node, inline, className, children, ...props }: any) {
                                                                     const match = /language-(\w+)/.exec(className || '')

@@ -770,6 +770,26 @@ mod tests {
     }
     
     #[test]
+    fn test_math_module() {
+        // math module is now available via rustpython-stdlib native module
+        let result = exec_code(&[
+            "import math",
+            "print(f'pi = {math.pi}')",
+            "print(f'sqrt(16) = {math.sqrt(16)}')",
+            "print(f'sin(0) = {math.sin(0)}')",
+            "print(f'ceil(4.2) = {math.ceil(4.2)}')",
+            "print(f'floor(4.8) = {math.floor(4.8)}')",
+        ]);
+        assert_eq!(result.status, ExecutionStatus::Complete, 
+            "math module should be available. Error: {:?}", result.status);
+        assert!(result.stdout.contains("pi = 3.14"), "stdout: {}", result.stdout);
+        assert!(result.stdout.contains("sqrt(16) = 4"), "stdout: {}", result.stdout);
+        assert!(result.stdout.contains("sin(0) = 0"), "stdout: {}", result.stdout);
+        assert!(result.stdout.contains("ceil(4.2) = 5"), "stdout: {}", result.stdout);
+        assert!(result.stdout.contains("floor(4.8) = 4"), "stdout: {}", result.stdout);
+    }
+    
+    #[test]
     fn test_module_not_available_error() {
         // Test that unavailable modules give proper error (not a sandbox escape)
         let result = exec_code(&["import json"]);

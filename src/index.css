@@ -229,3 +229,19 @@
   text-align: center;
   padding: 0.5em 0;
 }
+
+/* KaTeX error styling - show errors gracefully instead of red */
+.katex-error {
+  color: #666666 !important;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background-color: #f5f5f5;
+  padding: 0.2em 0.4em;
+  border-radius: 4px;
+  border: 1px solid #e0e0e0;
+}
+
+/* Hide the red error color from KaTeX */
+.katex .katex-html .mord.text {
+  color: inherit;
+}
