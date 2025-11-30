@@ -98,8 +98,50 @@ const ToolExecutionIndicator = ({ server, tool }: { server: string; tool: string
     );
 };
 
-// Tool processing indicator (shown inline in message when only tool_call content exists)
-const ToolProcessingIndicator = ({ startTime }: { startTime: number }) => {
+// Parse tool call JSON to extract name, server, and arguments
+interface ParsedToolCallInfo {
+    server: string;
+    tool: string;
+    arguments: Record<string, unknown>;
+    rawContent: string;
+}
+
+function parseToolCallJson(jsonContent: string): ParsedToolCallInfo | null {
+    try {
+        const parsed = JSON.parse(jsonContent.trim());
+        
+        // Extract tool name - could be "name" or "tool_name" (GPT-OSS legacy)
+        const fullName = parsed.name || parsed.tool_name || 'unknown';
+        
+        // Check if the name contains server prefix (server___tool format)
+        let server = 'unknown';
+        let tool = fullName;
+        
+        if (fullName.includes('___')) {
+            const parts = fullName.split('___');
+            server = parts[0];
+            tool = parts.slice(1).join('___');
+        } else if (parsed.server) {
+            server = parsed.server;
+        }
+        
+        // Extract arguments - could be "arguments", "parameters" (Llama), or "tool_args" (GPT-OSS)
+        const args = parsed.arguments || parsed.parameters || parsed.tool_args || {};
+        
+        return {
+            server,
+            tool,
+            arguments: args,
+            rawContent: jsonContent,
+        };
+    } catch {
+        return null;
+    }
+}
+
+// Tool processing block (shown inline in message when only tool_call content exists)
+// Shows a collapsible block with tool call details and processing status
+const ToolProcessingBlock = ({ content, startTime }: { content: string; startTime: number }) => {
     const [elapsed, setElapsed] = useState(0);
     
     useEffect(() => {
@@ -109,17 +151,73 @@ const ToolProcessingIndicator = ({ startTime }: { startTime: number }) => {
         return () => clearInterval(interval);
     }, [startTime]);
 
-    return (
-        <div className="flex items-center gap-2 text-xs text-gray-500 mt-2 mb-1">
-            <div className="flex gap-1">
-                <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" />
-                <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
-                <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '600ms' }} />
+    // Parse tool calls from the message content
+    const parts = parseMessageContent(content);
+    const toolCallParts = parts.filter(p => p.type === 'tool_call');
+    
+    // Parse each tool call JSON
+    const parsedCalls = toolCallParts
+        .map(part => parseToolCallJson(part.content))
+        .filter((call): call is ParsedToolCallInfo => call !== null);
+
+    if (parsedCalls.length === 0) {
+        // Fallback to simple indicator if we can't parse the tool calls
+        return (
+            <div className="flex items-center gap-2 text-xs text-gray-500 mt-2 mb-1">
+                <div className="flex gap-1">
+                    <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" />
+                    <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
+                    <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" style={{ animationDelay: '600ms' }} />
+                </div>
+                <span className="font-medium text-gray-500">
+                    Processing tool{elapsed >= 1 ? ` · ${formatTime(elapsed)}` : '...'}
+                </span>
             </div>
-            <span className="font-medium text-gray-500">
-                Processing tool{elapsed >= 1 ? ` · ${formatTime(elapsed)}` : '...'}
-            </span>
-        </div>
+        );
+    }
+
+    return (
+        <details className="my-2 group/processing border border-purple-300 rounded-xl overflow-hidden bg-purple-50/70" open>
+            <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-purple-100/50 transition-colors select-none">
+                <div className="flex gap-1">
+                    <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" />
+                    <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" style={{ animationDelay: '200ms' }} />
+                    <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" style={{ animationDelay: '400ms' }} />
+                </div>
+                <span className="font-medium text-purple-900 text-sm">
+                    Processing {parsedCalls.length} tool call{parsedCalls.length !== 1 ? 's' : ''}
+                </span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-purple-200 text-purple-700 animate-pulse">
+                    Running{elapsed >= 1 ? ` · ${formatTime(elapsed)}` : '...'}
+                </span>
+                <span className="ml-auto text-xs text-purple-400 group-open/processing:rotate-180 transition-transform">▼</span>
+            </summary>
+            <div className="border-t border-purple-200 divide-y divide-purple-100">
+                {parsedCalls.map((call, idx) => (
+                    <div key={idx} className="px-4 py-3 bg-white/80">
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <code className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600">{call.server}</code>
+                            <span className="text-gray-400">›</span>
+                            <code className="text-sm px-2 py-1 rounded bg-purple-100 text-purple-800 font-medium">{call.tool}</code>
+                            <span className="ml-auto flex items-center gap-1.5">
+                                <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" />
+                                <span className="text-xs text-purple-600 font-medium">Processing</span>
+                            </span>
+                        </div>
+                        {Object.keys(call.arguments).length > 0 && (
+                            <details className="mt-2">
+                                <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+                                    Arguments
+                                </summary>
+                                <pre className="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto text-gray-700">
+                                    {JSON.stringify(call.arguments, null, 2)}
+                                </pre>
+                            </details>
+                        )}
+                    </div>
+                ))}
+            </div>
+        </details>
     );
 };
 
@@ -1093,11 +1191,11 @@ export function ChatArea() {
                                                  hasOnlyThinkContent(m.content) && (
                                                     <ThinkingIndicator startTime={thinkingStartTime} />
                                                 )}
-                                                {/* Show tool processing indicator when only tool_call content is visible */}
+                                                {/* Show tool processing block when only tool_call content is visible */}
                                                 {toolProcessingStartTime && 
                                                  messages[messages.length - 1]?.id === m.id && 
                                                  hasOnlyToolCallContent(m.content) && (
-                                                    <ToolProcessingIndicator startTime={toolProcessingStartTime} />
+                                                    <ToolProcessingBlock content={m.content} startTime={toolProcessingStartTime} />
                                                 )}
                                                 {/* Collapsible tool calls block */}
                                                 {m.toolCalls && m.toolCalls.length > 0 && (
