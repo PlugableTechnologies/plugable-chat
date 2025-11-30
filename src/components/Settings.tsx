@@ -291,16 +291,21 @@ function McpServerCard({
         onSave(localConfig);
         setIsDirty(false);
         
-        // Automatically test the connection after saving
-        setIsTesting(true);
-        setTestResult(null);
-        try {
-            const tools = await invoke<McpTool[]>('test_mcp_server_config', { config: localConfig });
-            setTestResult({ success: true, tools });
-        } catch (e: any) {
-            setTestResult({ success: false, error: e.message || String(e) });
-        } finally {
-            setIsTesting(false);
+        // Only test the connection if the server is enabled
+        if (localConfig.enabled) {
+            setIsTesting(true);
+            setTestResult(null);
+            try {
+                const tools = await invoke<McpTool[]>('test_mcp_server_config', { config: localConfig });
+                setTestResult({ success: true, tools });
+            } catch (e: any) {
+                setTestResult({ success: false, error: e.message || String(e) });
+            } finally {
+                setIsTesting(false);
+            }
+        } else {
+            // Clear any previous test result when saving a disabled server
+            setTestResult(null);
         }
     }, [localConfig, onSave]);
     

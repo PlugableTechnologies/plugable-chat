@@ -784,36 +784,17 @@ async fn chat(
     // that don't support native tool calling
     let system_prompt = build_system_prompt(&base_system_prompt, &tool_descriptions, &server_configs);
     
-    // === LOGGING: System prompt and MCP tool descriptions ===
-    println!("\n=== CHAT CONTEXT - NEW MESSAGE ===");
-    println!("[SYSTEM PROMPT MODE]: {}", if has_mcp_tools { "MCP (full)" } else { "Simple fallback" });
-    println!("\n[BASE SYSTEM PROMPT] ({} chars):", base_system_prompt.len());
-    println!("{}", base_system_prompt);
-    println!("\n[MCP TOOL DESCRIPTIONS]:");
-    if tool_descriptions.is_empty() {
-        println!("  (no enabled MCP servers with tools)");
-    } else {
-        for (server_id, tools) in &tool_descriptions {
-            println!("  Server: {} ({} tools)", server_id, tools.len());
-            for tool in tools {
-                println!("    - {}: {}", tool.name, tool.description.as_deref().unwrap_or("no description"));
-            }
-        }
-    }
-    println!("\n[FINAL SYSTEM PROMPT] ({} chars):", system_prompt.len());
-    println!("{}", system_prompt);
-    println!("\n[AUTO-APPROVE SERVERS]:");
-    let auto_approve_count = server_configs.iter().filter(|c| c.auto_approve_tools).count();
-    if auto_approve_count == 0 {
-        println!("  (none)");
-    } else {
-        for cfg in &server_configs {
-            if cfg.auto_approve_tools {
-                println!("  - {} ({})", cfg.name, cfg.id);
-            }
-        }
-    }
-    println!("\n=== END CHAT CONTEXT ===\n");
+    // === LOGGING: System prompt construction ===
+    let auto_approve_servers: Vec<&str> = server_configs.iter()
+        .filter(|c| c.auto_approve_tools)
+        .map(|c| c.id.as_str())
+        .collect();
+    let tool_count: usize = tool_descriptions.iter().map(|(_, tools)| tools.len()).sum();
+    let server_count = tool_descriptions.len();
+    
+    println!("\n[Chat] System prompt: base={}chars, servers={}, tools={}, auto_approve={:?}",
+        base_system_prompt.len(), server_count, tool_count, auto_approve_servers);
+    println!("[Chat] Final system prompt ({} chars):\n{}", system_prompt.len(), system_prompt);
     
     // Build full history with system prompt at the beginning
     let mut full_history = Vec::new();

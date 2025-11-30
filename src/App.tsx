@@ -230,16 +230,14 @@ function App() {
     await log('\n=== END LAYOUT DEBUG ===\n');
   };
 
-  // Log layout info after initial render
-  useEffect(() => {
-    // Use setTimeout to ensure DOM is fully rendered and styled
-    const timer = setTimeout(() => {
-      console.log('📊 Initial layout debug (after first render):');
-      debugLayout();
-    }, 100);
-
-    return () => clearTimeout(timer);
-  }, []);
+  // Log layout info after initial render (disabled - use Ctrl+Shift+L to trigger manually)
+  // useEffect(() => {
+  //   const timer = setTimeout(() => {
+  //     console.log('📊 Initial layout debug (after first render):');
+  //     debugLayout();
+  //   }, 100);
+  //   return () => clearTimeout(timer);
+  // }, []);
   
   // Fetch settings and sync MCP servers on app startup
   useEffect(() => {
