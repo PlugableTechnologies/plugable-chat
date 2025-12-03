@@ -12,6 +12,22 @@ import {
 
 export type ReasoningEffort = 'low' | 'medium' | 'high';
 
+// Operation status types for the status bar
+export type OperationType = 'none' | 'downloading' | 'loading' | 'streaming';
+
+export interface OperationStatus {
+    type: OperationType;
+    message: string;
+    /** For downloads: current file being downloaded */
+    currentFile?: string;
+    /** Progress percentage (0-100) for downloads */
+    progress?: number;
+    /** Whether the operation completed (shows "Complete" briefly) */
+    completed?: boolean;
+    /** Start time for elapsed timer */
+    startTime: number;
+}
+
 export interface CachedModel {
     alias: string;
     model_id: string;
@@ -158,11 +174,28 @@ interface ChatState {
     setInput: (s: string) => void;
     isLoading: boolean;
     setIsLoading: (loading: boolean) => void;
-    stopGeneration: () => void;
+    stopGeneration: () => Promise<void>;
     generationId: number;
 
     currentChatId: string | null;
     setCurrentChatId: (id: string | null) => void;
+
+    // Operation status for status bar (downloads, loads, streaming)
+    operationStatus: OperationStatus | null;
+    statusBarDismissed: boolean;
+    setOperationStatus: (status: OperationStatus | null) => void;
+    dismissStatusBar: () => void;
+    showStatusBar: () => void;
+
+    // Per-chat streaming tracking (streaming continues to original chat on switch)
+    streamingChatId: string | null;
+    streamingMessages: Message[]; // Messages for the streaming chat (if different from current)
+    setStreamingChatId: (id: string | null) => void;
+
+    // Model loading operations
+    loadModel: (modelName: string) => Promise<void>;
+    downloadModel: (modelName: string) => Promise<void>;
+    getLoadedModels: () => Promise<string[]>;
 
     availableModels: string[];
     cachedModels: CachedModel[];
@@ -250,11 +283,13 @@ let unlistenToolCallsPending: (() => void) | undefined;
 let unlistenToolExecuting: (() => void) | undefined;
 let unlistenToolResult: (() => void) | undefined;
 let unlistenToolLoopFinished: (() => void) | undefined;
+let unlistenDownloadProgress: (() => void) | undefined;
+let unlistenLoadComplete: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
 let modelFetchPromise: Promise<void> | null = null;
 let modelFetchRetryTimer: ReturnType<typeof setTimeout> | null = null;
-const MODEL_FETCH_MAX_RETRIES = 10;
+const MODEL_FETCH_MAX_RETRIES = 3;
 const MODEL_FETCH_INITIAL_DELAY_MS = 1000;
 
 // Relevance search debounce/cancellation state
@@ -262,6 +297,114 @@ let relevanceSearchTimeout: ReturnType<typeof setTimeout> | null = null;
 let relevanceSearchGeneration = 0; // Incremented on each new search to cancel stale results
 const RELEVANCE_SEARCH_DEBOUNCE_MS = 400; // Wait 400ms after typing stops
 const RELEVANCE_SEARCH_MIN_LENGTH = 3; // Minimum chars before searching
+
+// Default model to download if no models are available
+// Using 'phi-4-mini-instruct' to specifically match the instruct version (not reasoning)
+// This matches the alias 'Phi-4-mini-instruct-generic-gpu:5' in the Foundry catalog
+const DEFAULT_MODEL_TO_DOWNLOAD = 'phi-4-mini-instruct';
+
+// Helper function to initialize models on startup
+async function initializeModelsOnStartup(
+    get: () => ChatState,
+    set: (partial: Partial<ChatState> | ((state: ChatState) => Partial<ChatState>)) => void
+) {
+    console.log('[ChatStore] Starting model initialization...');
+    
+    try {
+        // Step 1: Fetch available/cached models
+        console.log('[ChatStore] Fetching cached models...');
+        await get().fetchCachedModels();
+        await get().fetchModels();
+        await get().fetchModelInfo();
+        
+        const state = get();
+        const cachedModels = state.cachedModels;
+        
+        if (cachedModels.length === 0) {
+            // No models available - attempt auto-download
+            // The App.tsx will also show the help chat so users understand what's happening
+            console.log('[ChatStore] No cached models found. Attempting auto-download of:', DEFAULT_MODEL_TO_DOWNLOAD);
+            
+            set({
+                operationStatus: {
+                    type: 'downloading',
+                    message: `Downloading ${DEFAULT_MODEL_TO_DOWNLOAD}...`,
+                    progress: 0,
+                    startTime: Date.now(),
+                },
+                statusBarDismissed: false,
+                currentModel: 'Downloading...',
+            });
+            
+            try {
+                await invoke('download_model', { modelName: DEFAULT_MODEL_TO_DOWNLOAD });
+                console.log('[ChatStore] Default model download complete');
+                
+                // Refresh models after download
+                await get().fetchCachedModels();
+                await get().fetchModels();
+                
+                // Now load the model
+                const updatedState = get();
+                if (updatedState.cachedModels.length > 0) {
+                    const modelToLoad = updatedState.cachedModels[0].model_id;
+                    console.log('[ChatStore] Loading downloaded model:', modelToLoad);
+                    await get().loadModel(modelToLoad);
+                } else {
+                    // Download succeeded but no models found - unusual
+                    set({
+                        operationStatus: null,
+                        currentModel: 'No models',
+                    });
+                }
+            } catch (downloadError: any) {
+                console.error('[ChatStore] Failed to download default model:', downloadError);
+                // Clear loading state but show the error in status bar briefly
+                set({
+                    operationStatus: {
+                        type: 'downloading',
+                        message: `Auto-download failed. Use: foundry model load ${DEFAULT_MODEL_TO_DOWNLOAD}`,
+                        startTime: Date.now(),
+                    },
+                    currentModel: 'No models',
+                });
+                // Auto-dismiss error after 10 seconds
+                setTimeout(() => {
+                    const currentState = get();
+                    if (currentState.operationStatus?.message?.includes('Auto-download failed')) {
+                        set({ operationStatus: null });
+                    }
+                }, 10000);
+            }
+        } else {
+            // Models are available - check if any are loaded into VRAM
+            console.log('[ChatStore] Found', cachedModels.length, 'cached models. Checking loaded models...');
+            
+            try {
+                const loadedModels = await get().getLoadedModels();
+                
+                if (loadedModels.length > 0) {
+                    // Use the first loaded model
+                    const activeModel = loadedModels[0];
+                    console.log('[ChatStore] Found loaded model:', activeModel);
+                    set({ currentModel: activeModel });
+                } else {
+                    // No models loaded - load the first cached model
+                    const modelToLoad = cachedModels[0].model_id;
+                    console.log('[ChatStore] No models loaded. Loading first cached model:', modelToLoad);
+                    await get().loadModel(modelToLoad);
+                }
+            } catch (loadError: any) {
+                console.error('[ChatStore] Failed to check/load models:', loadError);
+                // Still set the first cached model as current (even if not loaded into VRAM)
+                set({ currentModel: cachedModels[0].model_id });
+            }
+        }
+    } catch (e: any) {
+        console.error('[ChatStore] Model initialization error:', e);
+        set({ operationStatus: null, currentModel: 'No models' });
+    }
+}
 
 export const useChatStore = create<ChatState>((set, get) => ({
     messages: [],
@@ -271,16 +414,135 @@ export const useChatStore = create<ChatState>((set, get) => ({
     isLoading: false,
     setIsLoading: (isLoading) => set({ isLoading }),
     generationId: 0,
-    stopGeneration: () => {
+    stopGeneration: async () => {
         // Increment generationId to ignore any incoming tokens from the stopped generation
+        const currentGenId = get().generationId;
         set((state) => ({ 
             isLoading: false, 
-            generationId: state.generationId + 1 
+            generationId: state.generationId + 1,
+            streamingChatId: null,
+            operationStatus: null,
         }));
+        // Call backend to cancel the stream
+        try {
+            await invoke('cancel_generation', { generationId: currentGenId });
+            console.log('[ChatStore] Cancelled generation', currentGenId);
+        } catch (e) {
+            console.error('[ChatStore] Failed to cancel generation:', e);
+        }
     },
 
     currentChatId: null,
     setCurrentChatId: (id) => set({ currentChatId: id }),
+
+    // Operation status for status bar
+    operationStatus: null,
+    statusBarDismissed: false,
+    setOperationStatus: (status) => set({ operationStatus: status, statusBarDismissed: false }),
+    dismissStatusBar: () => set({ statusBarDismissed: true }),
+    showStatusBar: () => set({ statusBarDismissed: false }),
+
+    // Per-chat streaming tracking
+    streamingChatId: null,
+    streamingMessages: [],
+    setStreamingChatId: (id) => set({ streamingChatId: id }),
+
+    // Model loading operations
+    loadModel: async (modelName: string) => {
+        console.log('[ChatStore] Loading model:', modelName);
+        set({
+            operationStatus: {
+                type: 'loading',
+                message: `Loading ${modelName} into VRAM...`,
+                startTime: Date.now(),
+            },
+            statusBarDismissed: false,
+        });
+        try {
+            await invoke('load_model', { modelName });
+            set({
+                operationStatus: {
+                    type: 'loading',
+                    message: `${modelName} loaded successfully`,
+                    completed: true,
+                    startTime: Date.now(),
+                },
+                currentModel: modelName,
+            });
+            // Auto-dismiss after 3 seconds
+            setTimeout(() => {
+                const state = get();
+                if (state.operationStatus?.completed) {
+                    set({ operationStatus: null });
+                }
+            }, 3000);
+        } catch (e: any) {
+            console.error('[ChatStore] Failed to load model:', e);
+            set({
+                operationStatus: {
+                    type: 'loading',
+                    message: `Failed to load ${modelName}: ${e.message || e}`,
+                    startTime: Date.now(),
+                },
+                backendError: `Failed to load model: ${e.message || e}`,
+            });
+        }
+    },
+
+    downloadModel: async (modelName: string) => {
+        console.log('[ChatStore] Downloading model:', modelName);
+        set({
+            operationStatus: {
+                type: 'downloading',
+                message: `Downloading ${modelName}...`,
+                progress: 0,
+                startTime: Date.now(),
+            },
+            statusBarDismissed: false,
+        });
+        try {
+            await invoke('download_model', { modelName });
+            set({
+                operationStatus: {
+                    type: 'downloading',
+                    message: `${modelName} downloaded successfully`,
+                    completed: true,
+                    progress: 100,
+                    startTime: Date.now(),
+                },
+            });
+            // Refresh cached models
+            await get().fetchCachedModels();
+            // Auto-dismiss after 3 seconds
+            setTimeout(() => {
+                const state = get();
+                if (state.operationStatus?.completed) {
+                    set({ operationStatus: null });
+                }
+            }, 3000);
+        } catch (e: any) {
+            console.error('[ChatStore] Failed to download model:', e);
+            set({
+                operationStatus: {
+                    type: 'downloading',
+                    message: `Failed to download ${modelName}: ${e.message || e}`,
+                    startTime: Date.now(),
+                },
+                backendError: `Failed to download model: ${e.message || e}`,
+            });
+        }
+    },
+
+    getLoadedModels: async () => {
+        try {
+            const models = await invoke<string[]>('get_loaded_models');
+            console.log('[ChatStore] Loaded models:', models);
+            return models;
+        } catch (e: any) {
+            console.error('[ChatStore] Failed to get loaded models:', e);
+            return [];
+        }
+    },
 
     availableModels: [],
     cachedModels: [],
@@ -305,8 +567,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         modelFetchPromise = (async () => {
             let retryCount = 0;
             let delay = MODEL_FETCH_INITIAL_DELAY_MS;
+            let lastConnectionError: string | null = null;
 
-            const attemptFetch = async (): Promise<boolean> => {
+            // Returns: 'success' | 'empty' | 'error'
+            const attemptFetch = async (): Promise<'success' | 'empty' | 'error'> => {
                 try {
                     console.log(`[ChatStore] Fetching models (attempt ${retryCount + 1}/${MODEL_FETCH_MAX_RETRIES})...`);
                     const models = await invoke<string[]>('get_models');
@@ -317,23 +581,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
                             set({ currentModel: models[0] });
                         }
                         console.log(`[ChatStore] Successfully fetched ${models.length} model(s)`);
-                        return true;
+                        return 'success';
                     } else {
-                        console.log("[ChatStore] No models returned, will retry...");
-                        return false;
+                        // Connection succeeded, but no models available - this is NOT a connection error
+                        console.log("[ChatStore] Connected to Foundry, but no models available");
+                        return 'empty';
                     }
                 } catch (e: any) {
                     console.error(`[ChatStore] Fetch models attempt ${retryCount + 1} failed:`, e);
-                    return false;
+                    lastConnectionError = e.message || String(e);
+                    return 'error';
                 }
             };
 
             // Initial attempt
-            if (await attemptFetch()) {
+            const initialResult = await attemptFetch();
+            if (initialResult === 'success') {
+                return;
+            }
+            if (initialResult === 'empty') {
+                // Connected but no models - don't retry, just set empty state
+                console.log("[ChatStore] Foundry connected but no models - download required");
+                set({ availableModels: [], backendError: null, isConnecting: false, currentModel: 'No models' });
                 return;
             }
 
-            // Retry loop with exponential backoff
+            // Only retry on actual connection errors
             while (retryCount < MODEL_FETCH_MAX_RETRIES - 1) {
                 retryCount++;
                 console.log(`[ChatStore] Retrying in ${delay}ms...`);
@@ -343,7 +616,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 });
                 modelFetchRetryTimer = null;
 
-                if (await attemptFetch()) {
+                const result = await attemptFetch();
+                if (result === 'success') {
+                    return;
+                }
+                if (result === 'empty') {
+                    // Connected now - no need to keep retrying
+                    console.log("[ChatStore] Foundry connected but no models - download required");
+                    set({ availableModels: [], backendError: null, isConnecting: false, currentModel: 'No models' });
                     return;
                 }
 
@@ -351,10 +631,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 delay = Math.min(delay * 1.5, 10000);
             }
 
-            // All retries failed
-            console.error(`[ChatStore] Failed to fetch models after ${MODEL_FETCH_MAX_RETRIES} attempts`);
+            // All retries failed with actual connection errors
+            console.error(`[ChatStore] Failed to connect to Foundry after ${MODEL_FETCH_MAX_RETRIES} attempts`);
             set({ 
-                backendError: `Failed to connect to Foundry. Please ensure Foundry is running and try again.`,
+                backendError: `Failed to connect to Foundry. Please ensure Foundry is running and try again.${lastConnectionError ? ` (${lastConnectionError})` : ''}`,
                 currentModel: 'Unavailable',
                 isConnecting: false
             });
@@ -436,6 +716,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
     loadChat: async (id) => {
         try {
+            const state = get();
+            const currentChatId = state.currentChatId;
+            const streamingChatId = state.streamingChatId;
+            
+            // If we're switching away from a streaming chat, save current messages to streamingMessages
+            if (streamingChatId && streamingChatId === currentChatId && id !== currentChatId) {
+                console.log(`[ChatStore] Switching away from streaming chat ${currentChatId?.slice(0, 8)}, saving messages`);
+                set({ streamingMessages: [...state.messages] });
+            }
+            
+            // If we're switching to the streaming chat, restore messages from streamingMessages
+            if (streamingChatId && streamingChatId === id && state.streamingMessages.length > 0) {
+                console.log(`[ChatStore] Switching to streaming chat ${id.slice(0, 8)}, restoring messages`);
+                set({ 
+                    messages: state.streamingMessages, 
+                    currentChatId: id, 
+                    streamingMessages: [], 
+                    backendError: null 
+                });
+                return;
+            }
+            
             const messagesJson = await invoke<string | null>('load_chat', { id });
             if (messagesJson) {
                 const messages = JSON.parse(messagesJson);
@@ -582,6 +884,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     if (!state.isLoading) {
                         return state;
                     }
+                    
+                    // Check if we're streaming to a different chat than currently displayed
+                    const targetChatId = state.streamingChatId;
+                    const isStreamingToOtherChat = targetChatId && targetChatId !== state.currentChatId;
+                    
+                    if (isStreamingToOtherChat) {
+                        // Append token to streamingMessages instead of current messages
+                        const lastMsg = state.streamingMessages[state.streamingMessages.length - 1];
+                        if (lastMsg && lastMsg.role === 'assistant') {
+                            const newStreamingMessages = [...state.streamingMessages];
+                            newStreamingMessages[newStreamingMessages.length - 1] = {
+                                ...lastMsg,
+                                content: lastMsg.content + event.payload
+                            };
+                            return { streamingMessages: newStreamingMessages };
+                        }
+                        return state;
+                    }
+                    
+                    // Normal case: streaming to current chat
                     const lastMsg = state.messages[state.messages.length - 1];
                     // Only append if the last message is from assistant
                     if (lastMsg && lastMsg.role === 'assistant') {
@@ -597,7 +919,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
 
             const finishedListener = await listen('chat-finished', () => {
-                set({ isLoading: false });
+                // If we were streaming to a different chat, the messages are in streamingMessages
+                // They should have been saved to LanceDB by the backend, so we don't need to do anything special
+                set({ 
+                    isLoading: false,
+                    streamingChatId: null,
+                    streamingMessages: [],
+                    operationStatus: null,
+                });
+            });
+            
+            // Model download progress listener
+            const downloadProgressListener = await listen<{ file: string; progress: number }>('model-download-progress', (event) => {
+                console.log(`[ChatStore] Download progress: ${event.payload.file} - ${event.payload.progress}%`);
+                set((state) => ({
+                    operationStatus: state.operationStatus?.type === 'downloading' ? {
+                        ...state.operationStatus,
+                        currentFile: event.payload.file,
+                        progress: event.payload.progress,
+                    } : state.operationStatus,
+                }));
+            });
+            
+            // Model load complete listener
+            const loadCompleteListener = await listen<{ model: string; success: boolean; error?: string }>('model-load-complete', (event) => {
+                console.log(`[ChatStore] Model load complete: ${event.payload.model}, success=${event.payload.success}`);
+                if (event.payload.success) {
+                    set({
+                        operationStatus: {
+                            type: 'loading',
+                            message: `${event.payload.model} loaded successfully`,
+                            completed: true,
+                            startTime: Date.now(),
+                        },
+                        currentModel: event.payload.model,
+                    });
+                    // Auto-dismiss after 3 seconds
+                    setTimeout(() => {
+                        const currentState = get();
+                        if (currentState.operationStatus?.completed) {
+                            set({ operationStatus: null });
+                        }
+                    }, 3000);
+                } else {
+                    set({
+                        operationStatus: {
+                            type: 'loading',
+                            message: `Failed to load ${event.payload.model}: ${event.payload.error || 'Unknown error'}`,
+                            startTime: Date.now(),
+                        },
+                    });
+                }
             });
 
             const modelSelectedListener = await listen<string>('model-selected', (event) => {
@@ -756,6 +1128,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 toolExecutingListener();
                 toolResultListener();
                 toolLoopFinishedListener();
+                downloadProgressListener();
+                loadCompleteListener();
                 isSettingUp = false;
                 return;
             }
@@ -770,24 +1144,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenToolLoopFinished = toolLoopFinishedListener;
             unlistenChatSaved = chatSavedListener;
             unlistenSidebarUpdate = sidebarUpdateListener;
+            unlistenDownloadProgress = downloadProgressListener;
+            unlistenLoadComplete = loadCompleteListener;
 
             set({ isListening: true });
             console.log(`[ChatStore] Event listeners active (Gen: ${myGeneration}).`);
             
-            // Proactively fetch models on startup
-            // This runs in the background - don't await to avoid blocking listener setup
-            get().fetchModels().catch((e) => {
-                console.error("[ChatStore] Background model fetch failed:", e);
-            });
-            
-            // Also fetch cached models (for the dropdown)
-            get().fetchCachedModels().catch((e) => {
-                console.error("[ChatStore] Background cached models fetch failed:", e);
-            });
-            
-            // Fetch model info with capabilities (toolCalling, vision, etc.)
-            get().fetchModelInfo().catch((e) => {
-                console.error("[ChatStore] Background model info fetch failed:", e);
+            // Initialize models on startup
+            initializeModelsOnStartup(get, set).catch((e) => {
+                console.error("[ChatStore] Model initialization failed:", e);
             });
         } catch (e) {
             console.error("[ChatStore] Failed to setup listeners:", e);
@@ -832,6 +1197,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenToolLoopFinished) {
             unlistenToolLoopFinished();
             unlistenToolLoopFinished = undefined;
+        }
+        if (unlistenDownloadProgress) {
+            unlistenDownloadProgress();
+            unlistenDownloadProgress = undefined;
+        }
+        if (unlistenLoadComplete) {
+            unlistenLoadComplete();
+            unlistenLoadComplete = undefined;
         }
         set({ isListening: false });
         isSettingUp = false; // Reset setup guard

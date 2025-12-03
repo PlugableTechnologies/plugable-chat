@@ -297,15 +297,15 @@ impl FoundryActor {
                     }
                 }
                 FoundryMsg::GetModels { respond_to } => {
-                    if self.port.is_none() || self.available_models.is_empty() {
-                        // Retry with exponential backoff if still not connected
+                    if self.port.is_none() {
+                        // Only retry if service is unreachable (not if models list is empty)
                         self.update_connection_info_with_retry(3, Duration::from_secs(1)).await;
                     }
                     let _ = respond_to.send(self.available_models.clone());
                 }
                 FoundryMsg::GetModelInfo { respond_to } => {
-                    if self.port.is_none() || self.model_info.is_empty() {
-                        // Retry with exponential backoff if still not connected
+                    if self.port.is_none() {
+                        // Only retry if service is unreachable (not if model info is empty)
                         self.update_connection_info_with_retry(3, Duration::from_secs(1)).await;
                     }
                     let _ = respond_to.send(self.model_info.clone());
@@ -610,6 +610,33 @@ impl FoundryActor {
                          let _ = respond_to.send("The local model service is not available. Please check if Foundry is installed and running.".to_string());
                      }
                 }
+                FoundryMsg::DownloadModel { model_name, respond_to } => {
+                    println!("FoundryActor: Downloading model: {}", model_name);
+                    if let Some(port) = self.port {
+                        let result = self.download_model_impl(&client, port, &model_name).await;
+                        let _ = respond_to.send(result);
+                    } else {
+                        let _ = respond_to.send(Err("Foundry service not available".to_string()));
+                    }
+                }
+                FoundryMsg::LoadModel { model_name, respond_to } => {
+                    println!("FoundryActor: Loading model into VRAM: {}", model_name);
+                    if let Some(port) = self.port {
+                        let result = self.load_model_impl(&client, port, &model_name).await;
+                        let _ = respond_to.send(result);
+                    } else {
+                        let _ = respond_to.send(Err("Foundry service not available".to_string()));
+                    }
+                }
+                FoundryMsg::GetLoadedModels { respond_to } => {
+                    println!("FoundryActor: Getting loaded models");
+                    if let Some(port) = self.port {
+                        let models = self.get_loaded_models_impl(&client, port).await;
+                        let _ = respond_to.send(models);
+                    } else {
+                        let _ = respond_to.send(Vec::new());
+                    }
+                }
             }
         }
     }
@@ -625,7 +652,11 @@ impl FoundryActor {
             println!("Foundry service detected on port {}", p);
             println!("FoundryActor: Valid EPs: {:?}", self.valid_eps);
             
-            // Get models via REST API instead of CLI
+            if self.valid_eps.is_empty() {
+                println!("FoundryActor: Warning - no valid EPs available, models may not be loadable");
+            }
+            
+            // Always check REST API for downloaded models (they can be listed even without EPs)
             let models = self.get_models_via_rest(p).await;
             
             if models.is_empty() {
@@ -934,6 +965,240 @@ impl FoundryActor {
         }
         
         ServiceStatus { port, registered_eps, valid_eps }
+    }
+    
+    /// Download a model from the Foundry catalog
+    /// POST /openai/download with streaming progress
+    async fn download_model_impl(&self, client: &reqwest::Client, port: u16, model_name: &str) -> Result<(), String> {
+        let url = format!("http://127.0.0.1:{}/openai/download", port);
+        println!("FoundryActor: Downloading model {} from {}", model_name, url);
+        
+        // Get model info from the catalog first to build the proper download request
+        let catalog_url = format!("http://127.0.0.1:{}/foundry/list", port);
+        let catalog_response = client.get(&catalog_url)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch catalog: {}", e))?;
+        
+        if !catalog_response.status().is_success() {
+            return Err(format!("Failed to fetch catalog: HTTP {}", catalog_response.status()));
+        }
+        
+        let catalog: serde_json::Value = catalog_response.json()
+            .await
+            .map_err(|e| format!("Failed to parse catalog: {}", e))?;
+        
+        println!("FoundryActor: Catalog response type: {}", 
+            if catalog.is_array() { "array" } 
+            else if catalog.is_object() { "object" } 
+            else { "other" });
+        
+        // Handle both formats:
+        // 1. { "models": [...] } - documented format
+        // 2. [...] - direct array
+        let models: Vec<&serde_json::Value> = if let Some(models_array) = catalog.get("models").and_then(|m| m.as_array()) {
+            models_array.iter().collect()
+        } else if let Some(direct_array) = catalog.as_array() {
+            direct_array.iter().collect()
+        } else {
+            println!("FoundryActor: Catalog structure: {:?}", catalog);
+            return Err("Invalid catalog format: expected 'models' array or direct array".to_string());
+        };
+        
+        println!("FoundryActor: Found {} models in catalog", models.len());
+        
+        let model_info = models.iter()
+            .find(|m| {
+                let name = m.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let alias = m.get("alias").and_then(|a| a.as_str()).unwrap_or("");
+                let display_name = m.get("displayName").and_then(|n| n.as_str()).unwrap_or("");
+                name.to_lowercase().contains(&model_name.to_lowercase()) ||
+                alias.to_lowercase().contains(&model_name.to_lowercase()) ||
+                display_name.to_lowercase().contains(&model_name.to_lowercase())
+            })
+            .ok_or_else(|| format!("Model '{}' not found in catalog ({} models available)", model_name, models.len()))?;
+        
+        // Build download request body
+        let uri = model_info.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+        let name = model_info.get("name").and_then(|n| n.as_str()).unwrap_or(model_name);
+        
+        // Get version - could be string or integer in JSON
+        let version: String = model_info.get("version")
+            .map(|v| {
+                if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else if let Some(n) = v.as_u64() {
+                    n.to_string()
+                } else {
+                    "1".to_string()
+                }
+            })
+            .unwrap_or_else(|| "1".to_string());
+        
+        // Build model name with version, avoiding double version suffix
+        // Some catalog entries may have the version already in the name (e.g., "Model:5")
+        let model_name_with_version = if name.contains(':') {
+            // Name already has version, use as-is
+            name.to_string()
+        } else {
+            // Append version
+            format!("{}:{}", name, version)
+        };
+        
+        // Get prompt template if available
+        let prompt_template = model_info.get("promptTemplate").cloned()
+            .unwrap_or(serde_json::json!({}));
+        
+        let request_body = serde_json::json!({
+            "model": {
+                "Uri": uri,
+                "ProviderType": "AzureFoundryLocal",
+                "Name": model_name_with_version,
+                "Publisher": "",
+                "PromptTemplate": prompt_template
+            },
+            "ignorePipeReport": true
+        });
+        
+        println!("FoundryActor: Download request body: {:?}", request_body);
+        
+        // Send download request with streaming response
+        let mut response = client.post(&url)
+            .json(&request_body)
+            .timeout(Duration::from_secs(3600)) // 1 hour timeout for large models
+            .send()
+            .await
+            .map_err(|e| format!("Download request failed: {}", e))?;
+        
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!("Download failed: HTTP {} - {}", status, text));
+        }
+        
+        // Read streaming progress
+        let mut buffer = String::new();
+        while let Ok(Some(chunk)) = response.chunk().await {
+            if let Ok(s) = String::from_utf8(chunk.to_vec()) {
+                buffer.push_str(&s);
+                
+                // Parse progress updates: ("file name", percentage)
+                // Look for complete lines
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim().to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+                    
+                    if line.is_empty() {
+                        continue;
+                    }
+                    
+                    // Try to parse progress: ("filename", 0.5) format
+                    if line.starts_with('(') && line.ends_with(')') {
+                        let inner = &line[1..line.len()-1];
+                        let parts: Vec<&str> = inner.rsplitn(2, ',').collect();
+                        if parts.len() == 2 {
+                            let progress_str = parts[0].trim();
+                            let file_part = parts[1].trim();
+                            
+                            // Extract filename (remove quotes)
+                            let filename = file_part.trim_matches('"').to_string();
+                            
+                            // Parse progress
+                            if let Ok(progress) = progress_str.parse::<f32>() {
+                                let progress_percent = progress * 100.0;
+                                println!("FoundryActor: Download progress: {} - {:.1}%", filename, progress_percent);
+                                
+                                // Emit progress event
+                                let _ = self.app_handle.emit("model-download-progress", serde_json::json!({
+                                    "file": filename,
+                                    "progress": progress_percent
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Note: Frontend should call fetchModels/fetchCachedModels to refresh after download
+        println!("FoundryActor: Model download complete: {}", model_name);
+        Ok(())
+    }
+    
+    /// Load a model into VRAM
+    /// GET /openai/load/{name}
+    async fn load_model_impl(&self, client: &reqwest::Client, port: u16, model_name: &str) -> Result<(), String> {
+        // URL encode the model name in case it has special characters
+        let encoded_name = urlencoding::encode(model_name);
+        let url = format!("http://127.0.0.1:{}/openai/load/{}?ttl=0", port, encoded_name);
+        println!("FoundryActor: Loading model {} from {}", model_name, url);
+        
+        let response = client.get(&url)
+            .timeout(Duration::from_secs(300)) // 5 minute timeout for loading
+            .send()
+            .await
+            .map_err(|e| format!("Load request failed: {}", e))?;
+        
+        if response.status().is_success() {
+            println!("FoundryActor: Model loaded successfully: {}", model_name);
+            
+            // Emit success event
+            let _ = self.app_handle.emit("model-load-complete", serde_json::json!({
+                "model": model_name,
+                "success": true
+            }));
+            
+            // Update current model
+            self.emit_model_selected(model_name);
+            
+            Ok(())
+        } else {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            let error_msg = format!("HTTP {} - {}", status, text);
+            
+            println!("FoundryActor: Failed to load model {}: {}", model_name, error_msg);
+            
+            // Emit failure event
+            let _ = self.app_handle.emit("model-load-complete", serde_json::json!({
+                "model": model_name,
+                "success": false,
+                "error": error_msg
+            }));
+            
+            Err(error_msg)
+        }
+    }
+    
+    /// Get currently loaded models
+    /// GET /openai/loadedmodels
+    async fn get_loaded_models_impl(&self, client: &reqwest::Client, port: u16) -> Vec<String> {
+        let url = format!("http://127.0.0.1:{}/openai/loadedmodels", port);
+        println!("FoundryActor: Getting loaded models from {}", url);
+        
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    match resp.json::<Vec<String>>().await {
+                        Ok(models) => {
+                            println!("FoundryActor: Loaded models: {:?}", models);
+                            models
+                        }
+                        Err(e) => {
+                            println!("FoundryActor: Failed to parse loaded models: {}", e);
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    println!("FoundryActor: Get loaded models failed: HTTP {}", resp.status());
+                    Vec::new()
+                }
+            }
+            Err(e) => {
+                println!("FoundryActor: Get loaded models request failed: {}", e);
+                Vec::new()
+            }
+        }
     }
 
 }

@@ -113,12 +113,10 @@ pub fn execute(request: &ExecutionRequest) -> ExecutionResult {
         };
         
         // Inject context variables if provided
-        if let Some(ctx) = &request.context {
-            if let serde_json::Value::Object(map) = ctx {
-                for (key, value) in map {
-                    if let Ok(py_value) = json_to_pyobject(value, vm) {
-                        let _ = scope.globals.set_item(key.as_str(), py_value, vm);
-                    }
+        if let Some(serde_json::Value::Object(map)) = &request.context {
+            for (key, value) in map {
+                if let Ok(py_value) = json_to_pyobject(value, vm) {
+                    let _ = scope.globals.set_item(key.as_str(), py_value, vm);
                 }
             }
         }
@@ -197,14 +195,17 @@ pub extern "C" fn alloc_memory(size: usize) -> *mut u8 {
 }
 
 /// Free memory allocated by alloc_memory
+///
+/// # Safety
+/// The caller must ensure that `ptr` was allocated by `alloc_memory` with the same `size`.
 #[no_mangle]
-pub extern "C" fn free_memory(ptr: *mut u8, size: usize) {
+pub unsafe extern "C" fn free_memory(ptr: *mut u8, size: usize) {
     if ptr.is_null() || size == 0 {
         return;
     }
     
     let layout = Layout::from_size_align(size, 1).unwrap();
-    unsafe { dealloc(ptr, layout) }
+    dealloc(ptr, layout)
 }
 
 /// Execute Python code
@@ -216,11 +217,12 @@ pub extern "C" fn free_memory(ptr: *mut u8, size: usize) {
 /// # Returns
 /// Pointer to JSON-encoded ExecutionResult (caller must free with free_memory)
 /// The first 4 bytes contain the length of the result as a little-endian u32
+///
+/// # Safety
+/// The caller must ensure that `request_ptr` points to valid memory of at least `request_len` bytes.
 #[no_mangle]
-pub extern "C" fn execute_python(request_ptr: *const u8, request_len: usize) -> *mut u8 {
-    let request_bytes = unsafe {
-        std::slice::from_raw_parts(request_ptr, request_len)
-    };
+pub unsafe extern "C" fn execute_python(request_ptr: *const u8, request_len: usize) -> *mut u8 {
+    let request_bytes = std::slice::from_raw_parts(request_ptr, request_len);
     
     let request: ExecutionRequest = match serde_json::from_slice(request_bytes) {
         Ok(r) => r,

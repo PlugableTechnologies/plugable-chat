@@ -1,4 +1,5 @@
 import { useChatStore, ToolCallRecord, CodeExecutionRecord } from '../store/chat-store';
+import { StatusBar, StreamingWarningBar } from './StatusBar';
 // Icons replaced with unicode characters
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -7,7 +8,7 @@ import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
 import 'katex/dist/katex.min.css';
 import { invoke } from '../lib/api';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { parseMessageContent, hasOnlyThinkContent, hasOnlyToolCallContent } from '../lib/response-parser';
 
 // Format elapsed time helper
@@ -310,7 +311,70 @@ const formatDurationMs = (ms?: number): string => {
     return `${mins}m ${secs}s`;
 };
 
-// Collapsible Tool Calls Block - shows all tool calls made during a message
+// Inline Tool Call Result - shows a single tool call result inline in the message
+const InlineToolCallResult = ({ call }: { call: ToolCallRecord }) => {
+    return (
+        <details className="my-3 group/tool border border-purple-200 rounded-xl overflow-hidden bg-purple-50/50">
+            <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-purple-100/50 transition-colors select-none">
+                <span className="text-purple-600 text-lg">🔧</span>
+                <span className="font-medium text-purple-900 text-sm">
+                    1 tool call
+                </span>
+                {call.isError ? (
+                    <span className="text-xs px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">
+                        1 ✗
+                    </span>
+                ) : (
+                    <span className="text-xs px-1.5 py-0.5 rounded-full bg-green-100 text-green-700">
+                        1 ✓
+                    </span>
+                )}
+                <span className="ml-auto text-xs text-purple-400 group-open/tool:rotate-180 transition-transform">▼</span>
+            </summary>
+            <div className="border-t border-purple-200">
+                <div className="px-4 py-3 bg-white">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <code className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600">{call.server}</code>
+                        <span className="text-gray-400">›</span>
+                        <code className="text-sm px-2 py-1 rounded bg-purple-100 text-purple-800 font-medium">{call.tool}</code>
+                        {call.isError ? (
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-600 ml-auto">Error</span>
+                        ) : (
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-600 ml-auto">Success</span>
+                        )}
+                        {call.durationMs && (
+                            <span className="text-xs text-gray-400">{formatDurationMs(call.durationMs)}</span>
+                        )}
+                    </div>
+                    {Object.keys(call.arguments).length > 0 && (
+                        <details className="mt-2">
+                            <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+                                Arguments
+                            </summary>
+                            <pre className="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto text-gray-700">
+                                {JSON.stringify(call.arguments, null, 2)}
+                            </pre>
+                        </details>
+                    )}
+                    <details className="mt-2">
+                        <summary className={`text-xs cursor-pointer hover:text-gray-700 ${call.isError ? 'text-red-500' : 'text-gray-500'}`}>
+                            {call.isError ? 'Error' : 'Result'}
+                        </summary>
+                        <pre className={`mt-1 text-xs p-2 rounded overflow-x-auto whitespace-pre-wrap ${
+                            call.isError ? 'bg-red-50 text-red-700' : 'bg-gray-50 text-gray-700'
+                        }`}>
+                            {call.result.length > 2000 
+                                ? call.result.slice(0, 2000) + '\n... (truncated)'
+                                : call.result}
+                        </pre>
+                    </details>
+                </div>
+            </div>
+        </details>
+    );
+};
+
+// Collapsible Tool Calls Block - shows multiple tool calls made during a message
 const ToolCallsBlock = ({ toolCalls }: { toolCalls: ToolCallRecord[] }) => {
     if (!toolCalls || toolCalls.length === 0) return null;
     
@@ -541,7 +605,8 @@ const InputBar = ({
     attachedCount,
     onAttachFiles,
     onAttachFolder,
-    onClearAttachments
+    onClearAttachments,
+    disabled = false
 }: {
     className?: string,
     input: string,
@@ -554,11 +619,13 @@ const InputBar = ({
     attachedCount: number,
     onAttachFiles: () => void,
     onAttachFolder: () => void,
-    onClearAttachments: () => void
+    onClearAttachments: () => void,
+    disabled?: boolean
 }) => {
     const [menuOpen, setMenuOpen] = useState(false);
     const isMultiline = input.includes('\n') || (textareaRef.current && textareaRef.current.scrollHeight > 44);
     const hasAttachments = attachedCount > 0;
+    const isDisabled = disabled || isLoading;
     
     return (
         <div className={`w-full flex justify-center ${className}`}>
@@ -599,15 +666,16 @@ const InputBar = ({
                 )}
                 <textarea
                     ref={textareaRef}
-                    className="flex-1 bg-transparent text-gray-700 resize-none focus:outline-none focus:ring-0 focus:border-none max-h-[200px] overflow-y-auto placeholder:text-gray-400 font-normal text-[15px] leading-6 border-none py-1"
+                    className={`flex-1 bg-transparent text-gray-700 resize-none focus:outline-none focus:ring-0 focus:border-none max-h-[200px] overflow-y-auto placeholder:text-gray-400 font-normal text-[15px] leading-6 border-none py-1 ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                     rows={1}
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder={hasAttachments ? "Ask about your documents..." : "Ask anything"}
+                    onChange={(e) => !disabled && setInput(e.target.value)}
+                    onKeyDown={(e) => !disabled && handleKeyDown(e)}
+                    placeholder={disabled ? "Response streaming in another chat..." : hasAttachments ? "Ask about your documents..." : "Ask anything"}
                     style={{ height: 'auto', minHeight: '32px' }}
+                    disabled={disabled}
                 />
-                {isLoading ? (
+                {isLoading && !disabled ? (
                     <button
                         onClick={handleStop}
                         className="h-9 w-9 flex items-center justify-center rounded-full text-base transition bg-red-500 text-white hover:bg-red-600 shrink-0"
@@ -618,8 +686,8 @@ const InputBar = ({
                 ) : (
                     <button
                         onClick={handleSend}
-                        className={`h-9 w-9 flex items-center justify-center rounded-full text-xl transition shrink-0 ${input.trim() ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}
-                        disabled={!input.trim()}
+                        className={`h-9 w-9 flex items-center justify-center rounded-full text-xl transition shrink-0 ${!isDisabled && input.trim() ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}
+                        disabled={isDisabled || !input.trim()}
                         aria-label="Send message"
                     >
                         ↩
@@ -995,8 +1063,13 @@ export function ChatArea() {
         attachedPaths, addAttachment, clearAttachments,
         processRagDocuments, searchRagContext, clearRagContext,
         // Tool execution state
-        pendingToolApproval, toolExecution, approveCurrentToolCall, rejectCurrentToolCall
+        pendingToolApproval, toolExecution, approveCurrentToolCall, rejectCurrentToolCall,
+        // Streaming state
+        streamingChatId
     } = useChatStore();
+    
+    // Check if streaming is active in a different chat (input should be blocked)
+    const isStreamingInOtherChat = streamingChatId !== null && streamingChatId !== currentChatId;
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const [thinkingStartTime, setThinkingStartTime] = useState<number | null>(null);
@@ -1005,6 +1078,19 @@ export function ChatArea() {
     const [ragStartTime, setRagStartTime] = useState<number | null>(null);
     const [ragStage, setRagStage] = useState<'indexing' | 'searching'>('indexing');
     const [isRagProcessing, setIsRagProcessing] = useState(false);
+
+    // Follow mode: auto-scroll to bottom when true, stop when user scrolls up
+    const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const [isFollowMode, setIsFollowMode] = useState(true);
+
+    // Scroll handler to detect when user scrolls away from bottom
+    const handleScroll = useCallback(() => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        const { scrollTop, scrollHeight, clientHeight } = container;
+        const atBottom = scrollHeight - scrollTop - clientHeight < 50;
+        setIsFollowMode(atBottom);
+    }, []);
 
     // Track when thinking phase starts
     useEffect(() => {
@@ -1034,10 +1120,17 @@ export function ChatArea() {
         }
     }, [messages, isLoading, toolProcessingStartTime]);
 
-    // Auto-scroll to bottom
+    // Reset follow mode when switching chats
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages, isLoading]);
+        setIsFollowMode(true);
+    }, [currentChatId]);
+
+    // Auto-scroll to bottom (only when in follow mode)
+    useEffect(() => {
+        if (isFollowMode) {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }
+    }, [messages, isLoading, isFollowMode]);
 
     // Setup Streaming Listeners
     useEffect(() => {
@@ -1158,6 +1251,16 @@ export function ChatArea() {
         clearRelevanceSearch(); // Clear relevance results when sending
         if (textareaRef.current) textareaRef.current.style.height = 'auto';
         setIsLoading(true);
+        
+        // Track which chat we're streaming to (for cross-chat switching)
+        storeState.setStreamingChatId(chatId);
+        
+        // Show streaming status in status bar
+        storeState.setOperationStatus({
+            type: 'streaming',
+            message: 'Generating response...',
+            startTime: Date.now(),
+        });
 
         // Add placeholder for assistant
         addMessage({
@@ -1263,8 +1366,14 @@ export function ChatArea() {
 
     return (
     <div className="h-full w-full flex flex-col text-gray-800 font-sans relative overflow-hidden">
+        {/* Status Bar for model operations */}
+        <StatusBar />
+        
+        {/* Warning when streaming in another chat */}
+        <StreamingWarningBar />
+        
         {/* Scrollable Messages Area - takes all remaining space */}
-        <div className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-4 sm:px-6 pt-6 pb-6">
+        <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-4 sm:px-6 pt-6 pb-6">
                 {messages.length === 0 ? (
                     <div className="flex-1 flex flex-col items-center justify-center px-6">
                         <div className="mb-8 text-center">
@@ -1288,88 +1397,108 @@ export function ChatArea() {
                                 >
                                     <div className="prose prose-slate max-w-none break-words text-gray-900">
                                         {m.role === 'assistant' ? (
-                                            <>
-                                                {parseMessageContent(m.content).map((part, idx) => (
-                                                    part.type === 'think' ? (
-                                                        <details key={idx} className="mb-4 group">
-                                                            <summary className="cursor-pointer text-xs font-medium text-gray-400 hover:text-gray-600 select-none flex items-center gap-2 mb-2">
-                                                                <span className="h-px flex-1 bg-gray-200 group-open:bg-gray-300 transition-colors"></span>
-                                                                <span className="text-sm group-open:rotate-180 transition-transform inline-block">▼</span>
-                                                            </summary>
-                                                            <div className="pl-3 border-l-2 border-gray-300 text-gray-600 text-sm italic bg-gray-50 p-3 rounded-r-lg">
-                                                                {part.content || "Thinking..."}
-                                                            </div>
-                                                        </details>
-                                                    ) : part.type === 'tool_call' ? (
-                                                        // Tool calls are hidden - they're displayed in the ToolCallsBlock
-                                                        null
-                                                    ) : (
-                                                        <ReactMarkdown
-                                                            key={idx}
-                                                            remarkPlugins={[remarkGfm, remarkMath]}
-                                                            rehypePlugins={[
-                                                                rehypeRaw, 
-                                                                [rehypeKatex, { 
-                                                                    throwOnError: false, 
-                                                                    errorColor: '#666666',
-                                                                    strict: false
-                                                                }]
-                                                            ]}
-                                                            components={{
-                                                                code({ node, inline, className, children, ...props }: any) {
-                                                                    const match = /language-(\w+)/.exec(className || '')
-                                                                    const codeContent = String(children).replace(/\n$/, '');
-
-                                                                    return !inline && match ? (
-                                                                        <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
-                                                                            <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
-                                                                                <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
-                                                                                <button
-                                                                                    onClick={() => navigator.clipboard.writeText(codeContent)}
-                                                                                    className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
-                                                                                >
-                                                                                    📋
-                                                                                </button>
-                                                                            </div>
-                                                                            <div className="bg-white p-4 overflow-x-auto text-sm">
-                                                                                <code className={className} {...props}>
-                                                                                    {children}
-                                                                                </code>
-                                                                            </div>
+                                            (() => {
+                                                // Parse content and track tool call index for inline rendering
+                                                const parts = parseMessageContent(m.content);
+                                                let toolCallIndex = 0;
+                                                
+                                                return (
+                                                    <>
+                                                        {parts.map((part, idx) => {
+                                                            if (part.type === 'think') {
+                                                                return (
+                                                                    <details key={idx} className="mb-4 group">
+                                                                        <summary className="cursor-pointer text-xs font-medium text-gray-400 hover:text-gray-600 select-none flex items-center gap-2 mb-2">
+                                                                            <span className="h-px flex-1 bg-gray-200 group-open:bg-gray-300 transition-colors"></span>
+                                                                            <span className="text-sm group-open:rotate-180 transition-transform inline-block">▼</span>
+                                                                        </summary>
+                                                                        <div className="pl-3 border-l-2 border-gray-300 text-gray-600 text-sm italic bg-gray-50 p-3 rounded-r-lg">
+                                                                            {part.content || "Thinking..."}
                                                                         </div>
-                                                                    ) : (
-                                                                        <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
-                                                                            {children}
-                                                                        </code>
-                                                                    )
+                                                                    </details>
+                                                                );
+                                                            } else if (part.type === 'tool_call') {
+                                                                // Render tool call result inline if available
+                                                                const currentToolCallIndex = toolCallIndex++;
+                                                                const toolCallRecord = m.toolCalls?.[currentToolCallIndex];
+                                                                
+                                                                if (toolCallRecord) {
+                                                                    return <InlineToolCallResult key={idx} call={toolCallRecord} />;
                                                                 }
-                                                            }}
-                                                        >
-                                                            {preprocessLaTeX(part.content)}
-                                                        </ReactMarkdown>
-                                                    )
-                                                ))}
-                                                {/* Show thinking indicator when only think content is visible */}
-                                                {thinkingStartTime && 
-                                                 messages[messages.length - 1]?.id === m.id && 
-                                                 hasOnlyThinkContent(m.content) && (
-                                                    <ThinkingIndicator startTime={thinkingStartTime} />
-                                                )}
-                                                {/* Show tool processing block when only tool_call content is visible */}
-                                                {toolProcessingStartTime && 
-                                                 messages[messages.length - 1]?.id === m.id && 
-                                                 hasOnlyToolCallContent(m.content) && (
-                                                    <ToolProcessingBlock content={m.content} startTime={toolProcessingStartTime} />
-                                                )}
-                                                {/* Collapsible tool calls block */}
-                                                {m.toolCalls && m.toolCalls.length > 0 && (
-                                                    <ToolCallsBlock toolCalls={m.toolCalls} />
-                                                )}
-                                                {/* Collapsible code execution block */}
-                                                {m.codeExecutions && m.codeExecutions.length > 0 && (
-                                                    <CodeExecutionBlock executions={m.codeExecutions} />
-                                                )}
-                                            </>
+                                                                // If no result yet (still processing), show the processing block
+                                                                return null;
+                                                            } else {
+                                                                return (
+                                                                    <ReactMarkdown
+                                                                        key={idx}
+                                                                        remarkPlugins={[remarkGfm, remarkMath]}
+                                                                        rehypePlugins={[
+                                                                            rehypeRaw, 
+                                                                            [rehypeKatex, { 
+                                                                                throwOnError: false, 
+                                                                                errorColor: '#666666',
+                                                                                strict: false
+                                                                            }]
+                                                                        ]}
+                                                                        components={{
+                                                                            code({ node, inline, className, children, ...props }: any) {
+                                                                                const match = /language-(\w+)/.exec(className || '')
+                                                                                const codeContent = String(children).replace(/\n$/, '');
+
+                                                                                return !inline && match ? (
+                                                                                    <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
+                                                                                        <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
+                                                                                            <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
+                                                                                            <button
+                                                                                                onClick={() => navigator.clipboard.writeText(codeContent)}
+                                                                                                className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
+                                                                                            >
+                                                                                                📋
+                                                                                            </button>
+                                                                                        </div>
+                                                                                        <div className="bg-white p-4 overflow-x-auto text-sm">
+                                                                                            <code className={className} {...props}>
+                                                                                                {children}
+                                                                                            </code>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                ) : (
+                                                                                    <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
+                                                                                        {children}
+                                                                                    </code>
+                                                                                )
+                                                                            }
+                                                                        }}
+                                                                    >
+                                                                        {preprocessLaTeX(part.content)}
+                                                                    </ReactMarkdown>
+                                                                );
+                                                            }
+                                                        })}
+                                                        {/* Show thinking indicator when only think content is visible */}
+                                                        {thinkingStartTime && 
+                                                         messages[messages.length - 1]?.id === m.id && 
+                                                         hasOnlyThinkContent(m.content) && (
+                                                            <ThinkingIndicator startTime={thinkingStartTime} />
+                                                        )}
+                                                        {/* Show tool processing block when only tool_call content is visible */}
+                                                        {toolProcessingStartTime && 
+                                                         messages[messages.length - 1]?.id === m.id && 
+                                                         hasOnlyToolCallContent(m.content) && (
+                                                            <ToolProcessingBlock content={m.content} startTime={toolProcessingStartTime} />
+                                                        )}
+                                                        {/* Show any remaining tool calls that weren't matched to content positions */}
+                                                        {/* This handles native OpenAI tool calls or mismatched counts */}
+                                                        {m.toolCalls && m.toolCalls.length > toolCallIndex && (
+                                                            <ToolCallsBlock toolCalls={m.toolCalls.slice(toolCallIndex)} />
+                                                        )}
+                                                        {/* Collapsible code execution block - shown at end since executions aren't tracked by position */}
+                                                        {m.codeExecutions && m.codeExecutions.length > 0 && (
+                                                            <CodeExecutionBlock executions={m.codeExecutions} />
+                                                        )}
+                                                    </>
+                                                );
+                                            })()
                                         ) : (
                                             <div className="whitespace-pre-wrap">{m.content}</div>
                                         )}
@@ -1443,6 +1572,7 @@ export function ChatArea() {
                         onAttachFiles={handleAttachFiles}
                         onAttachFolder={handleAttachFolder}
                         onClearAttachments={handleClearAttachments}
+                        disabled={isStreamingInOtherChat}
                     />
                 </div>
             </div>

@@ -44,6 +44,9 @@ dirs = "5"
 # Regex for parsing tool calls
 regex = "1"
 
+# URL encoding for API calls
+urlencoding = "2"
+
 # Lazy static for profile registry
 lazy_static = "1.4"
 

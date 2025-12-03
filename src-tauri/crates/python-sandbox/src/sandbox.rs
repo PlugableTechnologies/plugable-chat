@@ -19,11 +19,11 @@ use crate::protocol::{PendingToolCall, ToolInfo, ToolCallResult};
 
 // Thread-local state for collecting tool calls during execution
 thread_local! {
-    static PENDING_CALLS: RefCell<Vec<PendingToolCall>> = RefCell::new(Vec::new());
+    static PENDING_CALLS: RefCell<Vec<PendingToolCall>> = const { RefCell::new(Vec::new()) };
     static TOOL_RESULTS: RefCell<std::collections::HashMap<String, ToolCallResult>> = RefCell::new(std::collections::HashMap::new());
-    static AVAILABLE_TOOLS: RefCell<Vec<ToolInfo>> = RefCell::new(Vec::new());
-    static STDOUT_BUFFER: RefCell<String> = RefCell::new(String::new());
-    static STDERR_BUFFER: RefCell<String> = RefCell::new(String::new());
+    static AVAILABLE_TOOLS: RefCell<Vec<ToolInfo>> = const { RefCell::new(Vec::new()) };
+    static STDOUT_BUFFER: RefCell<String> = const { RefCell::new(String::new()) };
+    static STDERR_BUFFER: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// Clear all thread-local state for a fresh execution

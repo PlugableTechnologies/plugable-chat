@@ -65,6 +65,14 @@ struct ToolApprovalState {
     pending: PendingApprovals,
 }
 
+// Cancellation state for stream abort
+struct CancellationState {
+    /// Current generation's cancel signal
+    cancel_signal: Arc<RwLock<Option<tokio::sync::watch::Sender<bool>>>>,
+    /// Current generation ID for matching
+    current_generation_id: Arc<RwLock<u32>>,
+}
+
 /// Maximum number of tool call iterations before stopping (safety limit)
 const MAX_TOOL_ITERATIONS: usize = 20;
 
@@ -220,6 +228,7 @@ async fn run_agentic_loop(
     app_handle: tauri::AppHandle,
     mut full_history: Vec<ChatMessage>,
     reasoning_effort: String,
+    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
     server_configs: Vec<McpServerConfig>,
     chat_id: String,
     title: String,
@@ -257,9 +266,34 @@ async fn run_agentic_loop(
         
         // Collect response while streaming tokens to frontend
         let mut assistant_response = String::new();
-        while let Some(token) = rx.recv().await {
-            assistant_response.push_str(&token);
-            let _ = app_handle.emit("chat-token", token);
+        let mut cancelled = false;
+        loop {
+            tokio::select! {
+                // Check for cancellation
+                _ = cancel_rx.changed() => {
+                    if *cancel_rx.borrow() {
+                        println!("[AgenticLoop] Cancellation received!");
+                        cancelled = true;
+                        break;
+                    }
+                }
+                // Receive tokens
+                token = rx.recv() => {
+                    match token {
+                        Some(token) => {
+                            assistant_response.push_str(&token);
+                            let _ = app_handle.emit("chat-token", token);
+                        }
+                        None => break, // Channel closed, stream complete
+                    }
+                }
+            }
+        }
+        
+        if cancelled {
+            println!("[AgenticLoop] Stream cancelled by user");
+            let _ = app_handle.emit("chat-finished", ());
+            return;
         }
         
         println!("[AgenticLoop] Response complete ({} chars)", assistant_response.len());
@@ -838,6 +872,57 @@ async fn get_model_info(handles: State<'_, ActorHandles>) -> Result<Vec<ModelInf
 }
 
 #[tauri::command]
+async fn download_model(model_name: String, handles: State<'_, ActorHandles>) -> Result<(), String> {
+    println!("[download_model] Starting download for: {}", model_name);
+    let (tx, rx) = oneshot::channel();
+    handles.foundry_tx.send(FoundryMsg::DownloadModel { model_name: model_name.clone(), respond_to: tx })
+        .await
+        .map_err(|e| format!("Failed to send download request: {}", e))?;
+    rx.await.map_err(|_| "Foundry actor died".to_string())?
+}
+
+#[tauri::command]
+async fn load_model(model_name: String, handles: State<'_, ActorHandles>) -> Result<(), String> {
+    println!("[load_model] Loading model: {}", model_name);
+    let (tx, rx) = oneshot::channel();
+    handles.foundry_tx.send(FoundryMsg::LoadModel { model_name: model_name.clone(), respond_to: tx })
+        .await
+        .map_err(|e| format!("Failed to send load request: {}", e))?;
+    rx.await.map_err(|_| "Foundry actor died".to_string())?
+}
+
+#[tauri::command]
+async fn get_loaded_models(handles: State<'_, ActorHandles>) -> Result<Vec<String>, String> {
+    println!("[get_loaded_models] Getting loaded models");
+    let (tx, rx) = oneshot::channel();
+    handles.foundry_tx.send(FoundryMsg::GetLoadedModels { respond_to: tx })
+        .await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+    Ok(rx.await.map_err(|_| "Foundry actor died".to_string())?)
+}
+
+#[tauri::command]
+async fn cancel_generation(
+    generation_id: u32,
+    cancellation_state: State<'_, CancellationState>,
+) -> Result<(), String> {
+    println!("[cancel_generation] Cancellation requested for generation: {}", generation_id);
+    
+    // Check if this matches the current generation
+    let current_id = *cancellation_state.current_generation_id.read().await;
+    
+    // Send cancel signal
+    if let Some(sender) = cancellation_state.cancel_signal.read().await.as_ref() {
+        let _ = sender.send(true);
+        println!("[cancel_generation] Cancel signal sent for generation {} (current: {})", generation_id, current_id);
+    } else {
+        println!("[cancel_generation] No active generation to cancel");
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
 async fn chat(
     chat_id: Option<String>,
     title: Option<String>,
@@ -849,11 +934,22 @@ async fn chat(
     approval_state: State<'_, ToolApprovalState>,
     tool_registry_state: State<'_, ToolRegistryState>,
     embedding_state: State<'_, EmbeddingModelState>,
+    cancellation_state: State<'_, CancellationState>,
     app_handle: tauri::AppHandle
 ) -> Result<String, String> {
     let chat_id = chat_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let chat_id_return = chat_id.clone();
     let title = title.unwrap_or_else(|| message.chars().take(50).collect::<String>());
+    
+    // Set up cancellation signal for this generation
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    {
+        // Increment generation ID and store the cancel signal
+        let mut gen_id = cancellation_state.current_generation_id.write().await;
+        *gen_id = gen_id.wrapping_add(1);
+        *cancellation_state.cancel_signal.write().await = Some(cancel_tx);
+        println!("[chat] Starting generation {} with cancellation support", *gen_id);
+    }
     
     // Get server configs from settings
     let settings = settings_state.settings.read().await;
@@ -1024,6 +1120,7 @@ async fn chat(
             app_handle,
             full_history,
             reasoning_effort,
+            cancel_rx,
             server_configs,
             chat_id_task,
             title_task,
@@ -1570,6 +1667,13 @@ pub fn run() {
                  pending: Arc::new(RwLock::new(HashMap::new())),
              };
              app.manage(approval_state);
+             
+             // Initialize cancellation state for stream abort
+             let cancellation_state = CancellationState {
+                 cancel_signal: Arc::new(RwLock::new(None)),
+                 current_generation_id: Arc::new(RwLock::new(0)),
+             };
+             app.manage(cancellation_state);
 
              let app_handle = app.handle();
              // Spawn Vector Actor
@@ -1652,6 +1756,11 @@ pub fn run() {
             delete_chat, 
             load_chat, 
             update_chat,
+            // Model loading commands
+            download_model,
+            load_model,
+            get_loaded_models,
+            cancel_generation,
             // RAG commands
             select_files,
             select_folder,

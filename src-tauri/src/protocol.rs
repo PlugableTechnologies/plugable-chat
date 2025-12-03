@@ -793,6 +793,35 @@ pub enum FoundryMsg {
         model_id: String,
         respond_to: oneshot::Sender<bool>,
     },
+    /// Download a model from the catalog (POST /openai/download)
+    DownloadModel {
+        model_name: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Load a model into VRAM (GET /openai/load/{name})
+    LoadModel {
+        model_name: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Get currently loaded models (GET /openai/loadedmodels)
+    GetLoadedModels {
+        respond_to: oneshot::Sender<Vec<String>>,
+    },
+}
+
+/// Event payload for model download progress
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelDownloadProgressEvent {
+    pub file: String,
+    pub progress: f32,
+}
+
+/// Event payload for model load completion
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelLoadCompleteEvent {
+    pub model: String,
+    pub success: bool,
+    pub error: Option<String>,
 }
 
 pub enum McpMsg {

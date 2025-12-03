@@ -6417,6 +6417,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tokio",
+ "urlencoding",
  "uuid",
  "wasmtime",
  "wasmtime-wasi",

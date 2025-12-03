@@ -13,14 +13,14 @@ const NO_MODELS_HELP_MESSAGE = `## Welcome to Plugable Chat! 👋
 
 It looks like you don't have any AI models cached locally yet.
 
-To get started, you'll need to install a model using the **Foundry CLI**:
+To get started, you'll need to load a model using the **Foundry CLI**:
 
 ### Quick Start
 
 1. Open a terminal (Command Prompt on Windows, Terminal on Mac/Linux)
 2. Run the following command:
    \`\`\`bash
-   foundry model install phi-4-mini-reasoning
+   foundry model load phi-4-mini
    \`\`\`
 3. Wait for the download to complete (this may take a few minutes)
 4. Once finished, click the **"No models (click to refresh)"** dropdown in the header to reload
@@ -29,9 +29,9 @@ To get started, you'll need to install a model using the **Foundry CLI**:
 
 | Model | Description | Command |
 |-------|-------------|---------|
-| **phi-4-mini-reasoning** | Compact model with reasoning | \`foundry model install phi-4-mini-reasoning\` |
-| **phi-4** | Microsoft's capable Phi-4 model | \`foundry model install phi-4\` |
-| **qwen2.5-coder-0.5b** | Small coding-focused model | \`foundry model install qwen2.5-coder-0.5b\` |
+| **phi-4-mini** | Compact and fast Phi-4 model | \`foundry model load phi-4-mini\` |
+| **phi-4** | Microsoft's capable Phi-4 model | \`foundry model load phi-4\` |
+| **qwen2.5-coder-0.5b** | Small coding-focused model | \`foundry model load qwen2.5-coder-0.5b\` |
 
 ### Need Help?
 
@@ -39,7 +39,7 @@ If you're having trouble, make sure:
 - Microsoft Foundry Local is installed (visit [Microsoft AI Toolkit](https://github.com/microsoft/vscode-ai-toolkit) for installation)
 - The Foundry service is running (\`foundry service start\`)
 
-Once you've installed a model, this chat will work normally! 🚀`;
+Once you've loaded a model, this chat will work normally! 🚀`;
 
 function ErrorBanner() {
   const { backendError, clearError } = useChatStore();
@@ -64,7 +64,7 @@ function ErrorBanner() {
 
 
 function App() {
-  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, setModel, fetchCachedModels, startSystemChat, messages, hasFetchedCachedModels } = useChatStore();
+  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, fetchCachedModels, startSystemChat, messages, hasFetchedCachedModels, loadModel, operationStatus } = useChatStore();
   const effortOptions: ReasoningEffort[] = ['low', 'medium', 'high'];
   const hasShownHelpChat = useRef(false);
   console.log("App component rendering...");
@@ -76,20 +76,22 @@ function App() {
   const supportsReasoningEffort = currentModelInfo?.supports_reasoning_effort ?? false;
   
   // Detect when startup is fully complete but no models are available
-  // Show help chat to guide user on installing models
+  // Show help chat to guide user on loading models
   useEffect(() => {
     // Only trigger once, when:
     // 1. Not connecting anymore
     // 2. We've actually completed fetching cached models (hasFetchedCachedModels)
-    // 3. No cached models were found
+    // 3. currentModel is 'No models' (not 'Downloading...' or other transient states)
     // 4. Haven't shown help chat before
     // 5. No existing messages in chat
-    if (!isConnecting && hasFetchedCachedModels && cachedModels.length === 0 && !hasShownHelpChat.current && messages.length === 0) {
+    // Note: We show help even during auto-download so users understand what's happening
+    const shouldShowHelp = currentModel === 'No models' || currentModel === 'Downloading...';
+    if (!isConnecting && hasFetchedCachedModels && shouldShowHelp && !hasShownHelpChat.current && messages.length === 0) {
       hasShownHelpChat.current = true;
       console.log('[App] No cached models found after startup complete. Showing help chat.');
       startSystemChat(NO_MODELS_HELP_MESSAGE, 'Getting Started');
     }
-  }, [isConnecting, hasFetchedCachedModels, cachedModels.length, startSystemChat, messages.length]);
+  }, [isConnecting, hasFetchedCachedModels, currentModel, startSystemChat, messages.length]);
   
   // Handle clicking on the "no models" dropdown to refresh
   const handleRefreshModels = async () => {
@@ -250,7 +252,7 @@ function App() {
         {/* Header */}
         <div className="h-14 shrink-0 flex items-center px-4 sm:px-6 bg-white">
           <div className="flex items-center gap-3">
-            <img src="/plugable-logo.png" alt="Plugable" className="h-6 max-w-[120px] w-auto object-contain" />
+            <img src="/plugable-logo.png" alt="Plugable" className="h-12 max-w-[240px] w-auto object-contain" />
             <span className="font-semibold text-sm text-gray-900">Local Chat - Microsoft Foundry</span>
           </div>
           <div className="flex-1" />
@@ -265,9 +267,34 @@ function App() {
               <button onClick={retryConnection} className="text-red-600 hover:text-red-800 underline underline-offset-2 transition-colors" title="Click to retry connection">
                 Unavailable (retry)
               </button>
+            ) : currentModel === 'No models' ? (
+              <button 
+                onClick={handleRefreshModels}
+                className="text-amber-600 hover:text-amber-800 text-[11px] font-semibold underline underline-offset-2 transition-colors"
+                title="No models found. Click to check for newly loaded models."
+              >
+                No models (click to refresh)
+              </button>
+            ) : currentModel === 'Downloading...' ? (
+              <span className="text-blue-600 flex items-center gap-1.5 text-[11px] font-semibold">
+                <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></span>
+                Downloading model...
+              </span>
             ) : cachedModels.length > 0 ? (
               <div className="flex items-center gap-1.5">
-                <select value={currentModel} onChange={(e) => setModel(e.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none max-w-[240px]" title="Select a cached model">
+                <select 
+                  value={currentModel} 
+                  onChange={(e) => {
+                    const newModel = e.target.value;
+                    if (newModel !== currentModel) {
+                      // Load the new model into VRAM (shows status bar)
+                      loadModel(newModel);
+                    }
+                  }} 
+                  className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none max-w-[240px]" 
+                  title="Select a cached model"
+                  disabled={operationStatus?.type === 'loading' || operationStatus?.type === 'downloading'}
+                >
                   {cachedModels.map((model) => {
                     return (
                       <option key={model.model_id} value={model.model_id}>
