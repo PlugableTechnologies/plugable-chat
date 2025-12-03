@@ -233,7 +233,7 @@ async fn run_agentic_loop(
     chat_id: String,
     title: String,
     original_message: String,
-    openai_tools: Option<Vec<OpenAITool>>,
+    mut openai_tools: Option<Vec<OpenAITool>>,
     model_name: String,
 ) {
     // Resolve model profile from model name
@@ -243,6 +243,11 @@ async fn run_agentic_loop(
     let mut iteration = 0;
     let mut had_tool_calls = false;
     let mut final_response = String::new();
+    
+    // Track repeated errors to detect when model is stuck
+    // Format: "tool_name::error_message"
+    let mut last_error_signature: Option<String> = None;
+    let mut tools_disabled_due_to_repeated_error = false;
     
     println!("[AgenticLoop] Starting with model_family={:?}, tool_format={:?}", model_family, tool_format);
     
@@ -536,6 +541,39 @@ async fn run_agentic_loop(
                 is_error,
             });
             
+            // Check for repeated errors - if the same tool produces the same error twice in a row,
+            // disable tool calling and prompt the model to answer without tools
+            if is_error {
+                let error_signature = format!("{}::{}", resolved_call.tool, result_text);
+                if let Some(ref last_sig) = last_error_signature {
+                    if *last_sig == error_signature {
+                        println!("[AgenticLoop] REPEATED ERROR DETECTED: Tool '{}' failed with same error twice", resolved_call.tool);
+                        println!("[AgenticLoop] Error: {}", result_text);
+                        println!("[AgenticLoop] Disabling tool calling, prompting model to answer directly");
+                        
+                        // Mark that we're disabling tools due to repeated error
+                        tools_disabled_due_to_repeated_error = true;
+                        
+                        // Prompt the model to answer without tools
+                        let redirect_msg = "The tool is not available for this request. \
+                            Please answer the user's question directly using your knowledge, \
+                            without attempting to use any tools.".to_string();
+                        tool_results.push(redirect_msg);
+                        
+                        // Remove tools from future iterations
+                        openai_tools = None;
+                        
+                        any_executed = true;
+                        break; // Stop processing more tool calls this iteration
+                    }
+                }
+                // Update the last error signature
+                last_error_signature = Some(error_signature);
+            } else {
+                // Clear error tracking on successful execution
+                last_error_signature = None;
+            }
+            
             // Format and collect tool result using model-appropriate format
             tool_results.push(format_tool_result(&resolved_call, &result_text, is_error, tool_format));
             any_executed = true;
@@ -565,7 +603,8 @@ async fn run_agentic_loop(
     });
     let _ = app_handle.emit("chat-finished", ());
     
-    println!("[AgenticLoop] Loop complete after {} iterations, had_tool_calls={}", iteration, had_tool_calls);
+    println!("[AgenticLoop] Loop complete after {} iterations, had_tool_calls={}, tools_disabled={}", 
+        iteration, had_tool_calls, tools_disabled_due_to_repeated_error);
     
     // Save the chat
     let messages_json = serde_json::to_string(&full_history).unwrap_or_default();
@@ -640,16 +679,40 @@ fn build_system_prompt(
     let _active_tool_count: usize = active_servers.iter().map(|(_, t)| t.len()).sum();
     let _deferred_tool_count: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
     
+    // ===== CRITICAL: Attached Documents =====
+    prompt.push_str("\n\n## CRITICAL: How Attached Documents Work\n\n");
+    prompt.push_str("When the user attaches files/documents to the chat:\n");
+    prompt.push_str("- The relevant text content is **already extracted** and shown in the user's message as \"Context from attached documents\"\n");
+    prompt.push_str("- This extracted text IS the file content - you already have it in the conversation\n");
+    prompt.push_str("- ❌ **You CANNOT access, read, or open the original files** - no file paths, no file I/O\n");
+    prompt.push_str("- ❌ **code_execution CANNOT read files** - it has no filesystem access whatsoever\n");
+    prompt.push_str("- ✅ **To work with document content**: Use the text already provided in \"Context from attached documents\"\n");
+    prompt.push_str("- ✅ **To analyze/transform that text**: Copy relevant portions into code_execution as string literals\n\n");
+    prompt.push_str("**Example - WRONG approach:**\n");
+    prompt.push_str("```python\n# This will FAIL - no file access!\nwith open('document.pdf', 'r') as f:\n    content = f.read()\n```\n\n");
+    prompt.push_str("**Example - CORRECT approach:**\n");
+    prompt.push_str("```python\n# Use the text already provided in the conversation\ntext = \"\"\"paste the relevant text from the context here\"\"\"\nresult = analyze(text)\n```\n\n");
+    
     // ===== CRITICAL: Tool Selection Decision Tree =====
-    prompt.push_str("\n\n## CRITICAL: Tool Selection Guide\n\n");
-    prompt.push_str("You have TWO distinct capabilities. Choose the right one:\n\n");
+    prompt.push_str("## Tool Selection Guide\n\n");
+    prompt.push_str("**IMPORTANT: Before using any tool, first ask yourself: Can I answer this directly from my knowledge?**\n\n");
+    prompt.push_str("Most questions can be answered without tools. Only use tools when they provide a clear advantage.\n\n");
     
     prompt.push_str("### 1. `code_execution` (Built-in Python Sandbox)\n");
-    prompt.push_str("**USE FOR:** Pure calculations, math, string manipulation, data transformations, logic\n");
+    prompt.push_str("**WHEN TO USE** (only when it provides clear advantage over your knowledge):\n");
+    prompt.push_str("- Complex arithmetic that's error-prone to compute mentally (e.g., compound interest over 30 years)\n");
+    prompt.push_str("- Processing/transforming data the user has provided in the conversation\n");
+    prompt.push_str("- Generating structured output (JSON, CSV) from conversation data\n");
+    prompt.push_str("- Pattern matching or text manipulation on user-provided text\n\n");
+    prompt.push_str("**WHEN NOT TO USE** (just answer directly):\n");
+    prompt.push_str("- Simple math you can do reliably (e.g., \"what's 15% of 80?\")\n");
+    prompt.push_str("- Date/calendar questions (e.g., \"what day is Jan 6, 2026?\") - answer from knowledge\n");
+    prompt.push_str("- Questions about facts, concepts, or explanations\n");
+    prompt.push_str("- Anything where your knowledge is sufficient and reliable\n\n");
     prompt.push_str("**LIMITATIONS:** \n");
     prompt.push_str("- ❌ CANNOT access internet, databases, files, APIs, or any external systems\n");
-    prompt.push_str("- ❌ CANNOT call MCP tools UNLESS you first discover them via `tool_search`\n");
-    prompt.push_str("- ✅ CAN use: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64\n\n");
+    prompt.push_str("- ❌ CANNOT read or write files - NO filesystem access at all\n");
+    prompt.push_str("- ✅ Available modules: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64\n\n");
     
     if has_mcp_tools {
         prompt.push_str("### 2. MCP Tools (External Capabilities)\n");
@@ -664,18 +727,18 @@ fn build_system_prompt(
         
         prompt.push_str("### Decision Tree:\n");
         prompt.push_str("```\n");
-        prompt.push_str("Need external data/access? (database, API, files, web)\n");
-        prompt.push_str("├── YES → Use tool_search first, then call discovered MCP tools\n");
-        prompt.push_str("└── NO → Pure calculation/logic?\n");
-        prompt.push_str("    ├── YES → Use code_execution\n");
-        prompt.push_str("    └── NO → Just answer from knowledge\n");
+        prompt.push_str("Can I answer this reliably from my knowledge?\n");
+        prompt.push_str("├── YES → Just answer directly (no tools needed)\n");
+        prompt.push_str("└── NO → What do I need?\n");
+        prompt.push_str("    ├── External data (database, API, web) → tool_search first, then MCP tools\n");
+        prompt.push_str("    └── Complex computation on data in conversation → code_execution\n");
         prompt.push_str("```\n\n");
         
         prompt.push_str("### COMMON MISTAKES TO AVOID:\n");
+        prompt.push_str("- ❌ Using tools for simple questions you can answer directly\n");
         prompt.push_str("- ❌ Using `code_execution` alone for tasks needing external data (it will fail)\n");
         prompt.push_str("- ❌ Calling MCP tools without discovering them via `tool_search` first\n");
-        prompt.push_str("- ❌ Thinking `code_execution` can access databases/APIs (it cannot by itself)\n");
-        prompt.push_str("- ✅ For external access: `tool_search` → discover tools → call them (directly or via code_execution)\n\n");
+        prompt.push_str("- ✅ Default to answering from knowledge unless tools provide clear value\n\n");
     }
     
     // Tool calling format instructions
@@ -689,11 +752,14 @@ fn build_system_prompt(
     
     // Code execution details
     prompt.push_str("## code_execution Tool\n\n");
-    prompt.push_str("Sandboxed Python execution for calculations and data processing.\n");
-    prompt.push_str("**You must `import` modules before using them.**\n\n");
-    prompt.push_str("Example (pure calculation):\n");
-    prompt.push_str("<tool_call>{\"name\": \"code_execution\", \"arguments\": {\"code\": [\"import math\", \"result = math.sqrt(17 * 23 + 456)\", \"print(f'Answer: {result:.2f}')\"]}}");
+    prompt.push_str("Sandboxed Python for complex calculations. **Only use when it provides clear advantage over answering directly.**\n");
+    prompt.push_str("You must `import` modules before using them.\n\n");
+    prompt.push_str("**Good use case** (complex calculation):\n");
+    prompt.push_str("<tool_call>{\"name\": \"code_execution\", \"arguments\": {\"code\": [\"import math\", \"# Compound interest: $10000 at 7% for 30 years\", \"result = 10000 * (1 + 0.07) ** 30\", \"print(f'Final amount: ${result:,.2f}')\"]}}");
     prompt.push_str("</tool_call>\n\n");
+    prompt.push_str("**Bad use case** (just answer directly instead):\n");
+    prompt.push_str("- \"What's 15% of 200?\" → Just say \"30\" - no code needed\n");
+    prompt.push_str("- Simple factual questions → Answer from knowledge\n\n");
     
     // Tool discovery section - critical when there are deferred tools
     if has_deferred_tools {

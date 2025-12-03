@@ -322,7 +322,7 @@ pub const ALLOWED_MODULES: &[&str] = &[
 ];
 
 /// Setup code to inject sandbox helpers into Python
-pub const SANDBOX_SETUP_CODE: &str = r#"
+pub const SANDBOX_SETUP_CODE: &str = r##"
 # Sandbox setup - import sandbox functions
 from _sandbox import tool_call, get_tool_result, sandbox_print
 
@@ -337,8 +337,220 @@ for _name in _blocked:
     if hasattr(builtins, _name):
         delattr(builtins, _name)
 
-# Restricted import - NOTE: _sandbox_allowed_modules must NOT be deleted
-# because the _restricted_import closure references it
+# ============== Datetime Shim ==============
+# Minimal datetime implementation for sandbox
+
+class _DatetimeModule:
+    """Namespace class acting as datetime module"""
+    
+    MINYEAR = 1
+    MAXYEAR = 9999
+    
+    _DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    _DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    _MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+                    'July', 'August', 'September', 'October', 'November', 'December']
+    
+    @staticmethod
+    def _is_leap(year):
+        return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    
+    @staticmethod
+    def _days_in_month(year, month):
+        if month == 2 and _DatetimeModule._is_leap(year):
+            return 29
+        return _DatetimeModule._DAYS_IN_MONTH[month]
+    
+    @staticmethod
+    def _days_before_year(year):
+        y = year - 1
+        return y*365 + y//4 - y//100 + y//400
+    
+    @staticmethod
+    def _days_before_month(year, month):
+        days = sum(_DatetimeModule._DAYS_IN_MONTH[1:month])
+        if month > 2 and _DatetimeModule._is_leap(year):
+            days += 1
+        return days
+    
+    @staticmethod
+    def _ymd_to_ordinal(year, month, day):
+        return _DatetimeModule._days_before_year(year) + _DatetimeModule._days_before_month(year, month) + day
+    
+    @staticmethod
+    def _ordinal_to_ymd(n):
+        n400, n = divmod(n, 146097)
+        n100, n = divmod(n, 36524)
+        n4, n = divmod(n, 1461)
+        n1, n = divmod(n, 365)
+        year = n400*400 + n100*100 + n4*4 + n1
+        if n1 == 4 or n100 == 4:
+            return year, 12, 31
+        year += 1
+        month = (n + 50) >> 5
+        preceding = _DatetimeModule._days_before_month(year, month)
+        if preceding > n:
+            month -= 1
+            preceding = _DatetimeModule._days_before_month(year, month)
+        return year, month, n - preceding + 1
+
+    class timedelta:
+        def __init__(self, days=0, seconds=0, microseconds=0, milliseconds=0, minutes=0, hours=0, weeks=0):
+            d = days + weeks * 7
+            s = seconds + minutes * 60 + hours * 3600
+            us = microseconds + milliseconds * 1000
+            s, us = s + us // 1000000, us % 1000000
+            d, s = d + s // 86400, s % 86400
+            self._days, self._seconds, self._microseconds = int(d), int(s), int(us)
+        
+        @property
+        def days(self): return self._days
+        @property
+        def seconds(self): return self._seconds
+        @property
+        def microseconds(self): return self._microseconds
+        
+        def total_seconds(self):
+            return self._days * 86400 + self._seconds + self._microseconds / 1000000
+        
+        def __repr__(self):
+            return f"datetime.timedelta(days={self._days}, seconds={self._seconds}, microseconds={self._microseconds})"
+        
+        def __eq__(self, other):
+            if isinstance(other, _DatetimeModule.timedelta):
+                return self._days == other._days and self._seconds == other._seconds and self._microseconds == other._microseconds
+            return NotImplemented
+        
+        def __add__(self, other):
+            if isinstance(other, _DatetimeModule.timedelta):
+                return _DatetimeModule.timedelta(days=self._days + other._days, seconds=self._seconds + other._seconds, microseconds=self._microseconds + other._microseconds)
+            return NotImplemented
+        
+        def __sub__(self, other):
+            if isinstance(other, _DatetimeModule.timedelta):
+                return _DatetimeModule.timedelta(days=self._days - other._days, seconds=self._seconds - other._seconds, microseconds=self._microseconds - other._microseconds)
+            return NotImplemented
+        
+        def __neg__(self):
+            return _DatetimeModule.timedelta(days=-self._days, seconds=-self._seconds, microseconds=-self._microseconds)
+
+    class date:
+        def __init__(self, year, month, day):
+            if not 1 <= month <= 12:
+                raise ValueError(f"month must be in 1..12")
+            dim = _DatetimeModule._days_in_month(year, month)
+            if not 1 <= day <= dim:
+                raise ValueError(f"day is out of range for month")
+            self._year, self._month, self._day = year, month, day
+        
+        @property
+        def year(self): return self._year
+        @property
+        def month(self): return self._month
+        @property
+        def day(self): return self._day
+        
+        def weekday(self):
+            return (_DatetimeModule._ymd_to_ordinal(self._year, self._month, self._day) + 6) % 7
+        
+        def isoweekday(self):
+            return self.weekday() + 1
+        
+        def isoformat(self):
+            return f"{self._year:04d}-{self._month:02d}-{self._day:02d}"
+        
+        def strftime(self, fmt):
+            wd = self.weekday()
+            r = fmt.replace('%Y', f"{self._year:04d}").replace('%m', f"{self._month:02d}").replace('%d', f"{self._day:02d}")
+            r = r.replace('%B', _DatetimeModule._MONTH_NAMES[self._month]).replace('%b', _DatetimeModule._MONTH_NAMES[self._month][:3])
+            r = r.replace('%A', _DatetimeModule._DAY_NAMES[wd]).replace('%a', _DatetimeModule._DAY_NAMES[wd][:3])
+            return r.replace('%%', '%')
+        
+        def __repr__(self):
+            return f"datetime.date({self._year}, {self._month}, {self._day})"
+        
+        def __str__(self):
+            return self.isoformat()
+        
+        def __eq__(self, other):
+            if isinstance(other, _DatetimeModule.date):
+                return self._year == other._year and self._month == other._month and self._day == other._day
+            return NotImplemented
+        
+        def __lt__(self, other):
+            if isinstance(other, _DatetimeModule.date):
+                return (self._year, self._month, self._day) < (other._year, other._month, other._day)
+            return NotImplemented
+        
+        def __sub__(self, other):
+            if isinstance(other, _DatetimeModule.date):
+                d1 = _DatetimeModule._ymd_to_ordinal(self._year, self._month, self._day)
+                d2 = _DatetimeModule._ymd_to_ordinal(other._year, other._month, other._day)
+                return _DatetimeModule.timedelta(days=d1 - d2)
+            elif isinstance(other, _DatetimeModule.timedelta):
+                return self + _DatetimeModule.timedelta(days=-other.days)
+            return NotImplemented
+        
+        def __add__(self, other):
+            if isinstance(other, _DatetimeModule.timedelta):
+                o = _DatetimeModule._ymd_to_ordinal(self._year, self._month, self._day) + other.days
+                y, m, d = _DatetimeModule._ordinal_to_ymd(o)
+                return _DatetimeModule.date(y, m, d)
+            return NotImplemented
+
+    class datetime(date):
+        def __init__(self, year, month, day, hour=0, minute=0, second=0, microsecond=0):
+            super().__init__(year, month, day)
+            if not 0 <= hour <= 23: raise ValueError("hour out of range")
+            if not 0 <= minute <= 59: raise ValueError("minute out of range")
+            if not 0 <= second <= 59: raise ValueError("second out of range")
+            if not 0 <= microsecond <= 999999: raise ValueError("microsecond out of range")
+            self._hour, self._minute, self._second, self._microsecond = hour, minute, second, microsecond
+        
+        @property
+        def hour(self): return self._hour
+        @property
+        def minute(self): return self._minute
+        @property
+        def second(self): return self._second
+        @property
+        def microsecond(self): return self._microsecond
+        
+        def date(self):
+            return _DatetimeModule.date(self._year, self._month, self._day)
+        
+        def isoformat(self, sep='T'):
+            d = f"{self._year:04d}-{self._month:02d}-{self._day:02d}"
+            t = f"{self._hour:02d}:{self._minute:02d}:{self._second:02d}"
+            if self._microsecond: t += f".{self._microsecond:06d}"
+            return f"{d}{sep}{t}"
+        
+        def strftime(self, fmt):
+            r = super().strftime(fmt)
+            r = r.replace('%H', f"{self._hour:02d}").replace('%M', f"{self._minute:02d}").replace('%S', f"{self._second:02d}")
+            r = r.replace('%I', f"{(self._hour % 12) or 12:02d}").replace('%p', 'PM' if self._hour >= 12 else 'AM')
+            return r.replace('%f', f"{self._microsecond:06d}")
+        
+        def __repr__(self):
+            return f"datetime.datetime({self._year}, {self._month}, {self._day}, {self._hour}, {self._minute}, {self._second}, {self._microsecond})"
+        
+        def __str__(self):
+            return self.isoformat(' ')
+        
+        def __sub__(self, other):
+            if isinstance(other, _DatetimeModule.datetime):
+                d1, d2 = _DatetimeModule._ymd_to_ordinal(self._year, self._month, self._day), _DatetimeModule._ymd_to_ordinal(other._year, other._month, other._day)
+                s1, s2 = self._hour*3600 + self._minute*60 + self._second, other._hour*3600 + other._minute*60 + other._second
+                return _DatetimeModule.timedelta(days=d1-d2, seconds=s1-s2, microseconds=self._microsecond-other._microsecond)
+            return super().__sub__(other)
+
+# Register as a fake module via import hook
+_datetime_instance = _DatetimeModule()
+_datetime_instance.date = _DatetimeModule.date
+_datetime_instance.datetime = _DatetimeModule.datetime
+_datetime_instance.timedelta = _DatetimeModule.timedelta
+
+# Restricted import with datetime shim
 _sandbox_allowed_modules = {
     'math', 'json', 'random', 're', 'datetime', 'collections',
     'itertools', 'functools', 'operator', 'string', 'textwrap',
@@ -350,6 +562,10 @@ _sandbox_allowed_modules = {
 _original_import = builtins.__import__
 
 def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
+    # Handle datetime specially - return our shim
+    if name == 'datetime':
+        return _datetime_instance
+    
     top_level = name.split('.')[0]
     if top_level not in _sandbox_allowed_modules:
         allowed_list = ', '.join(sorted(m for m in _sandbox_allowed_modules 
@@ -365,7 +581,7 @@ builtins.__import__ = _restricted_import
 
 # Clean up setup variables (but NOT _sandbox_allowed_modules - it's needed by the closure)
 del _blocked, _name
-"#;
+"##;
 
 #[cfg(test)]
 mod tests {
