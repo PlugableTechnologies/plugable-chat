@@ -603,23 +603,46 @@ fn build_system_prompt(
     let has_deferred_tools = !deferred_servers.is_empty();
     let has_mcp_tools = has_active_tools || has_deferred_tools;
     
-    let active_tool_count: usize = active_servers.iter().map(|(_, t)| t.len()).sum();
-    let deferred_tool_count: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
+    let _active_tool_count: usize = active_servers.iter().map(|(_, t)| t.len()).sum();
+    let _deferred_tool_count: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
     
-    // Add available tools summary at the top
-    prompt.push_str("\n\n## Available Tools\n\n");
-    prompt.push_str("You have the following tools available:\n");
-    prompt.push_str("- **code_execution**: Execute Python code in a secure sandbox for calculations, data processing, and deterministic operations\n");
+    // ===== CRITICAL: Tool Selection Decision Tree =====
+    prompt.push_str("\n\n## CRITICAL: Tool Selection Guide\n\n");
+    prompt.push_str("You have TWO distinct capabilities. Choose the right one:\n\n");
+    
+    prompt.push_str("### 1. `code_execution` (Built-in Python Sandbox)\n");
+    prompt.push_str("**USE FOR:** Pure calculations, math, string manipulation, data transformations, logic\n");
+    prompt.push_str("**LIMITATIONS:** \n");
+    prompt.push_str("- ❌ CANNOT access internet, databases, files, APIs, or any external systems\n");
+    prompt.push_str("- ❌ CANNOT call MCP tools UNLESS you first discover them via `tool_search`\n");
+    prompt.push_str("- ✅ CAN use: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64\n\n");
+    
     if has_mcp_tools {
-        prompt.push_str("- **tool_search**: Discover tools from connected MCP servers (REQUIRED before using MCP tools)\n");
+        prompt.push_str("### 2. MCP Tools (External Capabilities)\n");
+        prompt.push_str("**USE FOR:** Anything requiring external access - databases, APIs, files, web, etc.\n");
+        prompt.push_str("**HOW TO USE:**\n");
+        if has_deferred_tools {
+            prompt.push_str("1. First call `tool_search` to discover available tools for your task\n");
+            prompt.push_str("2. Then call the discovered tools directly OR via `code_execution` for complex workflows\n\n");
+        } else if has_active_tools {
+            prompt.push_str("- Call active MCP tools directly (listed below)\n\n");
+        }
+        
+        prompt.push_str("### Decision Tree:\n");
+        prompt.push_str("```\n");
+        prompt.push_str("Need external data/access? (database, API, files, web)\n");
+        prompt.push_str("├── YES → Use tool_search first, then call discovered MCP tools\n");
+        prompt.push_str("└── NO → Pure calculation/logic?\n");
+        prompt.push_str("    ├── YES → Use code_execution\n");
+        prompt.push_str("    └── NO → Just answer from knowledge\n");
+        prompt.push_str("```\n\n");
+        
+        prompt.push_str("### COMMON MISTAKES TO AVOID:\n");
+        prompt.push_str("- ❌ Using `code_execution` alone for tasks needing external data (it will fail)\n");
+        prompt.push_str("- ❌ Calling MCP tools without discovering them via `tool_search` first\n");
+        prompt.push_str("- ❌ Thinking `code_execution` can access databases/APIs (it cannot by itself)\n");
+        prompt.push_str("- ✅ For external access: `tool_search` → discover tools → call them (directly or via code_execution)\n\n");
     }
-    if has_active_tools {
-        prompt.push_str(&format!("- **{} active MCP tools** - ready to use immediately (listed below)\n", active_tool_count));
-    }
-    if has_deferred_tools {
-        prompt.push_str(&format!("- **{} latent MCP tools** - must be discovered via `tool_search` before use\n", deferred_tool_count));
-    }
-    prompt.push_str("\n");
     
     // Tool calling format instructions
     prompt.push_str("## Tool Calling Format\n\n");
@@ -628,34 +651,25 @@ fn build_system_prompt(
     
     prompt.push_str("RULES:\n");
     prompt.push_str("- Call tools immediately when they can help - don't just describe what you would do\n");
-    prompt.push_str("- Each argument value must be a SIMPLE value (string, number, boolean), never nested objects\n");
-    prompt.push_str("- For ANY math, calculations, or data processing, use code_execution\n\n");
+    prompt.push_str("- Each argument value must be a SIMPLE value (string, number, boolean), never nested objects\n\n");
     
     // Code execution details
     prompt.push_str("## code_execution Tool\n\n");
-    prompt.push_str("Sandboxed Python execution. Use for math, string ops, data transformations, multi-step logic.\n");
-    prompt.push_str("**You must `import` modules before using them.** Allowed: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64.\n");
-    prompt.push_str("No external packages (pandas, numpy, requests, etc.).\n\n");
-    prompt.push_str("Example:\n");
+    prompt.push_str("Sandboxed Python execution for calculations and data processing.\n");
+    prompt.push_str("**You must `import` modules before using them.**\n\n");
+    prompt.push_str("Example (pure calculation):\n");
     prompt.push_str("<tool_call>{\"name\": \"code_execution\", \"arguments\": {\"code\": [\"import math\", \"result = math.sqrt(17 * 23 + 456)\", \"print(f'Answer: {result:.2f}')\"]}}");
     prompt.push_str("</tool_call>\n\n");
     
     // Tool discovery section - critical when there are deferred tools
     if has_deferred_tools {
-        prompt.push_str("## Tool Discovery (IMPORTANT)\n\n");
-        prompt.push_str("**Most MCP tools are latent and must be discovered before use.**\n\n");
-        prompt.push_str("When the user's request might benefit from external tools (databases, APIs, specialized operations), ");
-        prompt.push_str("your FIRST action should be to search for relevant tools:\n\n");
+        prompt.push_str("## Tool Discovery (REQUIRED for External Access)\n\n");
+        prompt.push_str("**Before using any MCP tool, you MUST discover it first:**\n\n");
         prompt.push_str("<tool_call>{\"name\": \"tool_search\", \"arguments\": {\"queries\": [\"describe what you need\"]}}");
         prompt.push_str("</tool_call>\n\n");
-        prompt.push_str("**Workflow:**\n");
-        prompt.push_str("1. **Search first** - Use `tool_search` with semantic queries describing capabilities you need\n");
-        prompt.push_str("2. **Review results** - The search returns tool names, descriptions, and schemas\n");
-        prompt.push_str("3. **Use discovered tools** - After discovery, those tools become available to call directly\n");
-        prompt.push_str("4. **Orchestrate with code** - For complex multi-tool workflows, use `code_execution` to chain tools\n\n");
         
         // List what latent capabilities are available (high-level summary)
-        prompt.push_str("**Latent Tool Servers:**\n");
+        prompt.push_str("**Available Tool Servers:**\n");
         for (server_id, tools) in &deferred_servers {
             let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
             prompt.push_str(&format!("- `{}`: {} tools ({}) - use `tool_search` to discover\n", 
@@ -671,17 +685,16 @@ fn build_system_prompt(
     
     // Tool orchestration with code_execution (always show if there are MCP tools)
     if has_mcp_tools {
-        prompt.push_str("## Orchestrating Tools with Code\n\n");
-        prompt.push_str("After discovering tools via `tool_search`, you can call them from within `code_execution`:\n");
+        prompt.push_str("## Calling Discovered Tools from Code (Advanced)\n\n");
+        prompt.push_str("After discovering tools via `tool_search`, you can orchestrate them in `code_execution`:\n");
         prompt.push_str("```python\n");
-        prompt.push_str("# Discovered tools are available as async functions:\n");
-        prompt.push_str("result_a = await some_tool(param=\"value\")\n");
-        prompt.push_str("result_b = await another_tool(data=result_a[\"output\"])\n");
-        prompt.push_str("# Process and combine results with Python logic\n");
-        prompt.push_str("print(f\"Final answer: {result_b}\")\n");
+        prompt.push_str("# Discovered MCP tools are available as async functions:\n");
+        prompt.push_str("result = await sql_query(query=\"SELECT * FROM users LIMIT 5\")\n");
+        prompt.push_str("# Then process with Python:\n");
+        prompt.push_str("for row in result[\"rows\"]:\n");
+        prompt.push_str("    print(row)\n");
         prompt.push_str("```\n\n");
-        prompt.push_str("**Key advantage:** Code execution lets you process multiple tool results with logic, ");
-        prompt.push_str("seeing only the final output rather than consuming context with intermediate results.\n\n");
+        prompt.push_str("**This is the ONLY way to access external data from code_execution** - by calling discovered MCP tools.\n\n");
     }
     
     // List ACTIVE MCP tools in full detail (these can be called immediately)

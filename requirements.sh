@@ -35,6 +35,46 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Probe known installation paths and add them to the session PATH
+# This handles cases where tools were installed but PATH wasn't updated
+probe_known_paths() {
+    echo -e "${GRAY}Probing known installation paths...${NC}"
+    
+    local paths_added=0
+    
+    # Homebrew - Apple Silicon Macs
+    if [[ -f /opt/homebrew/bin/brew ]] && [[ ":$PATH:" != *":/opt/homebrew/bin:"* ]]; then
+        echo -e "  ${GRAY}Found Homebrew at: /opt/homebrew${NC}"
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+        paths_added=$((paths_added + 1))
+    fi
+    
+    # Homebrew - Intel Macs
+    if [[ -f /usr/local/bin/brew ]] && [[ ":$PATH:" != *":/usr/local/bin:"* ]]; then
+        echo -e "  ${GRAY}Found Homebrew at: /usr/local${NC}"
+        eval "$(/usr/local/bin/brew shellenv)"
+        paths_added=$((paths_added + 1))
+    fi
+    
+    # Rust/Cargo - user profile location
+    if [[ -f "$HOME/.cargo/bin/cargo" ]] && [[ ":$PATH:" != *":$HOME/.cargo/bin:"* ]]; then
+        echo -e "  ${GRAY}Found Cargo at: $HOME/.cargo/bin${NC}"
+        export PATH="$HOME/.cargo/bin:$PATH"
+        paths_added=$((paths_added + 1))
+    fi
+    
+    # Also source cargo env if it exists (sets up all Rust environment vars)
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        source "$HOME/.cargo/env"
+    fi
+    
+    if [[ $paths_added -gt 0 ]]; then
+        echo -e "  ${GREEN}Added $paths_added path(s) to session${NC}"
+    else
+        echo -e "  ${GRAY}No additional paths needed${NC}"
+    fi
+}
+
 # Check if Xcode Command Line Tools are installed
 check_xcode_clt() {
     xcode-select -p >/dev/null 2>&1
@@ -332,6 +372,10 @@ install_requirements() {
         echo -e "${YELLOW}========================================${NC}"
     fi
     
+    # Always probe known paths before verification (helps on re-runs too)
+    echo ""
+    probe_known_paths
+    
     # Verify all commands are available in current session
     if verify_commands; then
         echo ""
@@ -372,31 +416,49 @@ install_requirements() {
             echo ""
         fi
     else
-        # Some commands are missing - need terminal restart
+        # Some commands are missing - collect which ones
+        local missing_tools=""
+        command_exists node || missing_tools="$missing_tools node"
+        command_exists npm || missing_tools="$missing_tools npm"
+        command_exists rustc || missing_tools="$missing_tools rustc"
+        command_exists cargo || missing_tools="$missing_tools cargo"
+        command_exists rustup || missing_tools="$missing_tools rustup"
+        command_exists protoc || missing_tools="$missing_tools protoc"
+        
         echo ""
         echo -e "${YELLOW}========================================${NC}"
-        echo -e "${YELLOW}  Terminal Restart Required            ${NC}"
+        echo -e "${YELLOW}  Almost There! Re-run Required        ${NC}"
         echo -e "${YELLOW}========================================${NC}"
         echo ""
-        echo -e "${BOLD}Some tools are not yet available in this terminal session.${NC}"
+        echo -e "${BOLD}The following tools were installed but aren't in PATH yet:${NC}"
+        echo ""
+        for tool in $missing_tools; do
+            echo -e "  ${RED}- $tool${NC}"
+        done
+        echo ""
+        echo -e "${GRAY}This is normal! Your shell needs to be restarted to pick up PATH changes.${NC}"
         echo ""
         echo -e "Please do the following:"
         echo ""
-        echo -e "  ${BOLD}1.${NC} Close this terminal completely"
-        echo -e "  ${BOLD}2.${NC} Open a new terminal"
-        echo -e "  ${BOLD}3.${NC} Navigate back to this directory:"
-        echo -e "     ${GRAY}cd $(pwd)${NC}"
-        echo -e "  ${BOLD}4.${NC} Run the setup commands:"
-        echo -e "     ${YELLOW}npm install${NC}"
-        echo -e "     ${YELLOW}npx tauri dev${NC}"
+        echo -e "  ${BOLD}1.${NC} Close this terminal window completely"
+        echo -e "  ${BOLD}2.${NC} Open a NEW terminal"
+        echo -e "  ${BOLD}3.${NC} Re-run this script:"
+        echo ""
+        echo -e "     ${CYAN}cd \"$(pwd)\"${NC}"
+        echo -e "     ${CYAN}./requirements.sh${NC}"
+        echo ""
+        echo -e "  ${GRAY}The script is safe to run multiple times (idempotent).${NC}"
+        echo -e "  ${GRAY}It will skip already-installed packages and continue setup.${NC}"
         echo ""
         
         # Provide manual PATH fix as alternative
-        echo -e "${GRAY}Alternatively, you can try refreshing PATH manually:${NC}"
-        if $INSTALLED_HOMEBREW && [[ -f /opt/homebrew/bin/brew ]]; then
+        echo -e "${GRAY}Alternatively, you can try refreshing PATH manually in this session:${NC}"
+        if [[ -f /opt/homebrew/bin/brew ]]; then
             echo -e "${GRAY}  eval \"\$(/opt/homebrew/bin/brew shellenv)\"${NC}"
+        elif [[ -f /usr/local/bin/brew ]]; then
+            echo -e "${GRAY}  eval \"\$(/usr/local/bin/brew shellenv)\"${NC}"
         fi
-        if $INSTALLED_RUST; then
+        if [[ -f "$HOME/.cargo/env" ]]; then
             echo -e "${GRAY}  source ~/.cargo/env${NC}"
         fi
         echo ""

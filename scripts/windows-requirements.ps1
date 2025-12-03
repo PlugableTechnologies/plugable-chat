@@ -8,11 +8,38 @@
     in an idempotent manner. It will skip already-installed packages.
 
 .NOTES
-    Run this script with: powershell.exe -ExecutionPolicy Bypass -File requirements.ps1
-    Or use the requirements.bat wrapper.
+    DO NOT RUN THIS SCRIPT DIRECTLY!
+    
+    Use the requirements.bat wrapper in the project root instead:
+        requirements.bat
+    
+    Running this script directly may cause permission issues (UAC dialogs
+    appearing behind windows, making install appear to hang).
+    
+    The .bat wrapper ensures proper execution policy and permissions.
 #>
 
 $ErrorActionPreference = "Stop"
+
+# Warn if running directly (not via requirements.bat from project root)
+$scriptDir = Split-Path -Parent $PSCommandPath
+$projectRoot = Split-Path -Parent $scriptDir
+$expectedBat = Join-Path $projectRoot "requirements.bat"
+
+if (-not (Test-Path $expectedBat)) {
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host "  WARNING: Running script directly!    " -ForegroundColor Red
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "This script should be run via requirements.bat in the project root." -ForegroundColor Yellow
+    Write-Host "Running directly may cause permission issues (UAC dialogs behind windows)." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Please use: requirements.bat" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Press Enter to continue anyway, or Ctrl+C to cancel..."
+    Read-Host
+}
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
@@ -112,6 +139,96 @@ function Test-CommandExists {
     }
     catch {
         return $false
+    }
+}
+
+# Probe known installation paths and add them to the session PATH
+# This handles cases where winget installs don't immediately update the registry
+function Probe-KnownPaths {
+    Write-Host "Probing known installation paths..." -ForegroundColor Gray
+    
+    $pathsToAdd = @()
+    
+    # Node.js - check both system and user install locations
+    $nodePaths = @(
+        "$env:ProgramFiles\nodejs",
+        "${env:ProgramFiles(x86)}\nodejs",
+        "$env:LOCALAPPDATA\Programs\nodejs"
+    )
+    foreach ($p in $nodePaths) {
+        if ((Test-Path "$p\node.exe") -and $env:Path -notlike "*$p*") {
+            Write-Host "  Found Node.js at: $p" -ForegroundColor Gray
+            $pathsToAdd += $p
+            break  # Only add the first found location
+        }
+    }
+    
+    # Git - check standard locations
+    $gitPaths = @(
+        "$env:ProgramFiles\Git\cmd",
+        "${env:ProgramFiles(x86)}\Git\cmd",
+        "$env:ProgramFiles\Git\bin",
+        "${env:ProgramFiles(x86)}\Git\bin"
+    )
+    foreach ($p in $gitPaths) {
+        if ((Test-Path "$p\git.exe") -and $env:Path -notlike "*$p*") {
+            Write-Host "  Found Git at: $p" -ForegroundColor Gray
+            $pathsToAdd += $p
+            break
+        }
+    }
+    
+    # Rust/Cargo - user profile location
+    $cargoPath = "$env:USERPROFILE\.cargo\bin"
+    if ((Test-Path "$cargoPath\cargo.exe") -and $env:Path -notlike "*$cargoPath*") {
+        Write-Host "  Found Cargo at: $cargoPath" -ForegroundColor Gray
+        $pathsToAdd += $cargoPath
+    }
+    
+    # Protoc - winget installs to a shim directory
+    $wingetLinks = "$env:LOCALAPPDATA\Microsoft\WinGet\Links"
+    if ((Test-Path $wingetLinks) -and $env:Path -notlike "*$wingetLinks*") {
+        # Check if protoc shim exists there
+        if (Test-Path "$wingetLinks\protoc.exe") {
+            Write-Host "  Found protoc shim at: $wingetLinks" -ForegroundColor Gray
+            $pathsToAdd += $wingetLinks
+        }
+    }
+    
+    # Protoc - also check the actual install location (varies by version)
+    $protocPaths = @(
+        "$env:ProgramFiles\protobuf\bin",
+        "${env:ProgramFiles(x86)}\protobuf\bin",
+        "$env:LOCALAPPDATA\Microsoft\WinGet\Packages"
+    )
+    foreach ($p in $protocPaths) {
+        if (Test-Path $p) {
+            # For WinGet packages dir, we need to search subdirectories
+            if ($p -like "*WinGet\Packages*") {
+                $protocExe = Get-ChildItem -Path $p -Recurse -Filter "protoc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($protocExe -and $env:Path -notlike "*$($protocExe.DirectoryName)*") {
+                    Write-Host "  Found protoc at: $($protocExe.DirectoryName)" -ForegroundColor Gray
+                    $pathsToAdd += $protocExe.DirectoryName
+                    break
+                }
+            }
+            elseif ((Test-Path "$p\protoc.exe") -and $env:Path -notlike "*$p*") {
+                Write-Host "  Found protoc at: $p" -ForegroundColor Gray
+                $pathsToAdd += $p
+                break
+            }
+        }
+    }
+    
+    # Add all discovered paths to the session PATH
+    if ($pathsToAdd.Count -gt 0) {
+        foreach ($p in $pathsToAdd) {
+            $env:Path = "$p;$env:Path"
+        }
+        Write-Host "  Added $($pathsToAdd.Count) path(s) to session" -ForegroundColor Green
+    }
+    else {
+        Write-Host "  No additional paths needed" -ForegroundColor Gray
     }
 }
 
@@ -289,9 +406,10 @@ function Install-Requirements {
         Write-Host "========================================" -ForegroundColor Yellow
     }
     
-    # If anything was installed, refresh PATH from registry
+    # If anything was installed, refresh PATH from registry and probe known paths
     if ($script:InstalledAnything) {
         Update-PathFromRegistry
+        Probe-KnownPaths
     }
     
     # Check for Visual Studio Build Tools C++ workload requirement
@@ -331,6 +449,12 @@ function Install-Requirements {
     
     # Install wasm32-wasi target for WASM sandboxing (optional but recommended)
     Install-WasmTarget
+    
+    # Always probe known paths before verification (helps on re-runs)
+    if (-not $script:InstalledAnything) {
+        Write-Host ""
+        Probe-KnownPaths
+    }
     
     # Verify all commands are available
     if (Test-AllCommands) {
@@ -381,31 +505,46 @@ function Install-Requirements {
         }
     }
     else {
-        # Some commands are missing - need terminal restart
+        # Some commands are missing - collect which ones
+        $missingTools = @()
+        if (-not (Test-CommandExists "node")) { $missingTools += "node" }
+        if (-not (Test-CommandExists "npm")) { $missingTools += "npm" }
+        if (-not (Test-CommandExists "rustc")) { $missingTools += "rustc" }
+        if (-not (Test-CommandExists "cargo")) { $missingTools += "cargo" }
+        if (-not (Test-CommandExists "rustup")) { $missingTools += "rustup" }
+        if (-not (Test-CommandExists "protoc")) { $missingTools += "protoc" }
+        
         Write-Host ""
         Write-Host "========================================" -ForegroundColor Yellow
-        Write-Host "  Terminal Restart Required            " -ForegroundColor Yellow
+        Write-Host "  Almost There! Re-run Required        " -ForegroundColor Yellow
         Write-Host "========================================" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "Some tools are not yet available in this terminal session." -ForegroundColor White
+        Write-Host "The following tools were installed but aren't in PATH yet:" -ForegroundColor White
+        Write-Host ""
+        foreach ($tool in $missingTools) {
+            Write-Host "  - $tool" -ForegroundColor Red
+        }
+        Write-Host ""
+        Write-Host "This is normal! Windows needs a new terminal to pick up PATH changes." -ForegroundColor Gray
         Write-Host ""
         Write-Host "Please do the following:" -ForegroundColor White
         Write-Host ""
-        Write-Host "  1. Close this terminal/PowerShell window completely" -ForegroundColor White
+        Write-Host "  1. Close this terminal window completely" -ForegroundColor White
         Write-Host "  2. Open a NEW terminal (PowerShell or Command Prompt)" -ForegroundColor White
-        Write-Host "  3. Navigate back to this directory:" -ForegroundColor White
+        Write-Host "  3. Re-run this script:" -ForegroundColor White
+        Write-Host ""
         
         $currentDir = Get-Location
-        Write-Host "     cd $currentDir" -ForegroundColor Gray
-        
-        Write-Host "  4. Run the setup commands:" -ForegroundColor White
-        Write-Host "     npm install" -ForegroundColor Yellow
-        Write-Host "     npx tauri dev" -ForegroundColor Yellow
+        Write-Host "     cd `"$currentDir`"" -ForegroundColor Cyan
+        Write-Host "     .\requirements.bat" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "  The script is safe to run multiple times (idempotent)." -ForegroundColor Gray
+        Write-Host "  It will skip already-installed packages and continue setup." -ForegroundColor Gray
         Write-Host ""
         
         # Additional guidance for specific missing tools
         if (-not (Test-CommandExists "rustc") -and $script:InstalledRust) {
-            Write-Host "Note: If 'rustc' is still not found after restart:" -ForegroundColor Gray
+            Write-Host "Note: If 'rustc' is still not found after re-run:" -ForegroundColor Gray
             Write-Host "  Run: rustup default stable" -ForegroundColor Gray
             Write-Host ""
         }
