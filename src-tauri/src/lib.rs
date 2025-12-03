@@ -250,14 +250,20 @@ async fn run_agentic_loop(
     let mut tools_disabled_due_to_repeated_error = false;
     
     println!("[AgenticLoop] Starting with model_family={:?}, tool_format={:?}", model_family, tool_format);
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
     
     loop {
         println!("\n[AgenticLoop] Iteration {} starting...", iteration);
+        let iteration_start = std::time::Instant::now();
+        let _ = std::io::stdout().flush();
         
         // Create channel for this iteration
         let (tx, mut rx) = mpsc::unbounded_channel();
         
         // Send chat request to Foundry
+        println!("[AgenticLoop] 📤 Sending chat request to Foundry...");
+        let _ = std::io::stdout().flush();
         if let Err(e) = foundry_tx.send(FoundryMsg::Chat {
             history: full_history.clone(),
             reasoning_effort: reasoning_effort.clone(),
@@ -268,10 +274,16 @@ async fn run_agentic_loop(
             let _ = app_handle.emit("chat-finished", ());
             return;
         }
+        println!("[AgenticLoop] 📤 Request sent, waiting for tokens...");
+        let _ = std::io::stdout().flush();
         
         // Collect response while streaming tokens to frontend
         let mut assistant_response = String::new();
         let mut cancelled = false;
+        let mut token_count: usize = 0;
+        let mut first_token_time: Option<std::time::Instant> = None;
+        let mut last_progress_log = std::time::Instant::now();
+        
         loop {
             tokio::select! {
                 // Check for cancellation
@@ -286,10 +298,28 @@ async fn run_agentic_loop(
                 token = rx.recv() => {
                     match token {
                         Some(token) => {
+                            if first_token_time.is_none() {
+                                let ttft = iteration_start.elapsed();
+                                first_token_time = Some(std::time::Instant::now());
+                                println!("[AgenticLoop] 🎯 First token received! TTFT: {:.2}s", ttft.as_secs_f64());
+                                let _ = std::io::stdout().flush();
+                            }
+                            token_count += 1;
                             assistant_response.push_str(&token);
                             let _ = app_handle.emit("chat-token", token);
+                            
+                            // Log progress every 5 seconds
+                            if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
+                                println!("[AgenticLoop] 📊 Receiving: {} tokens, {} chars so far", token_count, assistant_response.len());
+                                let _ = std::io::stdout().flush();
+                                last_progress_log = std::time::Instant::now();
+                            }
                         }
-                        None => break, // Channel closed, stream complete
+                        None => {
+                            println!("[AgenticLoop] 📥 Channel closed, stream complete");
+                            let _ = std::io::stdout().flush();
+                            break; // Channel closed, stream complete
+                        }
                     }
                 }
             }
@@ -301,7 +331,10 @@ async fn run_agentic_loop(
             return;
         }
         
-        println!("[AgenticLoop] Response complete ({} chars)", assistant_response.len());
+        let iteration_elapsed = iteration_start.elapsed();
+        println!("[AgenticLoop] ✅ Response complete: {} tokens, {} chars in {:.2}s", 
+            token_count, assistant_response.len(), iteration_elapsed.as_secs_f64());
+        let _ = std::io::stdout().flush();
         
         // Check for tool calls in the response using model-appropriate parser
         let tool_calls = parse_tool_calls_for_model(&assistant_response, model_family, tool_format);
@@ -378,8 +411,16 @@ async fn run_agentic_loop(
                 raw: call.raw.clone(),
             };
             
-            println!("[AgenticLoop] Processing tool call {}/{}: {}::{}", 
+            println!("[AgenticLoop] 🔧 Processing tool call {}/{}: {}::{}", 
                 idx + 1, tool_calls.len(), resolved_call.server, resolved_call.tool);
+            
+            // Log tool call arguments
+            let args_str = serde_json::to_string_pretty(&resolved_call.arguments).unwrap_or_else(|_| "{}".to_string());
+            let args_preview: String = args_str.chars().take(500).collect();
+            println!("[AgenticLoop] 📝 Arguments: {}{}", 
+                args_preview, 
+                if args_str.len() > 500 { "..." } else { "" });
+            let _ = std::io::stdout().flush();
             
             // Check if this server allows auto-approve
             // Built-in tools are always auto-approved
@@ -475,6 +516,10 @@ async fn run_agentic_loop(
             let (result_text, is_error) = if is_builtin_tool(&resolved_call.tool) {
                 match resolved_call.tool.as_str() {
                     "tool_search" => {
+                        println!("[AgenticLoop] ⏳ Executing built-in: tool_search");
+                        let _ = std::io::stdout().flush();
+                        let exec_start = std::time::Instant::now();
+                        
                         // Parse tool_search input
                         let input: ToolSearchInput = serde_json::from_value(resolved_call.arguments.clone())
                             .map_err(|e| format!("Invalid tool_search arguments: {}", e))
@@ -482,16 +527,29 @@ async fn run_agentic_loop(
                         
                         match execute_tool_search(input, tool_registry.clone(), embedding_model.clone()).await {
                             Ok((result, discovered_tools)) => {
-                                println!("[AgenticLoop] tool_search found {} tools", discovered_tools.len());
+                                let elapsed = exec_start.elapsed();
+                                println!("[AgenticLoop] ✅ tool_search completed in {:.2}s, found {} tools", 
+                                    elapsed.as_secs_f64(), discovered_tools.len());
+                                let result_preview: String = result.chars().take(500).collect();
+                                println!("[AgenticLoop] 📤 Result: {}{}", 
+                                    result_preview, 
+                                    if result.len() > 500 { "..." } else { "" });
+                                let _ = std::io::stdout().flush();
                                 (result, false)
                             }
                             Err(e) => {
-                                println!("[AgenticLoop] tool_search failed: {}", e);
+                                let elapsed = exec_start.elapsed();
+                                println!("[AgenticLoop] ❌ tool_search failed in {:.2}s: {}", elapsed.as_secs_f64(), e);
+                                let _ = std::io::stdout().flush();
                                 (e, true)
                             }
                         }
                     }
                     "code_execution" => {
+                        println!("[AgenticLoop] ⏳ Executing built-in: code_execution");
+                        let _ = std::io::stdout().flush();
+                        let exec_start = std::time::Instant::now();
+                        
                         // Parse code_execution input
                         let input: CodeExecutionInput = serde_json::from_value(resolved_call.arguments.clone())
                             .map_err(|e| format!("Invalid code_execution arguments: {}", e))
@@ -500,16 +558,28 @@ async fn run_agentic_loop(
                         let exec_id = format!("{}-{}-{}", chat_id, iteration, idx);
                         match execute_code_execution(input, exec_id, tool_registry.clone(), &python_tx).await {
                             Ok(output) => {
-                                println!("[AgenticLoop] code_execution completed: {} chars stdout", output.stdout.len());
+                                let elapsed = exec_start.elapsed();
+                                println!("[AgenticLoop] {} code_execution completed in {:.2}s: {} chars stdout, {} chars stderr", 
+                                    if output.success { "✅" } else { "⚠️" },
+                                    elapsed.as_secs_f64(),
+                                    output.stdout.len(), 
+                                    output.stderr.len());
                                 let result = if output.success {
-                                    output.stdout
+                                    output.stdout.clone()
                                 } else {
                                     format!("Error: {}", output.stderr)
                                 };
+                                let result_preview: String = result.chars().take(500).collect();
+                                println!("[AgenticLoop] 📤 Result: {}{}", 
+                                    result_preview, 
+                                    if result.len() > 500 { "..." } else { "" });
+                                let _ = std::io::stdout().flush();
                                 (result, !output.success)
                             }
                             Err(e) => {
-                                println!("[AgenticLoop] code_execution failed: {}", e);
+                                let elapsed = exec_start.elapsed();
+                                println!("[AgenticLoop] ❌ code_execution failed in {:.2}s: {}", elapsed.as_secs_f64(), e);
+                                let _ = std::io::stdout().flush();
                                 (e, true)
                             }
                         }
@@ -521,13 +591,27 @@ async fn run_agentic_loop(
                 }
             } else {
                 // Execute MCP tool
+                println!("[AgenticLoop] ⏳ Executing MCP tool: {}::{}", resolved_call.server, resolved_call.tool);
+                let _ = std::io::stdout().flush();
+                let exec_start = std::time::Instant::now();
+                
                 match execute_tool_internal(&mcp_host_tx, &resolved_call).await {
                     Ok(result) => {
-                        println!("[AgenticLoop] Tool {} succeeded: {} chars", resolved_call.tool, result.len());
+                        let elapsed = exec_start.elapsed();
+                        println!("[AgenticLoop] ✅ MCP tool {} completed in {:.2}s: {} chars", 
+                            resolved_call.tool, elapsed.as_secs_f64(), result.len());
+                        let result_preview: String = result.chars().take(500).collect();
+                        println!("[AgenticLoop] 📤 Result: {}{}", 
+                            result_preview, 
+                            if result.len() > 500 { "..." } else { "" });
+                        let _ = std::io::stdout().flush();
                         (result, false)
                     }
                     Err(e) => {
-                        println!("[AgenticLoop] Tool {} failed: {}", resolved_call.tool, e);
+                        let elapsed = exec_start.elapsed();
+                        println!("[AgenticLoop] ❌ MCP tool {} failed in {:.2}s: {}", 
+                            resolved_call.tool, elapsed.as_secs_f64(), e);
+                        let _ = std::io::stdout().flush();
                         (e, true)
                     }
                 }
@@ -1032,9 +1116,18 @@ async fn chat(
     cancellation_state: State<'_, CancellationState>,
     app_handle: tauri::AppHandle
 ) -> Result<String, String> {
+    use std::io::Write;
     let chat_id = chat_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let chat_id_return = chat_id.clone();
     let title = title.unwrap_or_else(|| message.chars().take(50).collect::<String>());
+    
+    // Log incoming chat request
+    let msg_preview: String = message.chars().take(128).collect();
+    println!("\n[chat] 💬 New chat request: \"{}{}\"", 
+        msg_preview, 
+        if message.len() > 128 { "..." } else { "" });
+    println!("[chat] chat_id={}, history_len={}", chat_id, history.len());
+    let _ = std::io::stdout().flush();
     
     // Set up cancellation signal for this generation
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
@@ -1044,6 +1137,7 @@ async fn chat(
         *gen_id = gen_id.wrapping_add(1);
         *cancellation_state.cancel_signal.write().await = Some(cancel_tx);
         println!("[chat] Starting generation {} with cancellation support", *gen_id);
+        let _ = std::io::stdout().flush();
     }
     
     // Get server configs from settings

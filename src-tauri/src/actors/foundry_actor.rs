@@ -432,7 +432,16 @@ impl FoundryActor {
                                 println!("[FoundryActor] Model does NOT support native tool calling, falling back to text-based tools");
                             }
                         
-                        println!("Sending streaming request to Foundry at {}", url);
+                        // Log the start of completion with first 128 chars of the last user message
+                        if let Some(last_user_msg) = messages.iter().rev().find(|m| m.role == "user") {
+                            let preview: String = last_user_msg.content.chars().take(128).collect();
+                            println!("[FoundryActor] 🚀 Starting completion: \"{}{}\"", 
+                                preview,
+                                if last_user_msg.content.len() > 128 { "..." } else { "" });
+                        }
+                        println!("[FoundryActor] Sending streaming request to Foundry at {}", url);
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
                          
                          let client_clone = client.clone();
                          let respond_to_clone = respond_to.clone();
@@ -511,7 +520,12 @@ impl FoundryActor {
                                         // Success - stream the response
                                         let mut buffer = String::new();
                                         let mut streaming_tool_calls = StreamingToolCalls::default();
-                                        println!("Foundry stream started.");
+                                        let stream_start = std::time::Instant::now();
+                                        let mut token_count: usize = 0;
+                                        let mut last_token_time = stream_start;
+                                        let mut last_progress_log = stream_start;
+                                        println!("[FoundryActor] 📡 Stream started at {:?}", stream_start);
+                                        let _ = std::io::stdout().flush();
                                         
                                         // Note: Tool calls can arrive in two formats:
                                         // 1. Text-based: in content field as <tool_call>JSON</tool_call>
@@ -530,14 +544,32 @@ impl FoundryActor {
                                                     if trimmed.starts_with("data: ") {
                                                         let data = &trimmed["data: ".len()..];
                                                         if data == "[DONE]" {
-                                                            println!("Foundry stream DONE.");
+                                                            let elapsed = stream_start.elapsed();
+                                                            println!("[FoundryActor] ✅ Stream DONE. {} tokens in {:.2}s ({:.1} tok/s)", 
+                                                                token_count, 
+                                                                elapsed.as_secs_f64(),
+                                                                token_count as f64 / elapsed.as_secs_f64());
+                                                            let _ = std::io::stdout().flush();
                                                             break;
                                                         }
                                                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                                                             // Stream content tokens (includes tool calls in <tool_call> format)
                                                             if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                                                                 if !content.is_empty() {
+                                                                    token_count += 1;
+                                                                    last_token_time = std::time::Instant::now();
                                                                     let _ = respond_to_clone.send(content.to_string());
+                                                                    
+                                                                    // Log progress every 5 seconds
+                                                                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
+                                                                        let elapsed = stream_start.elapsed();
+                                                                        println!("[FoundryActor] 📊 Streaming: {} tokens so far ({:.2}s elapsed, {:.1} tok/s)", 
+                                                                            token_count, 
+                                                                            elapsed.as_secs_f64(),
+                                                                            token_count as f64 / elapsed.as_secs_f64());
+                                                                        let _ = std::io::stdout().flush();
+                                                                        last_progress_log = std::time::Instant::now();
+                                                                    }
                                                                 }
                                                             }
                                                             
@@ -549,6 +581,17 @@ impl FoundryActor {
                                                     }
                                                 }
                                             }
+                                        }
+                                        
+                                        // Log if stream ended without DONE marker
+                                        let total_elapsed = stream_start.elapsed();
+                                        let since_last_token = last_token_time.elapsed();
+                                        if since_last_token > Duration::from_secs(1) && token_count > 0 {
+                                            println!("[FoundryActor] ⚠️ Stream ended. Last token was {:.2}s ago. Total: {} tokens in {:.2}s", 
+                                                since_last_token.as_secs_f64(),
+                                                token_count,
+                                                total_elapsed.as_secs_f64());
+                                            let _ = std::io::stdout().flush();
                                         }
                                         
                                         // After stream ends, emit any accumulated native tool calls as text
