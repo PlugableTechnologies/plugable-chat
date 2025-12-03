@@ -856,6 +856,10 @@ fn build_system_prompt(
         prompt.push_str("## code_execution Tool\n\n");
         prompt.push_str("Sandboxed Python for complex calculations. **Only use when it provides clear advantage over answering directly.**\n");
         prompt.push_str("You must `import` modules before using them.\n\n");
+        prompt.push_str("**CRITICAL: Do the calculation, don't explain it.**\n");
+        prompt.push_str("If a calculation can be done with the available Python libraries, USE `code_execution` to compute it and return the result.\n");
+        prompt.push_str("❌ WRONG: \"Here's how you could calculate this in Python...\"\n");
+        prompt.push_str("✅ RIGHT: Call `code_execution`, compute the answer, and tell the user the result.\n\n");
         prompt.push_str("**Good use case** (complex calculation):\n");
         prompt.push_str("<tool_call>{\"name\": \"code_execution\", \"arguments\": {\"code\": [\"import math\", \"# Compound interest: $10000 at 7% for 30 years\", \"result = 10000 * (1 + 0.07) ** 30\", \"print(f'Final amount: ${result:,.2f}')\"]}}");
         prompt.push_str("</tool_call>\n\n");

@@ -380,13 +380,14 @@ impl FoundryActor {
                                 content: "You are a helpful AI assistant.".to_string(),
                             });
                         } else {
-                             // Log the actual system message being used
-                             if let Some(sys_msg) = messages.iter().find(|m| m.role == "system") {
-                                 println!("[FoundryActor] Using system message ({} chars)", sys_msg.content.len());
-                                 // Log first 500 chars of system prompt
-                                 let sys_preview: String = sys_msg.content.chars().take(500).collect();
-                                 println!("[FoundryActor] System prompt preview:\n{}", sys_preview);
-                             }
+                            // Log the actual system message being used
+                            if let Some(sys_msg) = messages.iter().find(|m| m.role == "system") {
+                                println!("[FoundryActor] Using system message ({} chars)", sys_msg.content.len());
+                                // Log first 3000 chars of system prompt for debugging
+                                let sys_preview: String = sys_msg.content.chars().take(3000).collect();
+                                let truncated = if sys_msg.content.len() > 3000 { "... [TRUNCATED]" } else { "" };
+                                println!("[FoundryActor] System prompt preview:\n{}{}", sys_preview, truncated);
+                            }
                          }
                          
                         // Get model info for this model
