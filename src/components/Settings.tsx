@@ -1,6 +1,6 @@
-import { useSettingsStore, createNewServerConfig, type McpServerConfig, type McpTool } from '../store/settings-store';
+import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, type McpServerConfig, type McpTool } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench } from 'lucide-react';
+import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw } from 'lucide-react';
 import { invoke } from '../lib/api';
 
 // Tag input component for args - auto-splits on spaces
@@ -641,6 +641,14 @@ function SystemPromptTab() {
         setHasChanges(value !== settings?.system_prompt);
     };
     
+    const handleReset = () => {
+        setLocalPrompt(DEFAULT_SYSTEM_PROMPT);
+        setHasChanges(DEFAULT_SYSTEM_PROMPT !== settings?.system_prompt);
+    };
+    
+    // Check if current prompt matches default
+    const isDefault = localPrompt === DEFAULT_SYSTEM_PROMPT;
+    
     // Count enabled MCP servers
     const enabledServers = settings?.mcp_servers?.filter(s => s.enabled).length || 0;
     
@@ -707,7 +715,16 @@ function SystemPromptTab() {
                 </div>
             )}
             
-            <div className="flex justify-end">
+            <div className="flex justify-between items-center">
+                <button
+                    onClick={handleReset}
+                    disabled={isDefault}
+                    className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={isDefault ? "Already using default prompt" : "Reset to default prompt"}
+                >
+                    <RotateCcw size={16} />
+                    Reset to Default
+                </button>
                 <button
                     onClick={handleSave}
                     disabled={!hasChanges}

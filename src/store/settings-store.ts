@@ -71,8 +71,8 @@ interface SettingsState {
     testConnection: (serverId: string) => Promise<boolean>;
 }
 
-// Default system prompt
-const DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant. Be direct and concise in your responses. When you don't know something, say so rather than guessing.";
+// Default system prompt - exported so UI can offer reset
+export const DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant. Be direct and concise in your responses. When you don't know something, say so rather than guessing.";
 
 // Helper to create a new server config
 export function createNewServerConfig(): McpServerConfig {

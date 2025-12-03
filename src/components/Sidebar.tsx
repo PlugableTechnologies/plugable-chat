@@ -8,6 +8,123 @@ type SidebarProps = {
     className?: string;
 };
 
+// ChatItem props type
+type ChatItemProps = {
+    chat: any;
+    isActive: boolean;
+    isEditing: boolean;
+    isMenuOpen: boolean;
+    editTitle: string;
+    menuRef: React.RefObject<HTMLDivElement>;
+    onLoadChat: (id: string) => void;
+    onMenuToggle: (id: string | null) => void;
+    onEditTitleChange: (title: string) => void;
+    onRenameSubmit: (id: string) => void;
+    onStartEdit: (id: string, title: string) => void;
+    onTogglePin: (id: string) => void;
+    onDelete: (id: string) => Promise<void>;
+};
+
+// Extracted ChatItem component - stable identity across parent re-renders
+function ChatItem({
+    chat,
+    isActive,
+    isEditing,
+    isMenuOpen,
+    editTitle,
+    menuRef,
+    onLoadChat,
+    onMenuToggle,
+    onEditTitleChange,
+    onRenameSubmit,
+    onStartEdit,
+    onTogglePin,
+    onDelete,
+}: ChatItemProps) {
+    return (
+        <div
+            className={`group relative flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all text-sm border border-transparent
+                ${isActive ? 'bg-gray-200 text-gray-900 font-medium' : 'text-gray-700 hover:bg-gray-100'}
+            `}
+            onClick={() => !isEditing && onLoadChat(chat.id)}
+        >
+            <MessageSquare size={16} className={`shrink-0 ${isActive ? 'text-gray-900' : 'text-gray-500'}`} />
+
+            {isEditing ? (
+                <input
+                    autoFocus
+                    type="text"
+                    value={editTitle}
+                    onChange={(e) => onEditTitleChange(e.target.value)}
+                    onBlur={() => onRenameSubmit(chat.id)}
+                    onKeyDown={(e) => e.key === 'Enter' && onRenameSubmit(chat.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex-1 bg-white border border-gray-300 rounded px-1 py-0.5 text-sm focus:outline-none focus:border-blue-500"
+                />
+            ) : (
+                <span className="truncate flex-1">{chat.title || "Untitled Chat"}</span>
+            )}
+
+            {/* Menu Button and Dropdown - wrapped in ref for click-outside detection */}
+            <div 
+                ref={isMenuOpen ? menuRef : undefined}
+                className={`absolute right-2 opacity-0 group-hover:opacity-100 transition-opacity ${isMenuOpen ? 'opacity-100' : ''}`}
+            >
+                <button
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onMenuToggle(isMenuOpen ? null : chat.id);
+                    }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="p-1 hover:bg-gray-300 rounded text-gray-500 hover:text-gray-900"
+                >
+                    <MoreHorizontal size={14} />
+                </button>
+
+                {/* Dropdown Menu */}
+                {isMenuOpen && (
+                    <div
+                        className="absolute right-0 top-full mt-1 w-32 bg-white border border-gray-200 rounded-lg shadow-lg z-50 py-1 flex flex-col"
+                        onClick={(e) => e.stopPropagation()}
+                        onMouseDown={(e) => e.stopPropagation()}
+                    >
+                        <button
+                            onClick={() => {
+                                onStartEdit(chat.id, chat.title);
+                                onMenuToggle(null);
+                            }}
+                            className="flex items-center gap-2 px-3 py-2 text-xs text-gray-700 hover:bg-gray-100 w-full text-left"
+                        >
+                            <Edit size={12} /> Rename
+                        </button>
+                        <button
+                            onClick={() => {
+                                onTogglePin(chat.id);
+                                onMenuToggle(null);
+                            }}
+                            className="flex items-center gap-2 px-3 py-2 text-xs text-gray-700 hover:bg-gray-100 w-full text-left"
+                        >
+                            <Pin size={12} /> {chat.pinned ? 'Unpin' : 'Pin'}
+                        </button>
+                        <div className="h-px bg-gray-100 my-1"></div>
+                        <button
+                            onClick={async (e) => {
+                                e.stopPropagation();
+                                e.preventDefault();
+                                await onDelete(chat.id);
+                                onMenuToggle(null);
+                            }}
+                            className="flex items-center gap-2 px-3 py-2 text-xs text-red-600 hover:bg-red-50 w-full text-left"
+                        >
+                            <Trash size={12} /> Delete
+                        </button>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
 export function Sidebar({ className = "" }: SidebarProps) {
     const {
         history, fetchHistory, loadChat, deleteChat, renameChat, togglePin, currentChatId,
@@ -48,107 +165,30 @@ export function Sidebar({ className = "" }: SidebarProps) {
         setEditingId(null);
     };
 
+    const handleDelete = async (id: string) => {
+        await invoke('log_to_terminal', { message: `[Sidebar] Delete button clicked for chat: ${id}` });
+        
+        // Skip confirm dialog - it may not work well in Tauri webview
+        await invoke('log_to_terminal', { message: `[Sidebar] Calling deleteChat...` });
+        try {
+            await deleteChat(id);
+            await invoke('log_to_terminal', { message: '[Sidebar] deleteChat completed successfully' });
+        } catch (err) {
+            await invoke('log_to_terminal', { message: `[Sidebar] deleteChat ERROR: ${err}` });
+        }
+    };
+
+    const handleStartEdit = (id: string, title: string) => {
+        setEditTitle(title);
+        setEditingId(id);
+    };
+
     // Use relevance results if available (user is typing), otherwise use normal history
     const isShowingRelevance = relevanceResults !== null && input.trim().length >= 3;
     const displayChats = isShowingRelevance ? relevanceResults : history;
     
     const pinnedChats = displayChats.filter(c => c.pinned);
     const recentChats = displayChats.filter(c => !c.pinned);
-
-    const ChatItem = ({ chat }: { chat: any }) => {
-        const isActive = chat.id === currentChatId;
-        const isEditing = editingId === chat.id;
-
-        return (
-            <div
-                className={`group relative flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all text-sm border border-transparent
-                    ${isActive ? 'bg-gray-200 text-gray-900 font-medium' : 'text-gray-700 hover:bg-gray-100'}
-                `}
-                onClick={() => !isEditing && loadChat(chat.id)}
-            >
-                <MessageSquare size={16} className={`shrink-0 ${isActive ? 'text-gray-900' : 'text-gray-500'}`} />
-
-                {isEditing ? (
-                    <input
-                        autoFocus
-                        type="text"
-                        value={editTitle}
-                        onChange={(e) => setEditTitle(e.target.value)}
-                        onBlur={() => handleRenameSubmit(chat.id)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleRenameSubmit(chat.id)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="flex-1 bg-white border border-gray-300 rounded px-1 py-0.5 text-sm focus:outline-none focus:border-blue-500"
-                    />
-                ) : (
-                    <span className="truncate flex-1">{chat.title || "Untitled Chat"}</span>
-                )}
-
-                {/* Menu Button (visible on hover or if menu open) */}
-                <div className={`absolute right-2 opacity-0 group-hover:opacity-100 transition-opacity ${menuOpenId === chat.id ? 'opacity-100' : ''}`}>
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setMenuOpenId(menuOpenId === chat.id ? null : chat.id);
-                        }}
-                        className="p-1 hover:bg-gray-300 rounded text-gray-500 hover:text-gray-900"
-                    >
-                        <MoreHorizontal size={14} />
-                    </button>
-
-                    {/* Dropdown Menu */}
-                    {menuOpenId === chat.id && (
-                        <div
-                            ref={menuRef}
-                            className="absolute right-0 top-full mt-1 w-32 bg-white border border-gray-200 rounded-lg shadow-lg z-50 py-1 flex flex-col"
-                            onClick={(e) => e.stopPropagation()}
-                            onMouseDown={(e) => e.stopPropagation()}
-                        >
-                            <button
-                                onClick={() => {
-                                    setEditTitle(chat.title);
-                                    setEditingId(chat.id);
-                                    setMenuOpenId(null);
-                                }}
-                                className="flex items-center gap-2 px-3 py-2 text-xs text-gray-700 hover:bg-gray-100 w-full text-left"
-                            >
-                                <Edit size={12} /> Rename
-                            </button>
-                            <button
-                                onClick={() => {
-                                    togglePin(chat.id);
-                                    setMenuOpenId(null);
-                                }}
-                                className="flex items-center gap-2 px-3 py-2 text-xs text-gray-700 hover:bg-gray-100 w-full text-left"
-                            >
-                                <Pin size={12} /> {chat.pinned ? 'Unpin' : 'Pin'}
-                            </button>
-                            <div className="h-px bg-gray-100 my-1"></div>
-                            <button
-                                onClick={async (e) => {
-                                    e.stopPropagation();
-                                    e.preventDefault();
-                                    await invoke('log_to_terminal', { message: `[Sidebar] Delete button clicked for chat: ${chat.id}` });
-                                    
-                                    // Skip confirm dialog - it may not work well in Tauri webview
-                                    await invoke('log_to_terminal', { message: `[Sidebar] Calling deleteChat...` });
-                                    try {
-                                        await deleteChat(chat.id);
-                                        await invoke('log_to_terminal', { message: '[Sidebar] deleteChat completed successfully' });
-                                    } catch (err) {
-                                        await invoke('log_to_terminal', { message: `[Sidebar] deleteChat ERROR: ${err}` });
-                                    }
-                                    setMenuOpenId(null);
-                                }}
-                                className="flex items-center gap-2 px-3 py-2 text-xs text-red-600 hover:bg-red-50 w-full text-left"
-                            >
-                                <Trash size={12} /> Delete
-                            </button>
-                        </div>
-                    )}
-                </div>
-            </div>
-        );
-    };
 
     return (
         <div className={`text-gray-900 flex flex-col h-full w-full font-sans text-sm ${className}`} style={{ backgroundColor: '#e5e7eb' }}>
@@ -174,7 +214,22 @@ export function Sidebar({ className = "" }: SidebarProps) {
                         </div>
                         <div className="space-y-0.5">
                             {pinnedChats.map((chat) => (
-                                <ChatItem key={chat.id} chat={chat} />
+                                <ChatItem
+                                    key={chat.id}
+                                    chat={chat}
+                                    isActive={chat.id === currentChatId}
+                                    isEditing={editingId === chat.id}
+                                    isMenuOpen={menuOpenId === chat.id}
+                                    editTitle={editTitle}
+                                    menuRef={menuRef}
+                                    onLoadChat={loadChat}
+                                    onMenuToggle={setMenuOpenId}
+                                    onEditTitleChange={setEditTitle}
+                                    onRenameSubmit={handleRenameSubmit}
+                                    onStartEdit={handleStartEdit}
+                                    onTogglePin={togglePin}
+                                    onDelete={handleDelete}
+                                />
                             ))}
                         </div>
                     </div>
@@ -196,7 +251,22 @@ export function Sidebar({ className = "" }: SidebarProps) {
                             </div>
                         ) : (
                             recentChats.map((chat) => (
-                                <ChatItem key={chat.id} chat={chat} />
+                                <ChatItem
+                                    key={chat.id}
+                                    chat={chat}
+                                    isActive={chat.id === currentChatId}
+                                    isEditing={editingId === chat.id}
+                                    isMenuOpen={menuOpenId === chat.id}
+                                    editTitle={editTitle}
+                                    menuRef={menuRef}
+                                    onLoadChat={loadChat}
+                                    onMenuToggle={setMenuOpenId}
+                                    onEditTitleChange={setEditTitle}
+                                    onRenameSubmit={handleRenameSubmit}
+                                    onStartEdit={handleStartEdit}
+                                    onTogglePin={togglePin}
+                                    onDelete={handleDelete}
+                                />
                             ))
                         )}
                     </div>
@@ -216,4 +286,3 @@ export function Sidebar({ className = "" }: SidebarProps) {
         </div>
     )
 }
-
