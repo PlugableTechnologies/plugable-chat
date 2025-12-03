@@ -883,15 +883,32 @@ impl FoundryActor {
     async fn restart_service(&self) -> std::io::Result<()> {
         println!("Restarting Foundry service...");
         
+        // Emit event: service restart started
+        let _ = self.app_handle.emit("service-restart-started", json!({
+            "message": "Restarting Foundry service..."
+        }));
+        
         // Run `foundry service restart` with timeout to prevent hanging
         let child = Command::new("foundry")
             .args(&["service", "restart"])
             .output();
             
         let output = match timeout(Duration::from_secs(15), child).await {
-            Ok(res) => res?,
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                println!("FoundryActor: Failed to run 'foundry service restart': {}", e);
+                let _ = self.app_handle.emit("service-restart-complete", json!({
+                    "success": false,
+                    "error": format!("Failed to run foundry command: {}", e)
+                }));
+                return Err(e);
+            }
             Err(_) => {
                 println!("FoundryActor: 'foundry service restart' timed out after 15s");
+                let _ = self.app_handle.emit("service-restart-complete", json!({
+                    "success": false,
+                    "error": "Service restart timed out after 15 seconds"
+                }));
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "foundry service restart timed out"));
             }
         };
@@ -902,12 +919,24 @@ impl FoundryActor {
              let stderr = String::from_utf8_lossy(&output.stderr);
              println!("Foundry service restart command failed: {}", stderr);
              // If restart fails (e.g. not running), try start
-             self.ensure_service_running().await?;
+             if let Err(e) = self.ensure_service_running().await {
+                 let _ = self.app_handle.emit("service-restart-complete", json!({
+                     "success": false,
+                     "error": format!("Failed to start service: {}", e)
+                 }));
+                 return Err(e);
+             }
         }
         
         // Wait for service to be ready
         println!("Waiting for service to be ready...");
         sleep(Duration::from_secs(3)).await;
+        
+        // Emit event: service restart completed successfully
+        let _ = self.app_handle.emit("service-restart-complete", json!({
+            "success": true,
+            "message": "Service restarted successfully"
+        }));
         
         Ok(())
     }

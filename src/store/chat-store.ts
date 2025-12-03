@@ -285,6 +285,8 @@ let unlistenToolResult: (() => void) | undefined;
 let unlistenToolLoopFinished: (() => void) | undefined;
 let unlistenDownloadProgress: (() => void) | undefined;
 let unlistenLoadComplete: (() => void) | undefined;
+let unlistenServiceRestartStarted: (() => void) | undefined;
+let unlistenServiceRestartComplete: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
 let modelFetchPromise: Promise<void> | null = null;
@@ -1117,6 +1119,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }));
             });
 
+            // Service restart listeners (for Foundry service restart via CLI)
+            const serviceRestartStartedListener = await listen<{ message: string }>('service-restart-started', (event) => {
+                console.log(`[ChatStore] Service restart started: ${event.payload.message}`);
+                set({
+                    operationStatus: {
+                        type: 'reloading',
+                        message: event.payload.message,
+                        startTime: Date.now(),
+                    },
+                });
+            });
+
+            const serviceRestartCompleteListener = await listen<{ success: boolean; message?: string; error?: string }>('service-restart-complete', (event) => {
+                console.log(`[ChatStore] Service restart complete: success=${event.payload.success}`);
+                if (event.payload.success) {
+                    set({
+                        operationStatus: {
+                            type: 'reloading',
+                            message: event.payload.message || 'Service restarted successfully',
+                            completed: true,
+                            startTime: Date.now(),
+                        },
+                    });
+                    // Auto-dismiss after 3 seconds
+                    setTimeout(() => {
+                        const currentState = get();
+                        if (currentState.operationStatus?.completed && currentState.operationStatus?.type === 'reloading') {
+                            set({ operationStatus: null });
+                        }
+                    }, 3000);
+                } else {
+                    set({
+                        operationStatus: {
+                            type: 'reloading',
+                            message: `Service restart failed: ${event.payload.error || 'Unknown error'}`,
+                            startTime: Date.now(),
+                        },
+                    });
+                    // Auto-dismiss errors after 10 seconds
+                    setTimeout(() => {
+                        const currentState = get();
+                        if (currentState.operationStatus?.type === 'reloading' && !currentState.operationStatus?.completed) {
+                            set({ operationStatus: null });
+                        }
+                    }, 10000);
+                }
+            });
+
             // Critical check: did cleanup happen (invalidating this setup) while we were awaiting?
             if (listenerGeneration !== myGeneration) {
                 console.log(`[ChatStore] Setup aborted due to generation mismatch (${myGeneration} vs ${listenerGeneration}). Cleaning up new listeners.`);
@@ -1131,6 +1181,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 toolLoopFinishedListener();
                 downloadProgressListener();
                 loadCompleteListener();
+                serviceRestartStartedListener();
+                serviceRestartCompleteListener();
                 isSettingUp = false;
                 return;
             }
@@ -1147,6 +1199,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenSidebarUpdate = sidebarUpdateListener;
             unlistenDownloadProgress = downloadProgressListener;
             unlistenLoadComplete = loadCompleteListener;
+            unlistenServiceRestartStarted = serviceRestartStartedListener;
+            unlistenServiceRestartComplete = serviceRestartCompleteListener;
 
             set({ isListening: true });
             console.log(`[ChatStore] Event listeners active (Gen: ${myGeneration}).`);
@@ -1206,6 +1260,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenLoadComplete) {
             unlistenLoadComplete();
             unlistenLoadComplete = undefined;
+        }
+        if (unlistenServiceRestartStarted) {
+            unlistenServiceRestartStarted();
+            unlistenServiceRestartStarted = undefined;
+        }
+        if (unlistenServiceRestartComplete) {
+            unlistenServiceRestartComplete();
+            unlistenServiceRestartComplete = undefined;
         }
         set({ isListening: false });
         isSettingUp = false; // Reset setup guard
