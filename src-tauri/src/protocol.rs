@@ -807,6 +807,10 @@ pub enum FoundryMsg {
     GetLoadedModels {
         respond_to: oneshot::Sender<Vec<String>>,
     },
+    /// Reload the foundry service
+    Reload {
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Event payload for model download progress

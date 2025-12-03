@@ -13,7 +13,7 @@ import {
 export type ReasoningEffort = 'low' | 'medium' | 'high';
 
 // Operation status types for the status bar
-export type OperationType = 'none' | 'downloading' | 'loading' | 'streaming';
+export type OperationType = 'none' | 'downloading' | 'loading' | 'streaming' | 'reloading';
 
 export interface OperationStatus {
     type: OperationType;
@@ -421,14 +421,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
             isLoading: false, 
             generationId: state.generationId + 1,
             streamingChatId: null,
-            operationStatus: null,
+            operationStatus: {
+                type: 'reloading',
+                message: 'Stopping generation...',
+                startTime: Date.now(),
+            },
         }));
-        // Call backend to cancel the stream
+        
         try {
+            // Cancel the stream
             await invoke('cancel_generation', { generationId: currentGenId });
             console.log('[ChatStore] Cancelled generation', currentGenId);
+            
+            // Reload foundry service to recover from potential failures
+            set({ operationStatus: { type: 'reloading', message: 'Reloading service...', startTime: Date.now() } });
+            await invoke('reload_foundry');
+            console.log('[ChatStore] Foundry service reloaded');
+            
+            set({ operationStatus: null });
         } catch (e) {
-            console.error('[ChatStore] Failed to cancel generation:', e);
+            console.error('[ChatStore] Stop/reload failed:', e);
+            set({ operationStatus: null });
         }
     },
 

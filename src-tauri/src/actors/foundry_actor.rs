@@ -637,6 +637,27 @@ impl FoundryActor {
                         let _ = respond_to.send(Vec::new());
                     }
                 }
+                FoundryMsg::Reload { respond_to } => {
+                    println!("FoundryActor: Reloading foundry service...");
+                    
+                    // Restart the service
+                    let result = match self.restart_service().await {
+                        Ok(()) => {
+                            // Re-detect port, endpoints, and available models after restart
+                            self.update_connection_info().await;
+                            
+                            println!("FoundryActor: Service reloaded successfully. Port: {:?}, Models: {}", 
+                                self.port, self.available_models.len());
+                            Ok(())
+                        }
+                        Err(e) => {
+                            println!("FoundryActor: Failed to reload service: {}", e);
+                            Err(format!("Failed to reload service: {}", e))
+                        }
+                    };
+                    
+                    let _ = respond_to.send(result);
+                }
             }
         }
     }
@@ -862,11 +883,18 @@ impl FoundryActor {
     async fn restart_service(&self) -> std::io::Result<()> {
         println!("Restarting Foundry service...");
         
-        // Run `foundry service restart`
-        let output = Command::new("foundry")
+        // Run `foundry service restart` with timeout to prevent hanging
+        let child = Command::new("foundry")
             .args(&["service", "restart"])
-            .output()
-            .await?;
+            .output();
+            
+        let output = match timeout(Duration::from_secs(15), child).await {
+            Ok(res) => res?,
+            Err(_) => {
+                println!("FoundryActor: 'foundry service restart' timed out after 15s");
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "foundry service restart timed out"));
+            }
+        };
             
         if output.status.success() {
              println!("Foundry service restart command issued successfully.");
@@ -877,9 +905,9 @@ impl FoundryActor {
              self.ensure_service_running().await?;
         }
         
-        // Wait a few seconds for it to spin up
+        // Wait for service to be ready
         println!("Waiting for service to be ready...");
-        sleep(Duration::from_secs(5)).await;
+        sleep(Duration::from_secs(3)).await;
         
         Ok(())
     }

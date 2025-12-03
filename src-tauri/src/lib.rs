@@ -902,6 +902,16 @@ async fn get_loaded_models(handles: State<'_, ActorHandles>) -> Result<Vec<Strin
 }
 
 #[tauri::command]
+async fn reload_foundry(handles: State<'_, ActorHandles>) -> Result<(), String> {
+    println!("[reload_foundry] Reloading foundry service");
+    let (tx, rx) = oneshot::channel();
+    handles.foundry_tx.send(FoundryMsg::Reload { respond_to: tx })
+        .await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+    rx.await.map_err(|_| "Foundry actor died".to_string())?
+}
+
+#[tauri::command]
 async fn cancel_generation(
     generation_id: u32,
     cancellation_state: State<'_, CancellationState>,
@@ -1760,6 +1770,7 @@ pub fn run() {
             download_model,
             load_model,
             get_loaded_models,
+            reload_foundry,
             cancel_generation,
             // RAG commands
             select_files,

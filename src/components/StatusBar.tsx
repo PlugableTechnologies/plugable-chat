@@ -47,6 +47,14 @@ const getStatusBarColors = (status: OperationStatus) => {
                 icon: 'text-purple-600',
                 progress: 'bg-purple-500',
             };
+        case 'reloading':
+            return {
+                bg: 'bg-red-50',
+                border: 'border-red-300',
+                text: 'text-red-800',
+                icon: 'text-red-600',
+                progress: 'bg-red-500',
+            };
         default:
             return {
                 bg: 'bg-gray-50',
@@ -71,6 +79,8 @@ const getOperationIcon = (status: OperationStatus) => {
             return '⚡';
         case 'streaming':
             return '💬';
+        case 'reloading':
+            return '🔄';
         default:
             return '⏳';
     }
