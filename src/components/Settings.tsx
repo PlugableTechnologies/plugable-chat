@@ -323,6 +323,35 @@ function McpServerCard({
         }
     }, [localConfig]);
     
+    // Toggle enabled state and auto-save immediately
+    const handleToggleEnabled = useCallback(async () => {
+        const newEnabled = !localConfig.enabled;
+        const newConfig = { ...localConfig, enabled: newEnabled };
+        
+        // Update local state immediately
+        setLocalConfig(newConfig);
+        // Don't mark as dirty since we're saving immediately
+        
+        // Save to backend
+        onSave(newConfig);
+        
+        // Test connection if enabling
+        if (newEnabled) {
+            setIsTesting(true);
+            setTestResult(null);
+            try {
+                const tools = await invoke<McpTool[]>('test_mcp_server_config', { config: newConfig });
+                setTestResult({ success: true, tools });
+            } catch (e: any) {
+                setTestResult({ success: false, error: e.message || String(e) });
+            } finally {
+                setIsTesting(false);
+            }
+        } else {
+            setTestResult(null);
+        }
+    }, [localConfig, onSave]);
+    
     // Check if this is the built-in test server
     const isTestServer = config.id === 'mcp-test-server';
 
@@ -339,9 +368,9 @@ function McpServerCard({
                     status?.error ? 'bg-red-500' : 'bg-gray-300'
                 }`} />
                 
-                {/* Enable toggle */}
+                {/* Enable toggle - auto-saves on change */}
                 <button
-                    onClick={(e) => { e.stopPropagation(); updateField('enabled', !localConfig.enabled); }}
+                    onClick={(e) => { e.stopPropagation(); handleToggleEnabled(); }}
                     className={`relative w-10 h-5 rounded-full transition-colors ${
                         localConfig.enabled ? 'bg-blue-500' : 'bg-gray-300'
                     }`}
