@@ -775,6 +775,8 @@ pub enum FoundryMsg {
         /// Optional OpenAI-format tools for native tool calling
         tools: Option<Vec<OpenAITool>>,
         respond_to: tokio::sync::mpsc::UnboundedSender<String>,
+        /// Cancellation signal - when true, abort the stream
+        cancel_rx: tokio::sync::watch::Receiver<bool>,
     },
     /// Get available models from running service
     GetModels {

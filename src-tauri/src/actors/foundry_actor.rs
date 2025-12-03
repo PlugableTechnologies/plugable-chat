@@ -326,7 +326,7 @@ impl FoundryActor {
                     self.emit_model_selected(&model_id);
                     let _ = respond_to.send(true);
                 }
-                FoundryMsg::Chat { history, reasoning_effort, tools, respond_to } => {
+                FoundryMsg::Chat { history, reasoning_effort, tools, respond_to, mut cancel_rx } => {
                      // Check if we need to restart/reconnect
                      if self.port.is_none() || self.available_models.is_empty() {
                          println!("FoundryActor: No models found or port missing. Attempting to restart service...");
@@ -532,56 +532,96 @@ impl FoundryActor {
                                         // 1. Text-based: in content field as <tool_call>JSON</tool_call>
                                         // 2. Native OpenAI: in delta.tool_calls array (accumulated here)
                                         
-                                        while let Ok(Some(chunk)) = resp.chunk().await {
-                                            if let Ok(s) = String::from_utf8(chunk.to_vec()) {
-                                                buffer.push_str(&s);
+                                        let mut stream_cancelled = false;
+                                        'stream_loop: loop {
+                                            tokio::select! {
+                                                biased;
                                                 
-                                                // Process lines
-                                                while let Some(idx) = buffer.find('\n') {
-                                                    let line = buffer[..idx].to_string();
-                                                    buffer = buffer[idx + 1..].to_string();
-                                                    
-                                                    let trimmed = line.trim();
-                                                    if trimmed.starts_with("data: ") {
-                                                        let data = &trimmed["data: ".len()..];
-                                                        if data == "[DONE]" {
-                                                            let elapsed = stream_start.elapsed();
-                                                            println!("[FoundryActor] ✅ Stream DONE. {} tokens in {:.2}s ({:.1} tok/s)", 
-                                                                token_count, 
-                                                                elapsed.as_secs_f64(),
-                                                                token_count as f64 / elapsed.as_secs_f64());
-                                                            let _ = std::io::stdout().flush();
-                                                            break;
-                                                        }
-                                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                                            // Stream content tokens (includes tool calls in <tool_call> format)
-                                                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                                                if !content.is_empty() {
-                                                                    token_count += 1;
-                                                                    last_token_time = std::time::Instant::now();
-                                                                    let _ = respond_to_clone.send(content.to_string());
+                                                // Check for cancellation (higher priority)
+                                                _ = cancel_rx.changed() => {
+                                                    if *cancel_rx.borrow() {
+                                                        let elapsed = stream_start.elapsed();
+                                                        println!("[FoundryActor] 🛑 Stream CANCELLED by user after {} tokens in {:.2}s", 
+                                                            token_count, elapsed.as_secs_f64());
+                                                        let _ = std::io::stdout().flush();
+                                                        stream_cancelled = true;
+                                                        break 'stream_loop;
+                                                    }
+                                                }
+                                                
+                                                // Read next chunk from HTTP stream
+                                                chunk_result = resp.chunk() => {
+                                                    match chunk_result {
+                                                        Ok(Some(chunk)) => {
+                                                            if let Ok(s) = String::from_utf8(chunk.to_vec()) {
+                                                                buffer.push_str(&s);
+                                                                
+                                                                // Process lines
+                                                                while let Some(idx) = buffer.find('\n') {
+                                                                    let line = buffer[..idx].to_string();
+                                                                    buffer = buffer[idx + 1..].to_string();
                                                                     
-                                                                    // Log progress every 5 seconds
-                                                                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
-                                                                        let elapsed = stream_start.elapsed();
-                                                                        println!("[FoundryActor] 📊 Streaming: {} tokens so far ({:.2}s elapsed, {:.1} tok/s)", 
-                                                                            token_count, 
-                                                                            elapsed.as_secs_f64(),
-                                                                            token_count as f64 / elapsed.as_secs_f64());
-                                                                        let _ = std::io::stdout().flush();
-                                                                        last_progress_log = std::time::Instant::now();
+                                                                    let trimmed = line.trim();
+                                                                    if trimmed.starts_with("data: ") {
+                                                                        let data = &trimmed["data: ".len()..];
+                                                                        if data == "[DONE]" {
+                                                                            let elapsed = stream_start.elapsed();
+                                                                            println!("[FoundryActor] ✅ Stream DONE. {} tokens in {:.2}s ({:.1} tok/s)", 
+                                                                                token_count, 
+                                                                                elapsed.as_secs_f64(),
+                                                                                token_count as f64 / elapsed.as_secs_f64());
+                                                                            let _ = std::io::stdout().flush();
+                                                                            break 'stream_loop;
+                                                                        }
+                                                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                                                            // Stream content tokens (includes tool calls in <tool_call> format)
+                                                                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                                                                if !content.is_empty() {
+                                                                                    token_count += 1;
+                                                                                    last_token_time = std::time::Instant::now();
+                                                                                    let _ = respond_to_clone.send(content.to_string());
+                                                                                    
+                                                                                    // Log progress every 5 seconds
+                                                                                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
+                                                                                        let elapsed = stream_start.elapsed();
+                                                                                        println!("[FoundryActor] 📊 Streaming: {} tokens so far ({:.2}s elapsed, {:.1} tok/s)", 
+                                                                                            token_count, 
+                                                                                            elapsed.as_secs_f64(),
+                                                                                            token_count as f64 / elapsed.as_secs_f64());
+                                                                                        let _ = std::io::stdout().flush();
+                                                                                        last_progress_log = std::time::Instant::now();
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                            
+                                                                            // Accumulate native OpenAI tool calls (delta.tool_calls)
+                                                                            if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
+                                                                                streaming_tool_calls.process_delta(tool_calls);
+                                                                            }
+                                                                        }
                                                                     }
                                                                 }
                                                             }
-                                                            
-                                                            // Accumulate native OpenAI tool calls (delta.tool_calls)
-                                                            if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
-                                                                streaming_tool_calls.process_delta(tool_calls);
-                                                            }
+                                                        }
+                                                        Ok(None) => {
+                                                            // Stream ended naturally (connection closed)
+                                                            println!("[FoundryActor] Stream ended (connection closed)");
+                                                            let _ = std::io::stdout().flush();
+                                                            break 'stream_loop;
+                                                        }
+                                                        Err(e) => {
+                                                            println!("[FoundryActor] Stream error: {}", e);
+                                                            let _ = std::io::stdout().flush();
+                                                            break 'stream_loop;
                                                         }
                                                     }
                                                 }
                                             }
+                                        }
+                                        
+                                        // If cancelled, skip the post-stream processing
+                                        if stream_cancelled {
+                                            break; // Exit retry loop
                                         }
                                         
                                         // Log if stream ended without DONE marker

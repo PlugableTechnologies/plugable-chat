@@ -417,8 +417,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     setIsLoading: (isLoading) => set({ isLoading }),
     generationId: 0,
     stopGeneration: async () => {
+        console.log('[ChatStore] 🛑 STOP BUTTON PRESSED by user');
+        
         // Increment generationId to ignore any incoming tokens from the stopped generation
         const currentGenId = get().generationId;
+        console.log('[ChatStore] Current generation to cancel:', currentGenId);
+        
         set((state) => ({ 
             isLoading: false, 
             generationId: state.generationId + 1,
@@ -426,12 +430,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }));
         
         try {
-            // Cancel the stream - this signals the agentic loop to stop
-            // The HTTP request to Foundry will complete/timeout on its own
+            // Cancel the stream - this signals both the agentic loop AND the FoundryActor to stop
             await invoke('cancel_generation', { generationId: currentGenId });
-            console.log('[ChatStore] Cancelled generation', currentGenId);
+            console.log('[ChatStore] ✅ Cancel signal sent for generation', currentGenId);
         } catch (e) {
-            console.error('[ChatStore] Stop failed:', e);
+            console.error('[ChatStore] ❌ Stop failed:', e);
         }
     },
 

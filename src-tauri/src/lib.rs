@@ -269,6 +269,7 @@ async fn run_agentic_loop(
             reasoning_effort: reasoning_effort.clone(),
             tools: openai_tools.clone(),
             respond_to: tx,
+            cancel_rx: cancel_rx.clone(),
         }).await {
             println!("[AgenticLoop] ERROR: Failed to send to Foundry: {}", e);
             let _ = app_handle.emit("chat-finished", ());
@@ -1089,7 +1090,11 @@ async fn cancel_generation(
     generation_id: u32,
     cancellation_state: State<'_, CancellationState>,
 ) -> Result<(), String> {
-    println!("[cancel_generation] Cancellation requested for generation: {}", generation_id);
+    use std::io::Write;
+    
+    println!("\n[cancel_generation] 🛑 STOP BUTTON PRESSED - User requested cancellation");
+    println!("[cancel_generation] Requested generation_id: {}", generation_id);
+    let _ = std::io::stdout().flush();
     
     // Check if this matches the current generation
     let current_id = *cancellation_state.current_generation_id.read().await;
@@ -1097,9 +1102,11 @@ async fn cancel_generation(
     // Send cancel signal
     if let Some(sender) = cancellation_state.cancel_signal.read().await.as_ref() {
         let _ = sender.send(true);
-        println!("[cancel_generation] Cancel signal sent for generation {} (current: {})", generation_id, current_id);
+        println!("[cancel_generation] ✅ Cancel signal sent to generation {} (current active: {})", generation_id, current_id);
+        let _ = std::io::stdout().flush();
     } else {
-        println!("[cancel_generation] No active generation to cancel");
+        println!("[cancel_generation] ⚠️ No active generation to cancel (no cancel signal registered)");
+        let _ = std::io::stdout().flush();
     }
     
     Ok(())
