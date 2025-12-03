@@ -386,6 +386,9 @@ pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     calls
 }
 
+/// Explicit error guidance to help models understand they must fix the problem
+const ERROR_GUIDANCE: &str = "\n\n**TOOL ERROR**: The tool call above failed. Please carefully read the error message, identify what went wrong (e.g., missing required parameters, invalid parameter values, wrong parameter names), and retry with corrected parameters.";
+
 /// Format a tool result for injection into the chat history based on model format
 pub fn format_tool_result(
     call: &ParsedToolCall,
@@ -399,8 +402,8 @@ pub fn format_tool_result(
             // For text-based injection, we use a simple format
             if is_error {
                 format!(
-                    "<tool_result server=\"{}\" tool=\"{}\" error=\"true\">\n{}\n</tool_result>",
-                    call.server, call.tool, result
+                    "<tool_result server=\"{}\" tool=\"{}\" error=\"true\">\n{}\n</tool_result>{}",
+                    call.server, call.tool, result, ERROR_GUIDANCE
                 )
             } else {
                 format!(
@@ -413,8 +416,8 @@ pub fn format_tool_result(
             // Hermes models expect results in a similar XML format
             if is_error {
                 format!(
-                    "<tool_response error=\"true\">\n{}\n</tool_response>",
-                    result
+                    "<tool_response error=\"true\">\n{}\n</tool_response>{}",
+                    result, ERROR_GUIDANCE
                 )
             } else {
                 format!(
@@ -425,23 +428,29 @@ pub fn format_tool_result(
         }
         ToolFormat::Gemini => {
             // Gemini uses function_response format
-            format!(
-                "{{\"function_response\": {{\"name\": \"{}___{}\", \"response\": {}}}}}",
-                call.server,
-                call.tool,
-                if is_error {
-                    format!("{{\"error\": \"{}\"}}", result.replace('"', "\\\""))
-                } else {
-                    format!("{{\"result\": \"{}\"}}", result.replace('"', "\\\""))
-                }
-            )
+            if is_error {
+                format!(
+                    "{{\"function_response\": {{\"name\": \"{}___{}\", \"response\": {{\"error\": \"{}\"}}}}}}{}",
+                    call.server,
+                    call.tool,
+                    result.replace('"', "\\\""),
+                    ERROR_GUIDANCE
+                )
+            } else {
+                format!(
+                    "{{\"function_response\": {{\"name\": \"{}___{}\", \"response\": {{\"result\": \"{}\"}}}}}}",
+                    call.server,
+                    call.tool,
+                    result.replace('"', "\\\"")
+                )
+            }
         }
         ToolFormat::Granite => {
             // Granite uses <function_response> tags
             if is_error {
                 format!(
-                    "<function_response error=\"true\">\n{}\n</function_response>",
-                    result
+                    "<function_response error=\"true\">\n{}\n</function_response>{}",
+                    result, ERROR_GUIDANCE
                 )
             } else {
                 format!(
@@ -454,9 +463,8 @@ pub fn format_tool_result(
             // Generic text-based format
             if is_error {
                 format!(
-                    "<tool_result server=\"{}\" tool=\"{}\" error=\"true\">\n{}\n</tool_result>\n\n\
-                    **TOOL ERROR**: The tool call failed. Please analyze the error and try again with corrected parameters.",
-                    call.server, call.tool, result
+                    "<tool_result server=\"{}\" tool=\"{}\" error=\"true\">\n{}\n</tool_result>{}",
+                    call.server, call.tool, result, ERROR_GUIDANCE
                 )
             } else {
                 format!(
@@ -596,6 +604,37 @@ Done."#;
         let result = format_tool_result(&call, "Hello, World!", false, ToolFormat::Hermes);
         assert!(result.contains("<tool_response>"));
         assert!(result.contains("Hello, World!"));
+        // Success case should NOT include error guidance
+        assert!(!result.contains("TOOL ERROR"));
+    }
+    
+    #[test]
+    fn test_format_tool_result_error_includes_guidance() {
+        let call = ParsedToolCall {
+            server: "mcp-123".to_string(),
+            tool: "search_catalog".to_string(),
+            arguments: json!({}),
+            raw: "".to_string(),
+        };
+        
+        let error_msg = "MCP error -32602: provided parameters were invalid: parameter is required";
+        
+        // Test all formats include error guidance
+        for format in [ToolFormat::OpenAI, ToolFormat::Hermes, ToolFormat::Granite, ToolFormat::TextBased, ToolFormat::Gemini] {
+            let result = format_tool_result(&call, error_msg, true, format);
+            assert!(
+                result.contains("TOOL ERROR"),
+                "Format {:?} should include error guidance, got: {}", format, result
+            );
+            assert!(
+                result.contains("MCP error -32602"),
+                "Format {:?} should include error code, got: {}", format, result
+            );
+            assert!(
+                result.contains("retry with corrected parameters"),
+                "Format {:?} should tell model to retry with corrected parameters, got: {}", format, result
+            );
+        }
     }
     
     #[test]
