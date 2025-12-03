@@ -1,6 +1,6 @@
 import { useSettingsStore, createNewServerConfig, type McpServerConfig, type McpTool } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, PlugZap, Play, CheckCircle, XCircle, Loader2 } from 'lucide-react';
+import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench } from 'lucide-react';
 import { invoke } from '../lib/api';
 
 // Tag input component for args - auto-splits on spaces
@@ -721,55 +721,107 @@ function SystemPromptTab() {
     );
 }
 
-// MCP Servers Tab
-function McpServersTab() {
-    const { settings, addMcpServer, updateMcpServer, removeMcpServer, error } = useSettingsStore();
+// Tools Tab - combines built-in tools and MCP servers
+function ToolsTab() {
+    const { settings, updateCodeExecutionEnabled, addMcpServer, updateMcpServer, removeMcpServer, error } = useSettingsStore();
     const servers = settings?.mcp_servers || [];
+    const codeExecutionEnabled = settings?.code_execution_enabled ?? false;
     
     const handleAddServer = () => {
         const newConfig = createNewServerConfig();
         addMcpServer(newConfig);
     };
     
+    const handleToggleCodeExecution = () => {
+        updateCodeExecutionEnabled(!codeExecutionEnabled);
+    };
+    
     return (
-        <div className="space-y-4">
-            <div className="flex items-center justify-between">
+        <div className="space-y-6">
+            {/* Built-in Tools Section */}
+            <div className="space-y-3">
                 <div>
-                    <h3 className="text-sm font-medium text-gray-700">MCP Servers</h3>
-                    <p className="text-xs text-gray-500">Configure Model Context Protocol servers for tool access</p>
+                    <h3 className="text-sm font-medium text-gray-700">Built-in Tools</h3>
+                    <p className="text-xs text-gray-500">Core tools that run locally within the app</p>
                 </div>
-                <button
-                    onClick={handleAddServer}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700"
-                >
-                    <Plus size={14} />
-                    Add Server
-                </button>
+                
+                {/* Code Execution Tool Card */}
+                <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
+                    <div className="flex items-center gap-3 px-4 py-3">
+                        {/* Icon */}
+                        <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center">
+                            <Code2 size={16} className="text-amber-600" />
+                        </div>
+                        
+                        {/* Info */}
+                        <div className="flex-1">
+                            <div className="flex items-center gap-2">
+                                <span className="font-medium text-gray-900">Code Execution</span>
+                                <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Python Sandbox</span>
+                            </div>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                Run Python code for calculations, data processing, and transformations
+                            </p>
+                        </div>
+                        
+                        {/* Toggle */}
+                        <button
+                            onClick={handleToggleCodeExecution}
+                            className={`relative w-10 h-5 rounded-full transition-colors ${
+                                codeExecutionEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                            }`}
+                        >
+                            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
+                                codeExecutionEnabled ? 'translate-x-5' : ''
+                            }`} />
+                        </button>
+                    </div>
+                </div>
             </div>
             
-            {error && (
-                <div className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
-                    {error}
-                </div>
-            )}
+            {/* Divider */}
+            <div className="border-t border-gray-200" />
             
+            {/* MCP Servers Section */}
             <div className="space-y-3">
-                {servers.length === 0 ? (
-                    <div className="text-center py-12 text-gray-500">
-                        <Server size={40} className="mx-auto mb-3 opacity-30" />
-                        <p className="text-sm">No MCP servers configured</p>
-                        <p className="text-xs mt-1">Add a server to enable tool capabilities</p>
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h3 className="text-sm font-medium text-gray-700">MCP Servers</h3>
+                        <p className="text-xs text-gray-500">External tools via Model Context Protocol</p>
                     </div>
-                ) : (
-                    servers.map((server) => (
-                        <McpServerCard
-                            key={server.id}
-                            config={server}
-                            onSave={updateMcpServer}
-                            onRemove={() => removeMcpServer(server.id)}
-                        />
-                    ))
+                    <button
+                        onClick={handleAddServer}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700"
+                    >
+                        <Plus size={14} />
+                        Add Server
+                    </button>
+                </div>
+                
+                {error && (
+                    <div className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+                        {error}
+                    </div>
                 )}
+                
+                <div className="space-y-3">
+                    {servers.length === 0 ? (
+                        <div className="text-center py-8 text-gray-500 border border-dashed border-gray-200 rounded-xl">
+                            <Server size={32} className="mx-auto mb-2 opacity-30" />
+                            <p className="text-sm">No MCP servers configured</p>
+                            <p className="text-xs mt-1">Add a server to enable external tool capabilities</p>
+                        </div>
+                    ) : (
+                        servers.map((server) => (
+                            <McpServerCard
+                                key={server.id}
+                                config={server}
+                                onSave={updateMcpServer}
+                                onRemove={() => removeMcpServer(server.id)}
+                            />
+                        ))
+                    )}
+                </div>
             </div>
         </div>
     );
@@ -816,15 +868,15 @@ export function SettingsModal() {
                         System Prompt
                     </button>
                     <button
-                        onClick={() => setActiveTab('mcp-servers')}
+                        onClick={() => setActiveTab('tools')}
                         className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-                            activeTab === 'mcp-servers'
+                            activeTab === 'tools'
                                 ? 'border-blue-500 text-blue-600'
                                 : 'border-transparent text-gray-500 hover:text-gray-700'
                         }`}
                     >
-                        <PlugZap size={16} />
-                        MCP Servers
+                        <Wrench size={16} />
+                        Tools
                     </button>
                 </div>
                 
@@ -837,7 +889,7 @@ export function SettingsModal() {
                     ) : (
                         <>
                             {activeTab === 'system-prompt' && <SystemPromptTab />}
-                            {activeTab === 'mcp-servers' && <McpServersTab />}
+                            {activeTab === 'tools' && <ToolsTab />}
                         </>
                     )}
                 </div>

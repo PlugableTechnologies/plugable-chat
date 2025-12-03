@@ -649,6 +649,7 @@ fn build_system_prompt(
     base_prompt: &str, 
     tool_descriptions: &[(String, Vec<McpTool>)],
     server_configs: &[McpServerConfig],
+    code_execution_enabled: bool,
 ) -> String {
     let mut prompt = base_prompt.to_string();
     
@@ -675,91 +676,109 @@ fn build_system_prompt(
     let has_active_tools = !active_servers.is_empty();
     let has_deferred_tools = !deferred_servers.is_empty();
     let has_mcp_tools = has_active_tools || has_deferred_tools;
+    let has_any_tools = code_execution_enabled || has_mcp_tools;
     
     let _active_tool_count: usize = active_servers.iter().map(|(_, t)| t.len()).sum();
     let _deferred_tool_count: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
     
-    // ===== CRITICAL: Attached Documents =====
-    prompt.push_str("\n\n## CRITICAL: How Attached Documents Work\n\n");
-    prompt.push_str("When the user attaches files/documents to the chat:\n");
-    prompt.push_str("- The relevant text content is **already extracted** and shown in the user's message as \"Context from attached documents\"\n");
-    prompt.push_str("- This extracted text IS the file content - you already have it in the conversation\n");
-    prompt.push_str("- ❌ **You CANNOT access, read, or open the original files** - no file paths, no file I/O\n");
-    prompt.push_str("- ❌ **code_execution CANNOT read files** - it has no filesystem access whatsoever\n");
-    prompt.push_str("- ✅ **To work with document content**: Use the text already provided in \"Context from attached documents\"\n");
-    prompt.push_str("- ✅ **To analyze/transform that text**: Copy relevant portions into code_execution as string literals\n\n");
-    prompt.push_str("**Example - WRONG approach:**\n");
-    prompt.push_str("```python\n# This will FAIL - no file access!\nwith open('document.pdf', 'r') as f:\n    content = f.read()\n```\n\n");
-    prompt.push_str("**Example - CORRECT approach:**\n");
-    prompt.push_str("```python\n# Use the text already provided in the conversation\ntext = \"\"\"paste the relevant text from the context here\"\"\"\nresult = analyze(text)\n```\n\n");
-    
-    // ===== CRITICAL: Tool Selection Decision Tree =====
-    prompt.push_str("## Tool Selection Guide\n\n");
-    prompt.push_str("**IMPORTANT: Before using any tool, first ask yourself: Can I answer this directly from my knowledge?**\n\n");
-    prompt.push_str("Most questions can be answered without tools. Only use tools when they provide a clear advantage.\n\n");
-    
-    prompt.push_str("### 1. `code_execution` (Built-in Python Sandbox)\n");
-    prompt.push_str("**WHEN TO USE** (only when it provides clear advantage over your knowledge):\n");
-    prompt.push_str("- Complex arithmetic that's error-prone to compute mentally (e.g., compound interest over 30 years)\n");
-    prompt.push_str("- Processing/transforming data the user has provided in the conversation\n");
-    prompt.push_str("- Generating structured output (JSON, CSV) from conversation data\n");
-    prompt.push_str("- Pattern matching or text manipulation on user-provided text\n\n");
-    prompt.push_str("**WHEN NOT TO USE** (just answer directly):\n");
-    prompt.push_str("- Simple math you can do reliably (e.g., \"what's 15% of 80?\")\n");
-    prompt.push_str("- Date/calendar questions (e.g., \"what day is Jan 6, 2026?\") - answer from knowledge\n");
-    prompt.push_str("- Questions about facts, concepts, or explanations\n");
-    prompt.push_str("- Anything where your knowledge is sufficient and reliable\n\n");
-    prompt.push_str("**LIMITATIONS:** \n");
-    prompt.push_str("- ❌ CANNOT access internet, databases, files, APIs, or any external systems\n");
-    prompt.push_str("- ❌ CANNOT read or write files - NO filesystem access at all\n");
-    prompt.push_str("- ✅ Available modules: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64\n\n");
-    
-    if has_mcp_tools {
-        prompt.push_str("### 2. MCP Tools (External Capabilities)\n");
-        prompt.push_str("**USE FOR:** Anything requiring external access - databases, APIs, files, web, etc.\n");
-        prompt.push_str("**HOW TO USE:**\n");
-        if has_deferred_tools {
-            prompt.push_str("1. First call `tool_search` to discover available tools for your task\n");
-            prompt.push_str("2. Then call the discovered tools directly OR via `code_execution` for complex workflows\n\n");
-        } else if has_active_tools {
-            prompt.push_str("- Call active MCP tools directly (listed below)\n\n");
-        }
-        
-        prompt.push_str("### Decision Tree:\n");
-        prompt.push_str("```\n");
-        prompt.push_str("Can I answer this reliably from my knowledge?\n");
-        prompt.push_str("├── YES → Just answer directly (no tools needed)\n");
-        prompt.push_str("└── NO → What do I need?\n");
-        prompt.push_str("    ├── External data (database, API, web) → tool_search first, then MCP tools\n");
-        prompt.push_str("    └── Complex computation on data in conversation → code_execution\n");
-        prompt.push_str("```\n\n");
-        
-        prompt.push_str("### COMMON MISTAKES TO AVOID:\n");
-        prompt.push_str("- ❌ Using tools for simple questions you can answer directly\n");
-        prompt.push_str("- ❌ Using `code_execution` alone for tasks needing external data (it will fail)\n");
-        prompt.push_str("- ❌ Calling MCP tools without discovering them via `tool_search` first\n");
-        prompt.push_str("- ✅ Default to answering from knowledge unless tools provide clear value\n\n");
+    // ===== CRITICAL: Attached Documents (only if code_execution is enabled) =====
+    if code_execution_enabled {
+        prompt.push_str("\n\n## CRITICAL: How Attached Documents Work\n\n");
+        prompt.push_str("When the user attaches files/documents to the chat:\n");
+        prompt.push_str("- The relevant text content is **already extracted** and shown in the user's message as \"Context from attached documents\"\n");
+        prompt.push_str("- This extracted text IS the file content - you already have it in the conversation\n");
+        prompt.push_str("- ❌ **You CANNOT access, read, or open the original files** - no file paths, no file I/O\n");
+        prompt.push_str("- ❌ **code_execution CANNOT read files** - it has no filesystem access whatsoever\n");
+        prompt.push_str("- ✅ **To work with document content**: Use the text already provided in \"Context from attached documents\"\n");
+        prompt.push_str("- ✅ **To analyze/transform that text**: Copy relevant portions into code_execution as string literals\n\n");
+        prompt.push_str("**Example - WRONG approach:**\n");
+        prompt.push_str("```python\n# This will FAIL - no file access!\nwith open('document.pdf', 'r') as f:\n    content = f.read()\n```\n\n");
+        prompt.push_str("**Example - CORRECT approach:**\n");
+        prompt.push_str("```python\n# Use the text already provided in the conversation\ntext = \"\"\"paste the relevant text from the context here\"\"\"\nresult = analyze(text)\n```\n\n");
     }
     
-    // Tool calling format instructions
-    prompt.push_str("## Tool Calling Format\n\n");
-    prompt.push_str("To call a tool, use this EXACT format:\n");
-    prompt.push_str("<tool_call>{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg1\": \"value1\"}}</tool_call>\n\n");
+    // ===== Tool Selection Guide (only if any tools are enabled) =====
+    if has_any_tools {
+        prompt.push_str("## Tool Selection Guide\n\n");
+        prompt.push_str("**IMPORTANT: Before using any tool, first ask yourself: Can I answer this directly from my knowledge?**\n\n");
+        prompt.push_str("Most questions can be answered without tools. Only use tools when they provide a clear advantage.\n\n");
+        
+        if code_execution_enabled {
+            prompt.push_str("### 1. `code_execution` (Built-in Python Sandbox)\n");
+            prompt.push_str("**WHEN TO USE** (only when it provides clear advantage over your knowledge):\n");
+            prompt.push_str("- Complex arithmetic that's error-prone to compute mentally (e.g., compound interest over 30 years)\n");
+            prompt.push_str("- Processing/transforming data the user has provided in the conversation\n");
+            prompt.push_str("- Generating structured output (JSON, CSV) from conversation data\n");
+            prompt.push_str("- Pattern matching or text manipulation on user-provided text\n\n");
+            prompt.push_str("**WHEN NOT TO USE** (just answer directly):\n");
+            prompt.push_str("- Simple math you can do reliably (e.g., \"what's 15% of 80?\")\n");
+            prompt.push_str("- Date/calendar questions (e.g., \"what day is Jan 6, 2026?\") - answer from knowledge\n");
+            prompt.push_str("- Questions about facts, concepts, or explanations\n");
+            prompt.push_str("- Anything where your knowledge is sufficient and reliable\n\n");
+            prompt.push_str("**LIMITATIONS:** \n");
+            prompt.push_str("- ❌ CANNOT access internet, databases, files, APIs, or any external systems\n");
+            prompt.push_str("- ❌ CANNOT read or write files - NO filesystem access at all\n");
+            prompt.push_str("- ✅ Available modules: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64\n\n");
+        }
+        
+        if has_mcp_tools {
+            let section_num = if code_execution_enabled { "2" } else { "1" };
+            prompt.push_str(&format!("### {}. MCP Tools (External Capabilities)\n", section_num));
+            prompt.push_str("**USE FOR:** Anything requiring external access - databases, APIs, files, web, etc.\n");
+            prompt.push_str("**HOW TO USE:**\n");
+            if has_deferred_tools {
+                prompt.push_str("1. First call `tool_search` to discover available tools for your task\n");
+                if code_execution_enabled {
+                    prompt.push_str("2. Then call the discovered tools directly OR via `code_execution` for complex workflows\n\n");
+                } else {
+                    prompt.push_str("2. Then call the discovered tools directly\n\n");
+                }
+            } else if has_active_tools {
+                prompt.push_str("- Call active MCP tools directly (listed below)\n\n");
+            }
+            
+            prompt.push_str("### Decision Tree:\n");
+            prompt.push_str("```\n");
+            prompt.push_str("Can I answer this reliably from my knowledge?\n");
+            prompt.push_str("├── YES → Just answer directly (no tools needed)\n");
+            prompt.push_str("└── NO → What do I need?\n");
+            prompt.push_str("    ├── External data (database, API, web) → tool_search first, then MCP tools\n");
+            if code_execution_enabled {
+                prompt.push_str("    └── Complex computation on data in conversation → code_execution\n");
+            }
+            prompt.push_str("```\n\n");
+            
+            prompt.push_str("### COMMON MISTAKES TO AVOID:\n");
+            prompt.push_str("- ❌ Using tools for simple questions you can answer directly\n");
+            if code_execution_enabled {
+                prompt.push_str("- ❌ Using `code_execution` alone for tasks needing external data (it will fail)\n");
+            }
+            prompt.push_str("- ❌ Calling MCP tools without discovering them via `tool_search` first\n");
+            prompt.push_str("- ✅ Default to answering from knowledge unless tools provide clear value\n\n");
+        }
+        
+        // Tool calling format instructions
+        prompt.push_str("## Tool Calling Format\n\n");
+        prompt.push_str("To call a tool, use this EXACT format:\n");
+        prompt.push_str("<tool_call>{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg1\": \"value1\"}}</tool_call>\n\n");
+        
+        prompt.push_str("RULES:\n");
+        prompt.push_str("- Call tools immediately when they can help - don't just describe what you would do\n");
+        prompt.push_str("- Each argument value must be a SIMPLE value (string, number, boolean), never nested objects\n\n");
+    }
     
-    prompt.push_str("RULES:\n");
-    prompt.push_str("- Call tools immediately when they can help - don't just describe what you would do\n");
-    prompt.push_str("- Each argument value must be a SIMPLE value (string, number, boolean), never nested objects\n\n");
-    
-    // Code execution details
-    prompt.push_str("## code_execution Tool\n\n");
-    prompt.push_str("Sandboxed Python for complex calculations. **Only use when it provides clear advantage over answering directly.**\n");
-    prompt.push_str("You must `import` modules before using them.\n\n");
-    prompt.push_str("**Good use case** (complex calculation):\n");
-    prompt.push_str("<tool_call>{\"name\": \"code_execution\", \"arguments\": {\"code\": [\"import math\", \"# Compound interest: $10000 at 7% for 30 years\", \"result = 10000 * (1 + 0.07) ** 30\", \"print(f'Final amount: ${result:,.2f}')\"]}}");
-    prompt.push_str("</tool_call>\n\n");
-    prompt.push_str("**Bad use case** (just answer directly instead):\n");
-    prompt.push_str("- \"What's 15% of 200?\" → Just say \"30\" - no code needed\n");
-    prompt.push_str("- Simple factual questions → Answer from knowledge\n\n");
+    // Code execution details (only if enabled)
+    if code_execution_enabled {
+        prompt.push_str("## code_execution Tool\n\n");
+        prompt.push_str("Sandboxed Python for complex calculations. **Only use when it provides clear advantage over answering directly.**\n");
+        prompt.push_str("You must `import` modules before using them.\n\n");
+        prompt.push_str("**Good use case** (complex calculation):\n");
+        prompt.push_str("<tool_call>{\"name\": \"code_execution\", \"arguments\": {\"code\": [\"import math\", \"# Compound interest: $10000 at 7% for 30 years\", \"result = 10000 * (1 + 0.07) ** 30\", \"print(f'Final amount: ${result:,.2f}')\"]}}");
+        prompt.push_str("</tool_call>\n\n");
+        prompt.push_str("**Bad use case** (just answer directly instead):\n");
+        prompt.push_str("- \"What's 15% of 200?\" → Just say \"30\" - no code needed\n");
+        prompt.push_str("- Simple factual questions → Answer from knowledge\n\n");
+    }
     
     // Tool discovery section - critical when there are deferred tools
     if has_deferred_tools {
@@ -783,8 +802,8 @@ fn build_system_prompt(
         prompt.push_str("- `{\"queries\": [\"list tables\", \"get schema\"]}` - find data exploration tools\n\n");
     }
     
-    // Tool orchestration with code_execution (always show if there are MCP tools)
-    if has_mcp_tools {
+    // Tool orchestration with code_execution (only if both MCP tools and code_execution are enabled)
+    if has_mcp_tools && code_execution_enabled {
         prompt.push_str("## Calling Discovered Tools from Code (Advanced)\n\n");
         prompt.push_str("After discovering tools via `tool_search`, you can orchestrate them in `code_execution`:\n");
         prompt.push_str("```python\n");
@@ -1031,6 +1050,7 @@ async fn chat(
     let settings = settings_state.settings.read().await;
     let configured_system_prompt = settings.system_prompt.clone();
     let server_configs = settings.mcp_servers.clone();
+    let code_execution_enabled = settings.code_execution_enabled;
     drop(settings);
     
     // Get tool descriptions from MCP Host Actor
@@ -1047,15 +1067,19 @@ async fn chat(
     let base_system_prompt = configured_system_prompt;
     
     // Build the tools list:
-    // 1. Always include code_execution (for deterministic operations)
+    // 1. Include code_execution if enabled in settings
     // 2. Include tool_search when MCP servers with tools are available
     // 3. Include all MCP tools
     let mut openai_tools: Vec<OpenAITool> = Vec::new();
     
-    // Always add code_execution built-in tool
-    let code_exec_tool = tool_registry::code_execution_tool();
-    openai_tools.push(OpenAITool::from_tool_schema(&code_exec_tool));
-    println!("[Chat] Added code_execution built-in tool");
+    // Add code_execution built-in tool if enabled
+    if code_execution_enabled {
+        let code_exec_tool = tool_registry::code_execution_tool();
+        openai_tools.push(OpenAITool::from_tool_schema(&code_exec_tool));
+        println!("[Chat] Added code_execution built-in tool (enabled in settings)");
+    } else {
+        println!("[Chat] code_execution disabled in settings");
+    }
     
     // Add tool_search when MCP tools are available (for discovery)
     if has_mcp_tools {
@@ -1118,7 +1142,7 @@ async fn chat(
     // Build the full system prompt with tool descriptions
     // Note: We still include text-based tool instructions as a fallback for models
     // that don't support native tool calling
-    let system_prompt = build_system_prompt(&base_system_prompt, &tool_descriptions, &server_configs);
+    let system_prompt = build_system_prompt(&base_system_prompt, &tool_descriptions, &server_configs, code_execution_enabled);
     
     // === LOGGING: System prompt construction ===
     let auto_approve_servers: Vec<&str> = server_configs.iter()
@@ -1427,6 +1451,18 @@ async fn update_system_prompt(
     Ok(())
 }
 
+#[tauri::command]
+async fn update_code_execution_enabled(
+    enabled: bool,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.code_execution_enabled = enabled;
+    settings::save_settings(&guard).await?;
+    println!("[Settings] code_execution_enabled updated to: {}", enabled);
+    Ok(())
+}
+
 // ============ MCP Commands ============
 
 /// Result of syncing an MCP server - includes error message if failed
@@ -1597,6 +1633,7 @@ async fn get_system_prompt_preview(
     let settings = settings_state.settings.read().await;
     let base_prompt = settings.system_prompt.clone();
     let server_configs = settings.mcp_servers.clone();
+    let code_execution_enabled = settings.code_execution_enabled;
     drop(settings);
     
     // Get current tool descriptions from connected servers
@@ -1608,7 +1645,7 @@ async fn get_system_prompt_preview(
     let tool_descriptions = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
     
     // Build the full system prompt
-    let preview = build_system_prompt(&base_prompt, &tool_descriptions, &server_configs);
+    let preview = build_system_prompt(&base_prompt, &tool_descriptions, &server_configs, code_execution_enabled);
     
     Ok(preview)
 }
@@ -1851,6 +1888,7 @@ pub fn run() {
             update_mcp_server,
             remove_mcp_server,
             update_system_prompt,
+            update_code_execution_enabled,
             // MCP commands
             sync_mcp_servers,
             connect_mcp_server,

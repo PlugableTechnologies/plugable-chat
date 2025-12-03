@@ -421,27 +421,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
             isLoading: false, 
             generationId: state.generationId + 1,
             streamingChatId: null,
-            operationStatus: {
-                type: 'reloading',
-                message: 'Stopping generation...',
-                startTime: Date.now(),
-            },
         }));
         
         try {
-            // Cancel the stream
+            // Cancel the stream - this signals the agentic loop to stop
+            // The HTTP request to Foundry will complete/timeout on its own
             await invoke('cancel_generation', { generationId: currentGenId });
             console.log('[ChatStore] Cancelled generation', currentGenId);
-            
-            // Reload foundry service to recover from potential failures
-            set({ operationStatus: { type: 'reloading', message: 'Reloading service...', startTime: Date.now() } });
-            await invoke('reload_foundry');
-            console.log('[ChatStore] Foundry service reloaded');
-            
-            set({ operationStatus: null });
         } catch (e) {
-            console.error('[ChatStore] Stop/reload failed:', e);
-            set({ operationStatus: null });
+            console.error('[ChatStore] Stop failed:', e);
         }
     },
 

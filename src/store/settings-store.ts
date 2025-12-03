@@ -22,6 +22,7 @@ export interface McpServerConfig {
 export interface AppSettings {
     system_prompt: string;
     mcp_servers: McpServerConfig[];
+    code_execution_enabled: boolean;
 }
 
 // Connection status for MCP servers
@@ -49,16 +50,17 @@ interface SettingsState {
     
     // Modal state
     isSettingsOpen: boolean;
-    activeTab: 'system-prompt' | 'mcp-servers';
+    activeTab: 'system-prompt' | 'tools';
     
     // Actions
     openSettings: () => void;
     closeSettings: () => void;
-    setActiveTab: (tab: 'system-prompt' | 'mcp-servers') => void;
+    setActiveTab: (tab: 'system-prompt' | 'tools') => void;
     
     // Settings CRUD
     fetchSettings: () => Promise<void>;
     updateSystemPrompt: (prompt: string) => Promise<void>;
+    updateCodeExecutionEnabled: (enabled: boolean) => Promise<void>;
     addMcpServer: (config: McpServerConfig) => Promise<void>;
     updateMcpServer: (config: McpServerConfig) => Promise<void>;
     removeMcpServer: (serverId: string) => Promise<void>;
@@ -70,7 +72,7 @@ interface SettingsState {
 }
 
 // Default system prompt
-const DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant. When answering questions, you may use <think></think> tags to show your reasoning process. After your thinking, always provide a clear, concise final answer outside the think tags.";
+const DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant. Be direct and concise in your responses. When you don't know something, say so rather than guessing.";
 
 // Helper to create a new server config
 export function createNewServerConfig(): McpServerConfig {
@@ -144,6 +146,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 settings: {
                     system_prompt: DEFAULT_SYSTEM_PROMPT,
                     mcp_servers: [],
+                    code_execution_enabled: false,
                 }
             });
         }
@@ -164,6 +167,29 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             console.log('[SettingsStore] System prompt updated');
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update system prompt:', e);
+            // Revert on error
+            set({ 
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+    
+    updateCodeExecutionEnabled: async (enabled: boolean) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        
+        // Optimistic update
+        set({ 
+            settings: { ...currentSettings, code_execution_enabled: enabled },
+            error: null 
+        });
+        
+        try {
+            await invoke('update_code_execution_enabled', { enabled });
+            console.log('[SettingsStore] Code execution enabled updated:', enabled);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update code execution enabled:', e);
             // Revert on error
             set({ 
                 settings: currentSettings,

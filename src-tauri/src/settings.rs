@@ -65,14 +65,13 @@ pub struct AppSettings {
     pub system_prompt: String,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Whether the code_execution built-in tool is enabled (disabled by default)
+    #[serde(default)]
+    pub code_execution_enabled: bool,
 }
 
 fn default_system_prompt() -> String {
-    r#"You are a helpful AI assistant with tool-calling capabilities.
-
-IMPORTANT: When a task can be helped by a tool, call the tool immediately. Don't explain what you would do - just do it.
-
-For any math, calculations, or data processing: use code_execution. It gives exact results, not generated approximations."#.to_string()
+    r#"You are a helpful AI assistant. Be direct and concise in your responses. When you don't know something, say so rather than guessing."#.to_string()
 }
 
 /// Create the default MCP test server configuration
@@ -133,6 +132,7 @@ impl Default for AppSettings {
         Self {
             system_prompt: default_system_prompt(),
             mcp_servers: vec![default_mcp_test_server()],
+            code_execution_enabled: false,
         }
     }
 }
@@ -216,6 +216,8 @@ mod tests {
         // Default settings include the mcp-test-server (disabled by default)
         assert!(settings.mcp_servers.iter().any(|s| s.id == "mcp-test-server"));
         assert!(!settings.mcp_servers.iter().find(|s| s.id == "mcp-test-server").unwrap().enabled);
+        // code_execution is disabled by default
+        assert!(!settings.code_execution_enabled);
     }
 
     #[test]
