@@ -395,6 +395,13 @@ install_requirements() {
                 echo -e "${GREEN}  Setup complete! Ready to run.        ${NC}"
                 echo -e "${GREEN}========================================${NC}"
                 echo ""
+                
+                if $INSTALLED_ANYTHING; then
+                    echo -e "  ${YELLOW}NOTE: Tools were just installed.${NC}"
+                    echo -e "  ${YELLOW}Open a NEW terminal before running:${NC}"
+                    echo ""
+                fi
+                
                 echo -e "  Start the app with:"
                 echo -e "  ${YELLOW}npx tauri dev${NC}"
                 echo ""
@@ -410,9 +417,14 @@ install_requirements() {
             echo -e "${CYAN}  Next Steps                           ${NC}"
             echo -e "${CYAN}========================================${NC}"
             echo ""
+            
+            if $INSTALLED_ANYTHING; then
+                echo -e "  ${YELLOW}0. Open a NEW terminal (to pick up PATH changes)${NC}"
+            fi
+            
             echo "  1. Navigate to the project directory"
-            echo "  2. Run: ${YELLOW}npm install${NC}"
-            echo "  3. Run: ${YELLOW}npx tauri dev${NC}"
+            echo -e "  2. Run: ${YELLOW}npm install${NC}"
+            echo -e "  3. Run: ${YELLOW}npx tauri dev${NC}"
             echo ""
         fi
     else

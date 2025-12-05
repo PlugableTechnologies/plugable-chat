@@ -119,6 +119,91 @@ function Install-WingetPackage {
     }
 }
 
+# Install Visual Studio Build Tools with C++ workload
+# This is a custom function because we need to pass --override to include the C++ components
+function Install-BuildToolsWithCpp {
+    $packageId = "Microsoft.VisualStudio.2022.BuildTools"
+    $displayName = "Visual Studio 2022 Build Tools (with C++)"
+    
+    Write-Host "Checking $displayName... " -NoNewline
+    
+    # Check if already installed
+    if (Test-WingetPackage -PackageId $packageId) {
+        # Check if link.exe is available (indicates C++ workload is installed)
+        $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vsWhere) {
+            $installPath = & $vsWhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+            if ($installPath) {
+                Write-Host "already installed with C++ tools" -ForegroundColor Green
+                return $true
+            }
+        }
+        
+        # Build Tools installed but C++ workload missing - need to modify installation
+        Write-Host "installed, but C++ workload missing" -ForegroundColor Yellow
+        Write-Host "  -> Adding C++ workload..." -ForegroundColor Yellow
+        
+        try {
+            # Use vs_installer to modify the existing installation
+            $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            if (Test-Path $vsInstaller) {
+                # Find the BuildTools installation path
+                $buildToolsPath = & $vsWhere -products * -property installationPath 2>$null | Select-Object -First 1
+                if ($buildToolsPath) {
+                    & $vsInstaller modify --installPath $buildToolsPath --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --norestart
+                    if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {
+                        Write-Host "  -> C++ workload added successfully" -ForegroundColor Green
+                        $script:InstalledAnything = $true
+                        $script:InstalledBuildTools = $true
+                        return $true
+                    }
+                }
+            }
+            
+            # Fallback: reinstall with override
+            Write-Host "  -> Reinstalling with C++ workload..." -ForegroundColor Yellow
+            winget install --id $packageId --exact --silent --accept-source-agreements --accept-package-agreements --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --wait"
+            if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {
+                Write-Host "  -> Installed successfully" -ForegroundColor Green
+                $script:InstalledAnything = $true
+                $script:InstalledBuildTools = $true
+                return $true
+            }
+            else {
+                Write-Host "  -> Installation failed (exit code: $LASTEXITCODE)" -ForegroundColor Red
+                return $false
+            }
+        }
+        catch {
+            Write-Host "  -> Installation failed: $_" -ForegroundColor Red
+            return $false
+        }
+    }
+    
+    # Not installed at all - install fresh with C++ workload
+    Write-Host "installing..." -ForegroundColor Yellow
+    Write-Host "  (This may take several minutes - installing C++ build tools)" -ForegroundColor Gray
+    
+    try {
+        # Install with override to include C++ workload
+        winget install --id $packageId --exact --silent --accept-source-agreements --accept-package-agreements --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --wait"
+        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {
+            Write-Host "  -> Installed successfully" -ForegroundColor Green
+            $script:InstalledAnything = $true
+            $script:InstalledBuildTools = $true
+            return $true
+        }
+        else {
+            Write-Host "  -> Installation failed (exit code: $LASTEXITCODE)" -ForegroundColor Red
+            return $false
+        }
+    }
+    catch {
+        Write-Host "  -> Installation failed: $_" -ForegroundColor Red
+        return $false
+    }
+}
+
 # Refresh the PATH environment variable from the registry
 function Update-PathFromRegistry {
     Write-Host ""
@@ -379,7 +464,8 @@ function Install-Requirements {
     
     # Visual Studio Build Tools - Required for compiling native Rust dependencies on Windows
     # This includes the MSVC compiler and Windows SDK
-    if (-not (Install-WingetPackage -PackageId "Microsoft.VisualStudio.2022.BuildTools" -DisplayName "Visual Studio 2022 Build Tools" -TrackVariable "BuildTools")) {
+    # We use a custom install to include the C++ workload automatically
+    if (-not (Install-BuildToolsWithCpp)) {
         $allSucceeded = $false
     }
     
@@ -412,21 +498,34 @@ function Install-Requirements {
         Probe-KnownPaths
     }
     
-    # Check for Visual Studio Build Tools C++ workload requirement
+    # Check if C++ tools are properly installed (link.exe should be findable)
     if ($script:InstalledBuildTools) {
-        Write-Host ""
-        Write-Host "========================================" -ForegroundColor Yellow
-        Write-Host "  ACTION REQUIRED: Build Tools Setup   " -ForegroundColor Yellow
-        Write-Host "========================================" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "Visual Studio Build Tools was just installed." -ForegroundColor White
-        Write-Host "You MUST install the C++ workload for Rust to compile:" -ForegroundColor White
-        Write-Host ""
-        Write-Host "  1. Open 'Visual Studio Installer' from the Start Menu" -ForegroundColor Gray
-        Write-Host "  2. Click 'Modify' on Build Tools 2022" -ForegroundColor Gray
-        Write-Host "  3. Check 'Desktop development with C++'" -ForegroundColor Gray
-        Write-Host "  4. Click 'Modify' to install" -ForegroundColor Gray
-        Write-Host ""
+        # Verify the C++ workload was actually installed by checking for vswhere results
+        $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $hasCppTools = $false
+        if (Test-Path $vsWhere) {
+            $installPath = & $vsWhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+            if ($installPath) {
+                $hasCppTools = $true
+            }
+        }
+        
+        if (-not $hasCppTools) {
+            Write-Host ""
+            Write-Host "========================================" -ForegroundColor Yellow
+            Write-Host "  ACTION REQUIRED: Build Tools Setup   " -ForegroundColor Yellow
+            Write-Host "========================================" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "Visual Studio Build Tools was installed, but the C++ workload" -ForegroundColor White
+            Write-Host "may not have been added correctly. If you see 'link.exe not found'" -ForegroundColor White
+            Write-Host "errors when building, manually install the C++ workload:" -ForegroundColor White
+            Write-Host ""
+            Write-Host "  1. Open 'Visual Studio Installer' from the Start Menu" -ForegroundColor Gray
+            Write-Host "  2. Click 'Modify' on Build Tools 2022" -ForegroundColor Gray
+            Write-Host "  3. Check 'Desktop development with C++'" -ForegroundColor Gray
+            Write-Host "  4. Click 'Modify' to install" -ForegroundColor Gray
+            Write-Host ""
+        }
     }
     
     # Initialize Rust toolchain if rustup was just installed
@@ -477,6 +576,13 @@ function Install-Requirements {
                     Write-Host "  Setup complete! Ready to run.        " -ForegroundColor Green
                     Write-Host "========================================" -ForegroundColor Green
                     Write-Host ""
+                    
+                    if ($script:InstalledBuildTools) {
+                        Write-Host "  IMPORTANT: Build Tools was just installed." -ForegroundColor Yellow
+                        Write-Host "  Open a NEW terminal before running:" -ForegroundColor Yellow
+                        Write-Host ""
+                    }
+                    
                     Write-Host "  Start the app with:" -ForegroundColor White
                     Write-Host "     npx tauri dev" -ForegroundColor Yellow
                     Write-Host ""
@@ -498,6 +604,11 @@ function Install-Requirements {
             Write-Host "  Next Steps                           " -ForegroundColor Cyan
             Write-Host "========================================" -ForegroundColor Cyan
             Write-Host ""
+            
+            if ($script:InstalledBuildTools -or $script:InstalledAnything) {
+                Write-Host "  0. Open a NEW terminal (to pick up PATH changes)" -ForegroundColor Yellow
+            }
+            
             Write-Host "  1. Navigate to the project directory" -ForegroundColor White
             Write-Host "  2. Run: npm install" -ForegroundColor Yellow
             Write-Host "  3. Run: npx tauri dev" -ForegroundColor Yellow

@@ -52,3 +52,5 @@ src-tauri/data/
 *.sw?
 
 .fastembed_cache
+src/components/plugable-chat.code-workspace
+assets/*
