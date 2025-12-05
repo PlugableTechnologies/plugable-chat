@@ -1,4 +1,4 @@
-use crate::protocol::{RagMsg, RagChunk, RagIndexResult};
+use crate::protocol::{RagMsg, RagChunk, RagIndexResult, RemoveFileResult};
 use tokio::sync::mpsc;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -101,6 +101,28 @@ impl RagActor {
                     self.manifest.clear();
                     self.cache_dir = None;
                     let _ = respond_to.send(true);
+                }
+                RagMsg::RemoveFile { source_file, respond_to } => {
+                    println!("RagActor: Removing file from index: {}", source_file);
+                    let original_count = self.chunks.len();
+                    self.chunks.retain(|chunk| chunk.source_file != source_file);
+                    let chunks_removed = original_count - self.chunks.len();
+                    println!("RagActor: Removed {} chunks, {} remaining", chunks_removed, self.chunks.len());
+                    let _ = respond_to.send(RemoveFileResult {
+                        chunks_removed,
+                        remaining_chunks: self.chunks.len(),
+                    });
+                }
+                RagMsg::GetIndexedFiles { respond_to } => {
+                    // Get unique source file names from all chunks
+                    let files: Vec<String> = self.chunks
+                        .iter()
+                        .map(|chunk| chunk.source_file.clone())
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    println!("RagActor: Returning {} indexed files", files.len());
+                    let _ = respond_to.send(files);
                 }
             }
         }

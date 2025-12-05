@@ -6,7 +6,7 @@ pub mod model_profiles;
 pub mod tool_registry;
 pub mod tools;
 
-use protocol::{VectorMsg, FoundryMsg, RagMsg, McpHostMsg, ChatMessage, CachedModel, ModelInfo, RagChunk, RagIndexResult, ParsedToolCall, parse_tool_calls, ToolCallsPendingEvent, ToolExecutingEvent, ToolResultEvent, ToolLoopFinishedEvent, OpenAITool};
+use protocol::{VectorMsg, FoundryMsg, RagMsg, McpHostMsg, ChatMessage, CachedModel, ModelInfo, RagChunk, RagIndexResult, RemoveFileResult, ParsedToolCall, parse_tool_calls, ToolCallsPendingEvent, ToolExecutingEvent, ToolResultEvent, ToolLoopFinishedEvent, OpenAITool};
 use tool_adapters::{parse_tool_calls_for_model, format_tool_result};
 use model_profiles::resolve_profile;
 use tool_registry::{SharedToolRegistry, ToolSearchResult, create_shared_registry};
@@ -1440,12 +1440,39 @@ async fn search_rag_context(
 #[tauri::command]
 async fn clear_rag_context(handles: State<'_, ActorHandles>) -> Result<bool, String> {
     println!("[RAG] Clearing context");
-    
+
     let (tx, rx) = oneshot::channel();
     handles.rag_tx.send(RagMsg::ClearContext { respond_to: tx })
         .await
         .map_err(|e| e.to_string())?;
-    
+
+    rx.await.map_err(|_| "RAG actor died".to_string())
+}
+
+#[tauri::command]
+async fn remove_rag_file(
+    handles: State<'_, ActorHandles>,
+    source_file: String,
+) -> Result<RemoveFileResult, String> {
+    println!("[RAG] Removing file from index: {}", source_file);
+
+    let (tx, rx) = oneshot::channel();
+    handles.rag_tx.send(RagMsg::RemoveFile { source_file, respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    rx.await.map_err(|_| "RAG actor died".to_string())
+}
+
+#[tauri::command]
+async fn get_rag_indexed_files(handles: State<'_, ActorHandles>) -> Result<Vec<String>, String> {
+    println!("[RAG] Getting indexed files");
+
+    let (tx, rx) = oneshot::channel();
+    handles.rag_tx.send(RagMsg::GetIndexedFiles { respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+
     rx.await.map_err(|_| "RAG actor died".to_string())
 }
 
@@ -1986,6 +2013,8 @@ pub fn run() {
             process_rag_documents,
             search_rag_context,
             clear_rag_context,
+            remove_rag_file,
+            get_rag_indexed_files,
             // Settings commands
             get_settings,
             save_app_settings,

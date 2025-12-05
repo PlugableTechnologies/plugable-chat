@@ -903,4 +903,22 @@ pub enum RagMsg {
     ClearContext {
         respond_to: oneshot::Sender<bool>,
     },
+    /// Remove a specific file from the RAG index
+    RemoveFile {
+        source_file: String,
+        respond_to: oneshot::Sender<RemoveFileResult>,
+    },
+    /// Get list of all indexed file names
+    GetIndexedFiles {
+        respond_to: oneshot::Sender<Vec<String>>,
+    },
+}
+
+/// Result of removing a file from RAG index
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoveFileResult {
+    /// Number of chunks removed
+    pub chunks_removed: usize,
+    /// Remaining total chunks in index
+    pub remaining_chunks: usize,
 }

@@ -96,6 +96,8 @@ export interface Message {
     toolCalls?: ToolCallRecord[];
     /** Code execution blocks during this assistant message */
     codeExecutions?: CodeExecutionRecord[];
+    /** RAG chunks used as context for this assistant message */
+    ragChunks?: RagChunk[];
 }
 
 export interface RagChunk {
@@ -246,16 +248,19 @@ interface ChatState {
 
     // RAG (Retrieval Augmented Generation) State
     attachedPaths: string[];
+    ragIndexedFiles: string[];
     isIndexingRag: boolean;
     isSearchingRag: boolean;
     ragChunkCount: number;
-    addAttachment: (path: string) => void;
+    addAttachment: (path: string) => Promise<void>;
     removeAttachment: (path: string) => void;
     clearAttachments: () => void;
     clearAttachedPaths: () => void;
     processRagDocuments: () => Promise<RagIndexResult | null>;
     searchRagContext: (query: string, limit?: number) => Promise<RagChunk[]>;
     clearRagContext: () => Promise<void>;
+    fetchRagIndexedFiles: () => Promise<void>;
+    removeRagFile: (sourceFile: string) => Promise<void>;
 
     // Tool Execution State
     pendingToolApproval: PendingToolApproval | null;
@@ -1252,18 +1257,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // RAG (Retrieval Augmented Generation) State
     attachedPaths: [],
+    ragIndexedFiles: [],
     isIndexingRag: false,
     isSearchingRag: false,
     ragChunkCount: 0,
     
-    addAttachment: (path: string) => set((state) => {
+    addAttachment: async (path: string) => {
+        const state = get();
         // Avoid duplicates
         if (state.attachedPaths.includes(path)) {
-            return state;
+            return;
         }
-        console.log(`[ChatStore] Adding attachment: ${path}`);
-        return { attachedPaths: [...state.attachedPaths, path] };
-    }),
+        console.log(`[ChatStore] Adding attachment and indexing immediately: ${path}`);
+        
+        // Add path to attachedPaths
+        set((s) => ({ attachedPaths: [...s.attachedPaths, path] }));
+        
+        // Immediately trigger indexing
+        set({ isIndexingRag: true });
+        try {
+            const result = await invoke<RagIndexResult>('process_rag_documents', { paths: get().attachedPaths });
+            console.log(`[ChatStore] RAG indexing complete: ${result.total_chunks} chunks from ${result.files_processed} files`);
+            set({ ragChunkCount: result.total_chunks, isIndexingRag: false, attachedPaths: [] });
+            
+            // Fetch updated list of indexed files
+            await get().fetchRagIndexedFiles();
+        } catch (e: any) {
+            console.error('[ChatStore] RAG processing failed:', e);
+            set({ isIndexingRag: false });
+        }
+    },
     
     removeAttachment: (path: string) => set((state) => {
         console.log(`[ChatStore] Removing attachment: ${path}`);
@@ -1272,7 +1295,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     
     clearAttachments: () => {
         console.log('[ChatStore] Clearing all attachments');
-        set({ attachedPaths: [], ragChunkCount: 0 });
+        set({ attachedPaths: [], ragChunkCount: 0, ragIndexedFiles: [] });
     },
     
     clearAttachedPaths: () => {
@@ -1321,9 +1344,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
         console.log('[ChatStore] Clearing RAG context');
         try {
             await invoke<boolean>('clear_rag_context');
-            set({ attachedPaths: [], ragChunkCount: 0 });
+            set({ attachedPaths: [], ragChunkCount: 0, ragIndexedFiles: [] });
         } catch (e: any) {
             console.error('[ChatStore] Failed to clear RAG context:', e);
+        }
+    },
+    
+    fetchRagIndexedFiles: async () => {
+        try {
+            const files = await invoke<string[]>('get_rag_indexed_files');
+            console.log(`[ChatStore] Fetched ${files.length} indexed RAG files`);
+            set({ ragIndexedFiles: files });
+        } catch (e: any) {
+            console.error('[ChatStore] Failed to fetch RAG indexed files:', e);
+        }
+    },
+    
+    removeRagFile: async (sourceFile: string) => {
+        console.log(`[ChatStore] Removing RAG file: ${sourceFile}`);
+        try {
+            const result = await invoke<{ chunks_removed: number; remaining_chunks: number }>('remove_rag_file', { sourceFile });
+            console.log(`[ChatStore] Removed ${result.chunks_removed} chunks, ${result.remaining_chunks} remaining`);
+            set({ ragChunkCount: result.remaining_chunks });
+            // Refresh the indexed files list
+            await get().fetchRagIndexedFiles();
+        } catch (e: any) {
+            console.error('[ChatStore] Failed to remove RAG file:', e);
         }
     },
 

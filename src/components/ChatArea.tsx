@@ -1,4 +1,4 @@
-import { useChatStore, ToolCallRecord, CodeExecutionRecord } from '../store/chat-store';
+import { useChatStore, ToolCallRecord, CodeExecutionRecord, RagChunk } from '../store/chat-store';
 import { StatusBar, StreamingWarningBar } from './StatusBar';
 // Icons replaced with unicode characters
 import ReactMarkdown from 'react-markdown';
@@ -374,6 +374,54 @@ const InlineToolCallResult = ({ call }: { call: ToolCallRecord }) => {
     );
 };
 
+// Collapsible RAG Context Block - shows document chunks used as context
+const RagContextBlock = ({ chunks }: { chunks: RagChunk[] }) => {
+    if (!chunks || chunks.length === 0) return null;
+    
+    // Get unique source files
+    const uniqueFiles = [...new Set(chunks.map(c => c.source_file))];
+    
+    // Truncate content preview
+    const truncateContent = (content: string, maxLen: number = 60) => {
+        const cleaned = content.replace(/\s+/g, ' ').trim();
+        if (cleaned.length <= maxLen) return cleaned;
+        return cleaned.slice(0, maxLen - 3) + '...';
+    };
+    
+    return (
+        <details className="my-4 group/rag border border-emerald-200 rounded-xl overflow-hidden bg-emerald-50/50">
+            <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-emerald-100/50 transition-colors select-none">
+                <span className="text-emerald-600 text-lg">📚</span>
+                <span className="font-medium text-emerald-900 text-sm">
+                    {chunks.length} document chunk{chunks.length !== 1 ? 's' : ''} used
+                </span>
+                <span className="text-xs px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+                    {uniqueFiles.length} file{uniqueFiles.length !== 1 ? 's' : ''}
+                </span>
+                <span className="ml-auto text-xs text-emerald-400 group-open/rag:rotate-180 transition-transform">▼</span>
+            </summary>
+            <div className="border-t border-emerald-200 divide-y divide-emerald-100">
+                {chunks.map((chunk, idx) => (
+                    <div key={chunk.id || idx} className="px-4 py-3 bg-white">
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-emerald-500">📄</span>
+                            <code className="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 font-medium">
+                                {chunk.source_file}
+                            </code>
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 ml-auto">
+                                {(chunk.score * 100).toFixed(0)}% match
+                            </span>
+                        </div>
+                        <p className="mt-2 text-xs text-gray-600 italic">
+                            "{truncateContent(chunk.content)}"
+                        </p>
+                    </div>
+                ))}
+            </div>
+        </details>
+    );
+};
+
 // Collapsible Tool Calls Block - shows multiple tool calls made during a message
 const ToolCallsBlock = ({ toolCalls }: { toolCalls: ToolCallRecord[] }) => {
     if (!toolCalls || toolCalls.length === 0) return null;
@@ -538,6 +586,53 @@ const CodeExecutionBlock = ({ executions }: { executions: CodeExecutionRecord[] 
                 ))}
             </div>
         </details>
+    );
+};
+
+// RAG File Pills Component - shows indexed files above input with remove buttons
+const RagFilePills = ({ 
+    files, 
+    onRemove,
+    isIndexing
+}: { 
+    files: string[], 
+    onRemove: (file: string) => void,
+    isIndexing: boolean
+}) => {
+    if (files.length === 0 && !isIndexing) return null;
+    
+    // Truncate filename to first 15 chars
+    const truncateFilename = (filename: string) => {
+        if (filename.length <= 15) return filename;
+        return filename.slice(0, 12) + '...';
+    };
+    
+    return (
+        <div className="flex flex-wrap gap-2 px-2 py-2 max-w-[900px] mx-auto">
+            {isIndexing && (
+                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-100 text-blue-700 rounded-full text-xs font-medium">
+                    <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse" />
+                    <span>Indexing...</span>
+                </div>
+            )}
+            {files.map((file) => (
+                <div 
+                    key={file}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-medium group"
+                    title={file}
+                >
+                    <span>📄</span>
+                    <span>{truncateFilename(file)}</span>
+                    <button
+                        onClick={() => onRemove(file)}
+                        className="w-4 h-4 flex items-center justify-center rounded-full hover:bg-emerald-200 text-emerald-600 hover:text-emerald-800 transition-colors"
+                        title={`Remove ${file}`}
+                    >
+                        ×
+                    </button>
+                </div>
+            ))}
+        </div>
     );
 };
 
@@ -1060,8 +1155,8 @@ export function ChatArea() {
         messages, input, setInput, addMessage, isLoading, setIsLoading, stopGeneration, currentChatId, reasoningEffort,
         triggerRelevanceSearch, clearRelevanceSearch, isConnecting,
         // RAG state
-        attachedPaths, ragChunkCount, addAttachment, clearAttachments, clearAttachedPaths,
-        processRagDocuments, searchRagContext, clearRagContext,
+        attachedPaths, ragIndexedFiles, isIndexingRag,
+        addAttachment, searchRagContext, clearRagContext, removeRagFile,
         // Tool execution state
         pendingToolApproval, toolExecution, approveCurrentToolCall, rejectCurrentToolCall,
         // Streaming state
@@ -1182,9 +1277,10 @@ export function ChatArea() {
             });
             if (selected) {
                 const paths = Array.isArray(selected) ? selected : [selected];
-                paths.forEach(path => {
-                    if (path) addAttachment(path);
-                });
+                // Process each file sequentially (addAttachment now triggers immediate indexing)
+                for (const path of paths) {
+                    if (path) await addAttachment(path);
+                }
             }
         } catch (e) {
             console.error('[ChatArea] Failed to open file dialog:', e);
@@ -1200,7 +1296,7 @@ export function ChatArea() {
                 multiple: false
             });
             if (selected && typeof selected === 'string') {
-                addAttachment(selected);
+                await addAttachment(selected);
             }
         } catch (e) {
             console.error('[ChatArea] Failed to open folder dialog:', e);
@@ -1222,11 +1318,8 @@ export function ChatArea() {
         const chatId = isNewChat ? generateClientChatId() : currentChatId!;
         if (isNewChat) {
             storeState.setCurrentChatId(chatId);
-            // Clear any RAG context from previous chats to prevent context leaking
-            if (storeState.ragChunkCount > 0) {
-                console.log('[ChatArea] New chat - clearing previous RAG context');
-                await clearRagContext();
-            }
+            // Note: RAG context is managed by user via the pills above input
+            // They can remove individual files or clear all - no automatic clearing
             if (storeState.currentModel === 'Loading...') {
                 try {
                     await storeState.fetchModels();
@@ -1276,50 +1369,40 @@ export function ChatArea() {
         });
 
         try {
-            // Check if we have new attachments or existing RAG context
+            // Check if we have RAG context to search (files are indexed immediately on attach)
             let messageToSend = text;
-            const currentAttachedPaths = storeState.attachedPaths;
-            const hasNewAttachments = currentAttachedPaths.length > 0;
-            const hasExistingRagContext = storeState.ragChunkCount > 0;
+            const hasRagContext = storeState.ragChunkCount > 0;
             
-            if (hasNewAttachments || hasExistingRagContext) {
+            if (hasRagContext) {
+                console.log('[ChatArea] Searching RAG context with', storeState.ragChunkCount, 'indexed chunks');
+                
                 // Show RAG indicator
                 setIsRagProcessing(true);
                 setRagStartTime(Date.now());
+                setRagStage('searching');
                 
-                // Step 1: Index new documents if any
-                if (hasNewAttachments) {
-                    console.log('[ChatArea] Processing RAG with', currentAttachedPaths.length, 'new attachments');
-                    setRagStage('indexing');
-                    
-                    const indexResult = await processRagDocuments();
-                    if (indexResult && indexResult.total_chunks > 0) {
-                        console.log('[ChatArea] Indexed', indexResult.total_chunks, 'chunks');
-                    }
-                    
-                    // Clear attachment paths only (preserve ragChunkCount for subsequent turns)
-                    clearAttachedPaths();
-                } else {
-                    console.log('[ChatArea] Using existing RAG context with', storeState.ragChunkCount, 'chunks');
-                }
+                const relevantChunks = await searchRagContext(trimmedText, 5);
                 
-                // Step 2: Search for relevant context (always search if we have indexed content)
-                const currentChunkCount = storeState.ragChunkCount;
-                if (currentChunkCount > 0) {
-                    setRagStage('searching');
-                    const relevantChunks = await searchRagContext(trimmedText, 5);
+                if (relevantChunks.length > 0) {
+                    // Store chunks on the assistant message for display
+                    useChatStore.setState((state) => {
+                        const newMessages = [...state.messages];
+                        const lastIdx = newMessages.length - 1;
+                        if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+                            newMessages[lastIdx] = { ...newMessages[lastIdx], ragChunks: relevantChunks };
+                        }
+                        return { messages: newMessages };
+                    });
                     
-                    if (relevantChunks.length > 0) {
-                        // Step 3: Build context string
-                        const contextParts = relevantChunks.map((chunk, idx) => 
-                            `[${idx + 1}] From "${chunk.source_file}" (relevance: ${(chunk.score * 100).toFixed(1)}%):\n${chunk.content}`
-                        );
-                        const contextString = contextParts.join('\n\n');
-                        
-                        // Prepend context to the message
-                        messageToSend = `Context from attached documents:\n\n${contextString}\n\n---\n\nUser question: ${text}`;
-                        console.log('[ChatArea] Added', relevantChunks.length, 'chunks as context');
-                    }
+                    // Build context string for the model
+                    const contextParts = relevantChunks.map((chunk, idx) => 
+                        `[${idx + 1}] From "${chunk.source_file}" (relevance: ${(chunk.score * 100).toFixed(1)}%):\n${chunk.content}`
+                    );
+                    const contextString = contextParts.join('\n\n');
+                    
+                    // Prepend context to the message
+                    messageToSend = `Context from attached documents:\n\n${contextString}\n\n---\n\nUser question: ${text}`;
+                    console.log('[ChatArea] Added', relevantChunks.length, 'chunks as context');
                 }
                 
                 // Hide RAG indicator
@@ -1416,6 +1499,10 @@ export function ChatArea() {
                                                 
                                                 return (
                                                     <>
+                                                        {/* RAG context block - shows document chunks used as context (before response) */}
+                                                        {m.ragChunks && m.ragChunks.length > 0 && (
+                                                            <RagContextBlock chunks={m.ragChunks} />
+                                                        )}
                                                         {parts.map((part, idx) => {
                                                             if (part.type === 'think') {
                                                                 return (
@@ -1570,6 +1657,14 @@ export function ChatArea() {
 
             {/* Fixed Input Area at Bottom */}
             <div className="flex-shrink-0 mt-1 pb-4">
+                {/* RAG File Pills - show indexed files above input */}
+                <div className="px-2 sm:px-6">
+                    <RagFilePills 
+                        files={ragIndexedFiles} 
+                        onRemove={removeRagFile}
+                        isIndexing={isIndexingRag}
+                    />
+                </div>
                 <div className="px-2 sm:px-6">
                     <InputBar
                         className=""
