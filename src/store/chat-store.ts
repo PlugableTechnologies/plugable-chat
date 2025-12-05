@@ -986,48 +986,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 const chatId = event.payload;
                 console.log(`[ChatStore] chat-saved event received for: ${chatId.slice(0, 8)}...`);
                 
-                // Fetch history first, then only clear pending if the entry exists in fetched data
-                // This handles the race condition where the backend event fires before LanceDB finishes indexing
-                try {
-                    const fetchedHistory = await invoke<ChatSummary[]>('get_all_chats');
-                    console.log(`[ChatStore] After chat-saved, backend has ${fetchedHistory.length} chats`);
-                    
-                    const existsInFetched = fetchedHistory.some((chat) => chat.id === chatId);
-                    console.log(`[ChatStore] Chat ${chatId.slice(0, 8)} exists in backend: ${existsInFetched}`);
-                    
-                    if (existsInFetched) {
-                        // Safe to clear pending - entry is now in backend
-                        get().clearPendingSummary(chatId);
-                        const pendingEntries = Object.values(get().pendingSummaries);
-                        const mergedHistory = [
-                            ...pendingEntries.filter(
-                                (entry) => !fetchedHistory.some((chat) => chat.id === entry.id)
-                            ),
-                            ...fetchedHistory
-                        ];
-                        console.log(`[ChatStore] Cleared pending, merged history now: ${mergedHistory.length} chats`);
-                        set({ history: mergedHistory });
-                    } else {
-                        // Entry not in backend yet - keep pending, just refresh with merged data
-                        console.log(`[ChatStore] Chat ${chatId.slice(0, 8)} not yet in backend, keeping in pending`);
-                        const pendingEntries = Object.values(get().pendingSummaries);
-                        const mergedHistory = [
-                            ...pendingEntries.filter(
-                                (entry) => !fetchedHistory.some((chat) => chat.id === entry.id)
-                            ),
-                            ...fetchedHistory
-                        ];
-                        set({ history: mergedHistory });
-                        
-                        // Retry after a short delay
-                        console.log(`[ChatStore] Scheduling retry fetch in 500ms...`);
-                        setTimeout(() => {
-                            get().fetchHistory();
-                        }, 500);
-                    }
-                } catch (e) {
-                    console.error("[ChatStore] Failed to fetch history after chat-saved:", e);
-                }
+                // The chat is already in history via upsertHistoryEntry() called when the message was sent.
+                // We just need to clear the pending flag - no need to re-fetch everything from the backend.
+                get().clearPendingSummary(chatId);
+                console.log(`[ChatStore] Cleared pending summary for ${chatId.slice(0, 8)}`);
             });
 
             const sidebarUpdateListener = await listen<ChatSummary[]>('sidebar-update', (event) => {

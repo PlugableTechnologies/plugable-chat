@@ -1335,7 +1335,7 @@ export function ChatArea() {
                     pinned: summaryPinned
                 });
             }
-            storeState.fetchHistory();
+            // Chat is already in history via upsertHistoryEntry() above - no need to refetch
         } catch (error) {
             console.error('[ChatArea] Failed to send message:', error);
             // Reset RAG state on error
