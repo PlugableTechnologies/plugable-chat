@@ -283,7 +283,8 @@ impl RagActor {
 
     fn is_supported_file(&self, path: &Path) -> bool {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            matches!(ext.to_lowercase().as_str(), "txt" | "csv" | "tsv" | "md" | "json")
+            matches!(ext.to_lowercase().as_str(), 
+                "txt" | "csv" | "tsv" | "md" | "json" | "pdf" | "docx")
         } else {
             // Also support files without extension if they look like text
             false
@@ -297,15 +298,32 @@ impl RagActor {
     ) -> Result<FileProcessingStats, String> {
         let path_str = file_path.to_string_lossy().to_string();
         
-        // Read file content
-        let content = tokio::fs::read_to_string(file_path)
-            .await
-            .map_err(|e| format!("Failed to read file: {}", e))?;
+        // Check if this is a binary file type (PDF, DOCX)
+        let ext = file_path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let is_binary = ext == "pdf" || ext == "docx";
         
-        let bytes_processed = content.len();
-        
-        // Compute content hash
-        let content_hash = self.compute_hash(&content);
+        // Read file content (as bytes for binary files, as string for text files)
+        let (content, bytes_processed, content_hash) = if is_binary {
+            // For binary files, read as bytes and hash the bytes
+            let bytes = tokio::fs::read(file_path)
+                .await
+                .map_err(|e| format!("Failed to read file: {}", e))?;
+            let bytes_len = bytes.len();
+            let hash = self.compute_hash_bytes(&bytes);
+            // Content is not used for binary files (extraction reads the file again)
+            (String::new(), bytes_len, hash)
+        } else {
+            // For text files, read as string
+            let text = tokio::fs::read_to_string(file_path)
+                .await
+                .map_err(|e| format!("Failed to read file: {}", e))?;
+            let bytes_len = text.len();
+            let hash = self.compute_hash(&text);
+            (text, bytes_len, hash)
+        };
         
         // Check if we have a valid cache (same hash AND not expired)
         if let Some(entry) = self.manifest.get(&path_str) {
@@ -431,8 +449,36 @@ impl RagActor {
             "csv" => self.parse_csv(content, ','),
             "tsv" => self.parse_csv(content, '\t'),
             "json" => self.parse_json(content),
+            "pdf" => self.extract_pdf_text(file_path),
+            "docx" => self.extract_docx_text(file_path),
             _ => Ok(content.to_string()), // txt, md, etc. - use as-is
         }
+    }
+
+    /// Extract text from a PDF file
+    fn extract_pdf_text(&self, file_path: &Path) -> Result<String, String> {
+        pdf_extract::extract_text(file_path)
+            .map_err(|e| format!("PDF extraction failed: {}", e))
+    }
+
+    /// Extract text from a DOCX file
+    fn extract_docx_text(&self, file_path: &Path) -> Result<String, String> {
+        use std::io::Read;
+        
+        let file = std::fs::File::open(file_path)
+            .map_err(|e| format!("Failed to open DOCX: {}", e))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| format!("Invalid DOCX archive: {}", e))?;
+        
+        let mut doc_xml = archive.by_name("word/document.xml")
+            .map_err(|_| "No document.xml found in DOCX".to_string())?;
+        
+        let mut xml_content = String::new();
+        doc_xml.read_to_string(&mut xml_content)
+            .map_err(|e| format!("Failed to read document.xml: {}", e))?;
+        
+        // Extract text from XML (strip tags, decode entities)
+        Ok(extract_text_from_docx_xml(&xml_content))
     }
 
     fn parse_csv(&self, content: &str, delimiter: char) -> Result<String, String> {
@@ -558,6 +604,12 @@ impl RagActor {
     fn compute_hash(&self, content: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn compute_hash_bytes(&self, content: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(content);
         format!("{:x}", hasher.finalize())
     }
 
@@ -760,6 +812,49 @@ impl RagActor {
         let content = tokio::fs::read_to_string(&cache_file).await.ok()?;
         serde_json::from_str(&content).ok()
     }
+}
+
+/// Extract text content from DOCX XML (word/document.xml)
+/// Parses <w:t> tags for text and <w:p> tags for paragraph breaks
+fn extract_text_from_docx_xml(xml: &str) -> String {
+    let mut result = String::new();
+    let mut in_text = false;
+    let mut chars = xml.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            // Collect the tag content
+            let mut tag = String::new();
+            for tc in chars.by_ref() {
+                if tc == '>' {
+                    break;
+                }
+                tag.push(tc);
+            }
+            
+            // Check for <w:t> or <w:t ...> (text tag)
+            if tag.starts_with("w:t") && !tag.starts_with("w:t/") && !tag.ends_with('/') {
+                in_text = true;
+            } else if tag == "/w:t" {
+                in_text = false;
+            } else if tag.starts_with("w:p") && !tag.starts_with("w:p/") && !tag.ends_with('/') {
+                // New paragraph - add newline if we have content
+                if !result.is_empty() && !result.ends_with('\n') {
+                    result.push('\n');
+                }
+            }
+        } else if in_text {
+            result.push(c);
+        }
+    }
+    
+    // Clean up: decode XML entities
+    result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }
 
 /// Compute cosine similarity between two vectors

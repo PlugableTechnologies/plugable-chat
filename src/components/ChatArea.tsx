@@ -1272,7 +1272,7 @@ export function ChatArea() {
                 multiple: true,
                 filters: [{
                     name: 'Documents',
-                    extensions: ['txt', 'csv', 'tsv', 'md', 'json']
+                    extensions: ['txt', 'csv', 'tsv', 'md', 'json', 'pdf', 'docx']
                 }]
             });
             if (selected) {

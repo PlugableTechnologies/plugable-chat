@@ -60,6 +60,12 @@ async-channel = "2"
 # Python sandbox for code execution
 python-sandbox = { path = "crates/python-sandbox" }
 
+# PDF text extraction
+pdf-extract = "0.9"
+
+# DOCX parsing (DOCX = ZIP with XML)
+zip = "0.6"
+
 [dependencies.tauri-plugin-opener]
 version = "2"
 
