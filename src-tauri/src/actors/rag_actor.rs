@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use sha2::{Sha256, Digest};
 use fastembed::TextEmbedding;
 
@@ -23,11 +23,30 @@ struct IndexedChunk {
     vector: Vec<f32>,
 }
 
+/// Maximum age for cached embeddings (1 day in seconds)
+const CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
 /// Manifest entry for a cached file
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct ManifestEntry {
     file_hash: String,
     chunk_count: usize,
+    /// Unix timestamp (seconds) when embeddings were generated
+    #[serde(default)]
+    generated_at: u64,
+}
+
+/// Cached embedding data for a file (stored separately from manifest)
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CachedEmbeddings {
+    /// File path this cache is for
+    file_path: String,
+    /// Content hash when embeddings were generated
+    file_hash: String,
+    /// The text chunks
+    chunks: Vec<String>,
+    /// The embedding vectors (one per chunk)
+    embeddings: Vec<Vec<f32>>,
 }
 
 /// Statistics from processing a single file
@@ -106,15 +125,21 @@ impl RagActor {
         println!("║                    RAG INDEXING STARTED                      ║");
         println!("╚══════════════════════════════════════════════════════════════╝");
 
-        // Determine cache directory from the first path
+        // Determine cache directory in system temp (not alongside user data)
         if let Some(first_path) = paths.first() {
             let path = Path::new(first_path);
-            let parent = if path.is_dir() {
+            let source_dir = if path.is_dir() {
                 path.to_path_buf()
             } else {
                 path.parent().unwrap_or(Path::new(".")).to_path_buf()
             };
-            self.cache_dir = Some(parent.join(".rag-cache"));
+            
+            // Create a hash of the source directory to create a unique cache subdirectory
+            let source_hash = Self::compute_path_hash(&source_dir.to_string_lossy());
+            let cache_base = std::env::temp_dir().join("plugable-chat-rag");
+            self.cache_dir = Some(cache_base.join(&source_hash));
+            
+            println!("RagActor: Cache directory: {:?}", self.cache_dir);
             
             // Create cache directory if it doesn't exist
             if let Some(ref cache_dir) = self.cache_dir {
@@ -249,7 +274,6 @@ impl RagActor {
         embedding_model: &Arc<TextEmbedding>,
     ) -> Result<FileProcessingStats, String> {
         let path_str = file_path.to_string_lossy().to_string();
-        let mut was_cached = false;
         
         // Read file content
         let content = tokio::fs::read_to_string(file_path)
@@ -261,14 +285,45 @@ impl RagActor {
         // Compute content hash
         let content_hash = self.compute_hash(&content);
         
-        // Check if already in cache with same hash
+        // Check if we have a valid cache (same hash AND not expired)
         if let Some(entry) = self.manifest.get(&path_str) {
-            if entry.file_hash == content_hash {
-                // File hasn't changed, but we need to ensure chunks are loaded
-                // For now, we'll re-process but mark as cache hit
-                println!("RagActor: Cache hit for {:?}", file_path);
-                was_cached = true;
-                // In a full implementation, we'd load chunks from disk cache here
+            if entry.file_hash == content_hash && !Self::is_cache_expired(entry.generated_at) {
+                // Try to load cached embeddings from disk
+                if let Some(cached) = self.load_embeddings(&path_str).await {
+                    if cached.file_hash == content_hash && cached.chunks.len() == cached.embeddings.len() {
+                        println!("RagActor: Using cached embeddings for {:?} ({} chunks)", file_path, cached.chunks.len());
+                        
+                        // Reconstruct indexed chunks from cache
+                        let file_name = file_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        
+                        let chars_processed: usize = cached.chunks.iter().map(|c| c.chars().count()).sum();
+                        let chunk_count = cached.chunks.len();
+                        
+                        for (idx, (chunk_text, embedding)) in cached.chunks.into_iter().zip(cached.embeddings.into_iter()).enumerate() {
+                            let chunk = IndexedChunk {
+                                id: format!("{}:{}", path_str, idx),
+                                content: chunk_text,
+                                source_file: file_name.clone(),
+                                chunk_index: idx,
+                                vector: embedding,
+                            };
+                            self.chunks.push(chunk);
+                        }
+                        
+                        return Ok(FileProcessingStats {
+                            chunks_added: chunk_count,
+                            bytes_processed,
+                            chars_processed,
+                            embedding_time_ms: 0, // No embedding time - loaded from cache
+                            was_cached: true,
+                        });
+                    }
+                }
+            } else if entry.file_hash == content_hash {
+                println!("RagActor: Cache expired for {:?}, regenerating embeddings", file_path);
             }
         }
         
@@ -286,11 +341,11 @@ impl RagActor {
                 bytes_processed,
                 chars_processed,
                 embedding_time_ms: 0,
-                was_cached,
+                was_cached: false,
             });
         }
         
-        println!("RagActor: Chunking {:?} into {} chunks ({} bytes, {} chars)", 
+        println!("RagActor: Generating embeddings for {:?} ({} chunks, {} bytes, {} chars)", 
             file_path, chunk_count, bytes_processed, chars_processed);
         
         // Generate embeddings for all chunks
@@ -305,6 +360,11 @@ impl RagActor {
         .map_err(|e| format!("Embedding task failed: {}", e))?
         .map_err(|e| format!("Embedding generation failed: {}", e))?;
         let embedding_time_ms = embed_start.elapsed().as_millis();
+        
+        // Save embeddings to disk cache
+        if let Err(e) = self.save_embeddings(&path_str, &content_hash, &text_chunks, &embeddings).await {
+            println!("RagActor: Warning - failed to cache embeddings: {}", e);
+        }
         
         // Store indexed chunks
         let file_name = file_path.file_name()
@@ -323,10 +383,11 @@ impl RagActor {
             self.chunks.push(chunk);
         }
         
-        // Update manifest
+        // Update manifest with current timestamp
         self.manifest.insert(path_str, ManifestEntry {
             file_hash: content_hash,
             chunk_count,
+            generated_at: Self::current_timestamp(),
         });
         
         Ok(FileProcessingStats {
@@ -334,7 +395,7 @@ impl RagActor {
             bytes_processed,
             chars_processed,
             embedding_time_ms,
-            was_cached,
+            was_cached: false,
         })
     }
 
@@ -603,6 +664,79 @@ impl RagActor {
                 }
             }
         }
+    }
+
+    /// Get current Unix timestamp in seconds
+    fn current_timestamp() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Check if a cache entry is expired (older than 1 day)
+    fn is_cache_expired(generated_at: u64) -> bool {
+        let now = Self::current_timestamp();
+        // If generated_at is 0 (legacy entry without timestamp), treat as expired
+        if generated_at == 0 {
+            return true;
+        }
+        now.saturating_sub(generated_at) > CACHE_MAX_AGE_SECS
+    }
+
+    /// Compute a short hash of a path for use in cache directory names
+    fn compute_path_hash(path: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(path.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        hash[..16].to_string()
+    }
+
+    /// Generate a safe filename for caching embeddings based on file path
+    fn cache_filename_for_path(file_path: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(file_path.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        format!("{}.embeddings.json", &hash[..16])
+    }
+
+    /// Save embeddings to disk cache
+    async fn save_embeddings(
+        &self,
+        file_path: &str,
+        file_hash: &str,
+        chunks: &[String],
+        embeddings: &[Vec<f32>],
+    ) -> Result<(), String> {
+        let cache_dir = self.cache_dir.as_ref()
+            .ok_or_else(|| "No cache directory set".to_string())?;
+
+        let cache_file = cache_dir.join(Self::cache_filename_for_path(file_path));
+        
+        let cached = CachedEmbeddings {
+            file_path: file_path.to_string(),
+            file_hash: file_hash.to_string(),
+            chunks: chunks.to_vec(),
+            embeddings: embeddings.to_vec(),
+        };
+
+        let content = serde_json::to_string(&cached)
+            .map_err(|e| format!("Failed to serialize embeddings: {}", e))?;
+        
+        tokio::fs::write(&cache_file, content)
+            .await
+            .map_err(|e| format!("Failed to write embeddings cache: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Load embeddings from disk cache
+    async fn load_embeddings(&self, file_path: &str) -> Option<CachedEmbeddings> {
+        let cache_dir = self.cache_dir.as_ref()?;
+        let cache_file = cache_dir.join(Self::cache_filename_for_path(file_path));
+        
+        let content = tokio::fs::read_to_string(&cache_file).await.ok()?;
+        serde_json::from_str(&content).ok()
     }
 }
 
