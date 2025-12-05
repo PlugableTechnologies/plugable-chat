@@ -252,6 +252,7 @@ interface ChatState {
     addAttachment: (path: string) => void;
     removeAttachment: (path: string) => void;
     clearAttachments: () => void;
+    clearAttachedPaths: () => void;
     processRagDocuments: () => Promise<RagIndexResult | null>;
     searchRagContext: (query: string, limit?: number) => Promise<RagChunk[]>;
     clearRagContext: () => Promise<void>;
@@ -1272,6 +1273,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearAttachments: () => {
         console.log('[ChatStore] Clearing all attachments');
         set({ attachedPaths: [], ragChunkCount: 0 });
+    },
+    
+    clearAttachedPaths: () => {
+        console.log('[ChatStore] Clearing attachment paths (preserving RAG context)');
+        set({ attachedPaths: [] });
     },
     
     processRagDocuments: async () => {

@@ -1060,7 +1060,7 @@ export function ChatArea() {
         messages, input, setInput, addMessage, isLoading, setIsLoading, stopGeneration, currentChatId, reasoningEffort,
         triggerRelevanceSearch, clearRelevanceSearch, isConnecting,
         // RAG state
-        attachedPaths, addAttachment, clearAttachments,
+        attachedPaths, ragChunkCount, addAttachment, clearAttachments, clearAttachedPaths,
         processRagDocuments, searchRagContext, clearRagContext,
         // Tool execution state
         pendingToolApproval, toolExecution, approveCurrentToolCall, rejectCurrentToolCall,
@@ -1222,6 +1222,11 @@ export function ChatArea() {
         const chatId = isNewChat ? generateClientChatId() : currentChatId!;
         if (isNewChat) {
             storeState.setCurrentChatId(chatId);
+            // Clear any RAG context from previous chats to prevent context leaking
+            if (storeState.ragChunkCount > 0) {
+                console.log('[ChatArea] New chat - clearing previous RAG context');
+                await clearRagContext();
+            }
             if (storeState.currentModel === 'Loading...') {
                 try {
                     await storeState.fetchModels();
@@ -1271,27 +1276,37 @@ export function ChatArea() {
         });
 
         try {
-            // Check if we have attachments - if so, process RAG
+            // Check if we have new attachments or existing RAG context
             let messageToSend = text;
             const currentAttachedPaths = storeState.attachedPaths;
+            const hasNewAttachments = currentAttachedPaths.length > 0;
+            const hasExistingRagContext = storeState.ragChunkCount > 0;
             
-            if (currentAttachedPaths.length > 0) {
-                console.log('[ChatArea] Processing RAG with', currentAttachedPaths.length, 'attachments');
-                
+            if (hasNewAttachments || hasExistingRagContext) {
                 // Show RAG indicator
                 setIsRagProcessing(true);
                 setRagStartTime(Date.now());
-                setRagStage('indexing');
                 
-                // Step 1: Index documents
-                const indexResult = await processRagDocuments();
-                if (indexResult && indexResult.total_chunks > 0) {
-                    console.log('[ChatArea] Indexed', indexResult.total_chunks, 'chunks');
+                // Step 1: Index new documents if any
+                if (hasNewAttachments) {
+                    console.log('[ChatArea] Processing RAG with', currentAttachedPaths.length, 'new attachments');
+                    setRagStage('indexing');
                     
-                    // Update to searching stage
+                    const indexResult = await processRagDocuments();
+                    if (indexResult && indexResult.total_chunks > 0) {
+                        console.log('[ChatArea] Indexed', indexResult.total_chunks, 'chunks');
+                    }
+                    
+                    // Clear attachment paths only (preserve ragChunkCount for subsequent turns)
+                    clearAttachedPaths();
+                } else {
+                    console.log('[ChatArea] Using existing RAG context with', storeState.ragChunkCount, 'chunks');
+                }
+                
+                // Step 2: Search for relevant context (always search if we have indexed content)
+                const currentChunkCount = storeState.ragChunkCount;
+                if (currentChunkCount > 0) {
                     setRagStage('searching');
-                    
-                    // Step 2: Search for relevant context
                     const relevantChunks = await searchRagContext(trimmedText, 5);
                     
                     if (relevantChunks.length > 0) {
@@ -1310,9 +1325,6 @@ export function ChatArea() {
                 // Hide RAG indicator
                 setIsRagProcessing(false);
                 setRagStartTime(null);
-                
-                // Clear attachments after processing (they've been indexed)
-                clearAttachments();
             }
 
             const history = messages.map(m => ({ role: m.role, content: m.content }));
