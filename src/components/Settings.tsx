@@ -3,6 +3,37 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw } from 'lucide-react';
 import { invoke } from '../lib/api';
 
+// Python reserved keywords (cannot be used as identifiers)
+const PYTHON_KEYWORDS = new Set([
+    'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
+    'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
+    'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is',
+    'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try',
+    'while', 'with', 'yield'
+]);
+
+/**
+ * Validate that a string is a valid Python identifier
+ * - Must start with a letter or underscore
+ * - Can contain letters, numbers, and underscores
+ * - Cannot be a Python keyword
+ */
+function isValidPythonIdentifier(name: string): boolean {
+    if (!name || name.length === 0) return false;
+    
+    // Check first character (must be letter or underscore)
+    const firstChar = name[0];
+    if (!/^[a-zA-Z_]$/.test(firstChar)) return false;
+    
+    // Check all characters (must be alphanumeric or underscore)
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) return false;
+    
+    // Check if it's a reserved keyword
+    if (PYTHON_KEYWORDS.has(name)) return false;
+    
+    return true;
+}
+
 // Tag input component for args - auto-splits on spaces
 function TagInput({ 
     tags, 
@@ -498,6 +529,34 @@ function McpServerCard({
                         </button>
                     </div>
                     
+                    {/* Python Module Name */}
+                    <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                            Python Module Name <span className="text-gray-400">(optional)</span>
+                        </label>
+                        <div className="relative">
+                            <input
+                                type="text"
+                                value={localConfig.python_name || ''}
+                                onChange={(e) => updateField('python_name', e.target.value || undefined)}
+                                placeholder={`e.g., ${localConfig.id.replace(/-/g, '_').toLowerCase()}`}
+                                className={`w-full px-3 py-2 text-sm font-mono border rounded-lg focus:outline-none focus:ring-1 ${
+                                    localConfig.python_name && !isValidPythonIdentifier(localConfig.python_name)
+                                        ? 'border-red-300 focus:border-red-400 focus:ring-red-400'
+                                        : 'border-gray-200 focus:border-blue-400 focus:ring-blue-400'
+                                }`}
+                            />
+                        </div>
+                        {localConfig.python_name && !isValidPythonIdentifier(localConfig.python_name) && (
+                            <p className="mt-1 text-xs text-red-500">
+                                Must be a valid Python identifier (lowercase letters, numbers, underscores; cannot start with a number)
+                            </p>
+                        )}
+                        <p className="mt-1 text-xs text-gray-500">
+                            Name used when importing tools in Python code: <code className="bg-gray-100 px-1 rounded">from {localConfig.python_name || localConfig.id.replace(/-/g, '_').toLowerCase()} import tool_name</code>
+                        </p>
+                    </div>
+                    
                     {/* Status message from sync */}
                     {status?.error && !testResult && (
                         <div className="text-xs text-red-700 bg-red-50 px-3 py-2 rounded-lg max-h-48 overflow-y-auto">
@@ -742,7 +801,7 @@ function SystemPromptTab() {
 function ToolsTab() {
     const { settings, updateCodeExecutionEnabled, addMcpServer, updateMcpServer, removeMcpServer, error } = useSettingsStore();
     const servers = settings?.mcp_servers || [];
-    const codeExecutionEnabled = settings?.code_execution_enabled ?? false;
+    const codeExecutionEnabled = settings?.python_execution_enabled ?? false;
     
     const handleAddServer = () => {
         const newConfig = createNewServerConfig();

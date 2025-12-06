@@ -15,7 +15,9 @@ use sandbox::{
     create_sandboxed_interpreter, reset_execution_state, set_available_tools,
     set_tool_results, get_pending_calls, get_stdout, get_stderr,
     json_to_pyobject, pyobject_to_json, SANDBOX_SETUP_CODE,
+    set_tool_modules, generate_tool_module_code,
 };
+pub use protocol::{ToolModuleInfo, ToolFunctionInfo};
 use rustpython_compiler::Mode;
 use rustpython_vm::{VirtualMachine, PyRef, builtins::PyBaseException, AsObject};
 use std::alloc::{alloc, dealloc, Layout};
@@ -59,6 +61,9 @@ pub fn execute(request: &ExecutionRequest) -> ExecutionResult {
     set_available_tools(request.available_tools.clone());
     set_tool_results(request.tool_results.clone());
     
+    // Set up tool modules for import
+    set_tool_modules(request.tool_modules.clone());
+    
     // Create fresh sandboxed interpreter
     let interpreter = create_sandboxed_interpreter();
     
@@ -91,6 +96,35 @@ pub fn execute(request: &ExecutionRequest) -> ExecutionResult {
                 stderr: get_stderr(),
                 ..Default::default()
             };
+        }
+        
+        // If there are tool modules, inject them as importable Python modules
+        let tool_module_code = generate_tool_module_code();
+        if !tool_module_code.is_empty() {
+            let module_code = match vm.compile(
+                &tool_module_code,
+                Mode::Exec,
+                "<tool_modules>".to_string(),
+            ) {
+                Ok(code) => code,
+                Err(e) => {
+                    let error_msg = format!("Tool module injection compilation failed: {:?}", e);
+                    return ExecutionResult {
+                        status: ExecutionStatus::Error(error_msg),
+                        stderr: get_stderr(),
+                        ..Default::default()
+                    };
+                }
+            };
+            
+            if let Err(e) = vm.run_code_obj(module_code, scope.clone()) {
+                let error_msg = format!("Tool module injection failed: {:?}", e);
+                return ExecutionResult {
+                    status: ExecutionStatus::Error(error_msg),
+                    stderr: get_stderr(),
+                    ..Default::default()
+                };
+            }
         }
         
         // Join code lines and compile user code
@@ -272,6 +306,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         execute(&request)
     }
@@ -283,8 +318,20 @@ mod tests {
             context: Some(context),
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         execute(&request)
+    }
+    
+    /// Helper to create a ToolInfo with all required fields
+    fn make_tool_info(name: &str, server_id: &str, description: Option<&str>) -> ToolInfo {
+        ToolInfo {
+            name: name.to_string(),
+            server_id: server_id.to_string(),
+            description: description.map(|s| s.to_string()),
+            parameters: serde_json::json!({}),
+            python_module: None,
+        }
     }
     
     // ============ Existing Tests ============
@@ -299,6 +346,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -314,6 +362,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -344,6 +393,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -376,6 +426,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -397,7 +448,9 @@ mod tests {
                 server_id: "weather_server".to_string(),
                 description: Some("Get weather".to_string()),
                 parameters: serde_json::json!({}),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -419,6 +472,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -440,6 +494,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -461,6 +516,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -484,6 +540,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -504,6 +561,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -525,6 +583,7 @@ mod tests {
             })),
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -555,7 +614,9 @@ mod tests {
                 server_id: "time_server".to_string(),
                 description: Some("Get current time".to_string()),
                 parameters: serde_json::json!({}),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -1644,7 +1705,9 @@ mod tests {
                         "sort": {"type": "string"}
                     }
                 }),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -1673,7 +1736,9 @@ mod tests {
                 server_id: "user_server".to_string(),
                 description: Some("Create a user".to_string()),
                 parameters: serde_json::json!({}),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -1711,7 +1776,9 @@ mod tests {
                 server_id: "test_server".to_string(),
                 description: Some("A tool that fails".to_string()),
                 parameters: serde_json::json!({}),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -1731,6 +1798,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],  // No tools available
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -1774,7 +1842,9 @@ mod tests {
                 server_id: "data_server".to_string(),
                 description: Some("Get numbers".to_string()),
                 parameters: serde_json::json!({}),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -1800,7 +1870,9 @@ mod tests {
                 server_id: "calc_server".to_string(),
                 description: Some("Calculate".to_string()),
                 parameters: serde_json::json!({}),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -1827,7 +1899,9 @@ mod tests {
                 server_id: "item_server".to_string(),
                 description: Some("Get item by index".to_string()),
                 parameters: serde_json::json!({}),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -1855,7 +1929,9 @@ mod tests {
                 server_id: "test_server".to_string(),
                 description: Some("Conditional tool".to_string()),
                 parameters: serde_json::json!({}),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -1879,7 +1955,9 @@ mod tests {
                 server_id: "search_server".to_string(),
                 description: Some("Search".to_string()),
                 parameters: serde_json::json!({}),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);
@@ -1913,7 +1991,9 @@ mod tests {
                 server_id: "test_server".to_string(),
                 description: Some("Simple tool".to_string()),
                 parameters: serde_json::json!({}),
+                python_module: None,
             }],
+            tool_modules: vec![],
         };
         
         let result = execute(&request);

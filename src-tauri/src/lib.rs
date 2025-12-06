@@ -76,9 +76,9 @@ struct CancellationState {
 /// Maximum number of tool call iterations before stopping (safety limit)
 const MAX_TOOL_ITERATIONS: usize = 20;
 
-/// Check if a tool call is for a built-in tool (code_execution or tool_search)
+/// Check if a tool call is for a built-in tool (python_execution or tool_search)
 fn is_builtin_tool(tool_name: &str) -> bool {
-    tool_name == "code_execution" || tool_name == "tool_search"
+    tool_name == "python_execution" || tool_name == "tool_search"
 }
 
 /// Execute the tool_search built-in tool
@@ -93,25 +93,60 @@ async fn execute_tool_search(
     // Materialize discovered tools
     executor.materialize_results(&output.tools).await;
     
-    // Format result as JSON for the model
-    let result_json = serde_json::to_string_pretty(&output.tools)
-        .unwrap_or_else(|_| "[]".to_string());
+    // Format result for the model with clear instructions to CALL the tools
+    let mut result = String::new();
+    result.push_str("# Discovered Tools - CALL THESE NOW\n\n");
+    result.push_str("**IMPORTANT: Do not explain these tools. Call them immediately using <tool_call>.**\n\n");
     
-    Ok((result_json, output.tools))
+    // Show each tool with its call format
+    for tool in &output.tools {
+        result.push_str(&format!("## {}\n", tool.name));
+        if let Some(ref desc) = tool.description {
+            result.push_str(&format!("{}\n", desc));
+        }
+        
+        // Generate example tool_call
+        let mut example_args = serde_json::Map::new();
+        if let Some(props) = tool.parameters.get("properties").and_then(|p| p.as_object()) {
+            let required: Vec<&str> = tool.parameters.get("required")
+                .and_then(|r| r.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            
+            for (name, schema) in props {
+                let example_value = match schema.get("type").and_then(|t| t.as_str()) {
+                    Some("string") => serde_json::Value::String("...".to_string()),
+                    Some("integer") => serde_json::Value::Number(1.into()),
+                    Some("boolean") => serde_json::Value::Bool(true),
+                    Some("array") => serde_json::Value::Array(vec![]),
+                    _ => serde_json::Value::String("...".to_string()),
+                };
+                if required.contains(&name.as_str()) {
+                    example_args.insert(name.clone(), example_value);
+                }
+            }
+        }
+        
+        let args_json = serde_json::to_string(&example_args).unwrap_or_else(|_| "{}".to_string());
+        result.push_str(&format!("Call: <tool_call>{{\"name\": \"{}\", \"arguments\": {}}}</tool_call>\n\n", 
+            tool.name, args_json));
+    }
+    
+    Ok((result, output.tools))
 }
 
-/// Execute the code_execution built-in tool
-async fn execute_code_execution(
+/// Execute the python_execution built-in tool
+async fn execute_python_execution(
     input: CodeExecutionInput,
     exec_id: String,
     tool_registry: SharedToolRegistry,
     python_tx: &mpsc::Sender<PythonMsg>,
 ) -> Result<CodeExecutionOutput, String> {
     // Log the code about to be executed
-    println!("[code_execution] exec_id={}", exec_id);
-    println!("[code_execution] Code to execute ({} lines):", input.code.len());
+    println!("[python_execution] exec_id={}", exec_id);
+    println!("[python_execution] Code to execute ({} lines):", input.code.len());
     for (i, line) in input.code.iter().enumerate() {
-        println!("[code_execution]   {}: {}", i + 1, line);
+        println!("[python_execution]   {}: {}", i + 1, line);
     }
     // Flush stdout to ensure logs appear immediately
     use std::io::Write;
@@ -123,7 +158,7 @@ async fn execute_code_execution(
         registry.get_visible_tools()
     };
     
-    println!("[code_execution] Available tools: {}", available_tools.len());
+    println!("[python_execution] Available tools: {}", available_tools.len());
     let _ = std::io::stdout().flush();
     
     // Create execution context
@@ -133,7 +168,7 @@ async fn execute_code_execution(
         input.context.clone(),
     );
     
-    println!("[code_execution] Sending to Python actor...");
+    println!("[python_execution] Sending to Python actor...");
     let _ = std::io::stdout().flush();
     
     // Send to Python actor for execution
@@ -144,12 +179,12 @@ async fn execute_code_execution(
         respond_to,
     }).await.map_err(|e| format!("Failed to send to Python actor: {}", e))?;
     
-    println!("[code_execution] Waiting for Python actor response...");
+    println!("[python_execution] Waiting for Python actor response...");
     let _ = std::io::stdout().flush();
     
     let result = rx.await.map_err(|_| "Python actor died".to_string())?;
     
-    println!("[code_execution] Python execution complete: success={}", result.as_ref().map(|r| r.success).unwrap_or(false));
+    println!("[python_execution] Python execution complete: success={}", result.as_ref().map(|r| r.success).unwrap_or(false));
     let _ = std::io::stdout().flush();
     
     result
@@ -340,6 +375,18 @@ async fn run_agentic_loop(
         // Check for tool calls in the response using model-appropriate parser
         let tool_calls = parse_tool_calls_for_model(&assistant_response, model_family, tool_format);
         
+        // NOTE: Auto-Python execution is currently DISABLED
+        // The detect_python_code() function exists but we don't auto-execute detected Python
+        // because:
+        // 1. Models often write example/documentation code that shouldn't be executed
+        // 2. Tool modules (like sql_mcp) aren't fully wired into the sandbox yet
+        // 3. It's safer to require explicit <tool_call> syntax for now
+        //
+        // To enable in the future:
+        // 1. Wire up ToolModuleInfo from materialized tools to the sandbox
+        // 2. Add heuristics to distinguish "execute this" from "here's an example"
+        // 3. Consider a model-specific flag for Python-native tool calling
+        
         if tool_calls.is_empty() {
             println!("[AgenticLoop] No tool calls detected, loop complete");
             final_response = assistant_response.clone();
@@ -379,7 +426,7 @@ async fn run_agentic_loop(
         
         for (idx, call) in tool_calls.iter().enumerate() {
             // Resolve server ID if unknown
-            // Built-in tools (code_execution, tool_search) use "builtin" as their server
+            // Built-in tools (python_execution, tool_search) use "builtin" as their server
             let resolved_server = if is_builtin_tool(&call.tool) {
                 println!("[AgenticLoop] Built-in tool '{}' detected, using 'builtin' server", call.tool);
                 "builtin".to_string()
@@ -546,21 +593,21 @@ async fn run_agentic_loop(
                             }
                         }
                     }
-                    "code_execution" => {
-                        println!("[AgenticLoop] ⏳ Executing built-in: code_execution");
+                    "python_execution" => {
+                        println!("[AgenticLoop] ⏳ Executing built-in: python_execution");
                         let _ = std::io::stdout().flush();
                         let exec_start = std::time::Instant::now();
                         
-                        // Parse code_execution input
+                        // Parse python_execution input
                         let input: CodeExecutionInput = serde_json::from_value(resolved_call.arguments.clone())
-                            .map_err(|e| format!("Invalid code_execution arguments: {}", e))
+                            .map_err(|e| format!("Invalid python_execution arguments: {}", e))
                             .unwrap_or(CodeExecutionInput { code: vec![], context: None });
                         
                         let exec_id = format!("{}-{}-{}", chat_id, iteration, idx);
-                        match execute_code_execution(input, exec_id, tool_registry.clone(), &python_tx).await {
+                        match execute_python_execution(input, exec_id, tool_registry.clone(), &python_tx).await {
                             Ok(output) => {
                                 let elapsed = exec_start.elapsed();
-                                println!("[AgenticLoop] {} code_execution completed in {:.2}s: {} chars stdout, {} chars stderr", 
+                                println!("[AgenticLoop] {} python_execution completed in {:.2}s: {} chars stdout, {} chars stderr", 
                                     if output.success { "✅" } else { "⚠️" },
                                     elapsed.as_secs_f64(),
                                     output.stdout.len(), 
@@ -579,7 +626,7 @@ async fn run_agentic_loop(
                             }
                             Err(e) => {
                                 let elapsed = exec_start.elapsed();
-                                println!("[AgenticLoop] ❌ code_execution failed in {:.2}s: {}", elapsed.as_secs_f64(), e);
+                                println!("[AgenticLoop] ❌ python_execution failed in {:.2}s: {}", elapsed.as_secs_f64(), e);
                                 let _ = std::io::stdout().flush();
                                 (e, true)
                             }
@@ -734,7 +781,7 @@ fn build_system_prompt(
     base_prompt: &str, 
     tool_descriptions: &[(String, Vec<McpTool>)],
     server_configs: &[McpServerConfig],
-    code_execution_enabled: bool,
+    python_execution_enabled: bool,
 ) -> String {
     let mut prompt = base_prompt.to_string();
     
@@ -761,21 +808,21 @@ fn build_system_prompt(
     let has_active_tools = !active_servers.is_empty();
     let has_deferred_tools = !deferred_servers.is_empty();
     let has_mcp_tools = has_active_tools || has_deferred_tools;
-    let has_any_tools = code_execution_enabled || has_mcp_tools;
+    let has_any_tools = python_execution_enabled || has_mcp_tools;
     
     let _active_tool_count: usize = active_servers.iter().map(|(_, t)| t.len()).sum();
     let _deferred_tool_count: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
     
-    // ===== CRITICAL: Attached Documents (only if code_execution is enabled) =====
-    if code_execution_enabled {
+    // ===== CRITICAL: Attached Documents (only if python_execution is enabled) =====
+    if python_execution_enabled {
         prompt.push_str("\n\n## CRITICAL: How Attached Documents Work\n\n");
         prompt.push_str("When the user attaches files/documents to the chat:\n");
         prompt.push_str("- The relevant text content is **already extracted** and shown in the user's message as \"Context from attached documents\"\n");
         prompt.push_str("- This extracted text IS the file content - you already have it in the conversation\n");
         prompt.push_str("- ❌ **You CANNOT access, read, or open the original files** - no file paths, no file I/O\n");
-        prompt.push_str("- ❌ **code_execution CANNOT read files** - it has no filesystem access whatsoever\n");
+        prompt.push_str("- ❌ **python_execution CANNOT read files** - it has no filesystem access whatsoever\n");
         prompt.push_str("- ✅ **To work with document content**: Use the text already provided in \"Context from attached documents\"\n");
-        prompt.push_str("- ✅ **To analyze/transform that text**: Copy relevant portions into code_execution as string literals\n\n");
+        prompt.push_str("- ✅ **To analyze/transform that text**: Copy relevant portions into python_execution as string literals\n\n");
         prompt.push_str("**Example - WRONG approach:**\n");
         prompt.push_str("```python\n# This will FAIL - no file access!\nwith open('document.pdf', 'r') as f:\n    content = f.read()\n```\n\n");
         prompt.push_str("**Example - CORRECT approach:**\n");
@@ -788,8 +835,8 @@ fn build_system_prompt(
         prompt.push_str("**IMPORTANT: Before using any tool, first ask yourself: Can I answer this directly from my knowledge?**\n\n");
         prompt.push_str("Most questions can be answered without tools. Only use tools when they provide a clear advantage.\n\n");
         
-        if code_execution_enabled {
-            prompt.push_str("### 1. `code_execution` (Built-in Python Sandbox)\n");
+        if python_execution_enabled {
+            prompt.push_str("### 1. `python_execution` (Built-in Python Sandbox)\n");
             prompt.push_str("**WHEN TO USE** (only when it provides clear advantage over your knowledge):\n");
             prompt.push_str("- Complex arithmetic that's error-prone to compute mentally (e.g., compound interest over 30 years)\n");
             prompt.push_str("- Processing/transforming data the user has provided in the conversation\n");
@@ -807,14 +854,14 @@ fn build_system_prompt(
         }
         
         if has_mcp_tools {
-            let section_num = if code_execution_enabled { "2" } else { "1" };
+            let section_num = if python_execution_enabled { "2" } else { "1" };
             prompt.push_str(&format!("### {}. MCP Tools (External Capabilities)\n", section_num));
             prompt.push_str("**USE FOR:** Anything requiring external access - databases, APIs, files, web, etc.\n");
             prompt.push_str("**HOW TO USE:**\n");
             if has_deferred_tools {
                 prompt.push_str("1. First call `tool_search` to discover available tools for your task\n");
-                if code_execution_enabled {
-                    prompt.push_str("2. Then call the discovered tools directly OR via `code_execution` for complex workflows\n\n");
+                if python_execution_enabled {
+                    prompt.push_str("2. Then call the discovered tools directly OR via `python_execution` for complex workflows\n\n");
                 } else {
                     prompt.push_str("2. Then call the discovered tools directly\n\n");
                 }
@@ -822,25 +869,34 @@ fn build_system_prompt(
                 prompt.push_str("- Call active MCP tools directly (listed below)\n\n");
             }
             
-            prompt.push_str("### Decision Tree:\n");
-            prompt.push_str("```\n");
-            prompt.push_str("Can I answer this reliably from my knowledge?\n");
-            prompt.push_str("├── YES → Just answer directly (no tools needed)\n");
-            prompt.push_str("└── NO → What do I need?\n");
-            prompt.push_str("    ├── External data (database, API, web) → tool_search first, then MCP tools\n");
-            if code_execution_enabled {
-                prompt.push_str("    └── Complex computation on data in conversation → code_execution\n");
-            }
-            prompt.push_str("```\n\n");
-            
-            prompt.push_str("### COMMON MISTAKES TO AVOID:\n");
-            prompt.push_str("- ❌ Using tools for simple questions you can answer directly\n");
-            if code_execution_enabled {
-                prompt.push_str("- ❌ Using `code_execution` alone for tasks needing external data (it will fail)\n");
-            }
-            prompt.push_str("- ❌ Calling MCP tools without discovering them via `tool_search` first\n");
-            prompt.push_str("- ✅ Default to answering from knowledge unless tools provide clear value\n\n");
+        prompt.push_str("### Decision Tree:\n");
+        prompt.push_str("```\n");
+        prompt.push_str("Can I answer this reliably from my knowledge?\n");
+        prompt.push_str("├── YES → Just answer directly (no tools needed)\n");
+        prompt.push_str("└── NO → Use tool_search to find tools that can help!\n");
+        prompt.push_str("    ├── Need external data → tool_search, then call discovered tools\n");
+        if python_execution_enabled {
+            prompt.push_str("    ├── Need computation → python_execution\n");
         }
+        prompt.push_str("    └── Not sure what's available → tool_search with task description\n");
+        prompt.push_str("```\n\n");
+            
+        prompt.push_str("### WHEN YOU CAN'T DO SOMETHING:\n");
+        prompt.push_str("If you can't complete a task with your knowledge alone, USE `tool_search` to find a tool that can help!\n");
+        prompt.push_str("- \"I don't have access to your database\" → tool_search for database/SQL tools\n");
+        prompt.push_str("- \"I can't check current weather\" → tool_search for weather tools\n");
+        prompt.push_str("- \"I can't access that file\" → tool_search for file access tools\n");
+        prompt.push_str("- \"I don't know what tools are available\" → tool_search with your task description\n\n");
+        
+        prompt.push_str("### COMMON MISTAKES TO AVOID:\n");
+        prompt.push_str("- ❌ Saying \"I can't do that\" without trying tool_search first\n");
+        prompt.push_str("- ❌ Using tools for simple questions you can answer directly\n");
+        if python_execution_enabled {
+            prompt.push_str("- ❌ Using `python_execution` alone for tasks needing external data (it will fail)\n");
+        }
+        prompt.push_str("- ❌ Calling MCP tools without discovering them via `tool_search` first\n");
+        prompt.push_str("- ✅ When stuck, always try tool_search before giving up\n\n");
+    }
         
         // Tool calling format instructions
         prompt.push_str("## Tool Calling Format\n\n");
@@ -852,17 +908,17 @@ fn build_system_prompt(
         prompt.push_str("- Each argument value must be a SIMPLE value (string, number, boolean), never nested objects\n\n");
     }
     
-    // Code execution details (only if enabled)
-    if code_execution_enabled {
-        prompt.push_str("## code_execution Tool\n\n");
+    // Python execution details (only if enabled)
+    if python_execution_enabled {
+        prompt.push_str("## python_execution Tool\n\n");
         prompt.push_str("Sandboxed Python for complex calculations. **Only use when it provides clear advantage over answering directly.**\n");
         prompt.push_str("You must `import` modules before using them.\n\n");
         prompt.push_str("**CRITICAL: Do the calculation, don't explain it.**\n");
-        prompt.push_str("If a calculation can be done with the available Python libraries, USE `code_execution` to compute it and return the result.\n");
+        prompt.push_str("If a calculation can be done with the available Python libraries, USE `python_execution` to compute it and return the result.\n");
         prompt.push_str("❌ WRONG: \"Here's how you could calculate this in Python...\"\n");
-        prompt.push_str("✅ RIGHT: Call `code_execution`, compute the answer, and tell the user the result.\n\n");
+        prompt.push_str("✅ RIGHT: Call `python_execution`, compute the answer, and tell the user the result.\n\n");
         prompt.push_str("**Good use case** (complex calculation):\n");
-        prompt.push_str("<tool_call>{\"name\": \"code_execution\", \"arguments\": {\"code\": [\"import math\", \"# Compound interest: $10000 at 7% for 30 years\", \"result = 10000 * (1 + 0.07) ** 30\", \"print(f'Final amount: ${result:,.2f}')\"]}}");
+        prompt.push_str("<tool_call>{\"name\": \"python_execution\", \"arguments\": {\"code\": [\"import math\", \"# Compound interest: $10000 at 7% for 30 years\", \"result = 10000 * (1 + 0.07) ** 30\", \"print(f'Final amount: ${result:,.2f}')\"]}}");
         prompt.push_str("</tool_call>\n\n");
         prompt.push_str("**Bad use case** (just answer directly instead):\n");
         prompt.push_str("- \"What's 15% of 200?\" → Just say \"30\" - no code needed\n");
@@ -871,10 +927,19 @@ fn build_system_prompt(
     
     // Tool discovery section - critical when there are deferred tools
     if has_deferred_tools {
-        prompt.push_str("## Tool Discovery (REQUIRED for External Access)\n\n");
-        prompt.push_str("**Before using any MCP tool, you MUST discover it first:**\n\n");
+        prompt.push_str("## Tool Discovery and Execution\n\n");
+        prompt.push_str("**Step 1: Discover tools with tool_search:**\n");
         prompt.push_str("<tool_call>{\"name\": \"tool_search\", \"arguments\": {\"queries\": [\"describe what you need\"]}}");
         prompt.push_str("</tool_call>\n\n");
+        
+        prompt.push_str("**Step 2: IMMEDIATELY call the discovered tools:**\n");
+        prompt.push_str("After tool_search returns, DO NOT explain the tools - CALL them directly!\n");
+        prompt.push_str("Example: If tool_search finds `list_dataset_ids`, immediately call it:\n");
+        prompt.push_str("<tool_call>{\"name\": \"list_dataset_ids\", \"arguments\": {}}");
+        prompt.push_str("</tool_call>\n\n");
+        
+        prompt.push_str("**WRONG:** \"The available tools are X, Y, Z. Here's how to use them...\"\n");
+        prompt.push_str("**RIGHT:** <tool_call>{\"name\": \"discovered_tool\", \"arguments\": {...}}</tool_call>\n\n");
         
         // List what latent capabilities are available (high-level summary)
         prompt.push_str("**Available Tool Servers:**\n");
@@ -884,17 +949,12 @@ fn build_system_prompt(
                 server_id, tools.len(), tool_names.join(", ")));
         }
         prompt.push_str("\n");
-        
-        prompt.push_str("**Example queries for tool_search:**\n");
-        prompt.push_str("- `{\"queries\": [\"execute SQL\", \"query database\"]}` - find data query tools\n");
-        prompt.push_str("- `{\"queries\": [\"weather\", \"forecast\"]}` - find weather-related tools\n");
-        prompt.push_str("- `{\"queries\": [\"list tables\", \"get schema\"]}` - find data exploration tools\n\n");
     }
     
-    // Tool orchestration with code_execution (only if both MCP tools and code_execution are enabled)
-    if has_mcp_tools && code_execution_enabled {
+    // Tool orchestration with python_execution (only if both MCP tools and python_execution are enabled)
+    if has_mcp_tools && python_execution_enabled {
         prompt.push_str("## Calling Discovered Tools from Code (Advanced)\n\n");
-        prompt.push_str("After discovering tools via `tool_search`, you can orchestrate them in `code_execution`:\n");
+        prompt.push_str("After discovering tools via `tool_search`, you can orchestrate them in `python_execution`:\n");
         prompt.push_str("```python\n");
         prompt.push_str("# Discovered MCP tools are available as async functions:\n");
         prompt.push_str("result = await sql_query(query=\"SELECT * FROM users LIMIT 5\")\n");
@@ -902,7 +962,7 @@ fn build_system_prompt(
         prompt.push_str("for row in result[\"rows\"]:\n");
         prompt.push_str("    print(row)\n");
         prompt.push_str("```\n\n");
-        prompt.push_str("**This is the ONLY way to access external data from code_execution** - by calling discovered MCP tools.\n\n");
+        prompt.push_str("**This is the ONLY way to access external data from python_execution** - by calling discovered MCP tools.\n\n");
     }
     
     // List ACTIVE MCP tools in full detail (these can be called immediately)
@@ -1155,7 +1215,7 @@ async fn chat(
     let settings = settings_state.settings.read().await;
     let configured_system_prompt = settings.system_prompt.clone();
     let server_configs = settings.mcp_servers.clone();
-    let code_execution_enabled = settings.code_execution_enabled;
+    let python_execution_enabled = settings.python_execution_enabled;
     drop(settings);
     
     // Get tool descriptions from MCP Host Actor
@@ -1172,18 +1232,18 @@ async fn chat(
     let base_system_prompt = configured_system_prompt;
     
     // Build the tools list:
-    // 1. Include code_execution if enabled in settings
+    // 1. Include python_execution if enabled in settings
     // 2. Include tool_search when MCP servers with tools are available
     // 3. Include all MCP tools
     let mut openai_tools: Vec<OpenAITool> = Vec::new();
     
-    // Add code_execution built-in tool if enabled
-    if code_execution_enabled {
-        let code_exec_tool = tool_registry::code_execution_tool();
-        openai_tools.push(OpenAITool::from_tool_schema(&code_exec_tool));
-        println!("[Chat] Added code_execution built-in tool (enabled in settings)");
+    // Add python_execution built-in tool if enabled
+    if python_execution_enabled {
+        let python_exec_tool = tool_registry::python_execution_tool();
+        openai_tools.push(OpenAITool::from_tool_schema(&python_exec_tool));
+        println!("[Chat] Added python_execution built-in tool (enabled in settings)");
     } else {
-        println!("[Chat] code_execution disabled in settings");
+        println!("[Chat] python_execution disabled in settings");
     }
     
     // Add tool_search when MCP tools are available (for discovery)
@@ -1194,7 +1254,7 @@ async fn chat(
     }
     
     // Add MCP tools to the OpenAI tools list and register them in the tool registry
-    // so they're available for code_execution and tool_search
+    // so they're available for python_execution and tool_search
     {
         let mut registry = tool_registry_state.registry.write().await;
         
@@ -1202,17 +1262,19 @@ async fn chat(
         registry.clear_materialized();
         
         for (server_id, tools) in &tool_descriptions {
-            // Get the defer_tools setting from server config (default to false if not found)
-            let defer = server_configs.iter()
-                .find(|c| c.id == *server_id)
-                .map(|c| c.defer_tools)
-                .unwrap_or(false);
+            // Get the server config to extract defer_tools and python_name
+            let config = server_configs.iter().find(|c| c.id == *server_id);
+            let defer = config.map(|c| c.defer_tools).unwrap_or(false);
+            let python_name = config
+                .map(|c| c.get_python_name())
+                .unwrap_or_else(|| settings::to_python_identifier(server_id));
             
             let mode = if defer { "DEFERRED" } else { "ACTIVE" };
-            println!("[Chat] Registering {} tools from {} [{}]", tools.len(), server_id, mode);
+            println!("[Chat] Registering {} tools from {} [{}] (python_module={})", 
+                tools.len(), server_id, mode, python_name);
             
-            // Register MCP tools in the registry
-            registry.register_mcp_tools(server_id, tools, defer);
+            // Register MCP tools in the registry with python module name
+            registry.register_mcp_tools(server_id, &python_name, tools, defer);
             
             // Only add to OpenAI tools list for direct model access if NOT deferred
             // Deferred tools are discovered via tool_search
@@ -1247,7 +1309,7 @@ async fn chat(
     // Build the full system prompt with tool descriptions
     // Note: We still include text-based tool instructions as a fallback for models
     // that don't support native tool calling
-    let system_prompt = build_system_prompt(&base_system_prompt, &tool_descriptions, &server_configs, code_execution_enabled);
+    let system_prompt = build_system_prompt(&base_system_prompt, &tool_descriptions, &server_configs, python_execution_enabled);
     
     // === LOGGING: System prompt construction ===
     let auto_approve_servers: Vec<&str> = server_configs.iter()
@@ -1584,14 +1646,14 @@ async fn update_system_prompt(
 }
 
 #[tauri::command]
-async fn update_code_execution_enabled(
+async fn update_python_execution_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
-    guard.code_execution_enabled = enabled;
+    guard.python_execution_enabled = enabled;
     settings::save_settings(&guard).await?;
-    println!("[Settings] code_execution_enabled updated to: {}", enabled);
+    println!("[Settings] python_execution_enabled updated to: {}", enabled);
     Ok(())
 }
 
@@ -1765,7 +1827,7 @@ async fn get_system_prompt_preview(
     let settings = settings_state.settings.read().await;
     let base_prompt = settings.system_prompt.clone();
     let server_configs = settings.mcp_servers.clone();
-    let code_execution_enabled = settings.code_execution_enabled;
+    let python_execution_enabled = settings.python_execution_enabled;
     drop(settings);
     
     // Get current tool descriptions from connected servers
@@ -1777,7 +1839,7 @@ async fn get_system_prompt_preview(
     let tool_descriptions = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
     
     // Build the full system prompt
-    let preview = build_system_prompt(&base_prompt, &tool_descriptions, &server_configs, code_execution_enabled);
+    let preview = build_system_prompt(&base_prompt, &tool_descriptions, &server_configs, python_execution_enabled);
     
     Ok(preview)
 }
@@ -2022,7 +2084,7 @@ pub fn run() {
             update_mcp_server,
             remove_mcp_server,
             update_system_prompt,
-            update_code_execution_enabled,
+            update_python_execution_enabled,
             // MCP commands
             sync_mcp_servers,
             connect_mcp_server,

@@ -1,6 +1,6 @@
-//! Code Execution Implementation
+//! Python Execution Implementation
 //!
-//! Python/WASP code execution in a WASM sandbox.
+//! Python code execution in a WASM sandbox.
 //! This tool allows models to run Python code that can call other registered tools.
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::protocol::{ToolSchema, ExtendedToolCall, ToolCallCaller, ToolCallKind};
 
-/// Input for the code_execution built-in tool
+/// Input for the python_execution built-in tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeExecutionInput {
     /// Lines of Python code to execute
@@ -18,7 +18,7 @@ pub struct CodeExecutionInput {
     pub context: Option<Value>,
 }
 
-/// Output from code_execution
+/// Output from python_execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeExecutionOutput {
     /// Standard output from the code execution
@@ -69,13 +69,13 @@ impl InnerToolCall {
             tool: self.tool_name.clone(),
             arguments: self.arguments.clone(),
             raw: format!(
-                "{}({})  # from code_execution",
+                "{}({})  # from python_execution",
                 self.tool_name,
                 serde_json::to_string(&self.arguments).unwrap_or_default()
             ),
             kind: ToolCallKind::Normal,
             caller: Some(ToolCallCaller {
-                caller_type: "code_execution_20250825".to_string(),
+                caller_type: "python_execution_20251206".to_string(),
                 tool_id: self.parent_exec_id.clone(),
             }),
         }
@@ -89,18 +89,18 @@ impl InnerToolCall {
 pub fn generate_tool_stubs(tools: &[ToolSchema]) -> String {
     let mut stubs = String::new();
     
-    stubs.push_str("# Auto-generated tool stubs for code_execution\n");
+    stubs.push_str("# Auto-generated tool stubs for python_execution\n");
     stubs.push_str("# These functions call back to the Rust runtime via __host_call_tool__\n\n");
     stubs.push_str("import json\n\n");
     
     for tool in tools {
         // Skip built-in tools
-        if tool.is_code_execution() || tool.is_tool_search() {
+        if tool.is_python_execution() || tool.is_tool_search() {
             continue;
         }
         
-        // Check if this tool can be called from code_execution
-        if !tool.can_be_called_by(Some("code_execution_20250825")) {
+        // Check if this tool can be called from python_execution
+        if !tool.can_be_called_by(Some("python_execution_20251206")) {
             continue;
         }
         
@@ -196,7 +196,7 @@ pub struct CodeExecutionExecutor {
 }
 
 /// Modules allowed in the Python sandbox (matches python_sandbox::ALLOWED_MODULES)
-const ALLOWED_MODULES: &[&str] = &[
+pub const ALLOWED_MODULES: &[&str] = &[
     "math", "json", "random", "re", "datetime", "collections",
     "itertools", "functools", "operator", "string", "textwrap",
     "copy", "types", "typing", "abc", "numbers", "decimal",
@@ -204,13 +204,57 @@ const ALLOWED_MODULES: &[&str] = &[
     "html",
 ];
 
+/// Context for dynamic import validation
+/// 
+/// Used when tool_search has materialized tool modules that become
+/// importable in the sandbox.
+#[derive(Debug, Clone, Default)]
+pub struct DynamicImportContext {
+    /// Tool modules that are available for import (python_name -> server_id)
+    pub tool_modules: std::collections::HashMap<String, String>,
+}
+
+impl DynamicImportContext {
+    /// Create a new empty context
+    pub fn new() -> Self {
+        Self {
+            tool_modules: std::collections::HashMap::new(),
+        }
+    }
+    
+    /// Add a tool module
+    pub fn add_tool_module(&mut self, python_name: String, server_id: String) {
+        self.tool_modules.insert(python_name, server_id);
+    }
+    
+    /// Check if a module name is a known tool module
+    pub fn is_tool_module(&self, module_name: &str) -> bool {
+        self.tool_modules.contains_key(module_name)
+    }
+    
+    /// Get all tool module names
+    pub fn get_tool_modules(&self) -> Vec<&String> {
+        self.tool_modules.keys().collect()
+    }
+}
+
 impl CodeExecutionExecutor {
     pub fn new() -> Self {
         Self { _placeholder: () }
     }
     
-    /// Validate code input before execution
+    /// Validate code input before execution (basic validation without tool modules)
     pub fn validate_input(input: &CodeExecutionInput) -> Result<(), String> {
+        Self::validate_input_with_context(input, None)
+    }
+    
+    /// Validate code input with dynamic import context
+    /// 
+    /// This allows tool modules discovered via tool_search to be imported.
+    pub fn validate_input_with_context(
+        input: &CodeExecutionInput,
+        context: Option<&DynamicImportContext>,
+    ) -> Result<(), String> {
         if input.code.is_empty() {
             return Err("Code cannot be empty".to_string());
         }
@@ -237,15 +281,15 @@ impl CodeExecutionExecutor {
         }
         
         // Check for imports of disallowed modules and provide helpful error message
-        if let Some(err) = Self::check_imports(&code_str) {
+        if let Some(err) = Self::check_imports_with_context(&code_str, context) {
             return Err(err);
         }
         
         Ok(())
     }
     
-    /// Check imports and return helpful error if disallowed module is used
-    fn check_imports(code: &str) -> Option<String> {
+    /// Check imports with dynamic import context
+    fn check_imports_with_context(code: &str, context: Option<&DynamicImportContext>) -> Option<String> {
         use regex::Regex;
         
         // Match various import patterns:
@@ -263,7 +307,7 @@ impl CodeExecutionExecutor {
             if let Some(modules) = cap.get(1) {
                 for module in modules.as_str().split(',') {
                     let module = module.split_whitespace().next().unwrap_or("").trim();
-                    if !module.is_empty() && !ALLOWED_MODULES.contains(&module) && module != "builtins" {
+                    if !module.is_empty() && !Self::is_module_allowed(module, context) && module != "builtins" {
                         disallowed.push(module.to_string());
                     }
                 }
@@ -271,7 +315,7 @@ impl CodeExecutionExecutor {
             // Check "from x import" style
             if let Some(module) = cap.get(2) {
                 let module = module.as_str().trim();
-                if !ALLOWED_MODULES.contains(&module) && module != "builtins" {
+                if !Self::is_module_allowed(module, context) && module != "builtins" {
                     disallowed.push(module.to_string());
                 }
             }
@@ -281,7 +325,16 @@ impl CodeExecutionExecutor {
             disallowed.sort();
             disallowed.dedup();
             
-            let allowed_list = ALLOWED_MODULES.join(", ");
+            let mut allowed_list = ALLOWED_MODULES.join(", ");
+            
+            // Include tool modules in the allowed list if any
+            if let Some(ctx) = context {
+                if !ctx.tool_modules.is_empty() {
+                    let tool_modules: Vec<&String> = ctx.get_tool_modules();
+                    let tool_list: Vec<&str> = tool_modules.iter().map(|s| s.as_str()).collect();
+                    allowed_list = format!("{}, tool modules: {}", allowed_list, tool_list.join(", "));
+                }
+            }
             
             return Some(format!(
                 "Cannot import '{}' - not available in the sandbox. \
@@ -294,6 +347,23 @@ impl CodeExecutionExecutor {
         }
         
         None
+    }
+    
+    /// Check if a module is allowed (either built-in or a tool module)
+    fn is_module_allowed(module: &str, context: Option<&DynamicImportContext>) -> bool {
+        // Check built-in modules
+        if ALLOWED_MODULES.contains(&module) {
+            return true;
+        }
+        
+        // Check tool modules from context
+        if let Some(ctx) = context {
+            if ctx.is_tool_module(module) {
+                return true;
+            }
+        }
+        
+        false
     }
     
     /// Create an execution context for a code execution request
@@ -419,7 +489,7 @@ mod tests {
                     "required": ["city"]
                 }),
                 tool_type: None,
-                allowed_callers: Some(vec!["code_execution_20250825".to_string()]),
+                allowed_callers: Some(vec!["python_execution_20251206".to_string()]),
                 defer_loading: false,
                 embedding: None,
             },
@@ -447,7 +517,7 @@ mod tests {
         assert_eq!(extended.server, "weather_server");
         assert_eq!(extended.tool, "get_weather");
         assert!(extended.caller.is_some());
-        assert_eq!(extended.caller.unwrap().caller_type, "code_execution_20250825");
+        assert_eq!(extended.caller.unwrap().caller_type, "python_execution_20251206");
     }
     
     // ============ Additional Input Validation Tests ============
@@ -695,6 +765,79 @@ mod tests {
         assert!(!default.success);
         assert_eq!(default.tool_calls_made, 0);
         assert_eq!(default.duration_ms, 0);
+    }
+    
+    // ============ Dynamic Import Context Tests ============
+    
+    #[test]
+    fn test_dynamic_import_context_creation() {
+        let mut ctx = DynamicImportContext::new();
+        ctx.add_tool_module("weather".to_string(), "mcp-weather".to_string());
+        ctx.add_tool_module("database".to_string(), "mcp-db".to_string());
+        
+        assert!(ctx.is_tool_module("weather"));
+        assert!(ctx.is_tool_module("database"));
+        assert!(!ctx.is_tool_module("unknown"));
+        assert_eq!(ctx.get_tool_modules().len(), 2);
+    }
+    
+    #[test]
+    fn test_validate_with_tool_modules() {
+        let mut ctx = DynamicImportContext::new();
+        ctx.add_tool_module("weather_api".to_string(), "mcp-weather".to_string());
+        
+        // Should allow import of tool module
+        let input = CodeExecutionInput {
+            code: vec!["from weather_api import get_forecast".to_string()],
+            context: None,
+        };
+        assert!(
+            CodeExecutionExecutor::validate_input_with_context(&input, Some(&ctx)).is_ok(),
+            "Tool module import should be allowed with context"
+        );
+        
+        // Should still block unknown modules
+        let input2 = CodeExecutionInput {
+            code: vec!["import unknown_module".to_string()],
+            context: None,
+        };
+        assert!(
+            CodeExecutionExecutor::validate_input_with_context(&input2, Some(&ctx)).is_err(),
+            "Unknown module should still be blocked"
+        );
+    }
+    
+    #[test]
+    fn test_tool_module_import_without_context() {
+        // Without context, tool modules are blocked
+        let input = CodeExecutionInput {
+            code: vec!["from weather_api import get_forecast".to_string()],
+            context: None,
+        };
+        assert!(
+            CodeExecutionExecutor::validate_input(&input).is_err(),
+            "Tool module should be blocked without context"
+        );
+    }
+    
+    #[test]
+    fn test_mixed_imports_with_context() {
+        let mut ctx = DynamicImportContext::new();
+        ctx.add_tool_module("my_tools".to_string(), "mcp-tools".to_string());
+        
+        // Should allow mixing standard modules and tool modules
+        let input = CodeExecutionInput {
+            code: vec![
+                "import math".to_string(),
+                "from my_tools import do_something".to_string(),
+                "from collections import Counter".to_string(),
+            ],
+            context: None,
+        };
+        assert!(
+            CodeExecutionExecutor::validate_input_with_context(&input, Some(&ctx)).is_ok(),
+            "Mixed standard and tool module imports should be allowed"
+        );
     }
 }
 

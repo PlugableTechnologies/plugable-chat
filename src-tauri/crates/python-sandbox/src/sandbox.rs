@@ -15,7 +15,7 @@ use rustpython_vm::function::FuncArgs;
 use std::cell::RefCell;
 use serde_json::Value;
 
-use crate::protocol::{PendingToolCall, ToolInfo, ToolCallResult};
+use crate::protocol::{PendingToolCall, ToolInfo, ToolCallResult, ToolModuleInfo};
 
 // Thread-local state for collecting tool calls during execution
 thread_local! {
@@ -24,6 +24,8 @@ thread_local! {
     static AVAILABLE_TOOLS: RefCell<Vec<ToolInfo>> = const { RefCell::new(Vec::new()) };
     static STDOUT_BUFFER: RefCell<String> = const { RefCell::new(String::new()) };
     static STDERR_BUFFER: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Tool modules that should be injected as importable Python modules
+    static TOOL_MODULES: RefCell<Vec<ToolModuleInfo>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Clear all thread-local state for a fresh execution
@@ -32,11 +34,84 @@ pub fn reset_execution_state() {
     TOOL_RESULTS.with(|tr| tr.borrow_mut().clear());
     STDOUT_BUFFER.with(|sb| sb.borrow_mut().clear());
     STDERR_BUFFER.with(|se| se.borrow_mut().clear());
+    // Note: We don't clear TOOL_MODULES here as they persist across executions
 }
 
 /// Set the available tools for this execution
 pub fn set_available_tools(tools: Vec<ToolInfo>) {
     AVAILABLE_TOOLS.with(|at| *at.borrow_mut() = tools);
+}
+
+/// Set the tool modules that should be injected as importable Python modules
+pub fn set_tool_modules(modules: Vec<ToolModuleInfo>) {
+    TOOL_MODULES.with(|tm| *tm.borrow_mut() = modules);
+}
+
+/// Get the current tool modules
+pub fn get_tool_modules() -> Vec<ToolModuleInfo> {
+    TOOL_MODULES.with(|tm| tm.borrow().clone())
+}
+
+/// Generate Python code that creates importable modules for all registered tool modules
+/// 
+/// This code creates module objects with wrapper functions that call the sandbox's
+/// `tool_call` function under the hood.
+pub fn generate_tool_module_code() -> String {
+    let modules = get_tool_modules();
+    if modules.is_empty() {
+        return String::new();
+    }
+    
+    let mut code = String::new();
+    code.push_str("\n# ============== Dynamic Tool Modules ==============\n");
+    code.push_str("# Auto-generated importable modules for MCP tools\n\n");
+    code.push_str("import types\n");
+    code.push_str("import sys\n\n");
+    
+    for module in &modules {
+        code.push_str(&format!("# Module: {} (server: {})\n", module.python_name, module.server_id));
+        code.push_str(&format!("_{}_module = types.ModuleType('{}')\n", module.python_name, module.python_name));
+        code.push_str(&format!("_{}_module.__doc__ = 'MCP tools from server: {}'\n\n", module.python_name, module.server_id));
+        
+        for func in &module.functions {
+            // Generate a wrapper function for each tool
+            let func_code = generate_tool_function(&module.python_name, &func.name, &func.description);
+            code.push_str(&func_code);
+        }
+        
+        // Register the module in sys.modules so it can be imported
+        code.push_str(&format!("sys.modules['{}'] = _{}_module\n\n", module.python_name, module.python_name));
+    }
+    
+    // Add the module names to the allowed modules set
+    code.push_str("# Add tool modules to allowed imports\n");
+    for module in &modules {
+        code.push_str(&format!("_sandbox_allowed_modules.add('{}')\n", module.python_name));
+    }
+    code.push_str("\n");
+    
+    code
+}
+
+/// Generate Python code for a single tool function wrapper
+fn generate_tool_function(module_name: &str, func_name: &str, description: &Option<String>) -> String {
+    let docstring = description.as_ref()
+        .map(|d| format!("\"\"\"{}\"\"\"", d))
+        .unwrap_or_else(|| "\"\"\"Call the {} tool\"\"\"".to_string());
+    
+    format!(
+        r#"def _{module}_{func}(**kwargs):
+    {docstring}
+    from _sandbox import tool_call
+    return tool_call("{func}", **kwargs)
+
+_{module}_module.{func} = _{module}_{func}
+
+"#,
+        module = module_name,
+        func = func_name,
+        docstring = docstring
+    )
 }
 
 /// Set the tool results from a previous round

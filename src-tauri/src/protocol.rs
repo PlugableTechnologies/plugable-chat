@@ -14,10 +14,10 @@ pub struct ToolSchema {
     pub description: Option<String>,
     #[serde(default)]
     pub parameters: serde_json::Value,
-    /// Tool type identifier (e.g., "code_execution_20250825", "tool_search_20251201")
+    /// Tool type identifier (e.g., "python_execution_20251206", "tool_search_20251201")
     #[serde(default)]
     pub tool_type: Option<String>,
-    /// Which tool types are allowed to call this tool (e.g., ["code_execution_20250825"])
+    /// Which tool types are allowed to call this tool (e.g., ["python_execution_20251206"])
     #[serde(default)]
     pub allowed_callers: Option<Vec<String>>,
     /// Whether this tool should be deferred (not shown initially, discovered via tool_search)
@@ -51,9 +51,9 @@ impl ToolSchema {
         }
     }
     
-    /// Check if this is the code_execution built-in tool
-    pub fn is_code_execution(&self) -> bool {
-        self.tool_type.as_deref() == Some("code_execution_20250825")
+    /// Check if this is the python_execution built-in tool
+    pub fn is_python_execution(&self) -> bool {
+        self.tool_type.as_deref() == Some("python_execution_20251206")
     }
     
     /// Check if this is the tool_search built-in tool
@@ -79,7 +79,7 @@ pub enum ReasoningStyle {
 pub struct PromptOptions {
     /// Whether any tools are available (MCP, internal, or code mode)
     pub tools_available: bool,
-    /// Whether code mode is enabled (code_execution and tool_search available)
+    /// Whether code mode is enabled (python_execution and tool_search available)
     pub code_mode_enabled: bool,
     /// Reasoning style preference
     pub reasoning_style: ReasoningStyle,
@@ -114,7 +114,7 @@ impl Default for ModelInput {
 pub enum ToolCallKind {
     #[default]
     Normal,
-    CodeExecution,
+    PythonExecution,
     ToolSearch,
 }
 
@@ -134,10 +134,10 @@ pub struct ExtendedToolCall {
     pub caller: Option<ToolCallCaller>,
 }
 
-/// Information about what invoked a tool call (for nested calls from code_execution)
+/// Information about what invoked a tool call (for nested calls from python_execution)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallCaller {
-    /// Type of the caller (e.g., "code_execution_20250825")
+    /// Type of the caller (e.g., "python_execution_20251206")
     pub caller_type: String,
     /// ID of the parent tool call
     pub tool_id: String,
@@ -146,8 +146,8 @@ pub struct ToolCallCaller {
 impl From<ParsedToolCall> for ExtendedToolCall {
     fn from(call: ParsedToolCall) -> Self {
         // Detect kind based on tool name
-        let kind = if call.tool == "code_execution" {
-            ToolCallKind::CodeExecution
+        let kind = if call.tool == "python_execution" {
+            ToolCallKind::PythonExecution
         } else if call.tool == "tool_search" {
             ToolCallKind::ToolSearch
         } else {
@@ -672,7 +672,7 @@ impl OpenAITool {
         }
     }
     
-    /// Create from a built-in ToolSchema (code_execution, tool_search)
+    /// Create from a built-in ToolSchema (python_execution, tool_search)
     /// Built-in tools don't need server_id prefix since they're handled internally
     pub fn from_tool_schema(tool: &ToolSchema) -> Self {
         Self {

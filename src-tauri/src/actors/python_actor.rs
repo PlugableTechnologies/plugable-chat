@@ -163,6 +163,7 @@ impl PythonActor {
             context: input.context.clone(),
             tool_results: HashMap::new(),
             available_tools,
+            tool_modules: vec![],  // TODO: Populate from materialized modules
         };
         
         let mut output = CodeExecutionOutput::default();
@@ -275,6 +276,7 @@ impl PythonActor {
                 server_id: "default".to_string(), // TODO: Get actual server ID
                 description: schema.description.clone(),
                 parameters: schema.parameters.clone(),
+                python_module: None,  // TODO: Get from registry
             })
             .collect()
     }

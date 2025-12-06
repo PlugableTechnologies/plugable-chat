@@ -3,6 +3,111 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::fs;
 
+// ============ Python Identifier Validation ============
+
+/// Python reserved keywords that cannot be used as identifiers
+const PYTHON_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await",
+    "break", "class", "continue", "def", "del", "elif", "else", "except",
+    "finally", "for", "from", "global", "if", "import", "in", "is",
+    "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+    "while", "with", "yield",
+];
+
+/// Validate that a string is a valid Python identifier (module name).
+/// 
+/// Rules:
+/// - Only lowercase letters, digits, and underscores
+/// - Cannot start with a digit
+/// - Cannot be a Python keyword
+/// - Cannot be empty
+pub fn validate_python_identifier(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Python identifier cannot be empty".to_string());
+    }
+    
+    // Check first character (must be letter or underscore)
+    let first_char = name.chars().next().unwrap();
+    if !first_char.is_ascii_lowercase() && first_char != '_' {
+        return Err(format!(
+            "Python identifier must start with a lowercase letter or underscore, got '{}'",
+            first_char
+        ));
+    }
+    
+    // Check all characters (must be lowercase letters, digits, or underscores)
+    for (i, c) in name.chars().enumerate() {
+        if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '_' {
+            return Err(format!(
+                "Python identifier can only contain lowercase letters, digits, and underscores. \
+                Invalid character '{}' at position {}",
+                c, i
+            ));
+        }
+    }
+    
+    // Check for Python keywords
+    if PYTHON_KEYWORDS.contains(&name) {
+        return Err(format!("'{}' is a Python reserved keyword", name));
+    }
+    
+    Ok(())
+}
+
+/// Convert an arbitrary string to a valid Python identifier (snake_case).
+/// 
+/// Transformations:
+/// - Convert to lowercase
+/// - Replace spaces, hyphens, and other separators with underscores
+/// - Remove invalid characters
+/// - Prepend underscore if starts with digit
+/// - Handle empty result
+pub fn to_python_identifier(name: &str) -> String {
+    let mut result = String::new();
+    let mut last_was_underscore = false;
+    
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            // Convert to lowercase
+            for lc in c.to_lowercase() {
+                result.push(lc);
+            }
+            last_was_underscore = false;
+        } else if c == ' ' || c == '-' || c == '_' || c == '.' {
+            // Replace separators with underscore (avoiding duplicates)
+            if !last_was_underscore && !result.is_empty() {
+                result.push('_');
+                last_was_underscore = true;
+            }
+        }
+        // Skip other characters
+    }
+    
+    // Remove trailing underscores
+    while result.ends_with('_') {
+        result.pop();
+    }
+    
+    // Handle empty result
+    if result.is_empty() {
+        return "module".to_string();
+    }
+    
+    // Prepend underscore if starts with digit
+    if result.chars().next().unwrap().is_ascii_digit() {
+        result = format!("_{}", result);
+    }
+    
+    // Handle Python keywords by appending underscore
+    if PYTHON_KEYWORDS.contains(&result.as_str()) {
+        result.push('_');
+    }
+    
+    result
+}
+
+// ============ Transport Types ============
+
 /// MCP Server transport type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -36,6 +141,11 @@ pub struct McpServerConfig {
     /// If false, tools are active (immediately visible to the model)
     #[serde(default = "default_defer_tools")]
     pub defer_tools: bool,
+    /// Python module name for this server's tools (must be valid Python identifier).
+    /// If not set, defaults to a sanitized version of the server id.
+    /// Used for Python imports: `from {python_name} import tool_function`
+    #[serde(default)]
+    pub python_name: Option<String>,
 }
 
 fn default_defer_tools() -> bool {
@@ -54,7 +164,22 @@ impl McpServerConfig {
             env: HashMap::new(),
             auto_approve_tools: false,
             defer_tools: true,
+            python_name: None,
         }
+    }
+    
+    /// Get the Python module name for this server.
+    /// Returns the configured python_name, or derives one from the server id.
+    pub fn get_python_name(&self) -> String {
+        self.python_name.clone().unwrap_or_else(|| to_python_identifier(&self.id))
+    }
+    
+    /// Validate and set the Python module name.
+    /// Returns an error if the name is not a valid Python identifier.
+    pub fn set_python_name(&mut self, name: &str) -> Result<(), String> {
+        validate_python_identifier(name)?;
+        self.python_name = Some(name.to_string());
+        Ok(())
     }
 }
 
@@ -65,9 +190,11 @@ pub struct AppSettings {
     pub system_prompt: String,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
-    /// Whether the code_execution built-in tool is enabled (disabled by default)
-    #[serde(default)]
-    pub code_execution_enabled: bool,
+    /// Whether the python_execution built-in tool is enabled (disabled by default).
+    /// When enabled, models can execute Python code in a sandboxed environment.
+    /// Renamed from code_execution_enabled - alias preserved for backwards compatibility.
+    #[serde(default, alias = "code_execution_enabled")]
+    pub python_execution_enabled: bool,
 }
 
 fn default_system_prompt() -> String {
@@ -105,6 +232,7 @@ fn default_mcp_test_server() -> McpServerConfig {
             env: HashMap::new(),
             auto_approve_tools: true,  // Auto-approve for dev testing
             defer_tools: true,  // Tools deferred by default (discovered via tool_search)
+            python_name: None,  // Will derive from id: mcp_test_server
         }
     } else {
         // Fall back to cargo run if binary not found
@@ -123,6 +251,7 @@ fn default_mcp_test_server() -> McpServerConfig {
             env: HashMap::new(),
             auto_approve_tools: true,  // Auto-approve for dev testing
             defer_tools: true,  // Tools deferred by default (discovered via tool_search)
+            python_name: None,  // Will derive from id: mcp_test_server
         }
     }
 }
@@ -132,7 +261,7 @@ impl Default for AppSettings {
         Self {
             system_prompt: default_system_prompt(),
             mcp_servers: vec![default_mcp_test_server()],
-            code_execution_enabled: false,
+            python_execution_enabled: false,
         }
     }
 }
@@ -216,8 +345,8 @@ mod tests {
         // Default settings include the mcp-test-server (disabled by default)
         assert!(settings.mcp_servers.iter().any(|s| s.id == "mcp-test-server"));
         assert!(!settings.mcp_servers.iter().find(|s| s.id == "mcp-test-server").unwrap().enabled);
-        // code_execution is disabled by default
-        assert!(!settings.code_execution_enabled);
+        // python_execution is disabled by default
+        assert!(!settings.python_execution_enabled);
     }
 
     #[test]
@@ -233,6 +362,7 @@ mod tests {
             env: HashMap::from([("DEBUG".to_string(), "true".to_string())]),
             auto_approve_tools: false,
             defer_tools: true,
+            python_name: Some("test_server".to_string()),
         });
 
         let json = serde_json::to_string(&settings).unwrap();
@@ -241,6 +371,107 @@ mod tests {
         assert_eq!(settings.system_prompt, parsed.system_prompt);
         assert_eq!(settings.mcp_servers.len(), parsed.mcp_servers.len());
         assert_eq!(settings.mcp_servers[0].id, parsed.mcp_servers[0].id);
+    }
+    
+    #[test]
+    fn test_backwards_compat_code_execution_enabled() {
+        // Test that old config files with "code_execution_enabled" still work
+        let json = r#"{"system_prompt": "test", "mcp_servers": [], "code_execution_enabled": true}"#;
+        let parsed: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(parsed.python_execution_enabled);
+    }
+    
+    // ============ Python Identifier Validation Tests ============
+    
+    #[test]
+    fn test_validate_python_identifier_valid() {
+        assert!(validate_python_identifier("my_module").is_ok());
+        assert!(validate_python_identifier("weather_api").is_ok());
+        assert!(validate_python_identifier("mcp_test_server").is_ok());
+        assert!(validate_python_identifier("_private").is_ok());
+        assert!(validate_python_identifier("module123").is_ok());
+        assert!(validate_python_identifier("a").is_ok());
+    }
+    
+    #[test]
+    fn test_validate_python_identifier_invalid() {
+        // Empty
+        assert!(validate_python_identifier("").is_err());
+        
+        // Starts with digit
+        assert!(validate_python_identifier("123module").is_err());
+        
+        // Contains uppercase
+        assert!(validate_python_identifier("MyModule").is_err());
+        assert!(validate_python_identifier("myModule").is_err());
+        
+        // Contains invalid characters
+        assert!(validate_python_identifier("my-module").is_err());
+        assert!(validate_python_identifier("my.module").is_err());
+        assert!(validate_python_identifier("my module").is_err());
+        assert!(validate_python_identifier("my@module").is_err());
+        
+        // Python keywords
+        assert!(validate_python_identifier("import").is_err());
+        assert!(validate_python_identifier("class").is_err());
+        assert!(validate_python_identifier("def").is_err());
+        assert!(validate_python_identifier("None").is_err());
+    }
+    
+    #[test]
+    fn test_to_python_identifier() {
+        // Basic conversion
+        assert_eq!(to_python_identifier("My Module"), "my_module");
+        assert_eq!(to_python_identifier("mcp-test-server"), "mcp_test_server");
+        assert_eq!(to_python_identifier("Weather API"), "weather_api");
+        
+        // Handle leading digits
+        assert_eq!(to_python_identifier("123abc"), "_123abc");
+        
+        // Handle special characters
+        assert_eq!(to_python_identifier("my.module.name"), "my_module_name");
+        assert_eq!(to_python_identifier("test@server#1"), "testserver1");
+        
+        // Handle multiple separators
+        assert_eq!(to_python_identifier("my--module__name"), "my_module_name");
+        
+        // Handle empty/invalid input
+        assert_eq!(to_python_identifier("@#$"), "module");
+        assert_eq!(to_python_identifier(""), "module");
+        
+        // Handle Python keywords
+        assert_eq!(to_python_identifier("import"), "import_");
+        assert_eq!(to_python_identifier("class"), "class_");
+        
+        // Handle trailing separators
+        assert_eq!(to_python_identifier("module_"), "module");
+        assert_eq!(to_python_identifier("module--"), "module");
+    }
+    
+    #[test]
+    fn test_mcp_server_get_python_name() {
+        // With explicit python_name
+        let mut config = McpServerConfig::new("my-server".to_string(), "My Server".to_string());
+        config.python_name = Some("custom_name".to_string());
+        assert_eq!(config.get_python_name(), "custom_name");
+        
+        // Without explicit python_name (derived from id)
+        let config2 = McpServerConfig::new("mcp-weather-api".to_string(), "Weather".to_string());
+        assert_eq!(config2.get_python_name(), "mcp_weather_api");
+    }
+    
+    #[test]
+    fn test_mcp_server_set_python_name() {
+        let mut config = McpServerConfig::new("test".to_string(), "Test".to_string());
+        
+        // Valid name
+        assert!(config.set_python_name("my_module").is_ok());
+        assert_eq!(config.python_name, Some("my_module".to_string()));
+        
+        // Invalid name
+        assert!(config.set_python_name("My-Module").is_err());
+        assert!(config.set_python_name("123abc").is_err());
+        assert!(config.set_python_name("import").is_err());
     }
 }
 

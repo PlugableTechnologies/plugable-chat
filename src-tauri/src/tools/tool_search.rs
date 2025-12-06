@@ -2,8 +2,10 @@
 //!
 //! Semantic search over available tools using embeddings.
 //! This allows models to discover relevant tools dynamically.
+//! Returns Python import documentation for discovered tools.
 
 use std::sync::Arc;
+use std::collections::HashMap;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use fastembed::TextEmbedding;
@@ -31,6 +33,8 @@ pub struct ToolSearchOutput {
     pub tools: Vec<ToolSearchResult>,
     /// Query that was used
     pub queries_used: Vec<String>,
+    /// Python import/usage documentation for discovered tools
+    pub python_docs: String,
 }
 
 /// Executor for the tool_search built-in tool
@@ -77,10 +81,100 @@ impl ToolSearchExecutor {
             println!("[ToolSearch]   - {} (score: {:.3})", result.name, result.score);
         }
         
+        // Generate Python documentation for discovered tools
+        let python_docs = self.generate_python_docs(&results, &registry);
+        
         Ok(ToolSearchOutput {
             tools: results,
             queries_used: input.queries,
+            python_docs,
         })
+    }
+    
+    /// Generate Python import documentation for discovered tools
+    fn generate_python_docs(
+        &self,
+        results: &[ToolSearchResult],
+        registry: &crate::tool_registry::ToolRegistry,
+    ) -> String {
+        if results.is_empty() {
+            return "# No matching tools found".to_string();
+        }
+        
+        let mut docs = String::new();
+        docs.push_str("# Available tools (import and call as functions):\n\n");
+        
+        // Group tools by server/module
+        let mut tools_by_module: HashMap<String, Vec<&ToolSearchResult>> = HashMap::new();
+        for result in results {
+            let python_name = registry.get_python_name(&result.server_id)
+                .cloned()
+                .unwrap_or_else(|| result.server_id.replace("-", "_").to_lowercase());
+            
+            tools_by_module
+                .entry(python_name)
+                .or_insert_with(Vec::new)
+                .push(result);
+        }
+        
+        // Generate documentation for each module
+        for (module_name, tools) in &tools_by_module {
+            // Import statement
+            let function_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            docs.push_str(&format!("from {} import {}\n", module_name, function_names.join(", ")));
+            
+            // Function signatures and descriptions
+            for tool in tools {
+                let params = self.extract_param_signature(&tool.parameters);
+                docs.push_str(&format!("# {}({}) -> dict\n", tool.name, params));
+                if let Some(desc) = &tool.description {
+                    docs.push_str(&format!("#   {}\n", desc));
+                }
+            }
+            docs.push('\n');
+        }
+        
+        docs.push_str("# Example usage:\n");
+        docs.push_str("# result = function_name(arg1=\"value\", arg2=123)\n");
+        docs.push_str("# print(result)\n");
+        
+        docs
+    }
+    
+    /// Extract parameter signature from JSON Schema
+    fn extract_param_signature(&self, parameters: &serde_json::Value) -> String {
+        let mut params = Vec::new();
+        
+        if let Some(properties) = parameters.get("properties").and_then(|p| p.as_object()) {
+            let required: Vec<&str> = parameters.get("required")
+                .and_then(|r| r.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            
+            for (name, schema) in properties {
+                let type_hint = self.json_schema_to_python_type(schema);
+                if required.contains(&name.as_str()) {
+                    params.push(format!("{}: {}", name, type_hint));
+                } else {
+                    params.push(format!("{}: {} = None", name, type_hint));
+                }
+            }
+        }
+        
+        params.join(", ")
+    }
+    
+    /// Convert JSON Schema type to Python type hint
+    fn json_schema_to_python_type(&self, schema: &serde_json::Value) -> &'static str {
+        match schema.get("type").and_then(|t| t.as_str()) {
+            Some("string") => "str",
+            Some("integer") => "int",
+            Some("number") => "float",
+            Some("boolean") => "bool",
+            Some("array") => "list",
+            Some("object") => "dict",
+            _ => "any",
+        }
     }
     
     /// Materialize discovered tools (make them visible to the model)
@@ -199,7 +293,7 @@ mod tests {
             "queries": ["test"]
         })).unwrap();
         
-        assert_eq!(input.top_k, 10);
+        assert_eq!(input.top_k, 3);  // default_top_k() returns 3
     }
 }
 

@@ -16,13 +16,14 @@ export interface McpServerConfig {
     args: string[];
     env: Record<string, string>;
     auto_approve_tools: boolean;
+    python_name?: string;  // Python module name for imports (must be valid Python identifier)
 }
 
 // Application settings
 export interface AppSettings {
     system_prompt: string;
     mcp_servers: McpServerConfig[];
-    code_execution_enabled: boolean;
+    python_execution_enabled: boolean;
 }
 
 // Connection status for MCP servers
@@ -146,7 +147,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 settings: {
                     system_prompt: DEFAULT_SYSTEM_PROMPT,
                     mcp_servers: [],
-                    code_execution_enabled: false,
+                    python_execution_enabled: false,
                 }
             });
         }
@@ -181,12 +182,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         
         // Optimistic update
         set({ 
-            settings: { ...currentSettings, code_execution_enabled: enabled },
+            settings: { ...currentSettings, python_execution_enabled: enabled },
             error: null 
         });
         
         try {
-            await invoke('update_code_execution_enabled', { enabled });
+            await invoke('update_python_execution_enabled', { enabled });
             console.log('[SettingsStore] Code execution enabled updated:', enabled);
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update code execution enabled:', e);

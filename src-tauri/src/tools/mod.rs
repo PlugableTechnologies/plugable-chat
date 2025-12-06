@@ -2,7 +2,7 @@
 //!
 //! This module contains implementations for Plugable Chat's built-in tools:
 //! - `tool_search`: Semantic search over available tools using embeddings
-//! - `code_execution`: Python/WASP code execution in a WASM sandbox
+//! - `python_execution`: Python code execution in a WASM sandbox
 
 pub mod tool_search;
 pub mod code_execution;

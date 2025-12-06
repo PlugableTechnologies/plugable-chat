@@ -1,7 +1,7 @@
 //! Tool Registry - Manages built-in tools and domain tools with deferred loading
 //!
 //! This module provides a centralized registry for all tools available in Plugable Chat:
-//! - Built-in tools: `code_execution` and `tool_search`
+//! - Built-in tools: `python_execution` and `tool_search`
 //! - Domain tools from MCP servers (can be deferred for semantic discovery)
 //!
 //! The registry also stores precomputed embeddings for semantic tool search.
@@ -16,12 +16,12 @@ use crate::actors::mcp_host_actor::McpTool;
 
 // ========== Built-in Tool Definitions ==========
 
-/// Create the code_execution built-in tool schema
-pub fn code_execution_tool() -> ToolSchema {
+/// Create the python_execution built-in tool schema
+pub fn python_execution_tool() -> ToolSchema {
     ToolSchema {
-        name: "code_execution".to_string(),
+        name: "python_execution".to_string(),
         description: Some(
-            "Execute Python/WASP code in a secure sandbox. \
+            "Execute Python code in a secure sandbox. \
             This tool can call any allowed domain tools as Python functions. \
             Use for complex multi-step computations, data transformations, or orchestrating multiple tool calls."
                 .to_string(),
@@ -37,8 +37,8 @@ pub fn code_execution_tool() -> ToolSchema {
             },
             "required": ["code"]
         }),
-        tool_type: Some("code_execution_20250825".to_string()),
-        allowed_callers: None, // Anyone can call code_execution
+        tool_type: Some("python_execution_20251206".to_string()),
+        allowed_callers: None, // Anyone can call python_execution
         defer_loading: false,
         embedding: None,
     }
@@ -85,13 +85,40 @@ pub struct ToolSearchResult {
     pub description: Option<String>,
     pub score: f32,
     pub server_id: String,
+    /// Parameter schema for generating Python function signatures
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+}
+
+// ========== Python Module Mapping ==========
+
+/// Information about a tool module for Python imports
+#[derive(Debug, Clone)]
+pub struct ToolModuleInfo {
+    /// Python module name (e.g., "mcp_weather")
+    pub python_name: String,
+    /// Original MCP server ID
+    pub server_id: String,
+    /// Tool functions available in this module
+    pub functions: Vec<ToolFunctionInfo>,
+}
+
+/// Information about a single tool function
+#[derive(Debug, Clone)]
+pub struct ToolFunctionInfo {
+    /// Function name (same as MCP tool name)
+    pub name: String,
+    /// Function description
+    pub description: Option<String>,
+    /// Parameter schema (JSON Schema)
+    pub parameters: serde_json::Value,
 }
 
 // ========== Tool Registry ==========
 
 /// Central registry for all tools in Plugable Chat
 pub struct ToolRegistry {
-    /// Built-in tools (code_execution, tool_search)
+    /// Built-in tools (python_execution, tool_search)
     internal_tools: Vec<ToolSchema>,
     /// Domain tools from MCP servers (indexed by server_id___tool_name)
     domain_tools: HashMap<String, ToolSchema>,
@@ -99,23 +126,33 @@ pub struct ToolRegistry {
     tool_embeddings: HashMap<String, Vec<f32>>,
     /// Set of tools that have been materialized (made visible after tool_search)
     materialized_tools: std::collections::HashSet<String>,
+    /// Mapping of server_id to python module name
+    server_python_names: HashMap<String, String>,
+    /// Reverse mapping of python module name to server_id
+    python_name_to_server: HashMap<String, String>,
 }
 
 impl ToolRegistry {
     /// Create a new tool registry with built-in tools
     pub fn new() -> Self {
-        let internal_tools = vec![code_execution_tool(), tool_search_tool()];
+        let internal_tools = vec![python_execution_tool(), tool_search_tool()];
         
         Self {
             internal_tools,
             domain_tools: HashMap::new(),
             tool_embeddings: HashMap::new(),
             materialized_tools: std::collections::HashSet::new(),
+            server_python_names: HashMap::new(),
+            python_name_to_server: HashMap::new(),
         }
     }
     
-    /// Register domain tools from an MCP server
-    pub fn register_mcp_tools(&mut self, server_id: &str, tools: &[McpTool], defer: bool) {
+    /// Register domain tools from an MCP server with its Python module name
+    pub fn register_mcp_tools(&mut self, server_id: &str, python_name: &str, tools: &[McpTool], defer: bool) {
+        // Store the python_name mapping
+        self.server_python_names.insert(server_id.to_string(), python_name.to_string());
+        self.python_name_to_server.insert(python_name.to_string(), server_id.to_string());
+        
         for tool in tools {
             let key = format!("{}___{}", server_id, tool.name);
             let schema = ToolSchema {
@@ -124,8 +161,8 @@ impl ToolRegistry {
                 parameters: tool.input_schema.clone().unwrap_or(json!({"type": "object", "properties": {}})),
                 tool_type: None,
                 allowed_callers: if defer {
-                    // Deferred tools can only be called from code_execution
-                    Some(vec!["code_execution_20250825".to_string()])
+                    // Deferred tools can only be called from python_execution
+                    Some(vec!["python_execution_20251206".to_string()])
                 } else {
                     None
                 },
@@ -133,7 +170,7 @@ impl ToolRegistry {
                 embedding: None,
             };
             
-            println!("[ToolRegistry] Registered tool: {} (defer={})", key, defer);
+            println!("[ToolRegistry] Registered tool: {} (python_module={}, defer={})", key, python_name, defer);
             self.domain_tools.insert(key, schema);
         }
     }
@@ -153,7 +190,110 @@ impl ToolRegistry {
             self.materialized_tools.remove(&key);
         }
         
+        // Clean up python name mappings
+        if let Some(python_name) = self.server_python_names.remove(server_id) {
+            self.python_name_to_server.remove(&python_name);
+        }
+        
         println!("[ToolRegistry] Unregistered all tools from server: {}", server_id);
+    }
+    
+    /// Get the Python module name for a server
+    pub fn get_python_name(&self, server_id: &str) -> Option<&String> {
+        self.server_python_names.get(server_id)
+    }
+    
+    /// Get the server ID for a Python module name
+    pub fn get_server_for_python_name(&self, python_name: &str) -> Option<&String> {
+        self.python_name_to_server.get(python_name)
+    }
+    
+    /// Check if a Python module name is registered (for import validation)
+    pub fn is_valid_python_module(&self, module_name: &str) -> bool {
+        self.python_name_to_server.contains_key(module_name)
+    }
+    
+    /// Get all registered Python module names
+    pub fn get_all_python_modules(&self) -> Vec<&String> {
+        self.python_name_to_server.keys().collect()
+    }
+    
+    /// Get materialized tool modules with their function info (for Python docs)
+    pub fn get_materialized_tool_modules(&self) -> Vec<ToolModuleInfo> {
+        let mut modules: HashMap<String, ToolModuleInfo> = HashMap::new();
+        
+        for (key, schema) in &self.domain_tools {
+            // Only include materialized tools
+            if !self.materialized_tools.contains(key) {
+                continue;
+            }
+            
+            // Parse server_id from key
+            let parts: Vec<&str> = key.splitn(2, "___").collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let server_id = parts[0];
+            
+            // Get the python name for this server
+            let python_name = match self.server_python_names.get(server_id) {
+                Some(name) => name.clone(),
+                None => continue,
+            };
+            
+            // Get or create the module info
+            let module = modules.entry(python_name.clone()).or_insert_with(|| {
+                ToolModuleInfo {
+                    python_name: python_name.clone(),
+                    server_id: server_id.to_string(),
+                    functions: Vec::new(),
+                }
+            });
+            
+            // Add the function
+            module.functions.push(ToolFunctionInfo {
+                name: schema.name.clone(),
+                description: schema.description.clone(),
+                parameters: schema.parameters.clone(),
+            });
+        }
+        
+        modules.into_values().collect()
+    }
+    
+    /// Get all tool modules (including non-materialized) for a given set of servers
+    pub fn get_all_tool_modules_for_servers(&self, server_ids: &[&str]) -> Vec<ToolModuleInfo> {
+        let mut modules: HashMap<String, ToolModuleInfo> = HashMap::new();
+        
+        for server_id in server_ids {
+            let python_name = match self.server_python_names.get(*server_id) {
+                Some(name) => name.clone(),
+                None => continue,
+            };
+            
+            let prefix = format!("{}___", server_id);
+            for (key, schema) in &self.domain_tools {
+                if !key.starts_with(&prefix) {
+                    continue;
+                }
+                
+                let module = modules.entry(python_name.clone()).or_insert_with(|| {
+                    ToolModuleInfo {
+                        python_name: python_name.clone(),
+                        server_id: (*server_id).to_string(),
+                        functions: Vec::new(),
+                    }
+                });
+                
+                module.functions.push(ToolFunctionInfo {
+                    name: schema.name.clone(),
+                    description: schema.description.clone(),
+                    parameters: schema.parameters.clone(),
+                });
+            }
+        }
+        
+        modules.into_values().collect()
     }
     
     /// Store a precomputed embedding for a tool
@@ -258,6 +398,7 @@ impl ToolRegistry {
                     description: schema.description.clone(),
                     score: max_score,
                     server_id: server_id.to_string(),
+                    parameters: schema.parameters.clone(),
                 });
             }
         }
@@ -342,7 +483,7 @@ mod tests {
     fn test_registry_creation() {
         let registry = ToolRegistry::new();
         assert_eq!(registry.get_internal_tools().len(), 2);
-        assert!(registry.get_internal_tools().iter().any(|t| t.name == "code_execution"));
+        assert!(registry.get_internal_tools().iter().any(|t| t.name == "python_execution"));
         assert!(registry.get_internal_tools().iter().any(|t| t.name == "tool_search"));
     }
     
@@ -358,9 +499,11 @@ mod tests {
             },
         ];
         
-        registry.register_mcp_tools("weather_server", &mcp_tools, false);
+        registry.register_mcp_tools("weather_server", "weather", &mcp_tools, false);
         
         assert!(registry.get_tool("weather_server___get_weather").is_some());
+        assert_eq!(registry.get_python_name("weather_server"), Some(&"weather".to_string()));
+        assert_eq!(registry.get_server_for_python_name("weather"), Some(&"weather_server".to_string()));
     }
     
     #[test]
@@ -375,7 +518,7 @@ mod tests {
             },
         ];
         
-        registry.register_mcp_tools("internal", &mcp_tools, true);
+        registry.register_mcp_tools("internal", "internal_tools", &mcp_tools, true);
         
         // Deferred tool should not be in visible tools
         let visible = registry.get_visible_tools();

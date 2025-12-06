@@ -8,29 +8,99 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 /// Information about an available tool
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolInfo {
     /// Tool name
+    #[serde(default)]
     pub name: String,
     /// Server ID that provides this tool
+    #[serde(default)]
     pub server_id: String,
     /// Tool description
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Parameter schema (JSON Schema)
+    #[serde(default)]
+    pub parameters: Value,
+    /// Python module name for this tool's server (optional)
+    #[serde(default)]
+    pub python_module: Option<String>,
+}
+
+/// Information about a tool module to be injected as an importable Python module
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolModuleInfo {
+    /// Python module name (e.g., "weather_api")
+    pub python_name: String,
+    /// Server ID
+    pub server_id: String,
+    /// Functions available in this module
+    pub functions: Vec<ToolFunctionInfo>,
+}
+
+/// Information about a tool function within a module
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolFunctionInfo {
+    /// Function name (same as MCP tool name)
+    pub name: String,
+    /// Function description
     pub description: Option<String>,
     /// Parameter schema (JSON Schema)
     pub parameters: Value,
 }
 
 /// Request from host to execute Python code
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExecutionRequest {
     /// Lines of Python code to execute
+    #[serde(default)]
     pub code: Vec<String>,
     /// Optional context/variables to inject
+    #[serde(default)]
     pub context: Option<Value>,
     /// Results from previous tool calls (for continuation)
+    #[serde(default)]
     pub tool_results: HashMap<String, ToolCallResult>,
     /// Available tools that can be called
+    #[serde(default)]
     pub available_tools: Vec<ToolInfo>,
+    /// Tool modules to inject as importable Python modules
+    #[serde(default)]
+    pub tool_modules: Vec<ToolModuleInfo>,
+}
+
+impl ExecutionRequest {
+    /// Create a new execution request with code lines
+    pub fn new(code: Vec<String>) -> Self {
+        Self {
+            code,
+            ..Default::default()
+        }
+    }
+    
+    /// Builder pattern: add context
+    pub fn with_context(mut self, context: Value) -> Self {
+        self.context = Some(context);
+        self
+    }
+    
+    /// Builder pattern: add available tools
+    pub fn with_tools(mut self, tools: Vec<ToolInfo>) -> Self {
+        self.available_tools = tools;
+        self
+    }
+    
+    /// Builder pattern: add tool results
+    pub fn with_tool_results(mut self, results: HashMap<String, ToolCallResult>) -> Self {
+        self.tool_results = results;
+        self
+    }
+    
+    /// Builder pattern: add tool modules
+    pub fn with_tool_modules(mut self, modules: Vec<ToolModuleInfo>) -> Self {
+        self.tool_modules = modules;
+        self
+    }
 }
 
 /// Result of a tool call from a previous round
@@ -132,6 +202,7 @@ mod tests {
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let json = serde_json::to_string(&request).unwrap();

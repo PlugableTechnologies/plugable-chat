@@ -136,7 +136,7 @@ impl ModelProfile {
         let mut prompt = String::from("You are a tool-using assistant. Use available tools when appropriate.\n\n");
         
         if options.code_mode_enabled {
-            prompt.push_str(&Self::code_execution_explanation());
+            prompt.push_str(&Self::python_execution_explanation());
         }
         
         // Add reasoning style instruction
@@ -162,11 +162,11 @@ impl ModelProfile {
         prompt
     }
     
-    /// Shared code execution explanation for all model profiles
-    fn code_execution_explanation() -> String {
-        r#"## Code Execution
+    /// Shared python execution explanation for all model profiles
+    fn python_execution_explanation() -> String {
+        r#"## Python Execution
 
-`code_execution` runs Python in a secure sandbox. Use for:
+`python_execution` runs Python in a secure sandbox. Use for:
 - Math/calculations (deterministic results vs token generation)
 - String manipulation and data transformations
 - Multi-step logic with conditionals
@@ -175,7 +175,7 @@ impl ModelProfile {
 Allowed imports: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64, operator, string, textwrap, copy, types, typing, abc, numbers, binascii, html.
 Not available: pandas, numpy, requests, or any external packages.
 
-**Format:** `{"name": "code_execution", "arguments": {"code": ["import math", "result = math.pi", "print(result)"]}}`
+**Format:** `{"name": "python_execution", "arguments": {"code": ["import math", "result = math.pi", "print(result)"]}}`
 
 **Example:**
 ```python
@@ -187,7 +187,7 @@ print(f"Mean: {statistics.mean(data):.1f}, Sum: {math.fsum(data)}")
 
 ## Tool Discovery
 
-Use `tool_search` to discover MCP tools, which then become available as async Python functions in code_execution.
+Use `tool_search` to discover MCP tools, which then become available as async Python functions in python_execution.
 
 "#.to_string()
     }
@@ -242,7 +242,7 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
         prompt.push_str("<tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>\n\n");
         
         if options.code_mode_enabled {
-            prompt.push_str(&Self::code_execution_explanation());
+            prompt.push_str(&Self::python_execution_explanation());
         }
         
         prompt.push_str("## Available Tools\n\n");
@@ -302,7 +302,7 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
         prompt.push_str("<function_call>{\"name\": \"function_name\", \"arguments\": {...}}</function_call>\n\n");
         
         if options.code_mode_enabled {
-            prompt.push_str(&Self::code_execution_explanation());
+            prompt.push_str(&Self::python_execution_explanation());
         }
         
         prompt.push_str("## Available Functions\n\n");
@@ -357,7 +357,7 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
         prompt.push_str("Do not include any other text when making a tool call.\n\n");
         
         if options.code_mode_enabled {
-            prompt.push_str(&Self::code_execution_explanation());
+            prompt.push_str(&Self::python_execution_explanation());
         }
         
         // Include full JSON schemas for text-based models
@@ -556,12 +556,12 @@ mod tests {
         
         // No restrictions
         assert!(tool.can_be_called_by(None));
-        assert!(tool.can_be_called_by(Some("code_execution_20250825")));
+        assert!(tool.can_be_called_by(Some("python_execution_20251206")));
         
         // With restrictions
-        tool.allowed_callers = Some(vec!["code_execution_20250825".to_string()]);
+        tool.allowed_callers = Some(vec!["python_execution_20251206".to_string()]);
         assert!(!tool.can_be_called_by(None));
-        assert!(tool.can_be_called_by(Some("code_execution_20250825")));
+        assert!(tool.can_be_called_by(Some("python_execution_20251206")));
         assert!(!tool.can_be_called_by(Some("other_caller")));
     }
 }
