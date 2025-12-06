@@ -383,10 +383,10 @@ impl FoundryActor {
                             // Log the actual system message being used
                             if let Some(sys_msg) = messages.iter().find(|m| m.role == "system") {
                                 println!("[FoundryActor] Using system message ({} chars)", sys_msg.content.len());
-                                // Log first 3000 chars of system prompt for debugging
-                                let sys_preview: String = sys_msg.content.chars().take(3000).collect();
-                                let truncated = if sys_msg.content.len() > 3000 { "... [TRUNCATED]" } else { "" };
-                                println!("[FoundryActor] System prompt preview:\n{}{}", sys_preview, truncated);
+                                // Only log first 200 chars to reduce verbosity
+                                let sys_preview: String = sys_msg.content.chars().take(200).collect();
+                                let truncated = if sys_msg.content.len() > 200 { "..." } else { "" };
+                                println!("[FoundryActor] System prompt preview: {}{}", sys_preview, truncated);
                             }
                          }
                          
@@ -419,16 +419,11 @@ impl FoundryActor {
                             model, model_family, model_supports_reasoning, use_native_tools, supports_reasoning_effort);
                         
                             if use_native_tools {
-                                println!("[FoundryActor] Including {} native tools in request", 
-                                    tools.as_ref().map(|t| t.len()).unwrap_or(0));
-                                // Log the tools being sent for debugging
-                                if let Some(ref tool_list) = tools {
-                                    for tool in tool_list {
-                                        println!("[FoundryActor] Tool: {} - {:?}", 
-                                            tool.function.name, 
-                                            tool.function.description.as_deref().unwrap_or("(no description)"));
-                                    }
-                                }
+                                let tool_names: Vec<&str> = tools.as_ref()
+                                    .map(|t| t.iter().map(|tool| tool.function.name.as_str()).collect())
+                                    .unwrap_or_default();
+                                println!("[FoundryActor] Including {} native tools: {:?}", 
+                                    tool_names.len(), tool_names);
                             } else if tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
                                 println!("[FoundryActor] Model does NOT support native tool calling, falling back to text-based tools");
                             }
@@ -472,13 +467,8 @@ impl FoundryActor {
                                  &reasoning_effort,
                              );
                              
-                             // Log the request body for debugging (truncate large content)
-                             if use_native_tools {
-                                 if let Some(tools_json) = current_body.get("tools") {
-                                     println!("[FoundryActor] Request body 'tools' field:\n{}", 
-                                         serde_json::to_string_pretty(tools_json).unwrap_or_default());
-                                 }
-                             }
+                             // NOTE: Removed verbose tool JSON logging for cleaner output
+                             // Enable RUST_LOG=debug for full request body if needed
                              
                              match client_clone.post(&current_url).json(&current_body).send().await {
                                 Ok(mut resp) => {

@@ -1019,6 +1019,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
             const toolExecutingListener = await listen<ToolExecutingEvent>('tool-executing', (event) => {
                 console.log(`[ChatStore] Tool executing: ${event.payload.server}::${event.payload.tool}`);
+                const toolName = event.payload.tool;
+                const displayName = toolName === 'python_execution' 
+                    ? 'Running Python code...' 
+                    : toolName === 'tool_search'
+                    ? 'Searching for tools...'
+                    : `Executing ${toolName}...`;
                 set((state) => ({
                     toolExecution: {
                         ...state.toolExecution,
@@ -1028,7 +1034,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
                             arguments: event.payload.arguments,
                             startTime: Date.now(),
                         },
-                    }
+                    },
+                    // Update operation status to show tool execution
+                    operationStatus: {
+                        type: 'streaming',
+                        message: displayName,
+                        startTime: state.operationStatus?.startTime || Date.now(),
+                    },
+                    statusBarDismissed: false,
                 }));
             });
 
@@ -1061,8 +1074,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         };
                     }
                     
+                    // Update status bar: show error briefly or revert to generating
+                    const newOperationStatus = event.payload.is_error
+                        ? {
+                            type: 'streaming' as const,
+                            message: `Tool error: ${event.payload.tool} - retrying...`,
+                            startTime: state.operationStatus?.startTime || Date.now(),
+                        }
+                        : {
+                            type: 'streaming' as const,
+                            message: 'Generating response...',
+                            startTime: state.operationStatus?.startTime || Date.now(),
+                        };
+                    
                     return {
                         messages: newMessages,
+                        operationStatus: newOperationStatus,
                         toolExecution: {
                             ...state.toolExecution,
                             currentTool: null,

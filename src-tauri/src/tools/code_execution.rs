@@ -256,7 +256,7 @@ impl CodeExecutionExecutor {
         context: Option<&DynamicImportContext>,
     ) -> Result<(), String> {
         if input.code.is_empty() {
-            return Err("Code cannot be empty".to_string());
+            return Err("Code cannot be empty. The 'arguments' must be an object with a 'code' array, e.g.: {\"code\": [\"import random\", \"print(random.randint(1,6))\"]}. If you passed an array directly as arguments, wrap it in an object with 'code' as the key.".to_string());
         }
         
         // Check for obviously problematic patterns
