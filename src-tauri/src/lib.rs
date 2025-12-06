@@ -1130,7 +1130,7 @@ fn build_system_prompt(
             prompt.push_str("1. **SEARCH**: Call `tool_search` to find relevant tools for your current step\n");
             prompt.push_str("2. **EXECUTE**: Write a Python program using `python_execution` that calls the discovered tools\n");
             prompt.push_str("3. **REPEAT**: If more steps are needed, search again for the next step's tools\n\n");
-            prompt.push_str("**IMPORTANT**: Tools are reset between steps. Always search before executing.\n\n");
+            prompt.push_str("**IMPORTANT**: Tools you discover stay available for this user turn. Re-use them in python_execution without searching again. They reset only when the user sends a new message.\n\n");
         } else if has_mcp_tools {
             let section_num = if python_execution_enabled { "2" } else { "1" };
             prompt.push_str(&format!("### {}. MCP Tools (External Capabilities)\n", section_num));
