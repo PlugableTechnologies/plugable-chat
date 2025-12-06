@@ -134,7 +134,7 @@ impl PythonActor {
     async fn execute_code(
         &mut self,
         input: CodeExecutionInput,
-        _context: ExecutionContext,
+        context: ExecutionContext,
     ) -> Result<CodeExecutionOutput, String> {
         use std::io::Write;
         
@@ -145,6 +145,7 @@ impl PythonActor {
         for (i, line) in input.code.iter().enumerate() {
             println!("[PythonActor]   {}: {}", i + 1, line);
         }
+        println!("[PythonActor] Tool modules available: {}", context.tool_modules.len());
         let _ = std::io::stdout().flush();
         
         // Validate input
@@ -157,13 +158,13 @@ impl PythonActor {
         // Get available tools from registry
         let available_tools = self.get_available_tools().await;
         
-        // Build the initial request
+        // Build the initial request with tool modules from context
         let mut request = ExecutionRequest {
             code: input.code.clone(),
             context: input.context.clone(),
             tool_results: HashMap::new(),
             available_tools,
-            tool_modules: vec![],  // TODO: Populate from materialized modules
+            tool_modules: context.tool_modules.clone(),
         };
         
         let mut output = CodeExecutionOutput::default();
@@ -352,6 +353,7 @@ mod tests {
             tool_stubs: String::new(),
             user_context: None,
             available_tools: vec![],
+            tool_modules: vec![],
         };
         
         let result = actor.execute_code(input, context).await;

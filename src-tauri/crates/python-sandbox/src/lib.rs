@@ -118,7 +118,7 @@ pub fn execute(request: &ExecutionRequest) -> ExecutionResult {
             };
             
             if let Err(e) = vm.run_code_obj(module_code, scope.clone()) {
-                let error_msg = format!("Tool module injection failed: {:?}", e);
+                let error_msg = format!("Tool module injection failed: {}", format_python_exception(&e, vm));
                 return ExecutionResult {
                     status: ExecutionStatus::Error(error_msg),
                     stderr: get_stderr(),
@@ -2001,5 +2001,92 @@ mod tests {
         assert_eq!(result.status, ExecutionStatus::Complete);
         assert!(result.stdout.contains("before tool call"));
         assert!(result.stdout.contains("after tool call: tool_result"));
+    }
+    
+    #[test]
+    fn test_tool_module_global_injection() {
+        // Test that tool functions from tool_modules are available in global namespace
+        // This is the "code mode" pattern where models call tool_search, then python_execution
+        use crate::protocol::{ToolModuleInfo, ToolFunctionInfo};
+        
+        let request = ExecutionRequest {
+            code: vec![
+                // Call the function directly without import - this should work!
+                "result = list_dataset_ids()".to_string(),
+            ],
+            context: None,
+            tool_results: HashMap::new(),
+            available_tools: vec![ToolInfo {
+                name: "list_dataset_ids".to_string(),
+                server_id: "bigquery_server".to_string(),
+                description: Some("List datasets".to_string()),
+                parameters: serde_json::json!({}),
+                python_module: None,
+            }],
+            tool_modules: vec![
+                ToolModuleInfo {
+                    python_name: "bigquery".to_string(),
+                    server_id: "bigquery_server".to_string(),
+                    functions: vec![
+                        ToolFunctionInfo {
+                            name: "list_dataset_ids".to_string(),
+                            description: Some("List datasets".to_string()),
+                            parameters: serde_json::json!({}),
+                        },
+                    ],
+                },
+            ],
+        };
+        
+        let result = execute(&request);
+        
+        // Should trigger a tool call pending, NOT a NameError
+        assert_eq!(result.status, ExecutionStatus::ToolCallsPending,
+            "Expected ToolCallsPending but got {:?}. Stderr: {}", result.status, result.stderr);
+        assert_eq!(result.pending_calls.len(), 1);
+        assert_eq!(result.pending_calls[0].tool_name, "list_dataset_ids");
+    }
+    
+    #[test]
+    fn test_tool_module_import_also_works() {
+        // Test that tool functions can ALSO be accessed via module import
+        use crate::protocol::{ToolModuleInfo, ToolFunctionInfo};
+        
+        let request = ExecutionRequest {
+            code: vec![
+                "from bigquery import list_dataset_ids".to_string(),
+                "result = list_dataset_ids()".to_string(),
+            ],
+            context: None,
+            tool_results: HashMap::new(),
+            available_tools: vec![ToolInfo {
+                name: "list_dataset_ids".to_string(),
+                server_id: "bigquery_server".to_string(),
+                description: Some("List datasets".to_string()),
+                parameters: serde_json::json!({}),
+                python_module: None,
+            }],
+            tool_modules: vec![
+                ToolModuleInfo {
+                    python_name: "bigquery".to_string(),
+                    server_id: "bigquery_server".to_string(),
+                    functions: vec![
+                        ToolFunctionInfo {
+                            name: "list_dataset_ids".to_string(),
+                            description: Some("List datasets".to_string()),
+                            parameters: serde_json::json!({}),
+                        },
+                    ],
+                },
+            ],
+        };
+        
+        let result = execute(&request);
+        
+        // Should trigger a tool call pending
+        assert_eq!(result.status, ExecutionStatus::ToolCallsPending,
+            "Expected ToolCallsPending but got {:?}. Stderr: {}", result.status, result.stderr);
+        assert_eq!(result.pending_calls.len(), 1);
+        assert_eq!(result.pending_calls[0].tool_name, "list_dataset_ids");
     }
 }

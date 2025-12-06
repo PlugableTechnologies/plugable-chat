@@ -52,10 +52,13 @@ pub fn get_tool_modules() -> Vec<ToolModuleInfo> {
     TOOL_MODULES.with(|tm| tm.borrow().clone())
 }
 
-/// Generate Python code that creates importable modules for all registered tool modules
+/// Generate Python code that creates callable tool functions
 /// 
-/// This code creates module objects with wrapper functions that call the sandbox's
-/// `tool_call` function under the hood.
+/// This code creates wrapper functions that call the sandbox's `tool_call` function
+/// under the hood. Functions are injected directly into the global namespace so they
+/// can be called directly without imports (e.g., `list_dataset_ids()` works).
+/// 
+/// For compatibility, we also create simple namespace classes that can be imported.
 pub fn generate_tool_module_code() -> String {
     let modules = get_tool_modules();
     if modules.is_empty() {
@@ -63,52 +66,58 @@ pub fn generate_tool_module_code() -> String {
     }
     
     let mut code = String::new();
-    code.push_str("\n# ============== Dynamic Tool Modules ==============\n");
-    code.push_str("# Auto-generated importable modules for MCP tools\n\n");
-    code.push_str("import types\n");
+    code.push_str("\n# ============== Dynamic Tool Functions ==============\n");
+    code.push_str("# Auto-generated wrapper functions for MCP tools\n\n");
+    
+    // Generate all wrapper functions first (in global namespace)
+    for module in &modules {
+        code.push_str(&format!("# Tools from: {} (server: {})\n", module.python_name, module.server_id));
+        
+        for func in &module.functions {
+            // Generate a global wrapper function for each tool
+            let func_code = generate_global_tool_function(&func.name, &func.description);
+            code.push_str(&func_code);
+        }
+        code.push_str("\n");
+    }
+    
+    // Create namespace classes for module-style imports (e.g., from bigquery import list_dataset_ids)
+    code.push_str("# ============== Module Namespaces ==============\n");
+    code.push_str("# Namespace classes for module-style imports\n\n");
     code.push_str("import sys\n\n");
     
     for module in &modules {
-        code.push_str(&format!("# Module: {} (server: {})\n", module.python_name, module.server_id));
-        code.push_str(&format!("_{}_module = types.ModuleType('{}')\n", module.python_name, module.python_name));
-        code.push_str(&format!("_{}_module.__doc__ = 'MCP tools from server: {}'\n\n", module.python_name, module.server_id));
-        
+        code.push_str(&format!("class _{}:\n", module.python_name));
+        code.push_str(&format!("    '''MCP tools from server: {}'''\n", module.server_id));
         for func in &module.functions {
-            // Generate a wrapper function for each tool
-            let func_code = generate_tool_function(&module.python_name, &func.name, &func.description);
-            code.push_str(&func_code);
+            // Use staticmethod so accessing via instance doesn't add 'self' as first arg
+            code.push_str(&format!("    {} = staticmethod({})\n", func.name, func.name));
         }
+        code.push_str("\n");
         
-        // Register the module in sys.modules so it can be imported
-        code.push_str(&format!("sys.modules['{}'] = _{}_module\n\n", module.python_name, module.python_name));
+        // Register in sys.modules (use class, not instance, to avoid method binding issues)
+        code.push_str(&format!("sys.modules['{}'] = _{}\n\n", module.python_name, module.python_name));
+        
+        // Add to allowed imports
+        code.push_str(&format!("_sandbox_allowed_modules.add('{}')\n\n", module.python_name));
     }
-    
-    // Add the module names to the allowed modules set
-    code.push_str("# Add tool modules to allowed imports\n");
-    for module in &modules {
-        code.push_str(&format!("_sandbox_allowed_modules.add('{}')\n", module.python_name));
-    }
-    code.push_str("\n");
     
     code
 }
 
-/// Generate Python code for a single tool function wrapper
-fn generate_tool_function(module_name: &str, func_name: &str, description: &Option<String>) -> String {
+/// Generate Python code for a global tool function wrapper
+fn generate_global_tool_function(func_name: &str, description: &Option<String>) -> String {
     let docstring = description.as_ref()
         .map(|d| format!("\"\"\"{}\"\"\"", d))
-        .unwrap_or_else(|| "\"\"\"Call the {} tool\"\"\"".to_string());
+        .unwrap_or_else(|| format!("\"\"\"Call the {} tool\"\"\"", func_name));
     
     format!(
-        r#"def _{module}_{func}(**kwargs):
+        r#"def {func}(**kwargs):
     {docstring}
     from _sandbox import tool_call
     return tool_call("{func}", **kwargs)
 
-_{module}_module.{func} = _{module}_{func}
-
 "#,
-        module = module_name,
         func = func_name,
         docstring = docstring
     )
@@ -661,6 +670,36 @@ del _blocked, _name
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{ToolModuleInfo, ToolFunctionInfo};
+    
+    #[test]
+    fn test_generate_tool_module_code() {
+        // Set up some tool modules
+        let modules = vec![
+            ToolModuleInfo {
+                python_name: "bigquery".to_string(),
+                server_id: "bigquery_server".to_string(),
+                functions: vec![
+                    ToolFunctionInfo {
+                        name: "list_dataset_ids".to_string(),
+                        description: Some("List datasets".to_string()),
+                        parameters: serde_json::json!({}),
+                    },
+                ],
+            },
+        ];
+        
+        set_tool_modules(modules);
+        let code = generate_tool_module_code();
+        
+        println!("Generated code:\n{}", code);
+        
+        // Verify the code contains expected elements
+        assert!(code.contains("def list_dataset_ids("), "Should define global wrapper function");
+        assert!(code.contains("tool_call(\"list_dataset_ids\""), "Should call tool_call with function name");
+        assert!(code.contains("sys.modules['bigquery']"), "Should register module namespace");
+        assert!(code.contains("class _bigquery:"), "Should create namespace class");
+    }
     
     #[test]
     fn test_reset_state() {

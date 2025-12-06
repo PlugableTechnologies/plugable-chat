@@ -14,6 +14,9 @@ use serde_json::json;
 use crate::protocol::ToolSchema;
 use crate::actors::mcp_host_actor::McpTool;
 
+// Re-export python_sandbox types for Python module integration
+pub use python_sandbox::protocol::{ToolModuleInfo, ToolFunctionInfo};
+
 // ========== Built-in Tool Definitions ==========
 
 /// Create the python_execution built-in tool schema
@@ -87,30 +90,6 @@ pub struct ToolSearchResult {
     pub server_id: String,
     /// Parameter schema for generating Python function signatures
     #[serde(default)]
-    pub parameters: serde_json::Value,
-}
-
-// ========== Python Module Mapping ==========
-
-/// Information about a tool module for Python imports
-#[derive(Debug, Clone)]
-pub struct ToolModuleInfo {
-    /// Python module name (e.g., "mcp_weather")
-    pub python_name: String,
-    /// Original MCP server ID
-    pub server_id: String,
-    /// Tool functions available in this module
-    pub functions: Vec<ToolFunctionInfo>,
-}
-
-/// Information about a single tool function
-#[derive(Debug, Clone)]
-pub struct ToolFunctionInfo {
-    /// Function name (same as MCP tool name)
-    pub name: String,
-    /// Function description
-    pub description: Option<String>,
-    /// Parameter schema (JSON Schema)
     pub parameters: serde_json::Value,
 }
 
@@ -220,6 +199,10 @@ impl ToolRegistry {
     
     /// Get materialized tool modules with their function info (for Python docs)
     pub fn get_materialized_tool_modules(&self) -> Vec<ToolModuleInfo> {
+        println!("[ToolRegistry] get_materialized_tool_modules called");
+        println!("[ToolRegistry]   materialized_tools: {:?}", self.materialized_tools);
+        println!("[ToolRegistry]   server_python_names: {:?}", self.server_python_names);
+        
         let mut modules: HashMap<String, ToolModuleInfo> = HashMap::new();
         
         for (key, schema) in &self.domain_tools {
@@ -228,17 +211,26 @@ impl ToolRegistry {
                 continue;
             }
             
+            println!("[ToolRegistry]   Processing materialized tool: {}", key);
+            
             // Parse server_id from key
             let parts: Vec<&str> = key.splitn(2, "___").collect();
             if parts.len() != 2 {
+                println!("[ToolRegistry]     Skipping: invalid key format");
                 continue;
             }
             let server_id = parts[0];
             
             // Get the python name for this server
             let python_name = match self.server_python_names.get(server_id) {
-                Some(name) => name.clone(),
-                None => continue,
+                Some(name) => {
+                    println!("[ToolRegistry]     Found python_name: {} for server: {}", name, server_id);
+                    name.clone()
+                },
+                None => {
+                    println!("[ToolRegistry]     Skipping: no python_name for server: {}", server_id);
+                    continue;
+                }
             };
             
             // Get or create the module info
@@ -258,6 +250,7 @@ impl ToolRegistry {
             });
         }
         
+        println!("[ToolRegistry]   Returning {} modules", modules.len());
         modules.into_values().collect()
     }
     

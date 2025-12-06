@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::protocol::{ToolSchema, ExtendedToolCall, ToolCallCaller, ToolCallKind};
+use python_sandbox::protocol::ToolModuleInfo;
 
 /// Input for the python_execution built-in tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +177,8 @@ pub struct ExecutionContext {
     pub user_context: Option<Value>,
     /// Available tools for inner calls
     pub available_tools: Vec<ToolSchema>,
+    /// Tool modules to inject as importable Python modules (from materialized MCP tools)
+    pub tool_modules: Vec<ToolModuleInfo>,
 }
 
 /// Result of resolving an inner tool call
@@ -371,6 +374,7 @@ impl CodeExecutionExecutor {
         exec_id: String,
         available_tools: Vec<ToolSchema>,
         user_context: Option<Value>,
+        tool_modules: Vec<ToolModuleInfo>,
     ) -> ExecutionContext {
         let tool_stubs = generate_tool_stubs(&available_tools);
         
@@ -379,6 +383,7 @@ impl CodeExecutionExecutor {
             tool_stubs,
             user_context,
             available_tools,
+            tool_modules,
         }
     }
 }

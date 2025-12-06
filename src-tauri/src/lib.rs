@@ -387,13 +387,24 @@ async fn execute_python_execution(
     use std::io::Write;
     let _ = std::io::stdout().flush();
     
-    // Get available tools for the execution context
-    let available_tools = {
+    // Get available tools and materialized tool modules for the execution context
+    let (available_tools, tool_modules) = {
         let registry = tool_registry.read().await;
-        registry.get_visible_tools()
+        let tools = registry.get_visible_tools();
+        let modules = registry.get_materialized_tool_modules();
+        let stats = registry.stats();
+        println!("[python_execution] Registry stats: {} materialized tools", stats.materialized_tools);
+        (tools, modules)
     };
     
-    println!("[python_execution] Available tools: {}", available_tools.len());
+    println!("[python_execution] Available tools: {}, Tool modules: {}", available_tools.len(), tool_modules.len());
+    for module in &tool_modules {
+        println!("[python_execution]   Module '{}' (server: {}) with {} functions", 
+            module.python_name, module.server_id, module.functions.len());
+        for func in &module.functions {
+            println!("[python_execution]     - {}", func.name);
+        }
+    }
     let _ = std::io::stdout().flush();
     
     // Create execution context
@@ -401,6 +412,7 @@ async fn execute_python_execution(
         exec_id.clone(),
         available_tools,
         input.context.clone(),
+        tool_modules,
     );
     
     // Create modified input with the cleaned code
@@ -534,15 +546,16 @@ async fn run_agentic_loop(
         let iteration_start = std::time::Instant::now();
         let _ = std::io::stdout().flush();
         
-        // Clear materialized tools at the start of each iteration
-        // This ensures tool_search is required to discover tools for each turn
+        // NOTE: We do NOT clear materialized tools between iterations anymore.
+        // Tools discovered via tool_search in iteration 0 must remain available
+        // for python_execution in iteration 1 (same user turn).
+        // Materialized tools are cleared at the start of each new chat message instead.
         if iteration > 0 {
-            let mut registry = tool_registry.write().await;
+            let registry = tool_registry.read().await;
             let stats = registry.stats();
             if stats.materialized_tools > 0 {
-                println!("[AgenticLoop] Clearing {} materialized tools from previous iteration", stats.materialized_tools);
+                println!("[AgenticLoop] {} materialized tools available from previous iteration", stats.materialized_tools);
             }
-            registry.clear_materialized();
         }
 
         // Create channel for this iteration
