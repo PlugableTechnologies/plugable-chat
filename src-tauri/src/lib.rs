@@ -1287,14 +1287,14 @@ async fn chat(
 
     // Get current model info for model-specific handling
     let (model_info_tx, model_info_rx) = oneshot::channel();
-    handles.foundry_tx.send(FoundryMsg::GetModelInfo { respond_to: model_info_tx })
+    handles.foundry_tx.send(FoundryMsg::GetCurrentModel { respond_to: model_info_tx })
         .await
         .map_err(|e| e.to_string())?;
-    let model_info_list = model_info_rx.await.map_err(|_| "Foundry actor died".to_string())?;
+    let current_model = model_info_rx.await.map_err(|_| "Foundry actor died".to_string())?;
     
     // Get the current model name for profile resolution
-    let model_name = model_info_list.first()
-        .map(|m| m.id.clone())
+    let model_name = current_model
+        .map(|m| m.id)
         .unwrap_or_else(|| "unknown".to_string());
     
     println!("[Chat] Using model: {}", model_name);

@@ -707,6 +707,11 @@ impl FoundryActor {
                     println!("FoundryActor: Loading model into VRAM: {}", model_name);
                     if let Some(port) = self.port {
                         let result = self.load_model_impl(&client, port, &model_name).await;
+                        // Update model_id when load succeeds
+                        if result.is_ok() {
+                            self.model_id = Some(model_name.clone());
+                            println!("FoundryActor: Updated selected model to: {}", model_name);
+                        }
                         let _ = respond_to.send(result);
                     } else {
                         let _ = respond_to.send(Err("Foundry service not available".to_string()));
@@ -720,6 +725,14 @@ impl FoundryActor {
                     } else {
                         let _ = respond_to.send(Vec::new());
                     }
+                }
+                FoundryMsg::GetCurrentModel { respond_to } => {
+                    // Return the ModelInfo for the currently selected model
+                    let current = self.model_id.as_ref().and_then(|id| {
+                        self.model_info.iter().find(|m| &m.id == id).cloned()
+                    });
+                    println!("FoundryActor: GetCurrentModel returning: {:?}", current.as_ref().map(|m| &m.id));
+                    let _ = respond_to.send(current);
                 }
                 FoundryMsg::Reload { respond_to } => {
                     println!("FoundryActor: Reloading foundry service...");

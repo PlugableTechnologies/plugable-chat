@@ -809,6 +809,10 @@ pub enum FoundryMsg {
     GetLoadedModels {
         respond_to: oneshot::Sender<Vec<String>>,
     },
+    /// Get the currently selected model info
+    GetCurrentModel {
+        respond_to: oneshot::Sender<Option<ModelInfo>>,
+    },
     /// Reload the foundry service
     Reload {
         respond_to: oneshot::Sender<Result<(), String>>,
