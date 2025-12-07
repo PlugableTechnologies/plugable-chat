@@ -261,15 +261,25 @@ interface TestResult {
     error?: string;
 }
 
+interface SystemPromptLayers {
+    base_prompt: string;
+    additions: string[];
+    combined: string;
+}
+
 // Single MCP Server configuration card
 function McpServerCard({ 
     config, 
     onSave, 
-    onRemove 
+    onRemove,
+    toolPrompts,
+    onSaveToolPrompt
 }: { 
     config: McpServerConfig;
     onSave: (config: McpServerConfig) => void;
     onRemove: () => void;
+    toolPrompts: Record<string, string>;
+    onSaveToolPrompt: (serverId: string, toolName: string, prompt: string) => Promise<void>;
 }) {
     const [expanded, setExpanded] = useState(false);
     const [localConfig, setLocalConfig] = useState<McpServerConfig>(() => structuredClone(config));
@@ -283,6 +293,10 @@ function McpServerCard({
     // Test connection state
     const [isTesting, setIsTesting] = useState(false);
     const [testResult, setTestResult] = useState<TestResult | null>(null);
+    const [tools, setTools] = useState<McpTool[]>([]);
+    const [loadingTools, setLoadingTools] = useState(false);
+    const [toolsError, setToolsError] = useState<string | null>(null);
+    const [toolDrafts, setToolDrafts] = useState<Record<string, string>>({});
     
     // Sync with external config when it changes (e.g., after save from backend)
     useEffect(() => {
@@ -301,6 +315,11 @@ function McpServerCard({
             setLocalConfig(structuredClone(config));
         }
     }, [config, isDirty, localConfig]);
+    
+    // Sync tool prompt drafts with latest store state
+    useEffect(() => {
+        setToolDrafts(toolPrompts);
+    }, [toolPrompts]);
     
     const updateField = useCallback(<K extends keyof McpServerConfig>(field: K, value: McpServerConfig[K]) => {
         setLocalConfig(prev => {
@@ -354,6 +373,19 @@ function McpServerCard({
         }
     }, [localConfig]);
     
+    // Load tools for prompt editing when expanded and enabled
+    useEffect(() => {
+        if (!expanded || !localConfig.enabled) return;
+        if (tools.length > 0 && !toolsError) return;
+        
+        setLoadingTools(true);
+        setToolsError(null);
+        invoke<McpTool[]>('list_mcp_tools', { serverId: localConfig.id })
+            .then(setTools)
+            .catch((e: any) => setToolsError(e.message || String(e)))
+            .finally(() => setLoadingTools(false));
+    }, [expanded, localConfig.enabled, localConfig.id, tools.length, toolsError]);
+    
     // Toggle enabled state and auto-save immediately
     const handleToggleEnabled = useCallback(async () => {
         const newEnabled = !localConfig.enabled;
@@ -382,6 +414,17 @@ function McpServerCard({
             setTestResult(null);
         }
     }, [localConfig, onSave]);
+    
+    const toolPromptKey = useCallback((toolName: string) => `${localConfig.id}::${toolName}`, [localConfig.id]);
+    
+    const handleToolPromptChange = useCallback((toolName: string, value: string) => {
+        const key = toolPromptKey(toolName);
+        setToolDrafts(prev => ({ ...prev, [key]: value }));
+    }, [toolPromptKey]);
+    
+    const handleToolPromptSave = useCallback(async (toolName: string, value: string) => {
+        await onSaveToolPrompt(localConfig.id, toolName, value);
+    }, [localConfig.id, onSaveToolPrompt]);
     
     // Check if this is the built-in test server
     const isTestServer = config.id === 'mcp-test-server';
@@ -413,13 +456,7 @@ function McpServerCard({
                 
                 {/* Name */}
                 <div className="flex-1 flex items-center gap-2">
-                    <input
-                        type="text"
-                        value={localConfig.name}
-                        onChange={(e) => updateField('name', e.target.value)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="flex-1 font-medium text-gray-900 bg-transparent focus:outline-none focus:bg-gray-50 rounded px-1"
-                    />
+                    <span className="font-medium text-gray-900 truncate">{localConfig.name || 'Unnamed MCP server'}</span>
                     {isTestServer && (
                         <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">Built-in</span>
                     )}
@@ -437,6 +474,18 @@ function McpServerCard({
             {/* Expanded details */}
             {expanded && (
                 <div className="px-4 pb-4 pt-2 border-t border-gray-100 space-y-4">
+                    {/* Name (now editable at top of fields) */}
+                    <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1.5">Server Name</label>
+                        <input
+                            type="text"
+                            value={localConfig.name}
+                            onChange={(e) => updateField('name', e.target.value)}
+                            placeholder="Enter a name for this server"
+                            className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                        />
+                    </div>
+                    
                     {/* Transport type */}
                     <div>
                         <label className="block text-xs font-medium text-gray-600 mb-1.5">Transport</label>
@@ -557,6 +606,66 @@ function McpServerCard({
                         </p>
                     </div>
                     
+                    {/* Tool system prompts */}
+                    <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                            <label className="text-xs font-medium text-gray-600">Tool system prompts</label>
+                            {!localConfig.enabled && (
+                                <span className="text-[11px] text-gray-500">Enable this server to load tools</span>
+                            )}
+                        </div>
+                        {!localConfig.enabled && (
+                            <p className="text-xs text-gray-500">Turn on this server to view its tools and edit their prompts.</p>
+                        )}
+                        {localConfig.enabled && loadingTools && (
+                            <div className="flex items-center gap-2 text-xs text-gray-600 bg-gray-50 px-3 py-2 rounded-lg">
+                                <Loader2 size={14} className="animate-spin" />
+                                Loading tools...
+                            </div>
+                        )}
+                        {localConfig.enabled && toolsError && (
+                            <div className="text-xs text-red-700 bg-red-50 px-3 py-2 rounded-lg">
+                                {toolsError}
+                            </div>
+                        )}
+                        {localConfig.enabled && !loadingTools && !toolsError && tools.length === 0 && (
+                            <p className="text-xs text-gray-500">No tools reported yet from this server.</p>
+                        )}
+                        {localConfig.enabled && !loadingTools && tools.length > 0 && (
+                            <div className="space-y-3">
+                                {tools.map(tool => {
+                                    const key = toolPromptKey(tool.name);
+                                    const value = toolDrafts[key] ?? '';
+                                    return (
+                                        <div key={tool.name} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
+                                            <div className="flex items-start justify-between gap-2">
+                                                <div>
+                                                    <div className="text-sm font-medium text-gray-900">{tool.name}</div>
+                                                    {tool.description && (
+                                                        <p className="text-xs text-gray-600 mt-0.5">{tool.description}</p>
+                                                    )}
+                                                </div>
+                                                <span className="text-[11px] bg-white text-gray-600 px-2 py-0.5 rounded border border-gray-200">MCP tool</span>
+                                            </div>
+                                            <label className="block text-xs font-medium text-gray-600 mt-3 mb-1">System prompt (optional)</label>
+                                            <textarea
+                                                value={value}
+                                                onChange={(e) => handleToolPromptChange(tool.name, e.target.value)}
+                                                onBlur={(e) => handleToolPromptSave(tool.name, e.target.value)}
+                                                rows={3}
+                                                className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                                                placeholder="Add extra instructions for this tool"
+                                            />
+                                            <p className="text-[11px] text-gray-500 mt-1">
+                                                Appended to the system prompt when this tool is enabled.
+                                            </p>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                    
                     {/* Status message from sync */}
                     {status?.error && !testResult && (
                         <div className="text-xs text-red-700 bg-red-50 px-3 py-2 rounded-lg max-h-48 overflow-y-auto">
@@ -654,12 +763,14 @@ function McpServerCard({
 
 // System Prompt Tab
 function SystemPromptTab() {
-    const { settings, updateSystemPrompt, error } = useSettingsStore();
+    const { settings, updateSystemPrompt, error, promptRefreshTick } = useSettingsStore();
     const [localPrompt, setLocalPrompt] = useState(settings?.system_prompt || '');
     const [hasChanges, setHasChanges] = useState(false);
     const [preview, setPreview] = useState<string | null>(null);
     const [showPreview, setShowPreview] = useState(false);
     const [loadingPreview, setLoadingPreview] = useState(false);
+    const [layers, setLayers] = useState<SystemPromptLayers | null>(null);
+    const [layersError, setLayersError] = useState<string | null>(null);
     
     useEffect(() => {
         if (settings?.system_prompt) {
@@ -668,31 +779,43 @@ function SystemPromptTab() {
         }
     }, [settings?.system_prompt]);
     
-    // Fetch preview when showing it
+    const fetchLayers = useCallback(() => {
+        setLoadingPreview(true);
+        setLayersError(null);
+        invoke<SystemPromptLayers>('get_system_prompt_layers')
+            .then((data) => {
+                setLayers(data);
+                setPreview(data.combined);
+            })
+            .catch((e) => {
+                console.error('Failed to get system prompt layers:', e);
+                setLayersError(e.message || String(e));
+                setPreview('Failed to load preview');
+            })
+            .finally(() => setLoadingPreview(false));
+    }, []);
+    
+    // Keep layers in sync with saved settings
+    useEffect(() => {
+        fetchLayers();
+    }, [fetchLayers, settings?.mcp_servers, settings?.python_execution_enabled, settings?.system_prompt]);
+    
+    // Refresh when prompt refresh tick changes (e.g., MCP config saved)
+    useEffect(() => {
+        fetchLayers();
+    }, [fetchLayers, promptRefreshTick]);
+    
+    // Fetch preview when toggling view
     useEffect(() => {
         if (showPreview) {
-            setLoadingPreview(true);
-            invoke<string>('get_system_prompt_preview')
-                .then(setPreview)
-                .catch(e => {
-                    console.error('Failed to get preview:', e);
-                    setPreview('Failed to load preview');
-                })
-                .finally(() => setLoadingPreview(false));
+            fetchLayers();
         }
-    }, [showPreview, settings?.mcp_servers]);
+    }, [showPreview, fetchLayers]);
     
     const handleSave = async () => {
         await updateSystemPrompt(localPrompt);
         setHasChanges(false);
-        // Refresh preview after save
-        if (showPreview) {
-            setLoadingPreview(true);
-            invoke<string>('get_system_prompt_preview')
-                .then(setPreview)
-                .catch(() => setPreview('Failed to load preview'))
-                .finally(() => setLoadingPreview(false));
-        }
+        fetchLayers();
     };
     
     const handleChange = (value: string) => {
@@ -730,6 +853,43 @@ function SystemPromptTab() {
                 <p className="mt-2 text-xs text-gray-500">
                     This is the base prompt. MCP tool descriptions are appended automatically based on enabled servers.
                 </p>
+            </div>
+            
+            {/* Tool prompt breakdown */}
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-3 bg-gray-50">
+                    <div className="flex items-center gap-2">
+                        <Wrench size={16} />
+                        <span className="text-sm font-medium text-gray-700">Additional prompts from tools</span>
+                    </div>
+                    <button
+                        onClick={fetchLayers}
+                        className="text-xs text-blue-600 hover:text-blue-700"
+                    >
+                        Refresh
+                    </button>
+                </div>
+                <div className="p-4 bg-white space-y-3">
+                    {loadingPreview ? (
+                        <div className="flex items-center gap-2 text-sm text-gray-600">
+                            <Loader2 size={16} className="animate-spin" />
+                            Loading tool prompts...
+                        </div>
+                    ) : layersError ? (
+                        <div className="text-sm text-red-700 bg-red-50 px-3 py-2 rounded-lg">{layersError}</div>
+                    ) : layers && layers.additions.length > 0 ? (
+                        layers.additions.map((block, idx) => (
+                            <pre
+                                key={idx}
+                                className="text-xs font-mono whitespace-pre-wrap text-gray-700 bg-gray-50 p-3 rounded-lg border border-gray-100"
+                            >
+                                {block}
+                            </pre>
+                        ))
+                    ) : (
+                        <p className="text-sm text-gray-500">No tool-specific prompts active.</p>
+                    )}
+                </div>
             </div>
             
             {/* Preview toggle */}
@@ -799,9 +959,16 @@ function SystemPromptTab() {
 
 // Tools Tab - combines built-in tools and MCP servers
 function ToolsTab() {
-    const { settings, updateCodeExecutionEnabled, addMcpServer, updateMcpServer, removeMcpServer, error } = useSettingsStore();
+    const { settings, updateCodeExecutionEnabled, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error } = useSettingsStore();
     const servers = settings?.mcp_servers || [];
     const codeExecutionEnabled = settings?.python_execution_enabled ?? false;
+    const [pythonPrompt, setPythonPrompt] = useState(settings?.tool_system_prompts?.['builtin::python_execution'] || '');
+    const [toolSearchPrompt, setToolSearchPrompt] = useState(settings?.tool_system_prompts?.['builtin::tool_search'] || '');
+    
+    useEffect(() => {
+        setPythonPrompt(settings?.tool_system_prompts?.['builtin::python_execution'] || '');
+        setToolSearchPrompt(settings?.tool_system_prompts?.['builtin::tool_search'] || '');
+    }, [settings?.tool_system_prompts]);
     
     const handleAddServer = () => {
         const newConfig = createNewServerConfig();
@@ -810,6 +977,10 @@ function ToolsTab() {
     
     const handleToggleCodeExecution = () => {
         updateCodeExecutionEnabled(!codeExecutionEnabled);
+    };
+    
+    const handleSaveBuiltinPrompt = (toolName: 'python_execution' | 'tool_search', value: string) => {
+        updateToolSystemPrompt('builtin', toolName, value);
     };
     
     return (
@@ -853,6 +1024,48 @@ function ToolsTab() {
                         </button>
                     </div>
                 </div>
+                
+                {/* Built-in tool prompts */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-2">
+                        <div className="flex items-start justify-between">
+                            <div>
+                                <div className="text-sm font-semibold text-gray-900">Python Execution</div>
+                                <p className="text-xs text-gray-500">Built-in tool</p>
+                            </div>
+                            <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                        </div>
+                        <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
+                        <textarea
+                            value={pythonPrompt}
+                            onChange={(e) => setPythonPrompt(e.target.value)}
+                            onBlur={(e) => handleSaveBuiltinPrompt('python_execution', e.target.value)}
+                            rows={3}
+                            className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
+                            placeholder="Add extra guidance for python_execution"
+                        />
+                        <p className="text-[11px] text-gray-500">Appended to the system prompt when Python execution is enabled.</p>
+                    </div>
+                    <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-2">
+                        <div className="flex items-start justify-between">
+                            <div>
+                                <div className="text-sm font-semibold text-gray-900">Tool Search</div>
+                                <p className="text-xs text-gray-500">Built-in discovery helper</p>
+                            </div>
+                            <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                        </div>
+                        <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
+                        <textarea
+                            value={toolSearchPrompt}
+                            onChange={(e) => setToolSearchPrompt(e.target.value)}
+                            onBlur={(e) => handleSaveBuiltinPrompt('tool_search', e.target.value)}
+                            rows={3}
+                            className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
+                            placeholder="Add guidance for how tool_search results should be used"
+                        />
+                        <p className="text-[11px] text-gray-500">Added when MCP tools are available.</p>
+                    </div>
+                </div>
             </div>
             
             {/* Divider */}
@@ -894,6 +1107,8 @@ function ToolsTab() {
                                 config={server}
                                 onSave={updateMcpServer}
                                 onRemove={() => removeMcpServer(server.id)}
+                                toolPrompts={settings?.tool_system_prompts || {}}
+                                onSaveToolPrompt={updateToolSystemPrompt}
                             />
                         ))
                     )}

@@ -23,6 +23,7 @@ export interface McpServerConfig {
 export interface AppSettings {
     system_prompt: string;
     mcp_servers: McpServerConfig[];
+    tool_system_prompts: Record<string, string>;
     python_execution_enabled: boolean;
 }
 
@@ -45,6 +46,7 @@ interface SettingsState {
     settings: AppSettings | null;
     isLoading: boolean;
     error: string | null;
+    promptRefreshTick: number;
     
     // MCP Server statuses
     serverStatuses: Record<string, McpServerStatus>;
@@ -65,6 +67,8 @@ interface SettingsState {
     addMcpServer: (config: McpServerConfig) => Promise<void>;
     updateMcpServer: (config: McpServerConfig) => Promise<void>;
     removeMcpServer: (serverId: string) => Promise<void>;
+    updateToolSystemPrompt: (serverId: string, toolName: string, prompt: string) => Promise<void>;
+    bumpPromptRefresh: () => void;
     
     // MCP Server operations
     connectServer: (serverId: string) => Promise<void>;
@@ -89,13 +93,48 @@ export function createNewServerConfig(): McpServerConfig {
     };
 }
 
+function toPythonIdentifier(name: string): string {
+    let result = '';
+    let lastUnderscore = false;
+    for (const ch of name) {
+        if (/[a-zA-Z0-9]/.test(ch)) {
+            const lower = ch.toLowerCase();
+            result += lower;
+            lastUnderscore = false;
+        } else if (ch === ' ' || ch === '-' || ch === '_' || ch === '.') {
+            if (!lastUnderscore && result.length > 0) {
+                result += '_';
+                lastUnderscore = true;
+            }
+        }
+    }
+    while (result.endsWith('_')) {
+        result = result.slice(0, -1);
+    }
+    if (!result) {
+        result = 'module';
+    }
+    if (/^[0-9]/.test(result)) {
+        result = `_${result}`;
+    }
+    const PYTHON_KEYWORDS = new Set([
+        'false','none','true','and','as','assert','async','await','break','class','continue','def','del','elif','else','except','finally','for','from','global','if','import','in','is','lambda','nonlocal','not','or','pass','raise','return','try','while','with','yield'
+    ]);
+    if (PYTHON_KEYWORDS.has(result)) {
+        result = `${result}_`;
+    }
+    return result;
+}
+
 export const useSettingsStore = create<SettingsState>((set, get) => ({
     settings: null,
     isLoading: false,
     error: null,
+    promptRefreshTick: 0,
     serverStatuses: {},
     isSettingsOpen: false,
     activeTab: 'system-prompt',
+    bumpPromptRefresh: () => set(state => ({ promptRefreshTick: state.promptRefreshTick + 1 })),
     
     openSettings: () => {
         set({ isSettingsOpen: true });
@@ -147,6 +186,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 settings: {
                     system_prompt: DEFAULT_SYSTEM_PROMPT,
                     mcp_servers: [],
+                    tool_system_prompts: {},
                     python_execution_enabled: false,
                 }
             });
@@ -169,6 +209,37 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update system prompt:', e);
             // Revert on error
+            set({ 
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+    
+    updateToolSystemPrompt: async (serverId: string, toolName: string, prompt: string) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        
+        const key = `${serverId}::${toolName}`;
+        const newPrompts = { ...currentSettings.tool_system_prompts };
+        if (prompt.trim()) {
+            newPrompts[key] = prompt;
+        } else {
+            delete newPrompts[key];
+        }
+        
+        // Optimistic update
+        set({ 
+            settings: { ...currentSettings, tool_system_prompts: newPrompts },
+            error: null 
+        });
+        
+        try {
+            await invoke('update_tool_system_prompt', { serverId, toolName, prompt });
+            console.log('[SettingsStore] Tool system prompt updated:', key);
+            get().bumpPromptRefresh();
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update tool system prompt:', e);
             set({ 
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`
@@ -202,17 +273,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     addMcpServer: async (config: McpServerConfig) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
+        const sanitizedName = toPythonIdentifier(config.name);
+        const newConfig = { ...config, name: sanitizedName, python_name: sanitizedName };
         
         // Optimistic update
         const newSettings = {
             ...currentSettings,
-            mcp_servers: [...currentSettings.mcp_servers, config],
+            mcp_servers: [...currentSettings.mcp_servers, newConfig],
         };
         set({ settings: newSettings, error: null });
         
         try {
-            await invoke('add_mcp_server', { config });
-            console.log('[SettingsStore] MCP server added:', config.id);
+            await invoke('add_mcp_server', { config: newConfig });
+            console.log('[SettingsStore] MCP server added:', newConfig.id);
+            get().bumpPromptRefresh();
         } catch (e: any) {
             console.error('[SettingsStore] Failed to add MCP server:', e);
             // Revert on error
@@ -226,27 +300,30 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     updateMcpServer: async (config: McpServerConfig) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
+        const sanitizedName = toPythonIdentifier(config.name);
+        const newConfig = { ...config, name: sanitizedName, python_name: sanitizedName };
         
         // Optimistic update
         const newSettings = {
             ...currentSettings,
             mcp_servers: currentSettings.mcp_servers.map(s => 
-                s.id === config.id ? config : s
+                s.id === config.id ? newConfig : s
             ),
         };
         set({ settings: newSettings, error: null });
         
         try {
             // Backend will sync servers automatically after update
-            await invoke('update_mcp_server', { config });
-            console.log('[SettingsStore] MCP server updated:', config.id);
+            await invoke('update_mcp_server', { config: newConfig });
+            console.log('[SettingsStore] MCP server updated:', newConfig.id);
+            get().bumpPromptRefresh();
             
             // Update connection status
-            const isConnected = config.enabled;
+            const isConnected = newConfig.enabled;
             set(state => ({
                 serverStatuses: {
                     ...state.serverStatuses,
-                    [config.id]: { connected: isConnected }
+                    [newConfig.id]: { connected: isConnected }
                 }
             }));
         } catch (e: any) {
@@ -273,6 +350,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         try {
             await invoke('remove_mcp_server', { serverId });
             console.log('[SettingsStore] MCP server removed:', serverId);
+            get().bumpPromptRefresh();
             
             // Clean up status
             const newStatuses = { ...get().serverStatuses };

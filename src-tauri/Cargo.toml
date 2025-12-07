@@ -41,6 +41,9 @@ sha2 = "0.10"
 # Home directory detection for config files
 dirs = "5"
 
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
+
 # Regex for parsing tool calls
 regex = "1"
 
