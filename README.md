@@ -2,6 +2,25 @@
 
 A high-performance, local-first chat application built with Tauri v2, React, and Rust.
 
+## Why Plugable Chat
+
+- Local-first desktop app with Tauri: fast startup, small footprint, no browser overhead.
+- Multiple model families (OpenAI-compatible, Gemma, Granite, Phi, etc.) with model-specific tool-calling formats.
+- Offline-friendly: state stored locally; LanceDB keeps chat history on disk.
+- Built-in agentic loop: models can call Python code, search tools, or MCP tools with auto-approval for built-ins.
+- Streaming by default: tokens arrive via Tauri events and append to the latest assistant message for smooth UI updates.
+- Robust listener management: the store uses generation counters to avoid duplicated Tauri event handlers during hot reloads.
+
+## How It Works (High Level)
+
+- Frontend: React 19 + Tailwind v4 (via `@tailwindcss/postcss`) in a single-page app embedded by Tauri.
+- State: Zustand store (`src/store/chat-store.ts`) manages chats, streaming message assembly, and listener lifecycle.
+- Backend: Rust (Tauri v2) handles model requests, streaming, and tool execution; profiles per model family live in `src-tauri/src/model_profiles.rs`.
+- Tool calling: the agentic loop (`src-tauri/src/lib.rs`) resolves tools (built-in Python sandbox and tool search, plus MCP servers), executes them, and streams formatted results back.
+- Python sandbox: RustPython-based sandbox with a curated allowlist; validation happens in `code_execution.rs` before execution.
+- Vector store: LanceDB at `src-tauri/data/lancedb/chats.lance`; schema defined in `src-tauri/src/actors/vector_actor.rs` (drops/recreates on schema mismatch).
+- Desktop build artifacts: Tauri bundles platform installers; icon variants generated from a single source PNG.
+
 ## 🚀 Getting Started
 
 ### macOS
