@@ -442,6 +442,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
         } catch (e) {
             console.error('[ChatStore] ❌ Stop failed:', e);
         }
+
+        // Always request a Foundry service restart after a manual stop
+        console.log('[ChatStore] 🔄 Requesting Foundry service restart after stop...');
+        set({
+            operationStatus: {
+                type: 'reloading',
+                message: 'Restarting Foundry service after stop...',
+                startTime: Date.now(),
+            },
+            statusBarDismissed: false,
+        });
+
+        try {
+            await invoke('reload_foundry');
+            console.log('[ChatStore] ✅ Reload request sent to backend (waiting for restart events)');
+        } catch (e) {
+            console.error('[ChatStore] ❌ Failed to request Foundry restart:', e);
+            set({
+                operationStatus: {
+                    type: 'reloading',
+                    message: `Failed to restart Foundry service: ${ (e as any)?.message || e }`,
+                    startTime: Date.now(),
+                },
+            });
+            setTimeout(() => {
+                const currentState = get();
+                if (currentState.operationStatus?.type === 'reloading' && !currentState.operationStatus?.completed) {
+                    set({ operationStatus: null });
+                }
+            }, 10000);
+        }
     },
 
     currentChatId: null,

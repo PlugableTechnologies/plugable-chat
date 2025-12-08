@@ -1833,6 +1833,10 @@ fn default_python_prompt(has_attachments: bool, has_deferred_tools: bool) -> Str
         parts.push("Attached files are already summarized in the conversation. Do NOT read files; work with the provided text directly inside python_execution.".to_string());
     }
 
+    if has_deferred_tools {
+        parts.push("Some MCP tools are deferred; if you need extra capabilities, call `tool_search` first, then use those tools or python_execution as appropriate in the same turn.".to_string());
+    }
+
     parts.join("\n\n")
 }
 
@@ -2008,14 +2012,27 @@ async fn get_loaded_models(handles: State<'_, ActorHandles>) -> Result<Vec<Strin
 
 #[tauri::command]
 async fn reload_foundry(handles: State<'_, ActorHandles>) -> Result<(), String> {
-    println!("[reload_foundry] Reloading foundry service");
+    use std::io::Write;
+    println!("\n[reload_foundry] 🔄 Reloading foundry service (requested by UI)");
+    let _ = std::io::stdout().flush();
     let (tx, rx) = oneshot::channel();
     handles
         .foundry_tx
         .send(FoundryMsg::Reload { respond_to: tx })
         .await
         .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())?
+    match rx.await {
+        Ok(res) => {
+            println!("[reload_foundry] ✅ Reload command completed with result: {:?}", res);
+            let _ = std::io::stdout().flush();
+            res.map_err(|e| e)
+        }
+        Err(_) => {
+            println!("[reload_foundry] ❌ Foundry actor died while reloading");
+            let _ = std::io::stdout().flush();
+            Err("Foundry actor died".to_string())
+        }
+    }
 }
 
 #[tauri::command]
