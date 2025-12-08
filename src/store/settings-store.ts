@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '../lib/api';
+import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
 
 // Transport type matching Rust backend
 export type Transport = 
@@ -46,6 +47,7 @@ interface SettingsState {
     settings: AppSettings | null;
     isLoading: boolean;
     error: string | null;
+    pythonAllowedImports: string[];
     promptRefreshTick: number;
     
     // MCP Server statuses
@@ -130,6 +132,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     settings: null,
     isLoading: false,
     error: null,
+    pythonAllowedImports: FALLBACK_PYTHON_ALLOWED_IMPORTS,
     promptRefreshTick: 0,
     serverStatuses: {},
     isSettingsOpen: false,
@@ -153,9 +156,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     fetchSettings: async () => {
         set({ isLoading: true, error: null });
         try {
-            const settings = await invoke<AppSettings>('get_settings');
+            const [settings, allowedImportsRaw] = await Promise.all([
+                invoke<AppSettings>('get_settings'),
+                invoke<string[]>('get_python_allowed_imports').catch((err) => {
+                    console.error('[SettingsStore] Failed to fetch allowed imports:', err);
+                    return FALLBACK_PYTHON_ALLOWED_IMPORTS;
+                }),
+            ]);
+            const allowedImports = (allowedImportsRaw && allowedImportsRaw.length > 0)
+                ? allowedImportsRaw
+                : FALLBACK_PYTHON_ALLOWED_IMPORTS;
             console.log('[SettingsStore] Fetched settings:', settings);
-            set({ settings, isLoading: false });
+            set({ settings, pythonAllowedImports: allowedImports, isLoading: false });
             
             // Sync MCP servers after fetching settings
             try {
@@ -188,7 +200,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     mcp_servers: [],
                     tool_system_prompts: {},
                     python_execution_enabled: false,
-                }
+                },
+                pythonAllowedImports: FALLBACK_PYTHON_ALLOWED_IMPORTS,
             });
         }
     },

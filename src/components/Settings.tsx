@@ -2,6 +2,7 @@ import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, type Mc
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw } from 'lucide-react';
 import { invoke } from '../lib/api';
+import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
 
 // Python reserved keywords (cannot be used as identifiers)
 const PYTHON_KEYWORDS = new Set([
@@ -959,11 +960,19 @@ function SystemPromptTab() {
 
 // Tools Tab - combines built-in tools and MCP servers
 function ToolsTab() {
-    const { settings, updateCodeExecutionEnabled, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error } = useSettingsStore();
+    const { settings, updateCodeExecutionEnabled, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error, pythonAllowedImports } = useSettingsStore();
     const servers = settings?.mcp_servers || [];
     const codeExecutionEnabled = settings?.python_execution_enabled ?? false;
-    const defaultPythonPrompt = "Use python_execution for calculations and data transforms. No internet or filesystem access. Keep code concise; use allowed stdlib only.";
-    const defaultToolSearchPrompt = "Call tool_search to discover MCP tools. Then call discovered tools directly (or from python_execution).";
+    const allowedImports = (pythonAllowedImports && pythonAllowedImports.length > 0)
+        ? pythonAllowedImports
+        : FALLBACK_PYTHON_ALLOWED_IMPORTS;
+    const defaultPythonPrompt = [
+        "Use python_execution for calling tools, calculations, and data transforms.",
+        "Tools found with tool_search will be available in the global scope, with parameters with the same name and in the same order as returned in the tool description.",
+        "Do not use any imports that are not explicitly allowed.",
+        `Here are the allowed imports: ${allowedImports.join(', ')}.`
+    ].join(' ');
+    const defaultToolSearchPrompt = "Call tool_search to discover MCP tools related to your search string. If the returned tools appear to be relevant to your goal, use them";
     const [pythonPrompt, setPythonPrompt] = useState(settings?.tool_system_prompts?.['builtin::python_execution'] || '');
     const [toolSearchPrompt, setToolSearchPrompt] = useState(settings?.tool_system_prompts?.['builtin::tool_search'] || '');
     

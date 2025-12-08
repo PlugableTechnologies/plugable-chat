@@ -1,0 +1,27 @@
+// Fallback list of allowed Python imports when the backend is unavailable.
+// Kept in sync with the python sandbox ALLOWED_MODULES list.
+export const FALLBACK_PYTHON_ALLOWED_IMPORTS = [
+  'math',
+  'json',
+  'random',
+  're',
+  'datetime',
+  'collections',
+  'itertools',
+  'functools',
+  'operator',
+  'string',
+  'textwrap',
+  'copy',
+  'types',
+  'typing',
+  'abc',
+  'numbers',
+  'decimal',
+  'fractions',
+  'statistics',
+  'hashlib',
+  'base64',
+  'binascii',
+  'html',
+];

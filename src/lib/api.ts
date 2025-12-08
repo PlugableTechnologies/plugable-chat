@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
+import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from './python-allowed-imports';
 
 const isTauri = () => {
     return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -25,6 +26,7 @@ async function mockInvoke(cmd: string, _args?: any): Promise<any> {
     switch (cmd) {
         case 'get_models': return [];
         case 'get_all_chats': return [];
+        case 'get_python_allowed_imports': return FALLBACK_PYTHON_ALLOWED_IMPORTS;
         default: return null;
     }
 }

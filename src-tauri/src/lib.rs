@@ -22,6 +22,7 @@ use protocol::{
 use settings::{enforce_python_name, AppSettings, McpServerConfig};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, oneshot};
@@ -2577,6 +2578,14 @@ async fn get_settings(settings_state: State<'_, SettingsState>) -> Result<AppSet
 }
 
 #[tauri::command]
+fn get_python_allowed_imports() -> Vec<String> {
+    PYTHON_ALLOWED_MODULES
+        .iter()
+        .map(|m| m.to_string())
+        .collect()
+}
+
+#[tauri::command]
 async fn save_app_settings(
     new_settings: AppSettings,
     settings_state: State<'_, SettingsState>,
@@ -3352,6 +3361,7 @@ pub fn run() {
             get_rag_indexed_files,
             // Settings commands
             get_settings,
+            get_python_allowed_imports,
             save_app_settings,
             add_mcp_server,
             update_mcp_server,
