@@ -1,4 +1,4 @@
-import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, type McpServerConfig, type McpTool } from '../store/settings-store';
+import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw } from 'lucide-react';
 import { invoke } from '../lib/api';
@@ -984,9 +984,10 @@ function ToolsTab({
     onRegisterSave?: (handler: () => Promise<void>) => void;
     onSavingChange?: (saving: boolean) => void;
 }) {
-    const { settings, updateCodeExecutionEnabled, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error, pythonAllowedImports } = useSettingsStore();
+    const { settings, updateCodeExecutionEnabled, updateToolCallFormats, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error, pythonAllowedImports } = useSettingsStore();
     const servers = settings?.mcp_servers || [];
     const codeExecutionEnabled = settings?.python_execution_enabled ?? false;
+    const formatConfig = settings?.tool_call_formats || DEFAULT_TOOL_CALL_FORMATS;
     const allowedImports = (pythonAllowedImports && pythonAllowedImports.length > 0)
         ? pythonAllowedImports
         : FALLBACK_PYTHON_ALLOWED_IMPORTS;
@@ -999,14 +1000,23 @@ function ToolsTab({
     const defaultToolSearchPrompt = "Call tool_search to discover MCP tools related to your search string. If the returned tools appear to be relevant to your goal, use them";
     const initialPythonPrompt = settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt;
     const initialToolSearchPrompt = settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt;
+    const formatOptions: { id: ToolCallFormatName; label: string; description: string }[] = [
+        { id: 'code_mode', label: 'Code Mode (Python)', description: 'Model returns a single Python program executed in the sandbox (primary default).' },
+        { id: 'hermes', label: 'Hermes (tag-delimited)', description: '<tool_call>{"name": "...", "arguments": {...}}</tool_call>' },
+        { id: 'mistral', label: 'Mistral (bracket)', description: '[TOOL_CALLS] [{"name": "...", "arguments": {...}}]' },
+        { id: 'pythonic', label: 'Pythonic call', description: 'tool_name(arg1="value", arg2=123)' },
+        { id: 'pure_json', label: 'Pure JSON', description: '{"tool": "name", "args": {...}} or array' },
+    ];
 
     const [localCodeExecutionEnabled, setLocalCodeExecutionEnabled] = useState(codeExecutionEnabled);
     const [pythonPromptDraft, setPythonPromptDraft] = useState(initialPythonPrompt);
     const [toolSearchPromptDraft, setToolSearchPromptDraft] = useState(initialToolSearchPrompt);
+    const [localFormats, setLocalFormats] = useState<ToolCallFormatConfig>(formatConfig);
     const [baselineBuiltins, setBaselineBuiltins] = useState({
         codeExecutionEnabled,
         pythonPrompt: initialPythonPrompt,
         toolSearchPrompt: initialToolSearchPrompt,
+        toolCallFormats: formatConfig,
     });
 
     const [serverDirtyMap, setServerDirtyMap] = useState<Record<string, boolean>>({});
@@ -1019,17 +1029,20 @@ function ToolsTab({
             codeExecutionEnabled: codeExecutionEnabled,
             pythonPrompt: settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt,
             toolSearchPrompt: settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt,
+            toolCallFormats: formatConfig,
         };
 
         const hasPendingBuiltins =
             localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
             pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
-            toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt;
+            toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt ||
+            JSON.stringify(localFormats) !== JSON.stringify(baselineBuiltins.toolCallFormats);
 
         if (!hasPendingBuiltins) {
             setLocalCodeExecutionEnabled(nextBaseline.codeExecutionEnabled);
             setPythonPromptDraft(nextBaseline.pythonPrompt);
             setToolSearchPromptDraft(nextBaseline.toolSearchPrompt);
+            setLocalFormats(nextBaseline.toolCallFormats);
             setBaselineBuiltins(nextBaseline);
         } else {
             setBaselineBuiltins(nextBaseline);
@@ -1038,10 +1051,13 @@ function ToolsTab({
         baselineBuiltins.codeExecutionEnabled,
         baselineBuiltins.pythonPrompt,
         baselineBuiltins.toolSearchPrompt,
+        baselineBuiltins.toolCallFormats,
         codeExecutionEnabled,
         defaultPythonPrompt,
         defaultToolSearchPrompt,
+        formatConfig,
         localCodeExecutionEnabled,
+        localFormats,
         pythonPromptDraft,
         settings?.tool_system_prompts,
         toolSearchPromptDraft,
@@ -1068,7 +1084,8 @@ function ToolsTab({
     const hasBuiltInChanges =
         localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
         pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
-        toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt;
+        toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt ||
+        JSON.stringify(localFormats) !== JSON.stringify(baselineBuiltins.toolCallFormats);
 
     const hasServerChanges = Object.values(serverDirtyMap).some(Boolean);
     const anyChanges = hasBuiltInChanges || hasServerChanges;
@@ -1089,6 +1106,25 @@ function ToolsTab({
     const handleToggleCodeExecution = () => {
         setLocalCodeExecutionEnabled((prev) => !prev);
     };
+
+    const toggleFormat = useCallback((format: ToolCallFormatName) => {
+        setLocalFormats((prev) => {
+            const nextEnabled = prev.enabled.includes(format)
+                ? prev.enabled.filter((f) => f !== format)
+                : [...prev.enabled, format];
+            const deduped = Array.from(new Set(nextEnabled));
+            const ensuredEnabled = deduped.length > 0 ? deduped : [...DEFAULT_TOOL_CALL_FORMATS.enabled];
+            const nextPrimary = ensuredEnabled.includes(prev.primary) ? prev.primary : ensuredEnabled[0];
+            return { enabled: ensuredEnabled, primary: nextPrimary };
+        });
+    }, []);
+
+    const setPrimaryFormat = useCallback((format: ToolCallFormatName) => {
+        setLocalFormats((prev) => {
+            if (!prev.enabled.includes(format)) return prev;
+            return { ...prev, primary: format };
+        });
+    }, []);
 
     const handleResetPythonPrompt = () => {
         setPythonPromptDraft(defaultPythonPrompt);
@@ -1119,6 +1155,10 @@ function ToolsTab({
             saves.push(updateToolSystemPrompt('builtin', 'tool_search', targetToolSearchPrompt));
         }
 
+        if (JSON.stringify(localFormats) !== JSON.stringify(settings.tool_call_formats || DEFAULT_TOOL_CALL_FORMATS)) {
+            saves.push(updateToolCallFormats(localFormats));
+        }
+
         // Trigger saves for dirty MCP servers
         const dirtyServerIds = Object.entries(serverDirtyMap)
             .filter(([, dirty]) => dirty)
@@ -1142,6 +1182,7 @@ function ToolsTab({
                 codeExecutionEnabled: localCodeExecutionEnabled,
                 pythonPrompt: targetPythonPrompt,
                 toolSearchPrompt: targetToolSearchPrompt,
+                toolCallFormats: localFormats,
             });
             setServerDirtyMap((prev) => {
                 const next: Record<string, boolean> = {};
@@ -1164,7 +1205,9 @@ function ToolsTab({
         settings,
         toolSearchPromptDraft,
         updateCodeExecutionEnabled,
+        updateToolCallFormats,
         updateToolSystemPrompt,
+        localFormats,
     ]);
 
     // Register save handler with parent
@@ -1179,6 +1222,51 @@ function ToolsTab({
                 <div>
                     <h3 className="text-sm font-medium text-gray-700">Built-in Tools</h3>
                     <p className="text-xs text-gray-500">Core tools that run locally within the app</p>
+                </div>
+
+                {/* Tool format toggles */}
+                <div className="border border-gray-200 rounded-xl bg-white overflow-hidden w-full">
+                    <div className="px-4 py-3 border-b border-gray-100">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <div className="text-sm font-medium text-gray-900">Tool calling formats</div>
+                                <p className="text-xs text-gray-500">Primary is advertised in system prompts; others stay enabled for parsing/execution.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="divide-y divide-gray-100">
+                        {formatOptions.map((option) => {
+                            const enabled = localFormats.enabled.includes(option.id);
+                            const isPrimary = localFormats.primary === option.id;
+                            return (
+                                <div key={option.id} className="flex items-center justify-between px-4 py-3 gap-3">
+                                    <div className="flex items-start gap-3">
+                                        <input
+                                            type="checkbox"
+                                            checked={enabled}
+                                            onChange={() => toggleFormat(option.id)}
+                                            className="mt-1 h-4 w-4 text-blue-600 border-gray-300 rounded"
+                                        />
+                                        <div>
+                                            <div className="text-sm font-medium text-gray-900">{option.label}</div>
+                                            <p className="text-xs text-gray-500 font-mono">{option.description}</p>
+                                        </div>
+                                    </div>
+                                    <label className={`flex items-center gap-2 text-xs ${enabled ? 'text-gray-700' : 'text-gray-400'}`}>
+                                        <input
+                                            type="radio"
+                                            name="primary-format"
+                                            disabled={!enabled}
+                                            checked={isPrimary}
+                                            onChange={() => setPrimaryFormat(option.id)}
+                                            className="h-3.5 w-3.5 text-blue-600 border-gray-300"
+                                        />
+                                        Primary
+                                    </label>
+                                </div>
+                            );
+                        })}
+                    </div>
                 </div>
                 
                 {/* Code Execution Tool Card */}

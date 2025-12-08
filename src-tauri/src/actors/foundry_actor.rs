@@ -1031,7 +1031,7 @@ impl FoundryActor {
     /// Detect port and Execution Providers via `foundry service status`
     /// 
     /// Parses output like:
-    /// ```
+    /// ```text
     /// 🟢 Model management service is running on http://127.0.0.1:54657/openai/status
     /// EP autoregistration status: Successfully downloaded and registered the following EPs: NvTensorRTRTXExecutionProvider, OpenVINOExecutionProvider.
     /// Valid EPs: CPUExecutionProvider, WebGpuExecutionProvider, NvTensorRTRTXExecutionProvider, OpenVINOExecutionProvider, CUDAExecutionProvider

@@ -133,6 +133,10 @@ impl ModelProfile {
     }
     
     fn build_tool_system_prompt_openai(&self, tools: &[ToolSchema], options: &PromptOptions) -> String {
+        if options.code_mode_enabled {
+            return Self::python_only_tool_prompt(tools);
+        }
+
         let mut prompt = String::from("You are a tool-using assistant. Use available tools when appropriate.\n\n");
         
         if options.code_mode_enabled {
@@ -174,8 +178,6 @@ impl ModelProfile {
 **IMPORTANT: You must `import` modules before using them.**
 Allowed imports: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64, operator, string, textwrap, copy, types, typing, abc, numbers, binascii, html.
 Not available: pandas, numpy, requests, or any external packages.
-
-**Format:** `{"name": "python_execution", "arguments": {"code": ["import math", "result = math.pi", "print(result)"]}}`
 
 **Example:**
 ```python
@@ -235,6 +237,10 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
     }
     
     fn build_tool_system_prompt_hermes(&self, tools: &[ToolSchema], options: &PromptOptions) -> String {
+        if options.code_mode_enabled {
+            return Self::python_only_tool_prompt(tools);
+        }
+
         let mut prompt = String::from("You are a helpful assistant with tool-calling capabilities.\n\n");
         
         prompt.push_str("## Tool Calling Format\n\n");
@@ -295,6 +301,10 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
     }
     
     fn build_tool_system_prompt_granite(&self, tools: &[ToolSchema], options: &PromptOptions) -> String {
+        if options.code_mode_enabled {
+            return Self::python_only_tool_prompt(tools);
+        }
+
         let mut prompt = String::from("You are a helpful assistant with function calling capabilities.\n\n");
         
         prompt.push_str("## Function Calling Format\n\n");
@@ -349,6 +359,10 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
     }
     
     fn build_tool_system_prompt_text_based(&self, tools: &[ToolSchema], options: &PromptOptions) -> String {
+        if options.code_mode_enabled {
+            return Self::python_only_tool_prompt(tools);
+        }
+
         let mut prompt = String::from("You are a helpful assistant.\n\n");
         
         prompt.push_str("## Tool Calling\n\n");
@@ -459,6 +473,27 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
         }
         
         calls
+    }
+
+    fn python_only_tool_prompt(tools: &[ToolSchema]) -> String {
+        let mut prompt = String::new();
+        prompt.push_str("You must return exactly one runnable Python program when tools are available.\n\n");
+        prompt.push_str("Do NOT emit <tool_call> tags or JSON tool calls. All tool use happens inside that Python program. We will execute it and show any print output to the user.\n\n");
+        prompt.push_str("Allowed imports: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.\n");
+        prompt.push_str("To discover external tools, call the global function tool_search(relevant_to=\"...\") from your Python code, then call the returned functions directly.\n\n");
+
+        if !tools.is_empty() {
+            prompt.push_str("## Available tools\n\n");
+            for tool in tools.iter().filter(|t| !t.defer_loading) {
+                prompt.push_str(&format!("**{}**", tool.name));
+                if let Some(desc) = &tool.description {
+                    prompt.push_str(&format!(": {}", desc));
+                }
+                prompt.push('\n');
+            }
+        }
+
+        prompt
     }
 }
 

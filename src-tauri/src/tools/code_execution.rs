@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 
 use crate::protocol::{ToolSchema, ExtendedToolCall, ToolCallCaller, ToolCallKind};
 use python_sandbox::protocol::ToolModuleInfo;
@@ -179,6 +180,10 @@ pub struct ExecutionContext {
     pub available_tools: Vec<ToolSchema>,
     /// Tool modules to inject as importable Python modules (from materialized MCP tools)
     pub tool_modules: Vec<ToolModuleInfo>,
+    /// Mapping of tool name -> server_id for routing/validation
+    pub tool_server_map: HashMap<String, String>,
+    /// Allowed global function names for validation
+    pub allowed_functions: HashSet<String>,
 }
 
 /// Result of resolving an inner tool call
@@ -207,6 +212,45 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "html",
 ];
 
+/// Default global functions that are allowed without explicit tool stubs.
+pub const DEFAULT_ALLOWED_FUNCTIONS: &[&str] = &[
+    // Sandbox-provided helpers
+    "print",
+    "sandbox_print",
+    "sandbox_stderr",
+    "eprint",
+    "tool_call",
+    "get_tool_result",
+    // Common safe builtins
+    "len",
+    "range",
+    "sum",
+    "min",
+    "max",
+    "sorted",
+    "reversed",
+    "enumerate",
+    "zip",
+    "map",
+    "filter",
+    "any",
+    "all",
+    "abs",
+    "round",
+    "pow",
+    "set",
+    "list",
+    "dict",
+    "tuple",
+    "float",
+    "int",
+    "str",
+    "bool",
+    "type",
+    "isinstance",
+    "divmod",
+];
+
 /// Context for dynamic import validation
 /// 
 /// Used when tool_search has materialized tool modules that become
@@ -215,6 +259,12 @@ pub const ALLOWED_MODULES: &[&str] = &[
 pub struct DynamicImportContext {
     /// Tool modules that are available for import (python_name -> server_id)
     pub tool_modules: std::collections::HashMap<String, String>,
+}
+
+/// Combined validation context (imports + allowed functions)
+pub struct ValidationContext<'a> {
+    pub import_context: Option<&'a DynamicImportContext>,
+    pub allowed_functions: Option<&'a HashSet<String>>,
 }
 
 impl DynamicImportContext {
@@ -248,15 +298,29 @@ impl CodeExecutionExecutor {
     
     /// Validate code input before execution (basic validation without tool modules)
     pub fn validate_input(input: &CodeExecutionInput) -> Result<(), String> {
-        Self::validate_input_with_context(input, None)
+        Self::validate_input_with_rules(input, None)
     }
     
     /// Validate code input with dynamic import context
-    /// 
+    ///
     /// This allows tool modules discovered via tool_search to be imported.
     pub fn validate_input_with_context(
         input: &CodeExecutionInput,
         context: Option<&DynamicImportContext>,
+    ) -> Result<(), String> {
+        Self::validate_input_with_rules(
+            input,
+            context.map(|ctx| ValidationContext {
+                import_context: Some(ctx),
+                allowed_functions: None,
+            }),
+        )
+    }
+
+    /// Validate code input with both import and function-allowlist context.
+    pub fn validate_input_with_rules<'a>(
+        input: &CodeExecutionInput,
+        context: Option<ValidationContext<'a>>,
     ) -> Result<(), String> {
         if input.code.is_empty() {
             return Err("Code cannot be empty. The 'arguments' must be an object with a 'code' array, e.g.: {\"code\": [\"import random\", \"print(random.randint(1,6))\"]}. If you passed an array directly as arguments, wrap it in an object with 'code' as the key.".to_string());
@@ -284,8 +348,18 @@ impl CodeExecutionExecutor {
         }
         
         // Check for imports of disallowed modules and provide helpful error message
-        if let Some(err) = Self::check_imports_with_context(&code_str, context) {
+        if let Some(err) = Self::check_imports_with_context(
+            &code_str,
+            context.as_ref().and_then(|c| c.import_context),
+        ) {
             return Err(err);
+        }
+
+        // Ensure only allowed global functions are called when an allowlist is provided
+        if let Some(funcs) = context.as_ref().and_then(|c| c.allowed_functions) {
+            if let Some(err) = Self::check_function_calls(&code_str, funcs) {
+                return Err(err);
+            }
         }
         
         Ok(())
@@ -351,6 +425,62 @@ impl CodeExecutionExecutor {
         
         None
     }
+
+    /// Check that all called global functions are allowlisted
+    fn check_function_calls(
+        code: &str,
+        allowed_functions: &HashSet<String>,
+    ) -> Option<String> {
+        use regex::Regex;
+
+        let re = Regex::new(r"(?m)(?<![A-Za-z0-9_\.])([A-Za-z_][A-Za-z0-9_]*)\s*\(").ok()?;
+        let mut disallowed = Vec::new();
+
+        for cap in re.captures_iter(code) {
+            let name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+
+            // Skip function/class definitions
+            if let Some(mat) = cap.get(0) {
+                let start = mat.start();
+                let line_start = code[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let line_prefix = &code[line_start..start];
+                let trimmed = line_prefix.trim_start();
+                if trimmed.starts_with("def ") || trimmed.starts_with("class ") {
+                    continue;
+                }
+            }
+
+            // Skip common keywords that may appear in patterns but are not function calls
+            if ["if", "for", "while", "return", "await", "async", "with"]
+                .contains(&name)
+            {
+                continue;
+            }
+
+            if !allowed_functions.contains(name) {
+                disallowed.push(name.to_string());
+            }
+        }
+
+        if disallowed.is_empty() {
+            return None;
+        }
+
+        disallowed.sort();
+        disallowed.dedup();
+
+        let mut allowed: Vec<&str> = allowed_functions.iter().map(|s| s.as_str()).collect();
+        allowed.sort_unstable();
+
+        Some(format!(
+            "Invalid function call(s) detected: {}. Allowed global functions: {}",
+            disallowed.join(", "),
+            allowed.join(", ")
+        ))
+    }
     
     /// Check if a module is allowed (either built-in or a tool module)
     fn is_module_allowed(module: &str, context: Option<&DynamicImportContext>) -> bool {
@@ -372,18 +502,43 @@ impl CodeExecutionExecutor {
     /// Create an execution context for a code execution request
     pub fn create_context(
         exec_id: String,
-        available_tools: Vec<ToolSchema>,
+        available_tools_with_servers: Vec<(String, ToolSchema)>,
         user_context: Option<Value>,
         tool_modules: Vec<ToolModuleInfo>,
     ) -> ExecutionContext {
-        let tool_stubs = generate_tool_stubs(&available_tools);
-        
+        let tool_vec: Vec<ToolSchema> = available_tools_with_servers
+            .iter()
+            .map(|(_, t)| t.clone())
+            .collect();
+        let tool_stubs: String = generate_tool_stubs(&tool_vec);
+
+        let mut tool_server_map: HashMap<String, String> = HashMap::new();
+        let available_tools: Vec<ToolSchema> = available_tools_with_servers
+            .into_iter()
+            .map(|(server, tool)| {
+                tool_server_map.insert(tool.name.clone(), server);
+                tool
+            })
+            .collect();
+
+        let mut allowed_functions: HashSet<String> = DEFAULT_ALLOWED_FUNCTIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for module in &tool_modules {
+            for func in &module.functions {
+                allowed_functions.insert(func.name.clone());
+            }
+        }
+
         ExecutionContext {
             exec_id,
             tool_stubs,
             user_context,
             available_tools,
             tool_modules,
+            tool_server_map,
+            allowed_functions,
         }
     }
 }
@@ -843,6 +998,22 @@ mod tests {
             CodeExecutionExecutor::validate_input_with_context(&input, Some(&ctx)).is_ok(),
             "Mixed standard and tool module imports should be allowed"
         );
+    }
+
+    #[test]
+    #[ignore = "Validator does not yet preempt open() usage outside the sandbox"]
+    fn test_open_call_should_be_reported_before_execution() {
+        let input = CodeExecutionInput {
+            code: vec!["f = open('/etc/passwd')".to_string()],
+            context: None,
+        };
+        let _ = input;
+    }
+
+    #[test]
+    #[ignore = "Runtime error propagation from sandbox not covered in unit tests"]
+    fn test_runtime_error_surfaces_as_structured_failure() {
+        // This will be enabled when we wire a stub executor for unit tests.
     }
 }
 

@@ -15,6 +15,7 @@
 use serde_json::{json, Value};
 use regex::Regex;
 use crate::protocol::{ModelFamily, ToolFormat, OpenAITool, ParsedToolCall};
+use crate::settings::{ToolCallFormatConfig, ToolCallFormatName};
 
 /// Format tools for a specific model family's expected input format.
 /// Most models accept OpenAI-compatible tool definitions, but some need adjustments.
@@ -65,27 +66,52 @@ pub fn parse_tool_calls_for_model(
     response: &str,
     _family: ModelFamily,
     tool_format: ToolFormat,
+    formats: &ToolCallFormatConfig,
+    primary: ToolCallFormatName,
 ) -> Vec<ParsedToolCall> {
-    match tool_format {
-        ToolFormat::OpenAI => {
-            // OpenAI format uses structured tool_calls in the response JSON
-            // This is typically handled at the streaming level, not from text
-            // Fall back to Hermes parser for text-based detection
-            parse_hermes_tool_calls(response)
+    // Build an ordered list starting with the primary, followed by the other enabled formats.
+    let mut ordered: Vec<ToolCallFormatName> = vec![primary];
+    for fmt in &formats.enabled {
+        if *fmt != primary && !ordered.contains(fmt) {
+            ordered.push(*fmt);
         }
-        ToolFormat::Hermes => {
-            parse_hermes_tool_calls(response)
+    }
+
+    for fmt in ordered {
+        let calls = match fmt {
+            ToolCallFormatName::Hermes => parse_hermes_tool_calls(response),
+            ToolCallFormatName::Mistral => parse_tagged_tool_calls(response),
+            ToolCallFormatName::Pythonic => parse_pythonic_tool_calls(response),
+            ToolCallFormatName::PureJson => parse_pure_json_tool_calls(response),
+            ToolCallFormatName::CodeMode => Vec::new(), // handled via python_execution path
+        };
+        if !calls.is_empty() {
+            return calls;
+        }
+    }
+
+    // Fallback to model-specific parsing only if the format is enabled.
+    match tool_format {
+        ToolFormat::OpenAI | ToolFormat::Hermes => {
+            if formats.is_enabled(ToolCallFormatName::Hermes) {
+                parse_hermes_tool_calls(response)
+            } else {
+                Vec::new()
+            }
         }
         ToolFormat::Gemini => {
-            parse_gemini_tool_calls(response)
+            if formats.is_enabled(ToolCallFormatName::Hermes) || formats.is_enabled(ToolCallFormatName::PureJson) {
+                parse_gemini_tool_calls(response)
+            } else {
+                Vec::new()
+            }
         }
-        ToolFormat::Granite => {
-            parse_granite_tool_calls(response)
-        }
-        ToolFormat::TextBased => {
-            // Text-based models like Gemma use <function_call> tags (same as Granite)
-            // Falls back to Hermes parser if no <function_call> tags found
-            parse_granite_tool_calls(response)
+        ToolFormat::Granite | ToolFormat::TextBased => {
+            if formats.is_enabled(ToolCallFormatName::Mistral) || formats.is_enabled(ToolCallFormatName::Hermes) {
+                parse_granite_tool_calls(response)
+            } else {
+                Vec::new()
+            }
         }
     }
 }
@@ -111,7 +137,7 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
             let json_str = json_match.as_str().trim();
             let fixed_json = fix_llm_json(json_str);
             
-            if let Ok(parsed) = serde_json::from_str::<Value>(&fixed_json) {
+            if let Some(parsed) = parse_flexible_json(&fixed_json) {
                 let raw = cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
                 
                 // Try Format 1: {"server": "...", "tool": "...", "arguments": {...}}
@@ -156,7 +182,7 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                     if let Some(balanced_json) = extract_balanced_braces(json_str) {
                         let fixed_json = fix_llm_json(&balanced_json);
                         
-                        if let Ok(parsed) = serde_json::from_str::<Value>(&fixed_json) {
+                        if let Some(parsed) = parse_flexible_json(&fixed_json) {
                             if let Some(name) = extract_tool_name(&parsed) {
                                 let arguments = extract_arguments(&parsed);
                                 
@@ -173,6 +199,11 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                 }
             }
         }
+    }
+    
+    // Fallback: tag-based formats like [TOOL_CALLS] ... (Mistral-style)
+    if calls.is_empty() {
+        calls = parse_tagged_tool_calls(content);
     }
     
     // Fallback: check for Braintrust-style <function=name>{...}</function> format (Llama)
@@ -280,6 +311,215 @@ fn parse_markdown_json_tool_calls(content: &str) -> Vec<ParsedToolCall> {
         }
     }
     
+    calls
+}
+
+/// Parse Pythonic function-call style tool invocations: `tool_name(arg="value")`
+fn parse_pythonic_tool_calls(content: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+    let re = Regex::new(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)").unwrap();
+
+    for cap in re.captures_iter(content) {
+        let name = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let args_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+        let arguments = parse_pythonic_arguments(args_str);
+        let (server, tool) = parse_combined_tool_name(name);
+        calls.push(ParsedToolCall {
+            server,
+            tool,
+            arguments,
+            raw: cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+        });
+    }
+
+    calls
+}
+
+fn parse_pythonic_arguments(arg_str: &str) -> Value {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut quote_char = '\0';
+    let mut paren_depth = 0;
+
+    for ch in arg_str.chars() {
+        match ch {
+            '"' | '\'' => {
+                if in_string && ch == quote_char {
+                    in_string = false;
+                } else if !in_string {
+                    in_string = true;
+                    quote_char = ch;
+                }
+                current.push(ch);
+            }
+            '(' | '[' | '{' => {
+                if !in_string {
+                    paren_depth += 1;
+                }
+                current.push(ch);
+            }
+            ')' | ']' | '}' => {
+                if !in_string && paren_depth > 0 {
+                    paren_depth -= 1;
+                }
+                current.push(ch);
+            }
+            ',' if !in_string && paren_depth == 0 => {
+                if !current.trim().is_empty() {
+                    parts.push(current.trim().to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+
+    let mut map = serde_json::Map::new();
+    for part in parts {
+        if let Some((k, v)) = part.split_once('=') {
+            let key = k.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let value = parse_pythonic_value(v.trim());
+            map.insert(key.to_string(), value);
+        }
+    }
+
+    Value::Object(map)
+}
+
+fn parse_pythonic_value(raw: &str) -> Value {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('"') && trimmed.ends_with('"') || trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        return Value::String(trimmed.trim_matches(|c| c == '"' || c == '\'').to_string());
+    }
+
+    match trimmed.to_ascii_lowercase().as_str() {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" | "none" => Value::Null,
+        _ => {
+            if let Ok(n) = trimmed.parse::<i64>() {
+                Value::Number(n.into())
+            } else if let Ok(f) = trimmed.parse::<f64>() {
+                serde_json::Number::from_f64(f)
+                    .map(Value::Number)
+                    .unwrap_or_else(|| Value::String(trimmed.to_string()))
+            } else {
+                Value::String(trimmed.to_string())
+            }
+        }
+    }
+}
+
+/// Parse pure JSON object/array tool calls without tags.
+fn parse_pure_json_tool_calls(content: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return calls;
+    }
+
+    if let Some(value) = parse_flexible_json(trimmed) {
+        collect_calls_from_value(&value, trimmed, &mut calls);
+    }
+
+    if calls.is_empty() {
+        calls = parse_markdown_json_tool_calls(content);
+    }
+
+    calls
+}
+
+fn collect_calls_from_value(value: &Value, raw: &str, calls: &mut Vec<ParsedToolCall>) {
+    let entries: Vec<Value> = match value {
+        Value::Array(arr) => arr.clone(),
+        other => vec![other.clone()],
+    };
+
+    for entry in entries {
+        // Handle {"tool": "...", "args": {...}}
+        if let (Some(tool), Some(args)) = (
+            entry.get("tool").and_then(|v| v.as_str()),
+            entry.get("args"),
+        ) {
+            let (server, tool_name) = parse_combined_tool_name(tool);
+            calls.push(ParsedToolCall {
+                server,
+                tool: tool_name,
+                arguments: args.clone(),
+                raw: raw.to_string(),
+            });
+            continue;
+        }
+
+        if let Some(name) = extract_tool_name(&entry) {
+            let arguments = extract_arguments(&entry);
+            let (server, tool) = parse_combined_tool_name(&name);
+            calls.push(ParsedToolCall {
+                server,
+                tool,
+                arguments,
+                raw: raw.to_string(),
+            });
+        }
+    }
+}
+
+/// Parse tag-based tool calls such as `[TOOL_CALLS] [{...}]` (Mistral-style).
+fn parse_tagged_tool_calls(content: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+    let marker = "[TOOL_CALLS]";
+
+    if let Some(idx) = content.find(marker) {
+        let mut payload = content[idx + marker.len()..].trim_start();
+
+        // Trim at closing markers if present
+        for end_marker in ["[/TOOL_CALLS]", "[TOOL_RESULTS]"] {
+            if let Some(pos) = payload.find(end_marker) {
+                payload = &payload[..pos];
+                break;
+            }
+        }
+
+        let trimmed = payload.trim();
+
+        // Attempt parsing as-is, then try without surrounding [] if present
+        let parsed = parse_flexible_json(trimmed).or_else(|| {
+            let without_brackets = trimmed.trim_matches(|c| c == '[' || c == ']');
+            parse_flexible_json(without_brackets)
+        });
+
+        if let Some(value) = parsed {
+            let entries = match value {
+                Value::Array(arr) => arr,
+                other => vec![other],
+            };
+
+            for entry in entries {
+                if let Some(name) = extract_tool_name(&entry) {
+                    let arguments = extract_arguments(&entry);
+                    let (server, tool) = parse_combined_tool_name(&name);
+
+                    calls.push(ParsedToolCall {
+                        server,
+                        tool,
+                        arguments,
+                        raw: trimmed.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
     calls
 }
 
@@ -484,6 +724,23 @@ fn fix_llm_json(json_str: &str) -> String {
     let trailing_comma_re = Regex::new(r",(\s*[}\]])").unwrap();
     result = trailing_comma_re.replace_all(&result, "$1").to_string();
     result
+}
+
+/// Parse JSON with lenient fallbacks (single quotes, minor fixes).
+fn parse_flexible_json(raw: &str) -> Option<Value> {
+    if let Ok(val) = serde_json::from_str::<Value>(raw) {
+        return Some(val);
+    }
+
+    // Fix trivial JSON issues first
+    let fixed = fix_llm_json(raw);
+    if let Ok(val) = serde_json::from_str::<Value>(&fixed) {
+        return Some(val);
+    }
+
+    // Fallback: try replacing single quotes with double quotes
+    let single_to_double = fixed.replace('\'', "\"");
+    serde_json::from_str::<Value>(&single_to_double).ok()
 }
 
 /// Extract tool name from parsed JSON, supporting multiple formats:
@@ -790,6 +1047,42 @@ Done."#;
         assert_eq!(calls[0].server, "mcp");
         assert_eq!(calls[0].tool, "read_file");
     }
+
+    #[test]
+    fn test_parse_tagged_tool_call_with_single_quotes() {
+        let content = "[TOOL_CALLS] [{'name': 'search', 'arguments': {'query': 'AI'}}]";
+
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "search");
+        assert_eq!(
+            calls[0].arguments.get("query").and_then(|v| v.as_str()),
+            Some("AI")
+        );
+    }
+
+    #[test]
+    fn test_parse_tagged_tool_call_ignores_following_results() {
+        let content = "[TOOL_CALLS] [{\"name\": \"calc\", \"arguments\": {\"a\": 1}}][TOOL_RESULTS] placeholder";
+
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "calc");
+        assert_eq!(calls[0].arguments.get("a").and_then(|v| v.as_i64()), Some(1));
+    }
+
+    #[test]
+    fn test_parse_hermes_allows_single_quoted_json() {
+        let content = "<tool_call>{'name': 'echo', 'arguments': {'text': 'hi'}}</tool_call>";
+
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "echo");
+        assert_eq!(
+            calls[0].arguments.get("text").and_then(|v| v.as_str()),
+            Some("hi")
+        );
+    }
     
     #[test]
     fn test_format_tool_result_hermes() {
@@ -948,6 +1241,86 @@ The weather is..."#;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool, "calculate");
         assert_eq!(calls[0].arguments.get("expression").and_then(|v| v.as_str()), Some("2 + 2"));
+    }
+
+    #[test]
+    fn parse_tool_calls_prefers_primary_enabled_format() {
+        let formats = ToolCallFormatConfig {
+            enabled: vec![ToolCallFormatName::Pythonic, ToolCallFormatName::Hermes],
+            primary: ToolCallFormatName::Pythonic,
+        };
+
+        let calls = parse_tool_calls_for_model(
+            "builtin___echo(text=\"hi\")",
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            &formats,
+            formats.primary,
+        );
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].server, "builtin");
+        assert_eq!(calls[0].tool, "echo");
+    }
+
+    #[test]
+    fn parse_tool_calls_skips_disabled_formats() {
+        let formats = ToolCallFormatConfig {
+            enabled: vec![ToolCallFormatName::Pythonic],
+            primary: ToolCallFormatName::Pythonic,
+        };
+
+        let calls = parse_tool_calls_for_model(
+            "<tool_call>{\"name\": \"builtin___echo\", \"arguments\": {\"text\": \"hi\"}}</tool_call>",
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            &formats,
+            formats.primary,
+        );
+
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_calls_supports_mistral_when_enabled() {
+        let formats = ToolCallFormatConfig {
+            enabled: vec![ToolCallFormatName::Mistral],
+            primary: ToolCallFormatName::Mistral,
+        };
+        let content = r#"[TOOL_CALLS] [{"name": "builtin___echo", "arguments": {"text": "hi"}}]"#;
+
+        let calls = parse_tool_calls_for_model(
+            content,
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            &formats,
+            formats.primary,
+        );
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].server, "builtin");
+        assert_eq!(calls[0].tool, "echo");
+    }
+
+    #[test]
+    fn parse_tool_calls_supports_pure_json_when_enabled() {
+        let formats = ToolCallFormatConfig {
+            enabled: vec![ToolCallFormatName::PureJson],
+            primary: ToolCallFormatName::PureJson,
+        };
+        let content = r#"{"tool": "builtin___echo", "args": {"text": "hi"}}"#;
+
+        let calls = parse_tool_calls_for_model(
+            content,
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            &formats,
+            formats.primary,
+        );
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].server, "builtin");
+        assert_eq!(calls[0].tool, "echo");
     }
     
     // ============ Python Code Detection Tests ============

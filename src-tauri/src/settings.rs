@@ -1,7 +1,101 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tokio::fs;
+
+// ============ Tool Calling Formats ============
+
+/// Canonical names for tool calling formats shared across backend, frontend, and tests.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallFormatName {
+    Hermes,
+    Mistral,
+    Pythonic,
+    PureJson,
+    CodeMode,
+}
+
+impl ToolCallFormatName {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolCallFormatName::Hermes => "hermes",
+            ToolCallFormatName::Mistral => "mistral",
+            ToolCallFormatName::Pythonic => "pythonic",
+            ToolCallFormatName::PureJson => "pure_json",
+            ToolCallFormatName::CodeMode => "code_mode",
+        }
+    }
+}
+
+/// Configuration for which formats are enabled and which one is primary (prompted).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCallFormatConfig {
+    #[serde(default = "default_enabled_formats")]
+    pub enabled: Vec<ToolCallFormatName>,
+    #[serde(default = "default_primary_format")]
+    pub primary: ToolCallFormatName,
+}
+
+fn default_enabled_formats() -> Vec<ToolCallFormatName> {
+    vec![ToolCallFormatName::Hermes, ToolCallFormatName::CodeMode]
+}
+
+fn default_primary_format() -> ToolCallFormatName {
+    ToolCallFormatName::CodeMode
+}
+
+impl Default for ToolCallFormatConfig {
+    fn default() -> Self {
+        let mut cfg = Self {
+            enabled: default_enabled_formats(),
+            primary: default_primary_format(),
+        };
+        cfg.normalize();
+        cfg
+    }
+}
+
+impl ToolCallFormatConfig {
+    /// Ensure the config is well-formed: at least one enabled format and primary is enabled.
+    pub fn normalize(&mut self) {
+        if self.enabled.is_empty() {
+            self.enabled = default_enabled_formats();
+        }
+
+        // Deduplicate while preserving order
+        let mut seen = HashSet::new();
+        self.enabled.retain(|f| seen.insert(*f));
+
+        if !self.enabled.contains(&self.primary) {
+            self.primary = *self.enabled.first().unwrap_or(&default_primary_format());
+        }
+    }
+
+    pub fn is_enabled(&self, format: ToolCallFormatName) -> bool {
+        self.enabled.contains(&format)
+    }
+
+    pub fn any_non_code(&self) -> bool {
+        self.enabled
+            .iter()
+            .any(|f| *f != ToolCallFormatName::CodeMode)
+    }
+
+    /// Choose a primary that is actually usable. If code mode is primary but not available,
+    /// fall back to the first enabled non-code format.
+    pub fn resolve_primary_for_prompt(&self, code_mode_available: bool) -> ToolCallFormatName {
+        if self.primary == ToolCallFormatName::CodeMode && !code_mode_available {
+            self.enabled
+                .iter()
+                .copied()
+                .find(|f| *f != ToolCallFormatName::CodeMode)
+                .unwrap_or(ToolCallFormatName::CodeMode)
+        } else {
+            self.primary
+        }
+    }
+}
 
 // ============ Python Identifier Validation ============
 
@@ -199,6 +293,9 @@ pub struct AppSettings {
     pub system_prompt: String,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Tool calling format configuration (enabled formats + primary)
+    #[serde(default)]
+    pub tool_call_formats: ToolCallFormatConfig,
     /// Optional system prompt snippets keyed by "{server_id}::{tool_name}".
     /// Use "builtin" as server_id for built-in tools.
     #[serde(default)]
@@ -208,10 +305,21 @@ pub struct AppSettings {
     /// Renamed from code_execution_enabled - alias preserved for backwards compatibility.
     #[serde(default, alias = "code_execution_enabled")]
     pub python_execution_enabled: bool,
+    /// Whether python-driven tool calling is allowed. If false, we will not
+    /// execute tool calls even if python_execution is enabled.
+    #[serde(default = "default_python_tool_calling_enabled")]
+    pub python_tool_calling_enabled: bool,
+    /// Whether to allow legacy <tool_call> parsing. Disabled by default.
+    #[serde(default)]
+    pub legacy_tool_call_format_enabled: bool,
 }
 
 fn default_system_prompt() -> String {
     r#"You are a helpful AI assistant. Be direct and concise in your responses. When you don't know something, say so rather than guessing."#.to_string()
+}
+
+fn default_python_tool_calling_enabled() -> bool {
+    true
 }
 
 /// Create the default MCP test server configuration
@@ -274,8 +382,11 @@ impl Default for AppSettings {
         Self {
             system_prompt: default_system_prompt(),
             mcp_servers: vec![default_mcp_test_server()],
+            tool_call_formats: ToolCallFormatConfig::default(),
             tool_system_prompts: HashMap::new(),
             python_execution_enabled: false,
+            python_tool_calling_enabled: default_python_tool_calling_enabled(),
+            legacy_tool_call_format_enabled: false,
         }
     }
 }
@@ -323,6 +434,9 @@ pub async fn load_settings() -> AppSettings {
             AppSettings::default()
         }
     };
+
+    // Normalize tool format config after load
+    settings.tool_call_formats.normalize();
 
     // Ensure default servers exist (migration)
     ensure_default_servers(&mut settings);
@@ -376,6 +490,10 @@ mod tests {
         assert!(settings.tool_system_prompts.is_empty());
         // python_execution is disabled by default
         assert!(!settings.python_execution_enabled);
+        // python tool calling defaults
+        assert!(settings.python_tool_calling_enabled);
+        assert!(!settings.legacy_tool_call_format_enabled);
+        assert_eq!(settings.tool_call_formats, ToolCallFormatConfig::default());
     }
 
     #[test]
@@ -400,6 +518,7 @@ mod tests {
         assert_eq!(settings.system_prompt, parsed.system_prompt);
         assert_eq!(settings.mcp_servers.len(), parsed.mcp_servers.len());
         assert_eq!(settings.mcp_servers[0].id, parsed.mcp_servers[0].id);
+        assert_eq!(settings.tool_call_formats, parsed.tool_call_formats);
     }
 
     #[test]
@@ -409,6 +528,41 @@ mod tests {
             r#"{"system_prompt": "test", "mcp_servers": [], "code_execution_enabled": true}"#;
         let parsed: AppSettings = serde_json::from_str(json).unwrap();
         assert!(parsed.python_execution_enabled);
+        // Default for new flags should still apply
+        assert!(parsed.python_tool_calling_enabled);
+        assert!(!parsed.legacy_tool_call_format_enabled);
+        assert_eq!(parsed.tool_call_formats, ToolCallFormatConfig::default());
+    }
+
+    #[test]
+    fn tool_call_format_normalizes_primary_and_enabled() {
+        let mut cfg = ToolCallFormatConfig {
+            enabled: vec![ToolCallFormatName::Hermes],
+            primary: ToolCallFormatName::CodeMode,
+        };
+        cfg.normalize();
+
+        assert_eq!(cfg.enabled, vec![ToolCallFormatName::Hermes]);
+        assert_eq!(cfg.primary, ToolCallFormatName::Hermes);
+    }
+
+    #[test]
+    fn tool_call_format_dedupes_enabled_preserving_order() {
+        let mut cfg = ToolCallFormatConfig {
+            enabled: vec![
+                ToolCallFormatName::Hermes,
+                ToolCallFormatName::Hermes,
+                ToolCallFormatName::PureJson,
+            ],
+            primary: ToolCallFormatName::Hermes,
+        };
+        cfg.normalize();
+
+        assert_eq!(
+            cfg.enabled,
+            vec![ToolCallFormatName::Hermes, ToolCallFormatName::PureJson]
+        );
+        assert_eq!(cfg.primary, ToolCallFormatName::Hermes);
     }
 
     // ============ Python Identifier Validation Tests ============
@@ -510,5 +664,29 @@ mod tests {
         enforce_python_name(&mut config);
         assert_eq!(config.name, "server_name_1");
         assert_eq!(config.python_name.as_deref(), Some("server_name_1"));
+    }
+
+    #[test]
+    fn test_tool_call_format_normalization_and_resolution() {
+        // Primary not in enabled -> should normalize
+        let mut cfg = ToolCallFormatConfig {
+            enabled: vec![ToolCallFormatName::CodeMode],
+            primary: ToolCallFormatName::Hermes,
+        };
+        cfg.normalize();
+        assert!(cfg.enabled.contains(&cfg.primary));
+
+        // Code mode unavailable -> fall back to first non-code
+        let mut cfg2 = ToolCallFormatConfig {
+            enabled: vec![ToolCallFormatName::CodeMode, ToolCallFormatName::Mistral],
+            primary: ToolCallFormatName::CodeMode,
+        };
+        cfg2.normalize();
+        let resolved = cfg2.resolve_primary_for_prompt(false);
+        assert_eq!(resolved, ToolCallFormatName::Mistral);
+
+        // Code mode available -> keep primary
+        let resolved2 = cfg2.resolve_primary_for_prompt(true);
+        assert_eq!(resolved2, ToolCallFormatName::CodeMode);
     }
 }

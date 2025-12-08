@@ -16,10 +16,11 @@ use fastembed::TextEmbedding;
 use model_profiles::resolve_profile;
 use protocol::{
     parse_tool_calls, CachedModel, ChatMessage, FoundryMsg, McpHostMsg, ModelInfo, OpenAITool,
-    ParsedToolCall, RagChunk, RagIndexResult, RagMsg, RemoveFileResult, ToolCallsPendingEvent,
-    ToolExecutingEvent, ToolLoopFinishedEvent, ToolResultEvent, VectorMsg,
+    ModelFamily, ParsedToolCall, RagChunk, RagIndexResult, RagMsg, RemoveFileResult, ToolCallsPendingEvent,
+    ToolExecutingEvent, ToolFormat, ToolLoopFinishedEvent, ToolResultEvent, VectorMsg,
 };
-use settings::{enforce_python_name, AppSettings, McpServerConfig};
+use settings::{enforce_python_name, AppSettings, McpServerConfig, ToolCallFormatConfig, ToolCallFormatName};
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
@@ -196,7 +197,7 @@ async fn execute_tool_search(
     let mut result = String::new();
     result.push_str("# Discovered Tools\n\n");
     result.push_str(
-        "**YOUR NEXT STEP: Call python_execution with code that uses these functions.**\n\n",
+        "**YOUR NEXT STEP: Return a single Python program that uses these functions. Do NOT emit <tool_call> tags.**\n\n",
     );
 
     // Build the python code example
@@ -270,15 +271,16 @@ async fn execute_tool_search(
         result.push_str("\n");
     }
 
-    // Show exact python_execution call to make
+    // Show example python_execution program to make
     result.push_str("---\n\n");
-    result.push_str("**NOW call python_execution:**\n");
-    let code_json: Vec<String> = python_lines
-        .iter()
-        .map(|l| format!("\"{}\"", l.replace("\"", "\\\"")))
-        .collect();
-    result.push_str(&format!("<tool_call>{{\"name\": \"python_execution\", \"arguments\": {{\"code\": [{}]}}}}</tool_call>\n",
-        code_json.join(", ")));
+    result.push_str("**NOW return exactly this shape (single Python block):**\n");
+    result.push_str("```python\n");
+    result.push_str("# Use the discovered tools directly\n");
+    for line in &python_lines {
+        result.push_str(line);
+        result.push('\n');
+    }
+    result.push_str("```\n");
 
     Ok((result, output.tools))
 }
@@ -518,6 +520,7 @@ async fn execute_python_execution(
     exec_id: String,
     tool_registry: SharedToolRegistry,
     python_tx: &mpsc::Sender<PythonMsg>,
+    allow_tool_search: bool,
 ) -> Result<CodeExecutionOutput, String> {
     // Strip unsupported keywords before execution
     let code = strip_unsupported_python(&input.code);
@@ -533,9 +536,9 @@ async fn execute_python_execution(
     let _ = std::io::stdout().flush();
 
     // Get available tools and materialized tool modules for the execution context
-    let (available_tools, tool_modules) = {
+    let (available_tools_with_servers, mut tool_modules) = {
         let registry = tool_registry.read().await;
-        let tools = registry.get_visible_tools();
+        let tools = registry.get_visible_tools_with_servers();
         let modules = registry.get_materialized_tool_modules();
         let stats = registry.stats();
         println!(
@@ -545,9 +548,42 @@ async fn execute_python_execution(
         (tools, modules)
     };
 
+    // Filter tools: remove python_execution, optionally remove tool_search if disabled
+    let mut filtered_tools = Vec::new();
+    for (server_id, tool) in available_tools_with_servers {
+        if tool.name == "python_execution" {
+            continue;
+        }
+        if tool.name == "tool_search" && !allow_tool_search {
+            continue;
+        }
+        filtered_tools.push((server_id, tool));
+    }
+
+    // Inject a builtin module for tool_search if it is allowed (so python can call it directly)
+    if allow_tool_search {
+        tool_modules.push(tool_registry::ToolModuleInfo {
+            python_name: "builtin_tools".to_string(),
+            server_id: "builtin".to_string(),
+            functions: vec![tool_registry::ToolFunctionInfo {
+                name: "tool_search".to_string(),
+                description: Some(
+                    "Semantic search over available tools. Call with relevant_to string.".to_string(),
+                ),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "relevant_to": { "type": "string" }
+                    },
+                    "required": ["relevant_to"]
+                }),
+            }],
+        });
+    }
+
     println!(
         "[python_execution] Available tools: {}, Tool modules: {}",
-        available_tools.len(),
+        filtered_tools.len(),
         tool_modules.len()
     );
     for module in &tool_modules {
@@ -566,7 +602,7 @@ async fn execute_python_execution(
     // Create execution context
     let context = CodeExecutionExecutor::create_context(
         exec_id.clone(),
-        available_tools,
+        filtered_tools,
         input.context.clone(),
         tool_modules,
     );
@@ -576,6 +612,20 @@ async fn execute_python_execution(
         code,
         context: input.context,
     };
+
+    // Pre-validate before sending to the Python actor so errors can be surfaced immediately
+    let mut import_context = crate::tools::code_execution::DynamicImportContext::new();
+    for module in &context.tool_modules {
+        import_context.add_tool_module(module.python_name.clone(), module.server_id.clone());
+    }
+    let validation_context = crate::tools::code_execution::ValidationContext {
+        import_context: Some(&import_context),
+        allowed_functions: Some(&context.allowed_functions),
+    };
+    crate::tools::code_execution::CodeExecutionExecutor::validate_input_with_rules(
+        &cleaned_input,
+        Some(validation_context),
+    )?;
 
     println!("[python_execution] Sending to Python actor...");
     let _ = std::io::stdout().flush();
@@ -684,6 +734,90 @@ async fn resolve_server_for_tool(
     None
 }
 
+/// Extract a Python program from the model response.
+/// Prefers fenced ```python blocks, falls back to treating the whole message as code.
+fn extract_python_program(response: &str) -> Option<Vec<String>> {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(re) = regex::Regex::new(r"(?s)```(?:python|py)?\s*(.*?)\s*```") {
+        if let Some(cap) = re.captures(trimmed) {
+            let body = cap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            if !body.is_empty() {
+                return Some(
+                    body.lines()
+                        .map(|l| l.trim_end_matches('\r').to_string())
+                        .collect(),
+                );
+            }
+        }
+    }
+
+    // Fallback: if the response looks code-like, treat the whole thing as code
+    if trimmed.contains('\n') || trimmed.contains('=') || trimmed.contains('(') {
+        return Some(
+            trimmed
+                .lines()
+                .map(|l| l.trim_end_matches('\r').to_string())
+                .collect(),
+        );
+    }
+
+    None
+}
+
+/// Result of deciding what the agentic loop should do with a model response.
+#[derive(Debug, PartialEq)]
+pub(crate) enum AgenticAction {
+    Final { response: String },
+    ToolCalls { calls: Vec<ParsedToolCall> },
+}
+
+/// Decide whether a response should trigger tool execution or be treated as final text.
+pub(crate) fn detect_agentic_action(
+    assistant_response: &str,
+    model_family: ModelFamily,
+    tool_format: ToolFormat,
+    python_tool_mode: bool,
+    formats: &ToolCallFormatConfig,
+    primary_format: ToolCallFormatName,
+) -> AgenticAction {
+    let non_code_formats_enabled = formats.any_non_code();
+
+    if python_tool_mode {
+        if let Some(code_lines) = extract_python_program(assistant_response) {
+            return AgenticAction::ToolCalls {
+                calls: vec![ParsedToolCall {
+                    server: "builtin".to_string(),
+                    tool: "python_execution".to_string(),
+                    arguments: json!({ "code": code_lines }),
+                    raw: "[python_program]".to_string(),
+                }],
+            };
+        }
+
+        if !non_code_formats_enabled {
+            return AgenticAction::Final {
+                response: assistant_response.to_string(),
+            };
+        }
+    }
+
+    if non_code_formats_enabled {
+        let calls =
+            parse_tool_calls_for_model(assistant_response, model_family, tool_format, formats, primary_format);
+        if !calls.is_empty() {
+            return AgenticAction::ToolCalls { calls };
+        }
+    }
+
+    AgenticAction::Final {
+        response: assistant_response.to_string(),
+    }
+}
+
 /// Run the agentic loop: call model, detect tool calls, execute, repeat
 async fn run_agentic_loop(
     foundry_tx: mpsc::Sender<FoundryMsg>,
@@ -703,6 +837,10 @@ async fn run_agentic_loop(
     original_message: String,
     mut openai_tools: Option<Vec<OpenAITool>>,
     model_name: String,
+    python_tool_mode: bool,
+    format_config: ToolCallFormatConfig,
+    primary_format: ToolCallFormatName,
+    allow_tool_search_for_python: bool,
 ) {
     // Resolve model profile from model name
     let profile = resolve_profile(&model_name);
@@ -718,8 +856,8 @@ async fn run_agentic_loop(
     let mut tools_disabled_due_to_repeated_error = false;
 
     println!(
-        "[AgenticLoop] Starting with model_family={:?}, tool_format={:?}",
-        model_family, tool_format
+        "[AgenticLoop] Starting with model_family={:?}, tool_format={:?}, python_tool_mode={}, primary_format={:?}, tool_search_in_python={}",
+        model_family, tool_format, python_tool_mode, primary_format, allow_tool_search_for_python
     );
     use std::io::Write;
     let _ = std::io::stdout().flush();
@@ -830,32 +968,29 @@ async fn run_agentic_loop(
         );
         let _ = std::io::stdout().flush();
 
-        // Check for tool calls in the response using model-appropriate parser
-        let tool_calls = parse_tool_calls_for_model(&assistant_response, model_family, tool_format);
+        let agentic_action = detect_agentic_action(
+            &assistant_response,
+            model_family,
+            tool_format,
+            python_tool_mode,
+            &format_config,
+            primary_format,
+        );
 
-        // NOTE: Auto-Python execution is currently DISABLED
-        // The detect_python_code() function exists but we don't auto-execute detected Python
-        // because:
-        // 1. Models often write example/documentation code that shouldn't be executed
-        // 2. Tool modules (like sql_mcp) aren't fully wired into the sandbox yet
-        // 3. It's safer to require explicit <tool_call> syntax for now
-        //
-        // To enable in the future:
-        // 1. Wire up ToolModuleInfo from materialized tools to the sandbox
-        // 2. Add heuristics to distinguish "execute this" from "here's an example"
-        // 3. Consider a model-specific flag for Python-native tool calling
+        let tool_calls = match agentic_action {
+            AgenticAction::Final { response } => {
+                println!("[AgenticLoop] No tool calls detected, loop complete");
+                final_response = response.clone();
 
-        if tool_calls.is_empty() {
-            println!("[AgenticLoop] No tool calls detected, loop complete");
-            final_response = assistant_response.clone();
-
-            // Add final assistant response to history
-            full_history.push(ChatMessage {
-                role: "assistant".to_string(),
-                content: assistant_response,
-            });
-            break;
-        }
+                // Add final assistant response to history
+                full_history.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: response,
+                });
+                break;
+            }
+            AgenticAction::ToolCalls { calls } => calls,
+        };
 
         if iteration >= MAX_TOOL_ITERATIONS {
             println!(
@@ -1118,6 +1253,7 @@ async fn run_agentic_loop(
                             exec_id,
                             tool_registry.clone(),
                             &python_tx,
+                            allow_tool_search_for_python,
                         )
                         .await
                         {
@@ -1128,10 +1264,29 @@ async fn run_agentic_loop(
                                     elapsed.as_secs_f64(),
                                     output.stdout.len(),
                                     output.stderr.len());
+                                let has_stdout = !output.stdout.trim().is_empty();
+                                let has_stderr = !output.stderr.trim().is_empty();
                                 let result = if output.success {
+                                    match (has_stdout, has_stderr) {
+                                        (true, true) => format!(
+                                            "STDOUT:\n{}\n\nSTDERR:\n{}",
+                                            output.stdout, output.stderr
+                                        ),
+                                        (true, false) => output.stdout.clone(),
+                                        (false, true) => format!("STDERR:\n{}", output.stderr),
+                                        (false, false) => "Execution completed with no output".to_string(),
+                                    }
+                                } else if has_stdout && has_stderr {
+                                    format!(
+                                        "STDERR:\n{}\n\nSTDOUT:\n{}",
+                                        output.stderr, output.stdout
+                                    )
+                                } else if has_stderr {
+                                    output.stderr.clone()
+                                } else if has_stdout {
                                     output.stdout.clone()
                                 } else {
-                                    format!("Error: {}", output.stderr)
+                                    "Execution signaled follow-up with no message".to_string()
                                 };
                                 let result_preview: String = result.chars().take(500).collect();
                                 println!(
@@ -1426,10 +1581,11 @@ fn legacy_build_system_prompt(
             prompt.push_str("**EXAMPLE - When user says \"calculate\" or \"execute\":**\n\n");
             prompt
                 .push_str("User: \"Calculate compound interest on $5000 at 6% for 10 years\"\n\n");
-            prompt.push_str("✅ CORRECT - Call the tool immediately:\n");
-            prompt.push_str("<tool_call>{\"name\": \"python_execution\", \"arguments\": {\"code\": [\"principal = 5000\", \"rate = 0.06\", \"years = 10\", \"result = principal * (1 + rate) ** years\", \"print(f'Result: ${result:,.2f}')\"]}}</tool_call>\n\n");
-            prompt.push_str("❌ WRONG - Don't just show code without executing:\n");
-            prompt.push_str("\"Here's how you could calculate it: ```python ...```\"\n\n");
+            prompt.push_str("✅ CORRECT - Return a single Python program:\n");
+            prompt.push_str("```python\n");
+            prompt.push_str("principal = 5000\nrate = 0.06\nyears = 10\nresult = principal * (1 + rate) ** years\nprint(f\"Result: ${result:,.2f}\")\n");
+            prompt.push_str("```\n\n");
+            prompt.push_str("❌ WRONG - Don't just describe code without executing it.\n\n");
         }
 
         if has_mcp_tools && has_deferred_tools && python_execution_enabled {
@@ -1477,14 +1633,7 @@ fn legacy_build_system_prompt(
 
         // Tool calling format instructions
         prompt.push_str("## Tool Calling Format\n\n");
-        prompt.push_str("To call a tool, use this EXACT format:\n");
-        prompt.push_str("<tool_call>{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg1\": \"value1\"}}</tool_call>\n\n");
-
-        prompt.push_str("RULES:\n");
-        prompt.push_str(
-            "- Call tools immediately when they can help - don't just describe what you would do\n",
-        );
-        prompt.push_str("- Each argument value must be a SIMPLE value (string, number, boolean), never nested objects\n\n");
+        prompt.push_str("All tool use must happen from inside a single Python program. Do NOT emit <tool_call> tags. Call the provided global functions directly and print results for the user.\n\n");
     }
 
     // Python execution details (only if enabled)
@@ -1495,10 +1644,9 @@ fn legacy_build_system_prompt(
         prompt.push_str("**CRITICAL: Do the calculation, don't explain it.**\n");
         prompt.push_str("If a calculation can be done with the available Python libraries, USE `python_execution` to compute it and return the result.\n");
         prompt.push_str("❌ WRONG: \"Here's how you could calculate this in Python...\"\n");
-        prompt.push_str("✅ RIGHT: Call `python_execution`, compute the answer, and tell the user the result.\n\n");
+        prompt.push_str("✅ RIGHT: Return a single Python program that performs the calculation and prints the answer.\n\n");
         prompt.push_str("**Good use case** (complex calculation):\n");
-        prompt.push_str("<tool_call>{\"name\": \"python_execution\", \"arguments\": {\"code\": [\"import math\", \"# Compound interest: $10000 at 7% for 30 years\", \"result = 10000 * (1 + 0.07) ** 30\", \"print(f'Final amount: ${result:,.2f}')\"]}}");
-        prompt.push_str("</tool_call>\n\n");
+        prompt.push_str("```python\nimport math\nresult = 10000 * (1 + 0.07) ** 30\nprint(f\"Final amount: ${result:,.2f}\")\n```\n\n");
         prompt.push_str("**Bad use case** (just answer directly instead):\n");
         prompt.push_str("- \"What's 15% of 200?\" → Just say \"30\" - no code needed\n");
         prompt.push_str("- Simple factual questions → Answer from knowledge\n\n");
@@ -1519,21 +1667,15 @@ fn legacy_build_system_prompt(
         );
         prompt.push_str("```\n\n");
 
-        prompt.push_str("**CORRECT - Always follow this pattern:**\n\n");
-        prompt.push_str("**Step 1 - Search for tools** (describe what you need):\n");
-        prompt.push_str("<tool_call>{\"name\": \"tool_search\", \"arguments\": {\"queries\": [\"list datasets\", \"query database\"]}}</tool_call>\n\n");
-        prompt.push_str(
-            "**Step 2 - Execute with Python** (use ONLY the tools returned by tool_search):\n",
-        );
-        prompt
-            .push_str("<tool_call>{\"name\": \"python_execution\", \"arguments\": {\"code\": [\n");
-        prompt.push_str("  \"# Use the exact function name from tool_search results\",\n");
-        prompt.push_str("  \"result = await list_dataset_ids()\",\n");
-        prompt.push_str("  \"print(result)\"\n");
-        prompt.push_str("]}}</tool_call>\n\n");
-        prompt.push_str(
-            "**Step 3** - If more steps needed, call `tool_search` again, then execute.\n\n",
-        );
+        prompt.push_str("**CORRECT - Always follow this pattern inside ONE Python program:**\n\n");
+        prompt.push_str("```python\n");
+        prompt.push_str("# Step 1: discover tools\n");
+        prompt.push_str("tools = tool_search(relevant_to=\"list datasets\")\n");
+        prompt.push_str("# Step 2: call discovered tools\n");
+        prompt.push_str("result = list_dataset_ids()\n");
+        prompt.push_str("print(result)\n");
+        prompt.push_str("# Step 3: repeat tool_search if you need more tools\n");
+        prompt.push_str("```\n\n");
 
         // Count total tools available
         let total_deferred: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
@@ -1542,10 +1684,13 @@ fn legacy_build_system_prompt(
             deferred_servers.len()));
     } else if has_deferred_tools {
         prompt.push_str("## Tool Discovery (REQUIRED)\n\n");
-        prompt.push_str("**You MUST call `tool_search` before using any external tools.**\n\n");
-        prompt.push_str("**Step 1: Discover tools:**\n");
-        prompt.push_str("<tool_call>{\"name\": \"tool_search\", \"arguments\": {\"queries\": [\"describe what you need\"]}}</tool_call>\n\n");
-        prompt.push_str("**Step 2: Call the discovered tools.**\n\n");
+        prompt.push_str("**You MUST call tool_search(relevant_to=\"...\") inside your Python program before using any external tools.**\n\n");
+        prompt.push_str("**Pattern:**\n");
+        prompt.push_str("```python\n");
+        prompt.push_str("tools = tool_search(relevant_to=\"describe what you need\")\n");
+        prompt.push_str("result = some_discovered_tool()\n");
+        prompt.push_str("print(result)\n");
+        prompt.push_str("```\n\n");
 
         let total_deferred: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
         prompt.push_str(&format!(
@@ -1634,18 +1779,22 @@ fn build_system_prompt(
     base_prompt: &str,
     tool_descriptions: &[(String, Vec<McpTool>)],
     server_configs: &[McpServerConfig],
-    python_execution_enabled: bool,
     has_attachments: bool,
     tool_prompts: &HashMap<String, String>,
     filter: &ToolLaunchFilter,
+    primary_format: ToolCallFormatName,
+    python_tool_mode: bool,
+    allow_tool_search_for_python: bool,
 ) -> String {
     let additions = collect_tool_prompt_additions(
         tool_descriptions,
         server_configs,
-        python_execution_enabled,
         has_attachments,
         tool_prompts,
         filter,
+        primary_format,
+        python_tool_mode,
+        allow_tool_search_for_python,
     );
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
@@ -1660,17 +1809,18 @@ fn build_system_prompt(
 fn collect_tool_prompt_additions(
     tool_descriptions: &[(String, Vec<McpTool>)],
     server_configs: &[McpServerConfig],
-    python_execution_enabled: bool,
     has_attachments: bool,
     tool_prompts: &HashMap<String, String>,
     filter: &ToolLaunchFilter,
+    primary_format: ToolCallFormatName,
+    python_tool_mode: bool,
+    allow_tool_search_for_python: bool,
 ) -> Vec<String> {
     const BUILTIN_SERVER_LABEL: &str = "Built-in Tools";
     const PYTHON_LABEL: &str = "Python Execution";
     const TOOL_SEARCH_LABEL: &str = "Tool Search";
 
     let mut additions: Vec<String> = Vec::new();
-    let mut any_tools = false;
 
     // Track server defer modes for contextual guidance
     let mut has_deferred_tools = false;
@@ -1691,10 +1841,15 @@ fn collect_tool_prompt_additions(
         }
     }
 
-    // Built-in: python_execution
-    if python_execution_enabled && filter.builtin_allowed("python_execution") {
-        any_tools = true;
-        let mut body = default_python_prompt(has_attachments, has_deferred_tools);
+    let has_any_tools = !tool_descriptions.is_empty() || python_tool_mode;
+
+    // Built-in: python_execution (when Code Mode is primary and enabled)
+    if python_tool_mode && filter.builtin_allowed("python_execution") {
+        let mut body = default_python_prompt(
+            has_attachments,
+            has_deferred_tools,
+            allow_tool_search_for_python,
+        );
         if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "python_execution")) {
             let trimmed = custom.trim();
             if !trimmed.is_empty() {
@@ -1708,25 +1863,27 @@ fn collect_tool_prompt_additions(
             BUILTIN_SERVER_LABEL,
             body.trim()
         ));
-    }
 
-    // Built-in: tool_search (only when MCP tools exist)
-    if !tool_descriptions.is_empty() && filter.builtin_allowed("tool_search") {
-        any_tools = true;
-        let mut body = default_tool_search_prompt(has_deferred_tools);
-        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "tool_search")) {
-            let trimmed = custom.trim();
-            if !trimmed.is_empty() {
-                body.push_str("\n\n");
-                body.push_str(trimmed);
+        if allow_tool_search_for_python && filter.builtin_allowed("tool_search") {
+            let mut body = default_tool_search_prompt(has_deferred_tools);
+            if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "tool_search")) {
+                let trimmed = custom.trim();
+                if !trimmed.is_empty() {
+                    body.push_str("\n\n");
+                    body.push_str(trimmed);
+                }
             }
+            additions.push(format!(
+                "### {} ({})\n{}",
+                TOOL_SEARCH_LABEL,
+                BUILTIN_SERVER_LABEL,
+                body.trim()
+            ));
         }
-        additions.push(format!(
-            "### {} ({})\n{}",
-            TOOL_SEARCH_LABEL,
-            BUILTIN_SERVER_LABEL,
-            body.trim()
-        ));
+    } else if has_any_tools {
+        if let Some(format_prompt) = tool_calling_format_prompt(primary_format) {
+            additions.push(format_prompt);
+        }
     }
 
     // MCP tools
@@ -1738,7 +1895,6 @@ fn collect_tool_prompt_additions(
         let is_deferred = server_config.map(|c| c.defer_tools).unwrap_or(true);
 
         for tool in tools {
-            any_tools = true;
             let mut parts: Vec<String> = Vec::new();
 
             if let Some(desc) = &tool.description {
@@ -1761,6 +1917,45 @@ fn collect_tool_prompt_additions(
                 }
             }
 
+            // Include parameter schema details if available
+            if let Some(props) = tool
+                .input_schema
+                .as_ref()
+                .and_then(|s| s.get("properties"))
+                .and_then(|p| p.as_object())
+            {
+                let required: Vec<&str> = tool
+                    .input_schema
+                    .as_ref()
+                    .and_then(|s| s.get("required"))
+                    .and_then(|r| r.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+
+                let mut param_lines: Vec<String> = Vec::new();
+                for (name, schema) in props {
+                    let ty = schema.get("type").and_then(|t| t.as_str()).unwrap_or("any");
+                    let desc = schema
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("");
+                    let req = if required.contains(&name.as_str()) {
+                        " (required)"
+                    } else {
+                        ""
+                    };
+                    let mut line = format!("- `{}` (type: {}){}", name, ty, req);
+                    if !desc.is_empty() {
+                        line.push_str(&format!(": {}", desc));
+                    }
+                    param_lines.push(line);
+                }
+
+                if !param_lines.is_empty() {
+                    parts.push(format!("Parameters:\n{}", param_lines.join("\n")));
+                }
+            }
+
             if parts.is_empty() {
                 continue;
             }
@@ -1772,10 +1967,6 @@ fn collect_tool_prompt_additions(
                 parts.join("\n\n")
             ));
         }
-    }
-
-    if any_tools {
-        additions.insert(0, tool_calling_format_prompt());
     }
 
     additions
@@ -1792,18 +1983,22 @@ fn build_system_prompt_layers(
     base_prompt: &str,
     tool_descriptions: &[(String, Vec<McpTool>)],
     server_configs: &[McpServerConfig],
-    python_execution_enabled: bool,
     has_attachments: bool,
     tool_prompts: &HashMap<String, String>,
     filter: &ToolLaunchFilter,
+    primary_format: ToolCallFormatName,
+    python_tool_mode: bool,
+    allow_tool_search_for_python: bool,
 ) -> SystemPromptLayers {
     let additions = collect_tool_prompt_additions(
         tool_descriptions,
         server_configs,
-        python_execution_enabled,
         has_attachments,
         tool_prompts,
         filter,
+        primary_format,
+        python_tool_mode,
+        allow_tool_search_for_python,
     );
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
@@ -1821,20 +2016,30 @@ fn build_system_prompt_layers(
     }
 }
 
-fn default_python_prompt(has_attachments: bool, has_deferred_tools: bool) -> String {
+fn default_python_prompt(
+    has_attachments: bool,
+    has_deferred_tools: bool,
+    tool_search_enabled: bool,
+) -> String {
     let mut parts: Vec<String> = vec![
-        "Use for calculations, data transformations, and structured outputs when it clearly helps.".to_string(),
-        "Limitations: no internet, no filesystem (no reads/writes), no external APIs.".to_string(),
-        "Allowed imports: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.".to_string(),
-        "Call the tool instead of just showing code. Keep code concise and runnable.".to_string(),
+        "You must return exactly one runnable Python program when python_execution is enabled. Do not return explanations or multiple blocks.".to_string(),
+        "Output format: a single ```python ... ``` block. We will execute it and surface any print output directly to the user.".to_string(),
+        if tool_search_enabled {
+            "Tool calling is only available via Python. Use the provided global functions (including tool_search when available) from inside your program. Do NOT emit <tool_call> tags or JSON tool calls.".to_string()
+        } else {
+            "Tool calling is only available via Python. Use the provided global functions from inside your program. Do NOT emit <tool_call> tags or JSON tool calls.".to_string()
+        },
+        "Use print(...) for user-facing markdown on stdout. Use eprint(...) to send handoff text for the next agentic step (captured on stderr and treated as a follow-up signal).".to_string(),
+        "Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.".to_string(),
+        "Keep code concise and runnable; include prints for results the user should see.".to_string(),
     ];
 
     if has_attachments {
         parts.push("Attached files are already summarized in the conversation. Do NOT read files; work with the provided text directly inside python_execution.".to_string());
     }
 
-    if has_deferred_tools {
-        parts.push("Some MCP tools are deferred; if you need extra capabilities, call `tool_search` first, then use those tools or python_execution as appropriate in the same turn.".to_string());
+    if has_deferred_tools && tool_search_enabled {
+        parts.push("Some MCP tools are deferred; if you need extra capabilities, call the global function tool_search(relevant_to=\"...\") inside your Python program to discover them, then call the returned functions in the same program.".to_string());
     }
 
     parts.join("\n\n")
@@ -1842,26 +2047,33 @@ fn default_python_prompt(has_attachments: bool, has_deferred_tools: bool) -> Str
 
 fn default_tool_search_prompt(has_deferred_tools: bool) -> String {
     let mut parts: Vec<String> = vec![
-        "Find relevant MCP tools when you need external capabilities.".to_string(),
-        "Return discovered tools, then use them directly or from python_execution.".to_string(),
+        "Call the global function tool_search(relevant_to=\"...\") from inside your Python program to discover relevant MCP tools.".to_string(),
+        "After discovery, call the returned functions directly in the same Python program.".to_string(),
     ];
 
     if has_deferred_tools {
-        parts.push("Many MCP tools are deferred: call `tool_search` first, then call the discovered tools directly in the same turn.".to_string());
+        parts.push("Many MCP tools are deferred: call tool_search first inside your Python code, then call the discovered tools directly in that program.".to_string());
     }
 
     parts.join("\n\n")
 }
 
-fn tool_calling_format_prompt() -> String {
-    let mut text = String::new();
-    text.push_str("### Tool calling format\n");
-    text.push_str("Call tools with the exact tag format:\n");
-    text.push_str("<tool_call>{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg1\": \"value\"}}</tool_call>\n\n");
-    text.push_str(
-        "For native OpenAI-style tool calls, use the model's structured tool_calls if available.",
-    );
-    text
+fn tool_calling_format_prompt(primary: ToolCallFormatName) -> Option<String> {
+    match primary {
+        ToolCallFormatName::CodeMode => None,
+        ToolCallFormatName::Hermes => {
+            Some("### Tool calling format (Hermes)\nUse <tool_call>{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg\": \"value\"}}</tool_call> with valid JSON only. Do not wrap in markdown or add prose.".to_string())
+        }
+        ToolCallFormatName::Mistral => {
+            Some("### Tool calling format (Mistral)\nUse [TOOL_CALLS] [{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg\": \"value\"}}] with no extra text or markdown.".to_string())
+        }
+        ToolCallFormatName::Pythonic => {
+            Some("### Tool calling format (Pythonic)\nUse function-call syntax like tool_name(arg1=\"value\", arg2=123). Do not wrap in code fences or add explanations.".to_string())
+        }
+        ToolCallFormatName::PureJson => {
+            Some("### Tool calling format (Pure JSON)\nReturn a raw JSON object or array such as {\"tool\": \"TOOL_NAME\", \"args\": {\"arg\": \"value\"}}. No markdown or additional text.".to_string())
+        }
+    }
 }
 
 #[tauri::command]
@@ -2122,6 +2334,9 @@ async fn chat(
     let configured_system_prompt = settings.system_prompt.clone();
     let server_configs = settings.mcp_servers.clone();
     let python_execution_enabled = settings.python_execution_enabled;
+    let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let mut format_config = settings.tool_call_formats.clone();
+    format_config.normalize();
     let tool_system_prompts = settings.tool_system_prompts.clone();
     drop(settings);
 
@@ -2171,30 +2386,33 @@ async fn chat(
     // 1. Include python_execution if enabled in settings
     // 2. Include tool_search when MCP servers with tools are available
     // 3. Include all MCP tools
-    let mut openai_tools: Vec<OpenAITool> = Vec::new();
+    let code_mode_possible = format_config.is_enabled(ToolCallFormatName::CodeMode)
+        && python_execution_enabled
+        && python_tool_calling_enabled
+        && tool_filter.builtin_allowed("python_execution");
+    let primary_format_for_prompt = format_config.resolve_primary_for_prompt(code_mode_possible);
+    let python_tool_mode =
+        code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
+    let allow_tool_search_for_python =
+        python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
+    let non_code_formats_enabled = format_config.any_non_code();
+    let legacy_tool_calls_enabled =
+        non_code_formats_enabled && primary_format_for_prompt != ToolCallFormatName::CodeMode;
+    let legacy_tool_search_enabled =
+        legacy_tool_calls_enabled && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
 
-    let python_enabled =
-        python_execution_enabled && tool_filter.builtin_allowed("python_execution");
-    let tool_search_enabled = has_mcp_tools && tool_filter.builtin_allowed("tool_search");
-
-    // Add python_execution built-in tool if enabled
-    if python_enabled {
-        let python_exec_tool = tool_registry::python_execution_tool();
-        openai_tools.push(OpenAITool::from_tool_schema(&python_exec_tool));
-        println!("[Chat] Added python_execution built-in tool (enabled in settings)");
+    let mut openai_tools: Option<Vec<OpenAITool>> = if legacy_tool_calls_enabled {
+        Some(Vec::new())
     } else {
-        if python_execution_enabled {
-            println!("[Chat] python_execution blocked by launch filter");
-        } else {
-            println!("[Chat] python_execution disabled in settings");
-        }
-    }
+        None
+    };
 
-    // Add tool_search when MCP tools are available (for discovery)
-    if tool_search_enabled {
-        let tool_search_tool = tool_registry::tool_search_tool();
-        openai_tools.push(OpenAITool::from_tool_schema(&tool_search_tool));
-        println!("[Chat] Added tool_search built-in tool (MCP tools available)");
+    if let Some(list) = openai_tools.as_mut() {
+        if legacy_tool_search_enabled {
+            let tool_search_tool = tool_registry::tool_search_tool();
+            list.push(OpenAITool::from_tool_schema(&tool_search_tool));
+            println!("[Chat] Added tool_search built-in tool (legacy mode)");
+        }
     }
 
     // Add MCP tools to the OpenAI tools list and register them in the tool registry
@@ -2224,14 +2442,6 @@ async fn chat(
 
             // Register MCP tools in the registry with python module name
             registry.register_mcp_tools(server_id, &python_name, tools, defer);
-
-            // Only add to OpenAI tools list for direct model access if NOT deferred
-            // Deferred tools are discovered via tool_search
-            if !defer {
-                for tool in tools {
-                    openai_tools.push(OpenAITool::from_mcp(server_id, tool));
-                }
-            }
         }
 
         let stats = registry.stats();
@@ -2260,15 +2470,17 @@ async fn chat(
         }
     }
 
-    let has_tools = !openai_tools.is_empty();
-    println!(
-        "[Chat] Total tools available: {} (built-in + {} MCP tools)",
-        openai_tools.len(),
-        filtered_tool_descriptions
-            .iter()
-            .map(|(_, t)| t.len())
-            .sum::<usize>()
-    );
+    if let Some(ref tools) = openai_tools {
+        println!(
+            "[Chat] Total tools available (legacy mode): {} (built-in only)",
+            tools.len()
+        );
+    } else {
+        println!(
+            "[Chat] Tool calling via python_execution only: {} MCP servers registered",
+            filtered_tool_descriptions.len()
+        );
+    }
 
     // Check if there are any attached documents (RAG indexed files)
     let has_attachments = {
@@ -2292,10 +2504,12 @@ async fn chat(
         &base_system_prompt,
         &filtered_tool_descriptions,
         &server_configs,
-        python_enabled,
         has_attachments,
         &tool_system_prompts,
         &tool_filter,
+        primary_format_for_prompt,
+        python_tool_mode,
+        allow_tool_search_for_python,
     );
 
     // === LOGGING: System prompt construction ===
@@ -2374,7 +2588,11 @@ async fn chat(
     let chat_id_task = chat_id.clone();
     let title_task = title.clone();
     let message_task = message.clone();
-    let openai_tools_task = if has_tools { Some(openai_tools) } else { None };
+    let openai_tools_task = openai_tools;
+    let python_tool_mode_task = python_tool_mode;
+    let format_config_task = format_config.clone();
+    let primary_format_task = primary_format_for_prompt;
+    let allow_tool_search_for_python_task = allow_tool_search_for_python;
 
     // Spawn the agentic loop task
     tauri::async_runtime::spawn(async move {
@@ -2396,6 +2614,10 @@ async fn chat(
             message_task,
             openai_tools_task,
             model_name,
+            python_tool_mode_task,
+            format_config_task,
+            primary_format_task,
+            allow_tool_search_for_python_task,
         )
         .await;
     });
@@ -2603,12 +2825,15 @@ async fn save_app_settings(
     new_settings: AppSettings,
     settings_state: State<'_, SettingsState>,
 ) -> Result<(), String> {
+    let mut normalized = new_settings;
+    normalized.tool_call_formats.normalize();
+
     // Save to file
-    settings::save_settings(&new_settings).await?;
+    settings::save_settings(&normalized).await?;
 
     // Update in-memory state
     let mut guard = settings_state.settings.write().await;
-    *guard = new_settings;
+    *guard = normalized;
 
     Ok(())
 }
@@ -2726,6 +2951,23 @@ async fn update_tool_system_prompt(
     }
 
     settings::save_settings(&guard).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_tool_call_formats(
+    config: ToolCallFormatConfig,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut normalized = config;
+    normalized.normalize();
+    let mut guard = settings_state.settings.write().await;
+    guard.tool_call_formats = normalized.clone();
+    settings::save_settings(&guard).await?;
+    println!(
+        "[Settings] tool_call_formats updated: primary={:?}, enabled={:?}",
+        normalized.primary, normalized.enabled
+    );
     Ok(())
 }
 
@@ -2955,6 +3197,9 @@ async fn get_system_prompt_preview(
     let base_prompt = settings.system_prompt.clone();
     let server_configs = settings.mcp_servers.clone();
     let python_execution_enabled = settings.python_execution_enabled;
+    let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let mut format_config = settings.tool_call_formats.clone();
+    format_config.normalize();
     let tool_prompts = settings.tool_system_prompts.clone();
     drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
@@ -2985,8 +3230,16 @@ async fn get_system_prompt_preview(
             }
         })
         .collect();
-    let python_enabled =
-        python_execution_enabled && tool_filter.builtin_allowed("python_execution");
+    let has_mcp_tools = !filtered_tool_descriptions.is_empty();
+    let code_mode_possible = format_config.is_enabled(ToolCallFormatName::CodeMode)
+        && python_execution_enabled
+        && python_tool_calling_enabled
+        && tool_filter.builtin_allowed("python_execution");
+    let primary_format_for_prompt = format_config.resolve_primary_for_prompt(code_mode_possible);
+    let python_tool_mode =
+        code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
+    let allow_tool_search_for_python =
+        python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
 
     // Check if there are any attached documents
     let has_attachments = {
@@ -3008,10 +3261,12 @@ async fn get_system_prompt_preview(
         &base_prompt,
         &filtered_tool_descriptions,
         &server_configs,
-        python_enabled,
         has_attachments,
         &tool_prompts,
         &tool_filter,
+        primary_format_for_prompt,
+        python_tool_mode,
+        allow_tool_search_for_python,
     );
 
     Ok(preview)
@@ -3028,6 +3283,9 @@ async fn get_system_prompt_layers(
     let base_prompt = settings.system_prompt.clone();
     let server_configs = settings.mcp_servers.clone();
     let python_execution_enabled = settings.python_execution_enabled;
+    let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let mut format_config = settings.tool_call_formats.clone();
+    format_config.normalize();
     let tool_prompts = settings.tool_system_prompts.clone();
     drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
@@ -3058,8 +3316,16 @@ async fn get_system_prompt_layers(
             }
         })
         .collect();
-    let python_enabled =
-        python_execution_enabled && tool_filter.builtin_allowed("python_execution");
+    let has_mcp_tools = !filtered_tool_descriptions.is_empty();
+    let code_mode_possible = format_config.is_enabled(ToolCallFormatName::CodeMode)
+        && python_execution_enabled
+        && python_tool_calling_enabled
+        && tool_filter.builtin_allowed("python_execution");
+    let primary_format_for_prompt = format_config.resolve_primary_for_prompt(code_mode_possible);
+    let python_tool_mode =
+        code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
+    let allow_tool_search_for_python =
+        python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
 
     // Check if there are any attached documents
     let has_attachments = {
@@ -3080,10 +3346,12 @@ async fn get_system_prompt_layers(
         &base_prompt,
         &filtered_tool_descriptions,
         &server_configs,
-        python_enabled,
         has_attachments,
         &tool_prompts,
         &tool_filter,
+        primary_format_for_prompt,
+        python_tool_mode,
+        allow_tool_search_for_python,
     );
 
     Ok(layers)
@@ -3211,6 +3479,7 @@ pub fn run() {
             let (rag_tx, rag_rx) = mpsc::channel(32);
             let (mcp_host_tx, mcp_host_rx) = mpsc::channel(32);
             let (python_tx, python_rx) = mpsc::channel(32);
+            let python_mcp_host_tx = mcp_host_tx.clone();
 
             // Store handles in state
             app.manage(ActorHandles {
@@ -3242,6 +3511,7 @@ pub fn run() {
             };
             let embedding_model_arc = embedding_model_state.model.clone();
             app.manage(embedding_model_state);
+            let embedding_model_arc_for_python = embedding_model_arc.clone();
 
             // Initialize shared tool registry
             let tool_registry = create_shared_registry();
@@ -3313,7 +3583,12 @@ pub fn run() {
             let python_tool_registry = tool_registry.clone();
             tauri::async_runtime::spawn(async move {
                 println!("Starting Python Actor...");
-                let actor = PythonActor::new(python_rx, python_tool_registry);
+                let actor = PythonActor::new(
+                    python_rx,
+                    python_tool_registry,
+                    python_mcp_host_tx,
+                    embedding_model_arc_for_python,
+                );
                 actor.run().await;
             });
 
@@ -3381,6 +3656,7 @@ pub fn run() {
             remove_mcp_server,
             update_system_prompt,
             update_tool_system_prompt,
+            update_tool_call_formats,
             update_python_execution_enabled,
             // MCP commands
             sync_mcp_servers,
@@ -3406,6 +3682,24 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn hermes_call(name: &str, args: serde_json::Value) -> String {
+        format!(
+            "<tool_call>{{\"name\": \"{}\", \"arguments\": {}}}</tool_call>",
+            name,
+            args.to_string()
+        )
+    }
+
+    fn unwrap_tool_calls(action: AgenticAction) -> Vec<ParsedToolCall> {
+        match action {
+            AgenticAction::ToolCalls { calls } => calls,
+            AgenticAction::Final { response } => {
+                panic!("expected tool calls, got final response: {}", response)
+            }
+        }
+    }
 
     #[test]
     fn test_fix_python_indentation_if_else() {
@@ -3617,14 +3911,106 @@ mod tests {
             base_prompt,
             &tool_descriptions,
             &server_configs,
-            true,
             false,
             &tool_prompts,
             &filter,
+            ToolCallFormatName::CodeMode,
+            true,
+            false,
         );
 
         assert_eq!(layers.base_prompt, "Base prompt");
         assert!(layers.combined.contains("custom prompt"));
         assert!(layers.additions.iter().any(|s| s.contains("custom prompt")));
+    }
+
+    #[test]
+    fn detect_agentic_action_prefers_python_mode() {
+        let response = "```python\nprint('hi')\n```";
+        let formats = ToolCallFormatConfig::default();
+        let action = detect_agentic_action(
+            response,
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            true,
+            &formats,
+            ToolCallFormatName::CodeMode,
+        );
+
+        let calls = unwrap_tool_calls(action);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "python_execution");
+        assert!(calls[0].arguments.get("code").is_some());
+    }
+
+    #[test]
+    fn detect_agentic_action_final_without_tools() {
+        let response = "No tools needed here.";
+        let formats = ToolCallFormatConfig::default();
+        let action = detect_agentic_action(
+            response,
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            false,
+            &formats,
+            formats.primary,
+        );
+
+        match action {
+            AgenticAction::Final {
+                response: final_response,
+            } => {
+                assert_eq!(final_response, "No tools needed here.");
+            }
+            other => panic!("expected final response, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn detect_agentic_action_parses_hermes_calls() {
+        let response = hermes_call("server___echo", json!({ "text": "hello" }));
+        let formats = ToolCallFormatConfig::default();
+        let action = detect_agentic_action(
+            &response,
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            false,
+            &formats,
+            ToolCallFormatName::Hermes,
+        );
+
+        let calls = unwrap_tool_calls(action);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].server, "server");
+        assert_eq!(calls[0].tool, "echo");
+        assert_eq!(
+            calls[0].arguments.get("text").and_then(|v| v.as_str()),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn simulate_one_turn_formats_tool_result() {
+        let response = hermes_call("builtin___echo", json!({ "text": "hi" }));
+        let formats = ToolCallFormatConfig::default();
+        let action = detect_agentic_action(
+            &response,
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            false,
+            &formats,
+            ToolCallFormatName::Hermes,
+        );
+        let calls = unwrap_tool_calls(action);
+        let formatted = format_tool_result(&calls[0], "echo: hi", false, ToolFormat::Hermes);
+
+        assert!(
+            formatted.contains("echo: hi"),
+            "formatted result should include tool output"
+        );
+        assert!(
+            formatted.contains("<tool_response>"),
+            "Hermes formatting should wrap in tool_response tags"
+        );
     }
 }

@@ -20,12 +20,23 @@ export interface McpServerConfig {
     python_name?: string;  // Python module name for imports (must be valid Python identifier)
 }
 
+// Shared tool-calling format names (must match Rust)
+export type ToolCallFormatName = 'hermes' | 'mistral' | 'pythonic' | 'pure_json' | 'code_mode';
+
+export interface ToolCallFormatConfig {
+    enabled: ToolCallFormatName[];
+    primary: ToolCallFormatName;
+}
+
 // Application settings
 export interface AppSettings {
     system_prompt: string;
     mcp_servers: McpServerConfig[];
+    tool_call_formats: ToolCallFormatConfig;
     tool_system_prompts: Record<string, string>;
     python_execution_enabled: boolean;
+    python_tool_calling_enabled: boolean;
+    legacy_tool_call_format_enabled: boolean;
 }
 
 // Connection status for MCP servers
@@ -65,6 +76,7 @@ interface SettingsState {
     // Settings CRUD
     fetchSettings: () => Promise<void>;
     updateSystemPrompt: (prompt: string) => Promise<void>;
+    updateToolCallFormats: (config: ToolCallFormatConfig) => Promise<void>;
     updateCodeExecutionEnabled: (enabled: boolean) => Promise<void>;
     addMcpServer: (config: McpServerConfig) => Promise<void>;
     updateMcpServer: (config: McpServerConfig) => Promise<void>;
@@ -80,6 +92,23 @@ interface SettingsState {
 
 // Default system prompt - exported so UI can offer reset
 export const DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant. Be direct and concise in your responses. When you don't know something, say so rather than guessing.";
+
+export const DEFAULT_TOOL_CALL_FORMATS: ToolCallFormatConfig = {
+    enabled: ['hermes', 'code_mode'],
+    primary: 'code_mode',
+};
+
+function normalizeToolCallFormats(config: ToolCallFormatConfig): ToolCallFormatConfig {
+    const dedupedEnabled: ToolCallFormatName[] = [];
+    for (const fmt of config.enabled || []) {
+        if (!dedupedEnabled.includes(fmt)) {
+            dedupedEnabled.push(fmt);
+        }
+    }
+    const enabled = dedupedEnabled.length > 0 ? dedupedEnabled : [...DEFAULT_TOOL_CALL_FORMATS.enabled];
+    const primary = enabled.includes(config.primary) ? config.primary : enabled[0];
+    return { enabled, primary };
+}
 
 // Helper to create a new server config
 export function createNewServerConfig(): McpServerConfig {
@@ -163,11 +192,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     return FALLBACK_PYTHON_ALLOWED_IMPORTS;
                 }),
             ]);
+            const normalizedFormats = normalizeToolCallFormats(settings.tool_call_formats || DEFAULT_TOOL_CALL_FORMATS);
+            const mergedSettings: AppSettings = { ...settings, tool_call_formats: normalizedFormats };
             const allowedImports = (allowedImportsRaw && allowedImportsRaw.length > 0)
                 ? allowedImportsRaw
                 : FALLBACK_PYTHON_ALLOWED_IMPORTS;
             console.log('[SettingsStore] Fetched settings:', settings);
-            set({ settings, pythonAllowedImports: allowedImports, isLoading: false });
+            set({ settings: mergedSettings, pythonAllowedImports: allowedImports, isLoading: false });
             
             // Sync MCP servers after fetching settings
             try {
@@ -198,8 +229,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 settings: {
                     system_prompt: DEFAULT_SYSTEM_PROMPT,
                     mcp_servers: [],
+                    tool_call_formats: DEFAULT_TOOL_CALL_FORMATS,
                     tool_system_prompts: {},
                     python_execution_enabled: false,
+                    python_tool_calling_enabled: true,
+                    legacy_tool_call_format_enabled: false,
                 },
                 pythonAllowedImports: FALLBACK_PYTHON_ALLOWED_IMPORTS,
             });
@@ -225,6 +259,30 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             set({ 
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+
+    updateToolCallFormats: async (config: ToolCallFormatConfig) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+
+        const normalized = normalizeToolCallFormats(config);
+
+        // Optimistic update
+        set({
+            settings: { ...currentSettings, tool_call_formats: normalized },
+            error: null,
+        });
+
+        try {
+            await invoke('update_tool_call_formats', { config: normalized });
+            console.log('[SettingsStore] Tool call formats updated', normalized);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update tool call formats:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`,
             });
         }
     },

@@ -12,14 +12,18 @@
 //! - Outer: (Optional) WASM sandbox via Wasmtime for additional isolation
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use fastembed::TextEmbedding;
 
+use crate::protocol::McpHostMsg;
 use crate::tools::code_execution::{
     CodeExecutionInput, CodeExecutionOutput, ExecutionContext, InnerToolCall, InnerCallResult,
 };
+use crate::tools::tool_search::{ToolSearchExecutor, ToolSearchInput};
 use crate::tool_registry::SharedToolRegistry;
 
 // Import the python-sandbox crate
@@ -73,18 +77,27 @@ pub struct PythonToolCallResult {
 pub struct PythonActor {
     rx: mpsc::Receiver<PythonMsg>,
     tool_registry: SharedToolRegistry,
+    mcp_host_tx: mpsc::Sender<McpHostMsg>,
+    embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
     /// Channel to send tool calls to the orchestrator for execution
     tool_call_tx: mpsc::Sender<(InnerToolCall, oneshot::Sender<InnerCallResult>)>,
     tool_call_rx: mpsc::Receiver<(InnerToolCall, oneshot::Sender<InnerCallResult>)>,
 }
 
 impl PythonActor {
-    pub fn new(rx: mpsc::Receiver<PythonMsg>, tool_registry: SharedToolRegistry) -> Self {
+    pub fn new(
+        rx: mpsc::Receiver<PythonMsg>,
+        tool_registry: SharedToolRegistry,
+        mcp_host_tx: mpsc::Sender<McpHostMsg>,
+        embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+    ) -> Self {
         let (tool_call_tx, tool_call_rx) = mpsc::channel(32);
         
         Self {
             rx,
             tool_registry,
+            mcp_host_tx,
+            embedding_model,
             tool_call_tx,
             tool_call_rx,
         }
@@ -148,16 +161,52 @@ impl PythonActor {
         println!("[PythonActor] Tool modules available: {}", context.tool_modules.len());
         let _ = std::io::stdout().flush();
         
+        // Build validation/import context from execution context
+        let mut import_context = crate::tools::code_execution::DynamicImportContext::new();
+        for module in &context.tool_modules {
+            import_context.add_tool_module(module.python_name.clone(), module.server_id.clone());
+        }
+        let validation_context = crate::tools::code_execution::ValidationContext {
+            import_context: Some(&import_context),
+            allowed_functions: Some(&context.allowed_functions),
+        };
+
         // Validate input
         println!("[PythonActor] Validating input...");
         let _ = std::io::stdout().flush();
-        crate::tools::code_execution::CodeExecutionExecutor::validate_input(&input)?;
+        crate::tools::code_execution::CodeExecutionExecutor::validate_input_with_rules(
+            &input,
+            Some(validation_context),
+        )?;
         println!("[PythonActor] Input validated");
         let _ = std::io::stdout().flush();
-        
-        // Get available tools from registry
-        let available_tools = self.get_available_tools().await;
-        
+
+        // Convert available tools from context into ToolInfo for sandbox
+        let module_by_server: std::collections::HashMap<String, String> = context
+            .tool_modules
+            .iter()
+            .map(|m| (m.server_id.clone(), m.python_name.clone()))
+            .collect();
+        let available_tools: Vec<ToolInfo> = context
+            .available_tools
+            .iter()
+            .map(|schema| {
+                let server_id = context
+                    .tool_server_map
+                    .get(&schema.name)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let python_module = module_by_server.get(&server_id).cloned();
+                ToolInfo {
+                    name: schema.name.clone(),
+                    server_id,
+                    description: schema.description.clone(),
+                    parameters: schema.parameters.clone(),
+                    python_module,
+                }
+            })
+            .collect();
+
         // Build the initial request with tool modules from context
         let mut request = ExecutionRequest {
             code: input.code.clone(),
@@ -267,21 +316,6 @@ impl PythonActor {
         Ok(output)
     }
     
-    /// Get available tools from the registry as ToolInfo for the sandbox
-    async fn get_available_tools(&self) -> Vec<ToolInfo> {
-        let registry = self.tool_registry.read().await;
-        registry.get_visible_tools()
-            .iter()
-            .map(|schema| ToolInfo {
-                name: schema.name.clone(),
-                server_id: "default".to_string(), // TODO: Get actual server ID
-                description: schema.description.clone(),
-                parameters: schema.parameters.clone(),
-                python_module: None,  // TODO: Get from registry
-            })
-            .collect()
-    }
-    
     /// Execute a single tool call via the orchestrator
     async fn execute_tool_call(
         &mut self,
@@ -290,31 +324,92 @@ impl PythonActor {
         arguments: &Value,
     ) -> ToolCallResult {
         println!("[PythonActor] Executing tool: {}::{}", server_id, tool_name);
-        
-        // Create the inner tool call
-        let call = InnerToolCall {
-            tool_name: tool_name.to_string(),
-            server_id: server_id.to_string(),
-            arguments: arguments.clone(),
-            parent_exec_id: uuid::Uuid::new_v4().to_string(),
-        };
-        
-        // Send to orchestrator and wait for result
-        let (result_tx, result_rx) = oneshot::channel();
-        
-        if let Err(e) = self.tool_call_tx.send((call, result_tx)).await {
+
+        // Built-in: tool_search routed directly through the executor
+        if server_id == "builtin" && tool_name == "tool_search" {
+            let search_input = if let Some(query) = arguments
+                .get("relevant_to")
+                .and_then(|v| v.as_str())
+            {
+                ToolSearchInput {
+                    queries: vec![query.to_string()],
+                    top_k: 3,
+                }
+            } else {
+                serde_json::from_value::<ToolSearchInput>(arguments.clone()).unwrap_or(
+                    ToolSearchInput {
+                        queries: vec![],
+                        top_k: 3,
+                    },
+                )
+            };
+
+            let executor =
+                ToolSearchExecutor::new(self.tool_registry.clone(), self.embedding_model.clone());
+
+            match executor.execute(search_input).await {
+                Ok(output) => {
+                    executor.materialize_results(&output.tools).await;
+                    let payload = serde_json::to_value(&output).unwrap_or(Value::Null);
+                    return ToolCallResult {
+                        success: true,
+                        result: payload,
+                        error: None,
+                    };
+                }
+                Err(e) => {
+                    return ToolCallResult {
+                        success: false,
+                        result: Value::Null,
+                        error: Some(e),
+                    };
+                }
+            }
+        }
+
+        // MCP tool execution
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self
+            .mcp_host_tx
+            .send(McpHostMsg::ExecuteTool {
+                server_id: server_id.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments: arguments.clone(),
+                respond_to: tx,
+            })
+            .await
+        {
             return ToolCallResult {
                 success: false,
                 result: Value::Null,
                 error: Some(format!("Failed to send tool call: {}", e)),
             };
         }
-        
-        match result_rx.await {
-            Ok(inner_result) => ToolCallResult {
-                success: inner_result.success,
-                result: inner_result.result,
-                error: inner_result.error,
+
+        match rx.await {
+            Ok(Ok(result)) => {
+                let text = result
+                    .content
+                    .iter()
+                    .filter_map(|c| c.text.as_ref())
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                ToolCallResult {
+                    success: !result.is_error,
+                    result: Value::String(text.clone()),
+                    error: if result.is_error {
+                        Some(text)
+                    } else {
+                        None
+                    },
+                }
+            }
+            Ok(Err(err)) => ToolCallResult {
+                success: false,
+                result: Value::Null,
+                error: Some(err),
             },
             Err(_) => ToolCallResult {
                 success: false,
@@ -334,27 +429,30 @@ pub fn create_python_channel() -> (mpsc::Sender<PythonMsg>, mpsc::Receiver<Pytho
 mod tests {
     use super::*;
     use crate::tool_registry::ToolRegistry;
+    use crate::tools::code_execution::CodeExecutionExecutor;
     
     #[tokio::test]
     async fn test_simple_execution() {
         // Create a minimal setup for testing
         let (_tx, rx) = create_python_channel();
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(ToolRegistry::new()));
+        let (mcp_tx, _mcp_rx) = mpsc::channel(1);
+        let embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>> =
+            Arc::new(RwLock::new(None));
         
-        let mut actor = PythonActor::new(rx, registry);
+        let mut actor = PythonActor::new(rx, registry, mcp_tx, embedding_model);
         
         let input = CodeExecutionInput {
             code: vec!["x = 1 + 2".to_string(), "print(x)".to_string()],
             context: None,
         };
         
-        let context = ExecutionContext {
-            exec_id: "test".to_string(),
-            tool_stubs: String::new(),
-            user_context: None,
-            available_tools: vec![],
-            tool_modules: vec![],
-        };
+        let context = CodeExecutionExecutor::create_context(
+            "test".to_string(),
+            vec![],
+            None,
+            vec![],
+        );
         
         let result = actor.execute_code(input, context).await;
         

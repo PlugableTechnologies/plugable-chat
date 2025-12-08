@@ -1020,6 +1020,17 @@ mod tests {
         assert_eq!(result.status, ExecutionStatus::Complete);
         assert!(result.stdout.contains("42"));
     }
+
+    #[test]
+    fn test_eprint_routes_to_stderr() {
+        let result = exec_code(&[
+            "import builtins",
+            "builtins.eprint('needs follow-up')",
+        ]);
+        assert_eq!(result.status, ExecutionStatus::Complete);
+        assert!(result.stderr.contains("needs follow-up"));
+        assert!(result.stdout.is_empty());
+    }
     
     // ============ Security Blocks - Expected Failures ============
     

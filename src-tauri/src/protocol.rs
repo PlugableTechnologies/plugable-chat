@@ -119,7 +119,7 @@ pub enum ToolCallKind {
 }
 
 /// Extended parsed tool call with code mode metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExtendedToolCall {
     /// Base tool call info
     pub server: String,
@@ -135,7 +135,7 @@ pub struct ExtendedToolCall {
 }
 
 /// Information about what invoked a tool call (for nested calls from python_execution)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolCallCaller {
     /// Type of the caller (e.g., "python_execution_20251206")
     pub caller_type: String,
@@ -166,7 +166,7 @@ impl From<ParsedToolCall> for ExtendedToolCall {
 }
 
 /// Parsed tool call from assistant response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ParsedToolCall {
     pub server: String,
     pub tool: String,

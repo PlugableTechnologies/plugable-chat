@@ -201,6 +201,13 @@ fn make_sandbox_module(vm: &VirtualMachine) -> PyRef<PyModule> {
         vm,
     );
     
+    // Add stderr-capable print wrapper for agentic handoffs
+    let _ = dict.set_item(
+        "sandbox_stderr",
+        vm.new_function("sandbox_stderr", sandbox_stderr_impl).into(),
+        vm,
+    );
+    
     module_ref
 }
 
@@ -286,6 +293,21 @@ fn sandbox_print_impl(args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
     }
     output.push('\n');
     append_stdout(&output);
+    Ok(())
+}
+
+/// Sandbox stderr printer that captures to stderr buffer
+fn sandbox_stderr_impl(args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+    let mut output = String::new();
+    for (i, arg) in args.args.iter().enumerate() {
+        if i > 0 {
+            output.push(' ');
+        }
+        let s: String = arg.str(vm)?.to_string();
+        output.push_str(&s);
+    }
+    output.push('\n');
+    append_stderr(&output);
     Ok(())
 }
 
@@ -408,11 +430,13 @@ pub const ALLOWED_MODULES: &[&str] = &[
 /// Setup code to inject sandbox helpers into Python
 pub const SANDBOX_SETUP_CODE: &str = r##"
 # Sandbox setup - import sandbox functions
-from _sandbox import tool_call, get_tool_result, sandbox_print
+from _sandbox import tool_call, get_tool_result, sandbox_print, sandbox_stderr
 
 # Replace print with sandbox version  
 import builtins
 builtins.print = sandbox_print
+# Provide eprint that routes to stderr for agentic handoffs
+builtins.eprint = sandbox_stderr
 
 # Remove dangerous builtins
 _blocked = ['open', 'eval', 'exec', 'compile', 'input', 'breakpoint', 
@@ -721,5 +745,13 @@ mod tests {
         append_stdout("Hello ");
         append_stdout("World\n");
         assert_eq!(get_stdout(), "Hello World\n");
+    }
+
+    #[test]
+    fn test_stderr_capture() {
+        reset_execution_state();
+        append_stderr("Problem ");
+        append_stderr("Details\n");
+        assert_eq!(get_stderr(), "Problem Details\n");
     }
 }

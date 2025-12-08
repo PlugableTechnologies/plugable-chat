@@ -312,6 +312,30 @@ impl ToolRegistry {
         
         tools
     }
+
+    /// Get visible tools along with their server_id (builtin or MCP server)
+    pub fn get_visible_tools_with_servers(&self) -> Vec<(String, ToolSchema)> {
+        let mut tools: Vec<(String, ToolSchema)> = self
+            .internal_tools
+            .iter()
+            .cloned()
+            .map(|schema| ("builtin".to_string(), schema))
+            .collect();
+
+        for (key, schema) in &self.domain_tools {
+            if !schema.defer_loading || self.materialized_tools.contains(key) {
+                // key format: server_id___tool_name
+                let server_id = key
+                    .splitn(2, "___")
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string();
+                tools.push((server_id, schema.clone()));
+            }
+        }
+
+        tools
+    }
     
     /// Get all deferred tools (for semantic search)
     pub fn get_deferred_tools(&self) -> Vec<(&String, &ToolSchema)> {
