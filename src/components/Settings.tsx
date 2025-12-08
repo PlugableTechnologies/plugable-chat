@@ -274,13 +274,17 @@ function McpServerCard({
     onSave, 
     onRemove,
     toolPrompts,
-    onSaveToolPrompt
+    onSaveToolPrompt,
+    onDirtyChange,
+    registerSaveHandler
 }: { 
     config: McpServerConfig;
     onSave: (config: McpServerConfig) => void;
     onRemove: () => void;
     toolPrompts: Record<string, string>;
     onSaveToolPrompt: (serverId: string, toolName: string, prompt: string) => Promise<void>;
+    onDirtyChange?: (id: string, dirty: boolean) => void;
+    registerSaveHandler?: (id: string, handler: () => Promise<void>) => void;
 }) {
     const [expanded, setExpanded] = useState(false);
     const [localConfig, setLocalConfig] = useState<McpServerConfig>(() => structuredClone(config));
@@ -321,6 +325,11 @@ function McpServerCard({
     useEffect(() => {
         setToolDrafts(toolPrompts);
     }, [toolPrompts]);
+
+    // Notify parent when dirty state changes
+    useEffect(() => {
+        onDirtyChange?.(config.id, isDirty);
+    }, [config.id, isDirty, onDirtyChange]);
     
     const updateField = useCallback(<K extends keyof McpServerConfig>(field: K, value: McpServerConfig[K]) => {
         setLocalConfig(prev => {
@@ -359,6 +368,13 @@ function McpServerCard({
             setTestResult(null);
         }
     }, [localConfig, onSave]);
+
+    // Expose save handler to parent so a global Save button can trigger it
+    useEffect(() => {
+        if (registerSaveHandler) {
+            registerSaveHandler(config.id, handleSave);
+        }
+    }, [config.id, handleSave, registerSaveHandler]);
     
     // Manual test without saving
     const handleTest = useCallback(async () => {
@@ -959,7 +975,15 @@ function SystemPromptTab() {
 }
 
 // Tools Tab - combines built-in tools and MCP servers
-function ToolsTab() {
+function ToolsTab({
+    onDirtyChange,
+    onRegisterSave,
+    onSavingChange,
+}: {
+    onDirtyChange?: (dirty: boolean) => void;
+    onRegisterSave?: (handler: () => Promise<void>) => void;
+    onSavingChange?: (saving: boolean) => void;
+}) {
     const { settings, updateCodeExecutionEnabled, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error, pythonAllowedImports } = useSettingsStore();
     const servers = settings?.mcp_servers || [];
     const codeExecutionEnabled = settings?.python_execution_enabled ?? false;
@@ -973,29 +997,183 @@ function ToolsTab() {
         `Here are the allowed imports: ${allowedImports.join(', ')}.`
     ].join(' ');
     const defaultToolSearchPrompt = "Call tool_search to discover MCP tools related to your search string. If the returned tools appear to be relevant to your goal, use them";
-    const [pythonPrompt, setPythonPrompt] = useState(settings?.tool_system_prompts?.['builtin::python_execution'] || '');
-    const [toolSearchPrompt, setToolSearchPrompt] = useState(settings?.tool_system_prompts?.['builtin::tool_search'] || '');
-    
+    const initialPythonPrompt = settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt;
+    const initialToolSearchPrompt = settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt;
+
+    const [localCodeExecutionEnabled, setLocalCodeExecutionEnabled] = useState(codeExecutionEnabled);
+    const [pythonPromptDraft, setPythonPromptDraft] = useState(initialPythonPrompt);
+    const [toolSearchPromptDraft, setToolSearchPromptDraft] = useState(initialToolSearchPrompt);
+    const [baselineBuiltins, setBaselineBuiltins] = useState({
+        codeExecutionEnabled,
+        pythonPrompt: initialPythonPrompt,
+        toolSearchPrompt: initialToolSearchPrompt,
+    });
+
+    const [serverDirtyMap, setServerDirtyMap] = useState<Record<string, boolean>>({});
+    const serverSaveHandlers = useRef<Record<string, () => Promise<void>>>({});
+    const [isSaving, setIsSaving] = useState(false);
+
+    // Sync local state with settings when there are no pending built-in changes
     useEffect(() => {
-        setPythonPrompt(settings?.tool_system_prompts?.['builtin::python_execution'] || '');
-        setToolSearchPrompt(settings?.tool_system_prompts?.['builtin::tool_search'] || '');
-    }, [settings?.tool_system_prompts]);
-    
+        const nextBaseline = {
+            codeExecutionEnabled: codeExecutionEnabled,
+            pythonPrompt: settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt,
+            toolSearchPrompt: settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt,
+        };
+
+        const hasPendingBuiltins =
+            localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
+            pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
+            toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt;
+
+        if (!hasPendingBuiltins) {
+            setLocalCodeExecutionEnabled(nextBaseline.codeExecutionEnabled);
+            setPythonPromptDraft(nextBaseline.pythonPrompt);
+            setToolSearchPromptDraft(nextBaseline.toolSearchPrompt);
+            setBaselineBuiltins(nextBaseline);
+        } else {
+            setBaselineBuiltins(nextBaseline);
+        }
+    }, [
+        baselineBuiltins.codeExecutionEnabled,
+        baselineBuiltins.pythonPrompt,
+        baselineBuiltins.toolSearchPrompt,
+        codeExecutionEnabled,
+        defaultPythonPrompt,
+        defaultToolSearchPrompt,
+        localCodeExecutionEnabled,
+        pythonPromptDraft,
+        settings?.tool_system_prompts,
+        toolSearchPromptDraft,
+    ]);
+
+    // Keep server dirty map aligned with server list
+    useEffect(() => {
+        setServerDirtyMap((prev) => {
+            const next: Record<string, boolean> = {};
+            servers.forEach((s) => {
+                next[s.id] = prev[s.id] ?? false;
+            });
+            return next;
+        });
+    }, [servers]);
+
+    const markServerDirty = useCallback((id: string, dirty: boolean) => {
+        setServerDirtyMap((prev) => ({
+            ...prev,
+            [id]: dirty,
+        }));
+    }, []);
+
+    const hasBuiltInChanges =
+        localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
+        pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
+        toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt;
+
+    const hasServerChanges = Object.values(serverDirtyMap).some(Boolean);
+    const anyChanges = hasBuiltInChanges || hasServerChanges;
+
+    useEffect(() => {
+        onDirtyChange?.(anyChanges);
+    }, [anyChanges, onDirtyChange]);
+
+    useEffect(() => {
+        onSavingChange?.(isSaving);
+    }, [isSaving, onSavingChange]);
+
     const handleAddServer = () => {
         const newConfig = createNewServerConfig();
         addMcpServer(newConfig);
     };
-    
+
     const handleToggleCodeExecution = () => {
-        updateCodeExecutionEnabled(!codeExecutionEnabled);
+        setLocalCodeExecutionEnabled((prev) => !prev);
     };
-    
-    const handleSaveBuiltinPrompt = (toolName: 'python_execution' | 'tool_search', value: string) => {
-        updateToolSystemPrompt('builtin', toolName, value);
+
+    const handleResetPythonPrompt = () => {
+        setPythonPromptDraft(defaultPythonPrompt);
     };
+
+    const handleResetToolSearchPrompt = () => {
+        setToolSearchPromptDraft(defaultToolSearchPrompt);
+    };
+
+    const handleSaveAll = useCallback(async () => {
+        if (!settings) return;
+        setIsSaving(true);
+        onSavingChange?.(true);
+
+        const saves: Promise<unknown>[] = [];
+        const targetPythonPrompt = pythonPromptDraft?.trim() ? pythonPromptDraft : defaultPythonPrompt;
+        const targetToolSearchPrompt = toolSearchPromptDraft?.trim() ? toolSearchPromptDraft : defaultToolSearchPrompt;
+
+        if (localCodeExecutionEnabled !== settings.python_execution_enabled) {
+            saves.push(updateCodeExecutionEnabled(localCodeExecutionEnabled));
+        }
+
+        if (targetPythonPrompt !== (settings.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt)) {
+            saves.push(updateToolSystemPrompt('builtin', 'python_execution', targetPythonPrompt));
+        }
+
+        if (targetToolSearchPrompt !== (settings.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt)) {
+            saves.push(updateToolSystemPrompt('builtin', 'tool_search', targetToolSearchPrompt));
+        }
+
+        // Trigger saves for dirty MCP servers
+        const dirtyServerIds = Object.entries(serverDirtyMap)
+            .filter(([, dirty]) => dirty)
+            .map(([id]) => id);
+
+        dirtyServerIds.forEach((id) => {
+            const saveFn = serverSaveHandlers.current[id];
+            if (saveFn) {
+                saves.push(
+                    saveFn().catch((err) => {
+                        console.error(`Failed to save MCP server ${id}:`, err);
+                        throw err;
+                    })
+                );
+            }
+        });
+
+        try {
+            await Promise.all(saves);
+            setBaselineBuiltins({
+                codeExecutionEnabled: localCodeExecutionEnabled,
+                pythonPrompt: targetPythonPrompt,
+                toolSearchPrompt: targetToolSearchPrompt,
+            });
+            setServerDirtyMap((prev) => {
+                const next: Record<string, boolean> = {};
+                Object.keys(prev).forEach((id) => {
+                    next[id] = prev[id] && dirtyServerIds.includes(id) ? false : prev[id];
+                });
+                return next;
+            });
+        } finally {
+            setIsSaving(false);
+            onSavingChange?.(false);
+        }
+    }, [
+        defaultPythonPrompt,
+        defaultToolSearchPrompt,
+        localCodeExecutionEnabled,
+        onSavingChange,
+        pythonPromptDraft,
+        serverDirtyMap,
+        settings,
+        toolSearchPromptDraft,
+        updateCodeExecutionEnabled,
+        updateToolSystemPrompt,
+    ]);
+
+    // Register save handler with parent
+    useEffect(() => {
+        onRegisterSave?.(handleSaveAll);
+    }, [handleSaveAll, onRegisterSave]);
     
     return (
-            <div className="space-y-6">
+        <div className="space-y-6">
             {/* Built-in Tools Section */}
             <div className="space-y-3">
                 <div>
@@ -1026,11 +1204,11 @@ function ToolsTab() {
                         <button
                             onClick={handleToggleCodeExecution}
                             className={`relative w-10 h-5 rounded-full transition-colors ${
-                                codeExecutionEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                                localCodeExecutionEnabled ? 'bg-blue-500' : 'bg-gray-300'
                             }`}
                         >
                             <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-                                codeExecutionEnabled ? 'translate-x-5' : ''
+                                localCodeExecutionEnabled ? 'translate-x-5' : ''
                             }`} />
                         </button>
                     </div>
@@ -1044,13 +1222,21 @@ function ToolsTab() {
                                 <div className="text-sm font-semibold text-gray-900">python_execution</div>
                                 <p className="text-xs text-gray-500">Built-in tool</p>
                             </div>
-                            <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={handleResetPythonPrompt}
+                                    className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
+                                    title="Reset to default prompt"
+                                >
+                                    Reset
+                                </button>
+                                <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                            </div>
                         </div>
                         <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
                         <textarea
-                            value={pythonPrompt || defaultPythonPrompt}
-                            onChange={(e) => setPythonPrompt(e.target.value)}
-                            onBlur={(e) => handleSaveBuiltinPrompt('python_execution', e.target.value || defaultPythonPrompt)}
+                            value={pythonPromptDraft}
+                            onChange={(e) => setPythonPromptDraft(e.target.value)}
                             rows={3}
                             className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
                             placeholder={defaultPythonPrompt}
@@ -1063,13 +1249,21 @@ function ToolsTab() {
                                 <div className="text-sm font-semibold text-gray-900">tool_search</div>
                                 <p className="text-xs text-gray-500">Built-in discovery helper</p>
                             </div>
-                            <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={handleResetToolSearchPrompt}
+                                    className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
+                                    title="Reset to default prompt"
+                                >
+                                    Reset
+                                </button>
+                                <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                            </div>
                         </div>
                         <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
                         <textarea
-                            value={toolSearchPrompt || defaultToolSearchPrompt}
-                            onChange={(e) => setToolSearchPrompt(e.target.value)}
-                            onBlur={(e) => handleSaveBuiltinPrompt('tool_search', e.target.value || defaultToolSearchPrompt)}
+                            value={toolSearchPromptDraft}
+                            onChange={(e) => setToolSearchPromptDraft(e.target.value)}
                             rows={3}
                             className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
                             placeholder={defaultToolSearchPrompt}
@@ -1120,6 +1314,10 @@ function ToolsTab() {
                                 onRemove={() => removeMcpServer(server.id)}
                                 toolPrompts={settings?.tool_system_prompts || {}}
                                 onSaveToolPrompt={updateToolSystemPrompt}
+                                onDirtyChange={markServerDirty}
+                                registerSaveHandler={(id, handler) => {
+                                    serverSaveHandlers.current[id] = handler;
+                                }}
                             />
                         ))
                     )}
@@ -1132,6 +1330,24 @@ function ToolsTab() {
 // Main Settings Modal
 export function SettingsModal() {
     const { isSettingsOpen, closeSettings, activeTab, setActiveTab, isLoading } = useSettingsStore();
+    const [toolsDirty, setToolsDirty] = useState(false);
+    const [toolsSaving, setToolsSaving] = useState(false);
+    const toolsSaveHandlerRef = useRef<(() => Promise<void>) | null>(null);
+
+    const handleRegisterToolsSave = useCallback((handler: () => Promise<void>) => {
+        toolsSaveHandlerRef.current = handler;
+    }, []);
+
+    const handleToolsSavingChange = useCallback((saving: boolean) => {
+        setToolsSaving(saving);
+    }, []);
+
+    const handleHeaderSave = useCallback(async () => {
+        if (activeTab !== 'tools') return;
+        const handler = toolsSaveHandlerRef.current;
+        if (!handler) return;
+        await handler();
+    }, [activeTab]);
     
     if (!isSettingsOpen) return null;
     
@@ -1148,12 +1364,24 @@ export function SettingsModal() {
                 {/* Header */}
                 <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
                     <h2 className="text-lg font-semibold text-gray-900">Settings</h2>
-                    <button
-                        onClick={closeSettings}
-                        className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-500"
-                    >
-                        <X size={20} />
-                    </button>
+                    <div className="flex items-center gap-2">
+                        {activeTab === 'tools' && (
+                            <button
+                                onClick={handleHeaderSave}
+                                disabled={!toolsDirty || toolsSaving}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {toolsSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                                Save
+                            </button>
+                        )}
+                        <button
+                            onClick={closeSettings}
+                            className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-500"
+                        >
+                            <X size={20} />
+                        </button>
+                    </div>
                 </div>
                 
                 {/* Tabs */}
@@ -1191,7 +1419,13 @@ export function SettingsModal() {
                     ) : (
                         <>
                             {activeTab === 'system-prompt' && <SystemPromptTab />}
-                            {activeTab === 'tools' && <ToolsTab />}
+                            {activeTab === 'tools' && (
+                                <ToolsTab
+                                    onDirtyChange={setToolsDirty}
+                                    onRegisterSave={handleRegisterToolsSave}
+                                    onSavingChange={handleToolsSavingChange}
+                                />
+                            )}
                         </>
                     )}
                 </div>

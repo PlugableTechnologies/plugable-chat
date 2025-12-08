@@ -1829,10 +1829,6 @@ fn default_python_prompt(has_attachments: bool, has_deferred_tools: bool) -> Str
         "Call the tool instead of just showing code. Keep code concise and runnable.".to_string(),
     ];
 
-    if has_deferred_tools {
-        parts.push("You can import MCP tools that were discovered via `tool_search` inside python_execution.".to_string());
-    }
-
     if has_attachments {
         parts.push("Attached files are already summarized in the conversation. Do NOT read files; work with the provided text directly inside python_execution.".to_string());
     }
