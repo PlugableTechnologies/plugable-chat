@@ -231,11 +231,14 @@ impl PythonActor {
             }
             
             println!("[PythonActor] ========== Execution round {} ==========", round);
-            println!("[PythonActor] Calling python_sandbox::execute...");
+            println!("[PythonActor] Calling python_sandbox::execute (spawn_blocking)...");
             let _ = std::io::stdout().flush();
             
-            // Execute the Python code using the sandbox
-            let result = python_sandbox::execute(&request);
+            // Execute the Python code using the sandbox on a blocking thread so we don't stall async tasks/UI
+            let request_for_exec = request.clone();
+            let result = tokio::task::spawn_blocking(move || python_sandbox::execute(&request_for_exec))
+                .await
+                .map_err(|e| format!("python_sandbox::execute join error: {}", e))?;
             
             println!("[PythonActor] python_sandbox::execute returned");
             println!("[PythonActor] Status: {:?}", result.status);

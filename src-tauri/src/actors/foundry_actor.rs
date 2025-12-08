@@ -969,6 +969,7 @@ impl FoundryActor {
 
     async fn restart_service(&self) -> std::io::Result<()> {
         println!("Restarting Foundry service...");
+        let restart_timeout_secs: u64 = 75;
         
         // Emit event: service restart started
         let _ = self.app_handle.emit("service-restart-started", json!({
@@ -980,7 +981,7 @@ impl FoundryActor {
             .args(&["service", "restart"])
             .output();
             
-        let output = match timeout(Duration::from_secs(15), child).await {
+        let output = match timeout(Duration::from_secs(restart_timeout_secs), child).await {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
                 println!("FoundryActor: Failed to run 'foundry service restart': {}", e);
@@ -991,12 +992,15 @@ impl FoundryActor {
                 return Err(e);
             }
             Err(_) => {
-                println!("FoundryActor: 'foundry service restart' timed out after 15s");
+                println!("FoundryActor: 'foundry service restart' timed out after {}s", restart_timeout_secs);
                 let _ = self.app_handle.emit("service-restart-complete", json!({
                     "success": false,
-                    "error": "Service restart timed out after 15 seconds"
+                    "error": format!("Service restart timed out after {} seconds", restart_timeout_secs)
                 }));
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "foundry service restart timed out"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("foundry service restart timed out after {} seconds", restart_timeout_secs),
+                ));
             }
         };
             
