@@ -48,7 +48,7 @@ pub struct McpTool {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(rename = "inputSchema", default)]
+    #[serde(rename = "inputSchema", alias = "input_schema", default)]
     pub input_schema: Option<Value>,
 }
 

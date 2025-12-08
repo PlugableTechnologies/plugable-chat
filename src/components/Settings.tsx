@@ -268,6 +268,40 @@ interface SystemPromptLayers {
     combined: string;
 }
 
+type ToolParameter = {
+    name: string;
+    type: string;
+    description: string;
+    required: boolean;
+};
+
+function extractToolParameters(inputSchema?: Record<string, unknown>): ToolParameter[] {
+    if (!inputSchema) return [];
+    const propertiesRaw = (inputSchema as any).properties;
+    if (!propertiesRaw || typeof propertiesRaw !== 'object') return [];
+
+    const requiredList = Array.isArray((inputSchema as any).required)
+        ? (inputSchema as any).required.filter((item: unknown): item is string => typeof item === 'string')
+        : [];
+
+    const params: ToolParameter[] = Object.entries(propertiesRaw)
+        .filter(([, value]) => value && typeof value === 'object')
+        .map(([name, value]) => {
+            const schema = value as Record<string, any>;
+            const type = typeof schema.type === 'string' ? schema.type : 'any';
+            const description = typeof schema.description === 'string' ? schema.description : '';
+            const required = requiredList.includes(name);
+            return { name, type, description, required };
+        });
+
+    return params.sort((a, b) => {
+        if (a.required !== b.required) {
+            return a.required ? -1 : 1;
+        }
+        return a.name.localeCompare(b.name);
+    });
+}
+
 // Single MCP Server configuration card
 function McpServerCard({ 
     config, 
@@ -653,6 +687,7 @@ function McpServerCard({
                                 {tools.map(tool => {
                                     const key = toolPromptKey(tool.name);
                                     const value = toolDrafts[key] ?? '';
+                                    const parameters = extractToolParameters(tool.inputSchema as Record<string, unknown> | undefined);
                                     return (
                                         <div key={tool.name} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
                                             <div className="flex items-start justify-between gap-2">
@@ -664,6 +699,30 @@ function McpServerCard({
                                                 </div>
                                                 <span className="text-[11px] bg-white text-gray-600 px-2 py-0.5 rounded border border-gray-200">MCP tool</span>
                                             </div>
+                                            {parameters.length > 0 && (
+                                                <div className="mt-2 space-y-1">
+                                                    <div className="text-[11px] font-semibold text-gray-600">Parameters</div>
+                                                    <div className="space-y-1">
+                                                        {parameters.map((param) => (
+                                                            <div
+                                                                key={param.name}
+                                                                className="flex flex-wrap items-start gap-2 text-xs text-gray-800"
+                                                            >
+                                                                <span className="font-mono px-2 py-0.5 bg-white border border-gray-200 rounded">
+                                                                    {param.name}
+                                                                </span>
+                                                                <span className="text-[11px] text-gray-500">{param.type}</span>
+                                                                <span className={`text-[11px] ${param.required ? 'text-red-600' : 'text-gray-500'}`}>
+                                                                    {param.required ? 'required' : 'optional'}
+                                                                </span>
+                                                                {param.description && (
+                                                                    <span className="text-gray-600">{param.description}</span>
+                                                                )}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
                                             <label className="block text-xs font-medium text-gray-600 mt-3 mb-1">System prompt (optional)</label>
                                             <textarea
                                                 value={value}

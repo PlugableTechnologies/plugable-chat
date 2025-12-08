@@ -1893,6 +1893,9 @@ fn collect_tool_prompt_additions(
             .map(|c| c.name.clone())
             .unwrap_or_else(|| server_id.clone());
         let is_deferred = server_config.map(|c| c.defer_tools).unwrap_or(true);
+        let env_vars = server_config
+            .map(|c| c.env.clone())
+            .filter(|env| !env.is_empty());
 
         for tool in tools {
             let mut parts: Vec<String> = Vec::new();
@@ -1915,6 +1918,18 @@ fn collect_tool_prompt_additions(
                 if !trimmed.is_empty() {
                     parts.push(trimmed.to_string());
                 }
+            }
+
+            if let Some(env_map) = env_vars.as_ref() {
+                let mut pairs: Vec<String> = env_map
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect();
+                pairs.sort();
+                parts.push(format!(
+                    "Environment variables available to this server: {}",
+                    pairs.join(", ")
+                ));
             }
 
             // Include parameter schema details if available
@@ -3922,6 +3937,49 @@ mod tests {
         assert_eq!(layers.base_prompt, "Base prompt");
         assert!(layers.combined.contains("custom prompt"));
         assert!(layers.additions.iter().any(|s| s.contains("custom prompt")));
+    }
+
+    #[test]
+    fn test_build_system_prompt_layers_includes_env_vars() {
+        use std::collections::HashMap;
+
+        let base_prompt = "Base prompt";
+        let tool = McpTool {
+            name: "tool_a".to_string(),
+            description: Some("Demo tool".to_string()),
+            input_schema: None,
+        };
+        let tool_descriptions = vec![("srv1".to_string(), vec![tool])];
+
+        let mut server_config = McpServerConfig::new("srv1".to_string(), "Server 1".to_string());
+        server_config.defer_tools = false;
+        server_config.env = HashMap::from([
+            ("BIGQUERY_PROJECT".to_string(), "plugabot-colchuck".to_string()),
+            ("BQ_DATASET".to_string(), "finance".to_string()),
+        ]);
+        let server_configs = vec![server_config];
+
+        let tool_prompts = HashMap::new();
+        let filter = ToolLaunchFilter::default();
+        let layers = build_system_prompt_layers(
+            base_prompt,
+            &tool_descriptions,
+            &server_configs,
+            false,
+            &tool_prompts,
+            &filter,
+            ToolCallFormatName::CodeMode,
+            true,
+            false,
+        );
+
+        let addition = layers
+            .additions
+            .iter()
+            .find(|s| s.contains("Environment variables"))
+            .expect("env section missing");
+        assert!(addition.contains("BIGQUERY_PROJECT=plugabot-colchuck"));
+        assert!(addition.contains("BQ_DATASET=finance"));
     }
 
     #[test]
