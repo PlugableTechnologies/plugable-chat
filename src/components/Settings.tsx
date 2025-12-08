@@ -962,6 +962,8 @@ function ToolsTab() {
     const { settings, updateCodeExecutionEnabled, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error } = useSettingsStore();
     const servers = settings?.mcp_servers || [];
     const codeExecutionEnabled = settings?.python_execution_enabled ?? false;
+    const defaultPythonPrompt = "Use python_execution for calculations and data transforms. No internet or filesystem access. Keep code concise; use allowed stdlib only.";
+    const defaultToolSearchPrompt = "Call tool_search to discover MCP tools. Then call discovered tools directly (or from python_execution).";
     const [pythonPrompt, setPythonPrompt] = useState(settings?.tool_system_prompts?.['builtin::python_execution'] || '');
     const [toolSearchPrompt, setToolSearchPrompt] = useState(settings?.tool_system_prompts?.['builtin::tool_search'] || '');
     
@@ -984,7 +986,7 @@ function ToolsTab() {
     };
     
     return (
-        <div className="space-y-6">
+            <div className="space-y-6">
             {/* Built-in Tools Section */}
             <div className="space-y-3">
                 <div>
@@ -993,7 +995,7 @@ function ToolsTab() {
                 </div>
                 
                 {/* Code Execution Tool Card */}
-                <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
+                <div className="border border-gray-200 rounded-xl bg-white overflow-hidden w-full">
                     <div className="flex items-center gap-3 px-4 py-3">
                         {/* Icon */}
                         <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center">
@@ -1003,8 +1005,8 @@ function ToolsTab() {
                         {/* Info */}
                         <div className="flex-1">
                             <div className="flex items-center gap-2">
-                                <span className="font-medium text-gray-900">Code Execution</span>
-                                <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Python Sandbox</span>
+                                <span className="font-medium text-gray-900">python_execution</span>
+                                <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">builtin</span>
                             </div>
                             <p className="text-xs text-gray-500 mt-0.5">
                                 Run Python code for calculations, data processing, and transformations
@@ -1026,42 +1028,42 @@ function ToolsTab() {
                 </div>
                 
                 {/* Built-in tool prompts */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-2">
+                <div className="flex flex-col gap-3">
+                    <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-2 w-full">
                         <div className="flex items-start justify-between">
                             <div>
-                                <div className="text-sm font-semibold text-gray-900">Python Execution</div>
+                                <div className="text-sm font-semibold text-gray-900">python_execution</div>
                                 <p className="text-xs text-gray-500">Built-in tool</p>
                             </div>
                             <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
                         </div>
                         <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
                         <textarea
-                            value={pythonPrompt}
+                            value={pythonPrompt || defaultPythonPrompt}
                             onChange={(e) => setPythonPrompt(e.target.value)}
-                            onBlur={(e) => handleSaveBuiltinPrompt('python_execution', e.target.value)}
+                            onBlur={(e) => handleSaveBuiltinPrompt('python_execution', e.target.value || defaultPythonPrompt)}
                             rows={3}
                             className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
-                            placeholder="Add extra guidance for python_execution"
+                            placeholder={defaultPythonPrompt}
                         />
                         <p className="text-[11px] text-gray-500">Appended to the system prompt when Python execution is enabled.</p>
                     </div>
-                    <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-2">
+                    <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-2 w-full">
                         <div className="flex items-start justify-between">
                             <div>
-                                <div className="text-sm font-semibold text-gray-900">Tool Search</div>
+                                <div className="text-sm font-semibold text-gray-900">tool_search</div>
                                 <p className="text-xs text-gray-500">Built-in discovery helper</p>
                             </div>
                             <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
                         </div>
                         <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
                         <textarea
-                            value={toolSearchPrompt}
+                            value={toolSearchPrompt || defaultToolSearchPrompt}
                             onChange={(e) => setToolSearchPrompt(e.target.value)}
-                            onBlur={(e) => handleSaveBuiltinPrompt('tool_search', e.target.value)}
+                            onBlur={(e) => handleSaveBuiltinPrompt('tool_search', e.target.value || defaultToolSearchPrompt)}
                             rows={3}
                             className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
-                            placeholder="Add guidance for how tool_search results should be used"
+                            placeholder={defaultToolSearchPrompt}
                         />
                         <p className="text-[11px] text-gray-500">Added when MCP tools are available.</p>
                     </div>

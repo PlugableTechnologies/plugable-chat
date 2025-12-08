@@ -15,7 +15,7 @@ const PYTHON_KEYWORDS: &[&str] = &[
 ];
 
 /// Validate that a string is a valid Python identifier (module name).
-///
+/// 
 /// Rules:
 /// - Only lowercase letters, digits, and underscores
 /// - Cannot start with a digit
@@ -232,10 +232,10 @@ fn default_mcp_test_server() -> McpServerConfig {
         }
     });
 
-    if let Some(path) = binary_path {
+    let mut base = if let Some(path) = binary_path {
         McpServerConfig {
             id: "mcp-test-server".to_string(),
-            name: "MCP Test Server (Dev)".to_string(),
+            name: "mcp_test_server_dev".to_string(),
             enabled: false, // Disabled by default
             transport: Transport::Stdio,
             command: Some(path),
@@ -243,13 +243,13 @@ fn default_mcp_test_server() -> McpServerConfig {
             env: HashMap::new(),
             auto_approve_tools: true, // Auto-approve for dev testing
             defer_tools: true,        // Tools deferred by default (discovered via tool_search)
-            python_name: None,        // Will derive from id: mcp_test_server
+            python_name: None,
         }
     } else {
         // Fall back to cargo run if binary not found
         McpServerConfig {
             id: "mcp-test-server".to_string(),
-            name: "MCP Test Server (Dev)".to_string(),
+            name: "mcp_test_server_dev".to_string(),
             enabled: false, // Disabled by default
             transport: Transport::Stdio,
             command: Some("cargo".to_string()),
@@ -262,9 +262,11 @@ fn default_mcp_test_server() -> McpServerConfig {
             env: HashMap::new(),
             auto_approve_tools: true, // Auto-approve for dev testing
             defer_tools: true,        // Tools deferred by default (discovered via tool_search)
-            python_name: None,        // Will derive from id: mcp_test_server
+            python_name: None,
         }
-    }
+    };
+    enforce_python_name(&mut base);
+    base
 }
 
 impl Default for AppSettings {

@@ -2593,10 +2593,9 @@ async fn save_app_settings(
 
 #[tauri::command]
 async fn add_mcp_server(
-    config: McpServerConfig,
+    mut config: McpServerConfig,
     settings_state: State<'_, SettingsState>,
 ) -> Result<(), String> {
-    let mut config = config;
     enforce_python_name(&mut config);
 
     let mut guard = settings_state.settings.write().await;
@@ -2614,11 +2613,10 @@ async fn add_mcp_server(
 
 #[tauri::command]
 async fn update_mcp_server(
-    config: McpServerConfig,
+    mut config: McpServerConfig,
     settings_state: State<'_, SettingsState>,
     handles: State<'_, ActorHandles>,
 ) -> Result<(), String> {
-    let mut config = config;
     enforce_python_name(&mut config);
 
     let configs_for_sync;
