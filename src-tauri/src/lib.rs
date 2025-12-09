@@ -1257,6 +1257,12 @@ async fn run_agentic_loop(
                             parse_python_execution_args(&resolved_call.arguments);
 
                         let exec_id = format!("{}-{}-{}", chat_id, iteration, idx);
+                        let code_lines = input.code.len();
+                        println!(
+                            "[AgenticLoop] 🐍 python_execution triggered (chat_id={}, iteration={}, call_idx={}, exec_id={}, code_lines={})",
+                            chat_id, iteration, idx, exec_id, code_lines
+                        );
+                        let _ = std::io::stdout().flush();
                         match execute_python_execution(
                             input,
                             exec_id,

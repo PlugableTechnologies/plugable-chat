@@ -1053,20 +1053,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
 
             const toolExecutingListener = await listen<ToolExecutingEvent>('tool-executing', (event) => {
-                console.log(`[ChatStore] Tool executing: ${event.payload.server}::${event.payload.tool}`);
-                const toolName = event.payload.tool;
+                const { server, tool, arguments: payloadArgs } = event.payload;
+                const toolName = tool;
+                if (toolName === 'python_execution') {
+                    const codeLines = Array.isArray((payloadArgs as any)?.code)
+                        ? (payloadArgs as any).code.length
+                        : undefined;
+                    console.info(`[ChatStore] 🐍 python_execution triggered on ${server} (code_lines=${codeLines ?? 'unknown'})`);
+                } else {
+                    console.log(`[ChatStore] Tool executing: ${server}::${toolName}`);
+                }
                 const displayName = toolName === 'python_execution' 
                     ? 'Running Python code...' 
                     : toolName === 'tool_search'
                     ? 'Searching for tools...'
                     : `Executing ${toolName}...`;
-                set((state) => ({
+                const scheduleUpdate = () => set((state) => ({
                     toolExecution: {
                         ...state.toolExecution,
                         currentTool: { 
-                            server: event.payload.server, 
-                            tool: event.payload.tool,
-                            arguments: event.payload.arguments,
+                            server, 
+                            tool: toolName,
+                            arguments: payloadArgs,
                             startTime: Date.now(),
                         },
                     },
@@ -1078,6 +1086,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     },
                     statusBarDismissed: false,
                 }));
+
+                if (typeof queueMicrotask === 'function') {
+                    queueMicrotask(scheduleUpdate);
+                } else {
+                    setTimeout(scheduleUpdate, 0);
+                }
             });
 
             const toolResultListener = await listen<ToolResultEvent>('tool-result', (event) => {
