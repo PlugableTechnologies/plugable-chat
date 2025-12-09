@@ -35,6 +35,9 @@ use tool_registry::{create_shared_registry, SharedToolRegistry, ToolSearchResult
 use tools::code_execution::{CodeExecutionExecutor, CodeExecutionInput, CodeExecutionOutput};
 use tools::tool_search::{precompute_tool_embeddings, ToolSearchExecutor, ToolSearchInput};
 use uuid::Uuid;
+use std::fs;
+use std::path::Path;
+use serde::de::DeserializeOwned;
 
 /// Approval decision for tool calls
 #[derive(Debug, Clone)]
@@ -84,15 +87,54 @@ struct CancellationState {
 }
 
 /// CLI arguments for plugable-chat
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "plugable-chat", about = "Plugable Chat desktop app")]
 struct CliArgs {
+    /// Optional model to load on launch (non-persistent)
+    #[arg(long, value_name = "MODEL", env = "PLUGABLE_MODEL")]
+    model: Option<String>,
+    /// Override global system prompt (string or @path/to/file)
+    #[arg(long, value_name = "PROMPT_OR_@FILE", env = "PLUGABLE_SYSTEM_PROMPT")]
+    system_prompt: Option<String>,
+    /// Initial user prompt to send on startup (string or @path/to/file)
+    #[arg(long, value_name = "PROMPT_OR_@FILE", env = "PLUGABLE_INITIAL_PROMPT")]
+    initial_prompt: Option<String>,
+    /// Enable/disable tool_search
+    #[arg(long, value_name = "BOOL", env = "PLUGABLE_TOOL_SEARCH", value_parser = clap::builder::BoolishValueParser::new())]
+    tool_search: Option<bool>,
+    /// Enable/disable python_execution built-in
+    #[arg(long, value_name = "BOOL", env = "PLUGABLE_PYTHON_EXECUTION", value_parser = clap::builder::BoolishValueParser::new())]
+    python_execution: Option<bool>,
+    /// Enable/disable python-driven tool calling
+    #[arg(long, value_name = "BOOL", env = "PLUGABLE_PYTHON_TOOL_CALLING", value_parser = clap::builder::BoolishValueParser::new())]
+    python_tool_calling: Option<bool>,
+    /// Enable/disable legacy <tool_call> parsing
+    #[arg(long, value_name = "BOOL", env = "PLUGABLE_LEGACY_TOOL_FORMAT", value_parser = clap::builder::BoolishValueParser::new())]
+    legacy_tool_call_format: Option<bool>,
+    /// Comma-separated list of tool call formats to enable (hermes,mistral,pythonic,pure_json,code_mode)
+    #[arg(long = "tool-call-enabled", value_delimiter = ',', value_name = "FORMAT[,FORMAT...]", env = "PLUGABLE_TOOL_CALL_ENABLED")]
+    tool_call_enabled: Option<Vec<String>>,
+    /// Primary tool call format to prompt
+    #[arg(long = "tool-call-primary", value_name = "FORMAT", env = "PLUGABLE_TOOL_CALL_PRIMARY")]
+    tool_call_primary: Option<String>,
+    /// Override per-tool system prompts (server_id::tool_name=prompt_or_@file). Use server_id=builtin for built-ins.
+    #[arg(long = "tool-system-prompt", value_name = "KEY=VALUE_OR_@FILE", env = "PLUGABLE_TOOL_SYSTEM_PROMPTS", value_delimiter = None)]
+    tool_system_prompts: Vec<String>,
+    /// Replace MCP server list with JSON configs (inline JSON or @path/to/json)
+    #[arg(long = "mcp-server", value_name = "JSON_OR_@FILE", env = "PLUGABLE_MCP_SERVERS", value_delimiter = None)]
+    mcp_servers: Vec<String>,
     /// Optional allowlist of tools to expose on launch.
     /// Built-ins: python_execution, tool_search
     /// MCP tools: server_id::tool_name
     /// Servers: server_id (enables all tools from that server)
     #[arg(long, value_delimiter = ',', env = "PLUGABLE_TOOLS")]
     tools: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LaunchOverrides {
+    model: Option<String>,
+    initial_prompt: Option<String>,
 }
 
 /// Launch-time tool filter derived from CLI args.
@@ -137,6 +179,7 @@ impl ToolLaunchFilter {
 /// Global launch configuration state
 struct LaunchConfigState {
     tool_filter: ToolLaunchFilter,
+    launch_overrides: LaunchOverrides,
 }
 
 /// Maximum number of tool call iterations before stopping (safety limit)
@@ -150,6 +193,32 @@ fn is_builtin_tool(tool_name: &str) -> bool {
 /// Build a consistent key for tool-specific settings
 fn tool_prompt_key(server_id: &str, tool_name: &str) -> String {
     format!("{}::{}", server_id, tool_name)
+}
+
+fn read_value_or_file(raw: &str) -> Result<String, String> {
+    if let Some(path) = raw.strip_prefix('@') {
+        let contents = fs::read_to_string(Path::new(path))
+            .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+        Ok(contents)
+    } else {
+        Ok(raw.to_string())
+    }
+}
+
+fn parse_json_or_file<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
+    let data = read_value_or_file(raw)?;
+    serde_json::from_str(&data).map_err(|e| format!("Failed to parse JSON: {}", e))
+}
+
+fn parse_tool_call_format(name: &str) -> Option<ToolCallFormatName> {
+    match name {
+        "hermes" => Some(ToolCallFormatName::Hermes),
+        "mistral" => Some(ToolCallFormatName::Mistral),
+        "pythonic" => Some(ToolCallFormatName::Pythonic),
+        "pure_json" => Some(ToolCallFormatName::PureJson),
+        "code_mode" => Some(ToolCallFormatName::CodeMode),
+        _ => None,
+    }
 }
 
 /// Parse CLI args into a launch-time tool filter
@@ -181,6 +250,106 @@ fn parse_tool_filter(args: &CliArgs) -> ToolLaunchFilter {
         allowed_builtins: if has_builtin { Some(builtin_set) } else { None },
         allowed_servers: if has_server { Some(server_set) } else { None },
         allowed_tools: if has_tool { Some(tool_set) } else { None },
+    }
+}
+
+/// Apply CLI overrides to settings without persisting them.
+fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> LaunchOverrides {
+    // System prompt
+    if let Some(raw) = &args.system_prompt {
+        match read_value_or_file(raw) {
+            Ok(prompt) => settings.system_prompt = prompt,
+            Err(e) => println!("[Launch] Failed to apply system_prompt override: {}", e),
+        }
+    }
+
+    // Core toggles
+    if let Some(v) = args.tool_search {
+        settings.tool_search_enabled = v;
+    }
+    if let Some(v) = args.python_execution {
+        settings.python_execution_enabled = v;
+    }
+    if let Some(v) = args.python_tool_calling {
+        settings.python_tool_calling_enabled = v;
+    }
+    if let Some(v) = args.legacy_tool_call_format {
+        settings.legacy_tool_call_format_enabled = v;
+    }
+
+    // Tool call formats
+    if let Some(enabled) = &args.tool_call_enabled {
+        let mut parsed: Vec<ToolCallFormatName> = Vec::new();
+        for raw in enabled {
+            if let Some(fmt) = parse_tool_call_format(raw) {
+                parsed.push(fmt);
+            } else {
+                println!("[Launch] Unknown tool_call format '{}', ignoring", raw);
+            }
+        }
+        if !parsed.is_empty() {
+            settings.tool_call_formats.enabled = parsed;
+        }
+    }
+    if let Some(primary) = &args.tool_call_primary {
+        if let Some(fmt) = parse_tool_call_format(primary) {
+            settings.tool_call_formats.primary = fmt;
+        } else {
+            println!("[Launch] Unknown tool_call primary '{}', ignoring", primary);
+        }
+    }
+    settings.tool_call_formats.normalize();
+
+    // Tool system prompts
+    for entry in &args.tool_system_prompts {
+        if let Some((key, raw_val)) = entry.split_once('=') {
+            match read_value_or_file(raw_val) {
+                Ok(value) => {
+                    settings.tool_system_prompts.insert(key.to_string(), value);
+                }
+                Err(e) => println!("[Launch] Failed to apply tool_system_prompt {}: {}", key, e),
+            }
+        } else {
+            println!(
+                "[Launch] Invalid --tool-system-prompt '{}'. Expected server::tool=prompt_or_@file",
+                entry
+            );
+        }
+    }
+
+    // MCP servers
+    if !args.mcp_servers.is_empty() {
+        let mut parsed_servers: Vec<McpServerConfig> = Vec::new();
+        for raw in &args.mcp_servers {
+            match parse_json_or_file::<McpServerConfig>(raw) {
+                Ok(mut cfg) => {
+                    enforce_python_name(&mut cfg);
+                    parsed_servers.push(cfg);
+                }
+                Err(e) => println!("[Launch] Failed to parse MCP server '{}': {}", raw, e),
+            }
+        }
+        if !parsed_servers.is_empty() {
+            settings.mcp_servers = parsed_servers;
+        }
+    }
+
+    // Launch-only overrides
+    let launch_model = args.model.clone();
+    let launch_prompt = match &args.initial_prompt {
+        Some(raw) => match read_value_or_file(raw) {
+            Ok(text) => Some(text),
+            Err(e) => {
+                println!("[Launch] Failed to read initial_prompt: {}", e);
+                None
+            }
+        },
+        None => None,
+    };
+
+    LaunchOverrides {
+        model: launch_model,
+        initial_prompt: launch_prompt,
     }
 }
 
@@ -3640,12 +3809,31 @@ async fn get_pending_tool_approvals(
     Ok(pending.keys().cloned().collect())
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct LaunchOverridesPayload {
+    model: Option<String>,
+    initial_prompt: Option<String>,
+}
+
+#[tauri::command]
+fn get_launch_overrides(
+    launch_config: State<'_, LaunchConfigState>,
+) -> Result<LaunchOverridesPayload, String> {
+    let launch_overrides = &launch_config.launch_overrides;
+    Ok(LaunchOverridesPayload {
+        model: launch_overrides.model.clone(),
+        initial_prompt: launch_overrides.initial_prompt.clone(),
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let cli_args = CliArgs::try_parse().unwrap_or_else(|e| {
         println!("[Launch] CLI parse warning: {}", e);
-        CliArgs { tools: None }
+        // Fall back to defaults (no overrides) if parsing fails
+        CliArgs::parse_from(["plugable-chat"])
     });
+    let cli_args_for_setup = cli_args.clone();
     let launch_filter = parse_tool_filter(&cli_args);
 
     tauri::Builder::default()
@@ -3668,21 +3856,6 @@ pub fn run() {
                 python_tx,
             });
 
-            // Launch config state (tool filters)
-            app.manage(LaunchConfigState {
-                tool_filter: launch_filter.clone(),
-            });
-            if launch_filter.allow_all() {
-                println!("[Launch] Tool filter: all tools allowed");
-            } else {
-                println!(
-                    "[Launch] Tool filter active (builtins={:?}, servers={:?}, tools={:?})",
-                    launch_filter.allowed_builtins,
-                    launch_filter.allowed_servers,
-                    launch_filter.allowed_tools
-                );
-            }
-
             // Initialize shared embedding model state
             let embedding_model_state = EmbeddingModelState {
                 model: Arc::new(RwLock::new(None)),
@@ -3699,8 +3872,9 @@ pub fn run() {
             app.manage(tool_registry_state);
 
             // Initialize settings state (load from config file)
-            let settings =
+            let mut settings =
                 tauri::async_runtime::block_on(async { settings::load_settings().await });
+            let launch_overrides = apply_cli_overrides(&cli_args_for_setup, &mut settings);
             println!(
                 "Settings loaded: {} MCP servers configured",
                 settings.mcp_servers.len()
@@ -3709,6 +3883,29 @@ pub fn run() {
                 settings: Arc::new(RwLock::new(settings)),
             };
             app.manage(settings_state);
+
+            // Launch config state (tool filters + overrides)
+            app.manage(LaunchConfigState {
+                tool_filter: launch_filter.clone(),
+                launch_overrides: launch_overrides.clone(),
+            });
+            if launch_filter.allow_all() {
+                println!("[Launch] Tool filter: all tools allowed");
+            } else {
+                println!(
+                    "[Launch] Tool filter active (builtins={:?}, servers={:?}, tools={:?})",
+                    launch_filter.allowed_builtins,
+                    launch_filter.allowed_servers,
+                    launch_filter.allowed_tools
+                );
+            }
+            if launch_overrides.model.is_some() || launch_overrides.initial_prompt.is_some() {
+                println!(
+                    "[Launch] CLI overrides applied (model_override={}, initial_prompt={})",
+                    launch_overrides.model.as_deref().unwrap_or("none"),
+                    if launch_overrides.initial_prompt.is_some() { "provided" } else { "none" }
+                );
+            }
 
             // Initialize tool approval state
             let approval_state = ToolApprovalState {
@@ -3852,7 +4049,8 @@ pub fn run() {
             execute_tool_call,
             approve_tool_call,
             reject_tool_call,
-            get_pending_tool_approvals
+            get_pending_tool_approvals,
+            get_launch_overrides
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

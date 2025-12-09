@@ -198,6 +198,13 @@ interface ChatState {
     loadModel: (modelName: string) => Promise<void>;
     downloadModel: (modelName: string) => Promise<void>;
     getLoadedModels: () => Promise<string[]>;
+    loadLaunchOverrides: () => Promise<void>;
+    launchOverridesLoaded: boolean;
+    launchModelOverride: string | null;
+    launchInitialPrompt: string | null;
+    launchPromptApplied: boolean;
+    markLaunchPromptApplied: () => void;
+    sendLaunchPrompt: () => Promise<void>;
 
     availableModels: string[];
     cachedModels: CachedModel[];
@@ -315,6 +322,36 @@ const RELEVANCE_SEARCH_MIN_LENGTH = 3; // Minimum chars before searching
 // This matches the alias 'Phi-4-mini-instruct-generic-gpu:5' in the Foundry catalog
 const DEFAULT_MODEL_TO_DOWNLOAD = 'phi-4-mini-instruct';
 
+const generateClientChatId = () => {
+    const cryptoObj = typeof globalThis !== 'undefined' ? (globalThis as any).crypto : undefined;
+    if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
+        return cryptoObj.randomUUID();
+    }
+    return `chat-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+};
+
+const createChatTitleFromPrompt = (prompt: string) => {
+    const cleaned = prompt.trim().replace(/\s+/g, ' ');
+    if (!cleaned) {
+        return "Untitled Chat";
+    }
+    const sentenceEnd = cleaned.search(/[.!?]/);
+    const base = sentenceEnd > 0 ? cleaned.substring(0, sentenceEnd).trim() : cleaned;
+    if (base.length <= 40) {
+        return base;
+    }
+    return `${base.substring(0, 37).trim()}...`;
+};
+
+const createChatPreviewFromMessage = (message: string) => {
+    const cleaned = message.trim().replace(/\s+/g, ' ');
+    if (!cleaned) return "";
+    if (cleaned.length <= 80) {
+        return cleaned;
+    }
+    return `${cleaned.substring(0, 77)}...`;
+};
+
 // Helper function to initialize models on startup
 async function initializeModelsOnStartup(
     get: () => ChatState,
@@ -323,6 +360,11 @@ async function initializeModelsOnStartup(
     console.log('[ChatStore] Starting model initialization...');
     
     try {
+        // Load launch overrides (model / initial prompt) once
+        if (!get().launchOverridesLoaded) {
+            await get().loadLaunchOverrides();
+        }
+
         // Step 1: Fetch available/cached models
         console.log('[ChatStore] Fetching cached models...');
         await get().fetchCachedModels();
@@ -412,6 +454,32 @@ async function initializeModelsOnStartup(
                 set({ currentModel: cachedModels[0].model_id });
             }
         }
+
+        // Apply model override if provided
+        const launchModel = get().launchModelOverride;
+        if (launchModel) {
+            const current = get().currentModel;
+            if (current !== launchModel) {
+                console.log('[ChatStore] Applying launch model override:', launchModel);
+                try {
+                    await get().loadModel(launchModel);
+                } catch (e: any) {
+                    console.error('[ChatStore] Failed to load launch override model:', e);
+                    set({ backendError: `Failed to load model ${launchModel}: ${e?.message || e}` });
+                }
+            } else {
+                console.log('[ChatStore] Launch model override already active:', launchModel);
+            }
+        }
+
+        // Auto-send initial prompt if provided and not yet applied
+        if (get().launchInitialPrompt && !get().launchPromptApplied) {
+            try {
+                await get().sendLaunchPrompt();
+            } catch (e: any) {
+                console.error('[ChatStore] Failed to send launch initial prompt:', e);
+            }
+        }
     } catch (e: any) {
         console.error('[ChatStore] Model initialization error:', e);
         set({ operationStatus: null, currentModel: 'No models' });
@@ -493,6 +561,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
     streamingChatId: null,
     streamingMessages: [],
     setStreamingChatId: (id) => set({ streamingChatId: id }),
+
+    // Launch overrides (from CLI)
+    launchOverridesLoaded: false,
+    launchModelOverride: null,
+    launchInitialPrompt: null,
+    launchPromptApplied: false,
+    markLaunchPromptApplied: () => set({ launchPromptApplied: true }),
+    loadLaunchOverrides: async () => {
+        if (get().launchOverridesLoaded) return;
+        try {
+            const payload = await invoke<{ model?: string | null; initial_prompt?: string | null }>('get_launch_overrides');
+            set({
+                launchOverridesLoaded: true,
+                launchModelOverride: payload?.model ?? null,
+                launchInitialPrompt: payload?.initial_prompt ?? null,
+            });
+            console.log('[ChatStore] Launch overrides loaded:', payload);
+        } catch (e: any) {
+            console.error('[ChatStore] Failed to load launch overrides:', e);
+            // Mark as loaded to avoid retry loops
+            set({ launchOverridesLoaded: true });
+        }
+    },
 
     // Model loading operations
     loadModel: async (modelName: string) => {
@@ -588,6 +679,91 @@ export const useChatStore = create<ChatState>((set, get) => ({
         } catch (e: any) {
             console.error('[ChatStore] Failed to get loaded models:', e);
             return [];
+        }
+    },
+
+    sendLaunchPrompt: async () => {
+        const state = get();
+        if (state.launchPromptApplied) return;
+        const rawPrompt = state.launchInitialPrompt;
+        if (!rawPrompt || state.messages.length > 0) {
+            set({ launchPromptApplied: true });
+            return;
+        }
+        const text = rawPrompt.trim();
+        if (!text) {
+            set({ launchPromptApplied: true });
+            return;
+        }
+
+        const chatId = generateClientChatId();
+        const derivedTitle = createChatTitleFromPrompt(text);
+        const preview = createChatPreviewFromMessage(text);
+        const summaryScore = 0;
+        const summaryPinned = false;
+        const timestamp = Date.now();
+
+        // Seed history entry
+        state.upsertHistoryEntry({
+            id: chatId,
+            title: derivedTitle,
+            preview,
+            score: summaryScore,
+            pinned: summaryPinned,
+        });
+
+        // Seed UI messages
+        set({
+            messages: [
+                { id: timestamp.toString(), role: 'user', content: text, timestamp },
+                { id: (timestamp + 1).toString(), role: 'assistant', content: '', timestamp: timestamp + 1 },
+            ],
+            currentChatId: chatId,
+            input: '',
+            isLoading: true,
+            streamingChatId: chatId,
+            operationStatus: {
+                type: 'streaming',
+                message: 'Generating response...',
+                startTime: Date.now(),
+            },
+            statusBarDismissed: false,
+        });
+
+        try {
+            const returnedChatId = await invoke<string>('chat', {
+                chatId,
+                title: derivedTitle,
+                message: text,
+                history: [],
+                reasoningEffort: state.reasoningEffort,
+            });
+
+            if (returnedChatId && returnedChatId !== chatId) {
+                state.setCurrentChatId(returnedChatId);
+                state.upsertHistoryEntry({
+                    id: returnedChatId,
+                    title: derivedTitle,
+                    preview,
+                    score: summaryScore,
+                    pinned: summaryPinned,
+                });
+            }
+        } catch (error) {
+            console.error('[ChatStore] Failed to send launch prompt:', error);
+            set((s) => {
+                const newMessages = [...s.messages];
+                const lastIdx = newMessages.length - 1;
+                if (lastIdx >= 0) {
+                    newMessages[lastIdx] = {
+                        ...newMessages[lastIdx],
+                        content: `Error: ${error}`,
+                    };
+                }
+                return { messages: newMessages, isLoading: false };
+            });
+        } finally {
+            set({ launchPromptApplied: true });
         }
     },
 
