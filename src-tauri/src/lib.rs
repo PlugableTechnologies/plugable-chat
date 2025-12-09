@@ -2828,7 +2828,10 @@ async fn chat(
         tool_count,
         auto_approve_servers
     );
-    // NOTE: Full system prompt logging removed for cleaner output. Enable RUST_LOG=debug if needed.
+    println!(
+        "[Chat] --- SYSTEM PROMPT BEGIN ---\n{}\n[Chat] --- SYSTEM PROMPT END ---",
+        system_prompt
+    );
 
     // Build full history with system prompt at the beginning
     let mut full_history = Vec::new();
