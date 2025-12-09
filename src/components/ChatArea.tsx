@@ -1495,7 +1495,112 @@ export function ChatArea() {
                                             (() => {
                                                 // Parse content and track tool call index for inline rendering
                                                 const parts = parseMessageContent(m.content);
+                                                const toolCalls = m.toolCalls || [];
+                                                const toolCallPartIndices = parts
+                                                    .map((p, idx) => p.type === 'tool_call' ? idx : -1)
+                                                    .filter(idx => idx !== -1);
+                                                const lastThinkIndex = parts.reduce((last, part, idx) => part.type === 'think' ? idx : last, -1);
+                                                const shouldInlineFallbackToolCalls = toolCalls.length > toolCallPartIndices.length;
+                                                const fallbackInsertAfter = shouldInlineFallbackToolCalls
+                                                    ? (toolCallPartIndices.length > 0
+                                                        ? toolCallPartIndices[toolCallPartIndices.length - 1]
+                                                        : (lastThinkIndex !== -1 ? lastThinkIndex : (parts.length > 0 ? 0 : -1)))
+                                                    : -1;
+
                                                 let toolCallIndex = 0;
+                                                const renderedParts: JSX.Element[] = [];
+
+                                                parts.forEach((part, idx) => {
+                                                    if (part.type === 'think') {
+                                                        renderedParts.push(
+                                                            <details key={`think-${idx}`} className="mb-4 group">
+                                                                <summary className="cursor-pointer text-xs font-medium text-gray-400 hover:text-gray-600 select-none flex items-center gap-2 mb-2">
+                                                                    <span className="h-px flex-1 bg-gray-200 group-open:bg-gray-300 transition-colors"></span>
+                                                                    <span className="text-sm group-open:rotate-180 transition-transform inline-block">▼</span>
+                                                                </summary>
+                                                                <div className="pl-3 border-l-2 border-gray-300 text-gray-600 text-sm italic bg-gray-50 p-3 rounded-r-lg">
+                                                                    {part.content || "Thinking..."}
+                                                                </div>
+                                                            </details>
+                                                        );
+                                                    } else if (part.type === 'tool_call') {
+                                                        const toolCallRecord = toolCalls[toolCallIndex];
+                                                        if (toolCallRecord) {
+                                                            renderedParts.push(
+                                                                <InlineToolCallResult key={`toolcall-${toolCallRecord.id}`} call={toolCallRecord} />
+                                                            );
+                                                            toolCallIndex++;
+                                                        }
+                                                    } else {
+                                                        renderedParts.push(
+                                                            <ReactMarkdown
+                                                                key={`text-${idx}`}
+                                                                remarkPlugins={[remarkGfm, remarkMath]}
+                                                                rehypePlugins={[
+                                                                    rehypeRaw, 
+                                                                    [rehypeKatex, { 
+                                                                        throwOnError: false, 
+                                                                        errorColor: '#666666',
+                                                                        strict: false
+                                                                    }]
+                                                                ]}
+                                                                components={{
+                                                                    code({ node, inline, className, children, ...props }: any) {
+                                                                        const match = /language-(\w+)/.exec(className || '')
+                                                                        const codeContent = String(children).replace(/\n$/, '');
+
+                                                                        return !inline && match ? (
+                                                                            <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
+                                                                                <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
+                                                                                    <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
+                                                                                    <button
+                                                                                        onClick={() => navigator.clipboard.writeText(codeContent)}
+                                                                                        className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
+                                                                                    >
+                                                                                        📋
+                                                                                    </button>
+                                                                                </div>
+                                                                                <div className="bg-white p-4 overflow-x-auto text-sm">
+                                                                                    <code className={className} {...props}>
+                                                                                        {children}
+                                                                                    </code>
+                                                                                </div>
+                                                                            </div>
+                                                                        ) : (
+                                                                            <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
+                                                                                {children}
+                                                                            </code>
+                                                                        )
+                                                                    }
+                                                                }}
+                                                            >
+                                                                {preprocessLaTeX(part.content)}
+                                                            </ReactMarkdown>
+                                                        );
+                                                    }
+
+                                                    if (
+                                                        shouldInlineFallbackToolCalls &&
+                                                        idx === fallbackInsertAfter &&
+                                                        toolCallIndex < toolCalls.length
+                                                    ) {
+                                                        for (; toolCallIndex < toolCalls.length; toolCallIndex++) {
+                                                            const call = toolCalls[toolCallIndex];
+                                                            renderedParts.push(
+                                                                <InlineToolCallResult key={`toolcall-fallback-${call.id}`} call={call} />
+                                                            );
+                                                        }
+                                                    }
+                                                });
+
+                                                if (shouldInlineFallbackToolCalls && parts.length === 0 && toolCalls.length > 0) {
+                                                    toolCalls.forEach((call) => {
+                                                        renderedParts.push(
+                                                            <InlineToolCallResult key={`toolcall-fallback-${call.id}`} call={call} />
+                                                        );
+                                                    });
+                                                    toolCallIndex = toolCalls.length;
+                                                }
                                                 
                                                 return (
                                                     <>
@@ -1503,77 +1608,7 @@ export function ChatArea() {
                                                         {m.ragChunks && m.ragChunks.length > 0 && (
                                                             <RagContextBlock chunks={m.ragChunks} />
                                                         )}
-                                                        {parts.map((part, idx) => {
-                                                            if (part.type === 'think') {
-                                                                return (
-                                                                    <details key={idx} className="mb-4 group">
-                                                                        <summary className="cursor-pointer text-xs font-medium text-gray-400 hover:text-gray-600 select-none flex items-center gap-2 mb-2">
-                                                                            <span className="h-px flex-1 bg-gray-200 group-open:bg-gray-300 transition-colors"></span>
-                                                                            <span className="text-sm group-open:rotate-180 transition-transform inline-block">▼</span>
-                                                                        </summary>
-                                                                        <div className="pl-3 border-l-2 border-gray-300 text-gray-600 text-sm italic bg-gray-50 p-3 rounded-r-lg">
-                                                                            {part.content || "Thinking..."}
-                                                                        </div>
-                                                                    </details>
-                                                                );
-                                                            } else if (part.type === 'tool_call') {
-                                                                // Render tool call result inline if available
-                                                                const currentToolCallIndex = toolCallIndex++;
-                                                                const toolCallRecord = m.toolCalls?.[currentToolCallIndex];
-                                                                
-                                                                if (toolCallRecord) {
-                                                                    return <InlineToolCallResult key={idx} call={toolCallRecord} />;
-                                                                }
-                                                                // If no result yet (still processing), show the processing block
-                                                                return null;
-                                                            } else {
-                                                                return (
-                                                                    <ReactMarkdown
-                                                                        key={idx}
-                                                                        remarkPlugins={[remarkGfm, remarkMath]}
-                                                                        rehypePlugins={[
-                                                                            rehypeRaw, 
-                                                                            [rehypeKatex, { 
-                                                                                throwOnError: false, 
-                                                                                errorColor: '#666666',
-                                                                                strict: false
-                                                                            }]
-                                                                        ]}
-                                                                        components={{
-                                                                            code({ node, inline, className, children, ...props }: any) {
-                                                                                const match = /language-(\w+)/.exec(className || '')
-                                                                                const codeContent = String(children).replace(/\n$/, '');
-
-                                                                                return !inline && match ? (
-                                                                                    <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
-                                                                                        <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
-                                                                                            <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
-                                                                                            <button
-                                                                                                onClick={() => navigator.clipboard.writeText(codeContent)}
-                                                                                                className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
-                                                                                            >
-                                                                                                📋
-                                                                                            </button>
-                                                                                        </div>
-                                                                                        <div className="bg-white p-4 overflow-x-auto text-sm">
-                                                                                            <code className={className} {...props}>
-                                                                                                {children}
-                                                                                            </code>
-                                                                                        </div>
-                                                                                    </div>
-                                                                                ) : (
-                                                                                    <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
-                                                                                        {children}
-                                                                                    </code>
-                                                                                )
-                                                                            }
-                                                                        }}
-                                                                    >
-                                                                        {preprocessLaTeX(part.content)}
-                                                                    </ReactMarkdown>
-                                                                );
-                                                            }
-                                                        })}
+                                                        {renderedParts}
                                                         {/* Show thinking indicator when only think content is visible */}
                                                         {thinkingStartTime && 
                                                          messages[messages.length - 1]?.id === m.id && 
@@ -1585,11 +1620,6 @@ export function ChatArea() {
                                                          messages[messages.length - 1]?.id === m.id && 
                                                          hasOnlyToolCallContent(m.content) && (
                                                             <ToolProcessingBlock content={m.content} startTime={toolProcessingStartTime} />
-                                                        )}
-                                                        {/* Show any remaining tool calls that weren't matched to content positions */}
-                                                        {/* This handles native OpenAI tool calls or mismatched counts */}
-                                                        {m.toolCalls && m.toolCalls.length > toolCallIndex && (
-                                                            <ToolCallsBlock toolCalls={m.toolCalls.slice(toolCallIndex)} />
                                                         )}
                                                         {/* Collapsible code execution block - shown at end since executions aren't tracked by position */}
                                                         {m.codeExecutions && m.codeExecutions.length > 0 && (

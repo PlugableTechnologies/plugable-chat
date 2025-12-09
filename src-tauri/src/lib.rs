@@ -2044,7 +2044,7 @@ fn default_python_prompt(
         } else {
             "Tool calling is only available via Python. Use the provided global functions from inside your program. Do NOT emit <tool_call> tags or JSON tool calls.".to_string()
         },
-        "Use print(...) for user-facing markdown on stdout. Use eprint(...) to send handoff text for the next agentic step (captured on stderr and treated as a follow-up signal).".to_string(),
+        "Use print(...) for user-facing markdown on stdout. Prefer standard library stderr writes (e.g., import sys; sys.stderr.write(\"...\")) for handoff text, which is captured on stderr.".to_string(),
         "Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.".to_string(),
         "Keep code concise and runnable; include prints for results the user should see.".to_string(),
     ];

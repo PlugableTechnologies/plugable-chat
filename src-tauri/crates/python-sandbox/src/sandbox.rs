@@ -434,9 +434,17 @@ from _sandbox import tool_call, get_tool_result, sandbox_print, sandbox_stderr
 
 # Replace print with sandbox version  
 import builtins
+import sys
 builtins.print = sandbox_print
 # Provide eprint that routes to stderr for agentic handoffs
 builtins.eprint = sandbox_stderr
+# Route stdlib-style stderr writes to the sandbox buffer
+class _SandboxStdErr:
+    def write(self, text):
+        sandbox_stderr(text)
+    def flush(self):
+        return None
+sys.stderr = _SandboxStdErr()
 
 # Remove dangerous builtins
 _blocked = ['open', 'eval', 'exec', 'compile', 'input', 'breakpoint', 

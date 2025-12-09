@@ -66,12 +66,12 @@ interface SettingsState {
     
     // Modal state
     isSettingsOpen: boolean;
-    activeTab: 'system-prompt' | 'tools';
+    activeTab: 'system-prompt' | 'interfaces' | 'tools';
     
     // Actions
     openSettings: () => void;
     closeSettings: () => void;
-    setActiveTab: (tab: 'system-prompt' | 'tools') => void;
+    setActiveTab: (tab: 'system-prompt' | 'interfaces' | 'tools') => void;
     
     // Settings CRUD
     fetchSettings: () => Promise<void>;
@@ -83,6 +83,7 @@ interface SettingsState {
     removeMcpServer: (serverId: string) => Promise<void>;
     updateToolSystemPrompt: (serverId: string, toolName: string, prompt: string) => Promise<void>;
     bumpPromptRefresh: () => void;
+    refreshMcpTools: (serverId: string) => Promise<McpTool[]>;
     
     // MCP Server operations
     connectServer: (serverId: string) => Promise<void>;
@@ -387,7 +388,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             // Backend will sync servers automatically after update
             await invoke('update_mcp_server', { config: newConfig });
             console.log('[SettingsStore] MCP server updated:', newConfig.id);
-            get().bumpPromptRefresh();
             
             // Update connection status
             const isConnected = newConfig.enabled;
@@ -397,6 +397,25 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     [newConfig.id]: { connected: isConnected }
                 }
             }));
+
+            // Refresh tool list when the server is enabled so UI + prompts are current
+            if (isConnected) {
+                try {
+                    await get().refreshMcpTools(newConfig.id);
+                } catch (toolErr: any) {
+                    console.error('[SettingsStore] Failed to refresh MCP tools after enable:', toolErr);
+                }
+            } else {
+                // Clear any cached tools when disabling
+                set(state => ({
+                    serverStatuses: {
+                        ...state.serverStatuses,
+                        [newConfig.id]: { connected: false, tools: [] }
+                    }
+                }));
+            }
+
+            get().bumpPromptRefresh();
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update MCP server:', e);
             // Revert on error
@@ -500,6 +519,28 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 }
             }));
             return false;
+        }
+    },
+
+    refreshMcpTools: async (serverId: string) => {
+        try {
+            const tools = await invoke<McpTool[]>('list_mcp_tools', { serverId });
+            set(state => ({
+                serverStatuses: {
+                    ...state.serverStatuses,
+                    [serverId]: { ...(state.serverStatuses[serverId] || { connected: true }), tools, error: undefined }
+                }
+            }));
+            return tools;
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to refresh MCP tools:', e);
+            set(state => ({
+                serverStatuses: {
+                    ...state.serverStatuses,
+                    [serverId]: { ...(state.serverStatuses[serverId] || { connected: false }), error: e.message || String(e) }
+                }
+            }));
+            throw e;
         }
     },
 }));
