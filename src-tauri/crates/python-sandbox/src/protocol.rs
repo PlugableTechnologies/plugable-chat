@@ -77,25 +77,25 @@ impl ExecutionRequest {
             ..Default::default()
         }
     }
-    
+
     /// Builder pattern: add context
     pub fn with_context(mut self, context: Value) -> Self {
         self.context = Some(context);
         self
     }
-    
+
     /// Builder pattern: add available tools
     pub fn with_tools(mut self, tools: Vec<ToolInfo>) -> Self {
         self.available_tools = tools;
         self
     }
-    
+
     /// Builder pattern: add tool results
     pub fn with_tool_results(mut self, results: HashMap<String, ToolCallResult>) -> Self {
         self.tool_results = results;
         self
     }
-    
+
     /// Builder pattern: add tool modules
     pub fn with_tool_modules(mut self, modules: Vec<ToolModuleInfo>) -> Self {
         self.tool_modules = modules;
@@ -180,7 +180,7 @@ impl ExecutionResult {
             ..Default::default()
         }
     }
-    
+
     /// Create a result with pending tool calls
     pub fn with_pending_calls(calls: Vec<PendingToolCall>) -> Self {
         Self {
@@ -194,7 +194,7 @@ impl ExecutionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_execution_request_serialization() {
         let request = ExecutionRequest {
@@ -204,13 +204,13 @@ mod tests {
             available_tools: vec![],
             tool_modules: vec![],
         };
-        
+
         let json = serde_json::to_string(&request).unwrap();
         let parsed: ExecutionRequest = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(parsed.code.len(), 2);
     }
-    
+
     #[test]
     fn test_execution_result_default() {
         let result = ExecutionResult::default();
@@ -218,6 +218,3 @@ mod tests {
         assert!(result.pending_calls.is_empty());
     }
 }
-
-
-

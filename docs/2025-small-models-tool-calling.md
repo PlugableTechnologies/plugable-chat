@@ -84,6 +84,13 @@ Across vendors, you see only a few real patterns.
 
 ---
 
+## Plugable Chat runtime note: tool_search toggle
+
+- `tool_search_enabled` (settings) controls MCP exposure.
+- **Off (default):** MCP tools are exposed immediately to the model/system prompt; no pre-search step.
+- **On:** MCP tools are registered as deferred and hidden. The harness runs `tool_search` automatically on each new user prompt before the first model call, materializes discovered tools, then rebuilds the prompt/tool list (and Python globals, when enabled) with only those discoveries.
+- Built-ins (`python_execution`, `tool_search`) stay available in both modes.
+
 ## 2. A canonical internal abstraction
 
 If you normalize everything to this, adapters become mechanical.

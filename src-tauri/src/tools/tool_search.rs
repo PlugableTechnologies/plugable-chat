@@ -4,11 +4,11 @@
 //! This allows models to discover relevant tools dynamically.
 //! Returns Python import documentation for discovered tools.
 
-use std::sync::Arc;
-use std::collections::HashMap;
-use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 use fastembed::TextEmbedding;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crate::tool_registry::{SharedToolRegistry, ToolSearchResult};
 
@@ -54,43 +54,51 @@ impl ToolSearchExecutor {
             embedding_model,
         }
     }
-    
+
     /// Execute a tool search
     pub async fn execute(&self, input: ToolSearchInput) -> Result<ToolSearchOutput, String> {
-        println!("[ToolSearch] Executing with {} queries, top_k={}", input.queries.len(), input.top_k);
-        
+        println!(
+            "[ToolSearch] Executing with {} queries, top_k={}",
+            input.queries.len(),
+            input.top_k
+        );
+
         if input.queries.is_empty() {
             return Err("At least one search query is required".to_string());
         }
-        
+
         // Get the embedding model
         let model_guard = self.embedding_model.read().await;
-        let embedding_model = model_guard.clone()
+        let embedding_model = model_guard
+            .clone()
             .ok_or_else(|| "Embedding model not initialized".to_string())?;
         drop(model_guard);
-        
+
         // Generate embeddings for all queries
         let query_embeddings = self.embed_queries(&input.queries, &embedding_model).await?;
-        
+
         // Search the registry
         let registry = self.registry.read().await;
         let results = registry.search_tools(&query_embeddings, input.top_k);
-        
+
         println!("[ToolSearch] Found {} matching tools", results.len());
         for result in &results {
-            println!("[ToolSearch]   - {} (score: {:.3})", result.name, result.score);
+            println!(
+                "[ToolSearch]   - {} (score: {:.3})",
+                result.name, result.score
+            );
         }
-        
+
         // Generate Python documentation for discovered tools
         let python_docs = self.generate_python_docs(&results, &registry);
-        
+
         Ok(ToolSearchOutput {
             tools: results,
             queries_used: input.queries,
             python_docs,
         })
     }
-    
+
     /// Generate Python import documentation for discovered tools
     fn generate_python_docs(
         &self,
@@ -100,29 +108,34 @@ impl ToolSearchExecutor {
         if results.is_empty() {
             return "# No matching tools found".to_string();
         }
-        
+
         let mut docs = String::new();
         docs.push_str("# Available tools (import and call as functions):\n\n");
-        
+
         // Group tools by server/module
         let mut tools_by_module: HashMap<String, Vec<&ToolSearchResult>> = HashMap::new();
         for result in results {
-            let python_name = registry.get_python_name(&result.server_id)
+            let python_name = registry
+                .get_python_name(&result.server_id)
                 .cloned()
                 .unwrap_or_else(|| result.server_id.replace("-", "_").to_lowercase());
-            
+
             tools_by_module
                 .entry(python_name)
                 .or_insert_with(Vec::new)
                 .push(result);
         }
-        
+
         // Generate documentation for each module
         for (module_name, tools) in &tools_by_module {
             // Import statement
             let function_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-            docs.push_str(&format!("from {} import {}\n", module_name, function_names.join(", ")));
-            
+            docs.push_str(&format!(
+                "from {} import {}\n",
+                module_name,
+                function_names.join(", ")
+            ));
+
             // Function signatures and descriptions
             for tool in tools {
                 let params = self.extract_param_signature(&tool.parameters);
@@ -133,24 +146,25 @@ impl ToolSearchExecutor {
             }
             docs.push('\n');
         }
-        
+
         docs.push_str("# Example usage:\n");
         docs.push_str("# result = function_name(arg1=\"value\", arg2=123)\n");
         docs.push_str("# print(result)\n");
-        
+
         docs
     }
-    
+
     /// Extract parameter signature from JSON Schema
     fn extract_param_signature(&self, parameters: &serde_json::Value) -> String {
         let mut params = Vec::new();
-        
+
         if let Some(properties) = parameters.get("properties").and_then(|p| p.as_object()) {
-            let required: Vec<&str> = parameters.get("required")
+            let required: Vec<&str> = parameters
+                .get("required")
                 .and_then(|r| r.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
-            
+
             for (name, schema) in properties {
                 let type_hint = self.json_schema_to_python_type(schema);
                 if required.contains(&name.as_str()) {
@@ -160,10 +174,10 @@ impl ToolSearchExecutor {
                 }
             }
         }
-        
+
         params.join(", ")
     }
-    
+
     /// Convert JSON Schema type to Python type hint
     fn json_schema_to_python_type(&self, schema: &serde_json::Value) -> &'static str {
         match schema.get("type").and_then(|t| t.as_str()) {
@@ -176,7 +190,7 @@ impl ToolSearchExecutor {
             _ => "any",
         }
     }
-    
+
     /// Materialize discovered tools (make them visible to the model)
     pub async fn materialize_results(&self, results: &[ToolSearchResult]) {
         let mut registry = self.registry.write().await;
@@ -185,7 +199,7 @@ impl ToolSearchExecutor {
             registry.materialize_tool(&key);
         }
     }
-    
+
     /// Generate embeddings for query strings
     async fn embed_queries(
         &self,
@@ -194,14 +208,12 @@ impl ToolSearchExecutor {
     ) -> Result<Vec<Vec<f32>>, String> {
         let queries_clone: Vec<String> = queries.to_vec();
         let model_clone = Arc::clone(model);
-        
-        let result = tokio::task::spawn_blocking(move || {
-            model_clone.embed(queries_clone, None)
-        })
-        .await
-        .map_err(|e| format!("Embedding task panicked: {}", e))?
-        .map_err(|e| format!("Embedding generation failed: {}", e))?;
-        
+
+        let result = tokio::task::spawn_blocking(move || model_clone.embed(queries_clone, None))
+            .await
+            .map_err(|e| format!("Embedding task panicked: {}", e))?
+            .map_err(|e| format!("Embedding generation failed: {}", e))?;
+
         Ok(result)
     }
 }
@@ -212,18 +224,20 @@ pub async fn precompute_tool_embeddings(
     embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
 ) -> Result<usize, String> {
     println!("[ToolSearch] Pre-computing tool embeddings...");
-    
+
     // Get the embedding model
     let model_guard = embedding_model.read().await;
-    let model = model_guard.clone()
+    let model = model_guard
+        .clone()
         .ok_or_else(|| "Embedding model not initialized".to_string())?;
     drop(model_guard);
-    
+
     // Get all domain tools that need embeddings (both deferred and non-deferred)
     // This ensures tool_search can find any domain tool, not just deferred ones
     let tools_to_embed: Vec<(String, String)> = {
         let registry_guard = registry.read().await;
-        registry_guard.get_all_domain_tools()
+        registry_guard
+            .get_all_domain_tools()
             .iter()
             .map(|(key, schema)| {
                 // Create embedding text from name and description
@@ -236,25 +250,23 @@ pub async fn precompute_tool_embeddings(
             })
             .collect()
     };
-    
+
     if tools_to_embed.is_empty() {
         println!("[ToolSearch] No domain tools to embed");
         return Ok(0);
     }
-    
+
     println!("[ToolSearch] Embedding {} tools...", tools_to_embed.len());
-    
+
     // Generate embeddings in batch
     let texts: Vec<String> = tools_to_embed.iter().map(|(_, t)| t.clone()).collect();
     let model_clone = Arc::clone(&model);
-    
-    let embeddings = tokio::task::spawn_blocking(move || {
-        model_clone.embed(texts, None)
-    })
-    .await
-    .map_err(|e| format!("Embedding task panicked: {}", e))?
-    .map_err(|e| format!("Embedding generation failed: {}", e))?;
-    
+
+    let embeddings = tokio::task::spawn_blocking(move || model_clone.embed(texts, None))
+        .await
+        .map_err(|e| format!("Embedding task panicked: {}", e))?
+        .map_err(|e| format!("Embedding generation failed: {}", e))?;
+
     // Store embeddings in the registry
     {
         let mut registry_guard = registry.write().await;
@@ -262,39 +274,39 @@ pub async fn precompute_tool_embeddings(
             registry_guard.set_tool_embedding(key, embedding);
         }
     }
-    
+
     let count = tools_to_embed.len();
     println!("[ToolSearch] Pre-computed {} tool embeddings", count);
-    
+
     Ok(count)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_registry::ToolRegistry;
     use crate::actors::mcp_host_actor::McpTool;
+    use crate::tool_registry::ToolRegistry;
     use serde_json::json;
-    
+
     #[test]
     fn test_tool_search_input_parsing() {
         let input: ToolSearchInput = serde_json::from_value(json!({
             "queries": ["weather forecast", "temperature"],
             "top_k": 5
-        })).unwrap();
-        
+        }))
+        .unwrap();
+
         assert_eq!(input.queries.len(), 2);
         assert_eq!(input.top_k, 5);
     }
-    
+
     #[test]
     fn test_tool_search_input_default_top_k() {
         let input: ToolSearchInput = serde_json::from_value(json!({
             "queries": ["test"]
-        })).unwrap();
-        
-        assert_eq!(input.top_k, 3);  // default_top_k() returns 3
+        }))
+        .unwrap();
+
+        assert_eq!(input.top_k, 3); // default_top_k() returns 3
     }
 }
-
-

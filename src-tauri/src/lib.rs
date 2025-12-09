@@ -15,15 +15,18 @@ use clap::Parser;
 use fastembed::TextEmbedding;
 use model_profiles::resolve_profile;
 use protocol::{
-    parse_tool_calls, CachedModel, ChatMessage, FoundryMsg, McpHostMsg, ModelInfo, OpenAITool,
-    ModelFamily, ParsedToolCall, RagChunk, RagIndexResult, RagMsg, RemoveFileResult, ToolCallsPendingEvent,
-    ToolExecutingEvent, ToolFormat, ToolLoopFinishedEvent, ToolResultEvent, VectorMsg,
+    parse_tool_calls, CachedModel, ChatMessage, FoundryMsg, McpHostMsg, ModelFamily, ModelInfo,
+    OpenAITool, ParsedToolCall, RagChunk, RagIndexResult, RagMsg, RemoveFileResult,
+    ToolCallsPendingEvent, ToolExecutingEvent, ToolFormat, ToolLoopFinishedEvent, ToolResultEvent,
+    VectorMsg,
 };
-use settings::{enforce_python_name, AppSettings, McpServerConfig, ToolCallFormatConfig, ToolCallFormatName};
+use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
 use serde_json::json;
+use settings::{
+    enforce_python_name, AppSettings, McpServerConfig, ToolCallFormatConfig, ToolCallFormatName,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, oneshot};
@@ -568,7 +571,8 @@ async fn execute_python_execution(
             functions: vec![tool_registry::ToolFunctionInfo {
                 name: "tool_search".to_string(),
                 description: Some(
-                    "Semantic search over available tools. Call with relevant_to string.".to_string(),
+                    "Semantic search over available tools. Call with relevant_to string."
+                        .to_string(),
                 ),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -806,8 +810,13 @@ pub(crate) fn detect_agentic_action(
     }
 
     if non_code_formats_enabled {
-        let calls =
-            parse_tool_calls_for_model(assistant_response, model_family, tool_format, formats, primary_format);
+        let calls = parse_tool_calls_for_model(
+            assistant_response,
+            model_family,
+            tool_format,
+            formats,
+            primary_format,
+        );
         if !calls.is_empty() {
             return AgenticAction::ToolCalls { calls };
         }
@@ -1274,7 +1283,9 @@ async fn run_agentic_loop(
                                         ),
                                         (true, false) => output.stdout.clone(),
                                         (false, true) => format!("STDERR:\n{}", output.stderr),
-                                        (false, false) => "Execution completed with no output".to_string(),
+                                        (false, false) => {
+                                            "Execution completed with no output".to_string()
+                                        }
                                     }
                                 } else if has_stdout && has_stderr {
                                     format!(
@@ -1785,6 +1796,8 @@ fn build_system_prompt(
     primary_format: ToolCallFormatName,
     python_tool_mode: bool,
     allow_tool_search_for_python: bool,
+    python_execution_enabled: bool,
+    tool_search_enabled: bool,
 ) -> String {
     let additions = collect_tool_prompt_additions(
         tool_descriptions,
@@ -1795,6 +1808,8 @@ fn build_system_prompt(
         primary_format,
         python_tool_mode,
         allow_tool_search_for_python,
+        python_execution_enabled,
+        tool_search_enabled,
     );
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
@@ -1815,6 +1830,8 @@ fn collect_tool_prompt_additions(
     primary_format: ToolCallFormatName,
     python_tool_mode: bool,
     allow_tool_search_for_python: bool,
+    python_execution_enabled: bool,
+    tool_search_enabled: bool,
 ) -> Vec<String> {
     const BUILTIN_SERVER_LABEL: &str = "Built-in Tools";
     const PYTHON_LABEL: &str = "Python Execution";
@@ -1823,7 +1840,7 @@ fn collect_tool_prompt_additions(
     let mut additions: Vec<String> = Vec::new();
 
     // Track server defer modes for contextual guidance
-    let mut has_deferred_tools = false;
+    let mut has_deferred_tools = tool_search_enabled && !server_configs.is_empty();
     let mut has_active_tools = false;
     for (server_id, tools) in tool_descriptions {
         if tools.is_empty() {
@@ -1843,13 +1860,13 @@ fn collect_tool_prompt_additions(
 
     let has_any_tools = !tool_descriptions.is_empty() || python_tool_mode;
 
-    // Built-in: python_execution (when Code Mode is primary and enabled)
-    if python_tool_mode && filter.builtin_allowed("python_execution") {
-        let mut body = default_python_prompt(
-            has_attachments,
-            has_deferred_tools,
-            allow_tool_search_for_python,
-        );
+    // Built-ins: always show prompts when enabled (even if MCP tools are deferred)
+    let python_prompt_allowed =
+        python_execution_enabled && filter.builtin_allowed("python_execution");
+    if python_prompt_allowed {
+        let tool_search_available = tool_search_enabled && filter.builtin_allowed("tool_search");
+        let mut body =
+            default_python_prompt(has_attachments, has_deferred_tools, tool_search_available);
         if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "python_execution")) {
             let trimmed = custom.trim();
             if !trimmed.is_empty() {
@@ -1864,7 +1881,7 @@ fn collect_tool_prompt_additions(
             body.trim()
         ));
 
-        if allow_tool_search_for_python && filter.builtin_allowed("tool_search") {
+        if tool_search_available {
             let mut body = default_tool_search_prompt(has_deferred_tools);
             if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "tool_search")) {
                 let trimmed = custom.trim();
@@ -2004,6 +2021,8 @@ fn build_system_prompt_layers(
     primary_format: ToolCallFormatName,
     python_tool_mode: bool,
     allow_tool_search_for_python: bool,
+    python_execution_enabled: bool,
+    tool_search_enabled: bool,
 ) -> SystemPromptLayers {
     let additions = collect_tool_prompt_additions(
         tool_descriptions,
@@ -2014,6 +2033,8 @@ fn build_system_prompt_layers(
         primary_format,
         python_tool_mode,
         allow_tool_search_for_python,
+        python_execution_enabled,
+        tool_search_enabled,
     );
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
@@ -2250,7 +2271,10 @@ async fn reload_foundry(handles: State<'_, ActorHandles>) -> Result<(), String> 
         .map_err(|e| format!("Failed to send request: {}", e))?;
     match rx.await {
         Ok(res) => {
-            println!("[reload_foundry] ✅ Reload command completed with result: {:?}", res);
+            println!(
+                "[reload_foundry] ✅ Reload command completed with result: {:?}",
+                res
+            );
             let _ = std::io::stdout().flush();
             res.map_err(|e| e)
         }
@@ -2347,13 +2371,25 @@ async fn chat(
     // Get server configs from settings
     let settings = settings_state.settings.read().await;
     let configured_system_prompt = settings.system_prompt.clone();
-    let server_configs = settings.mcp_servers.clone();
+    let mut server_configs = settings.mcp_servers.clone();
+    let tool_search_enabled = settings.tool_search_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
     let tool_system_prompts = settings.tool_system_prompts.clone();
     drop(settings);
+
+    // Apply global tool_search flag to server defer settings
+    if tool_search_enabled {
+        for config in &mut server_configs {
+            config.defer_tools = true;
+        }
+    } else {
+        for config in &mut server_configs {
+            config.defer_tools = false;
+        }
+    }
 
     // Get tool descriptions from MCP Host Actor
     let (tools_tx, tools_rx) = oneshot::channel();
@@ -2485,9 +2521,78 @@ async fn chat(
         }
     }
 
+    // When tool_search is enabled, run it proactively with the user prompt to
+    // surface an initial set of tools before the first model call.
+    if tool_search_enabled && !message.trim().is_empty() {
+        let executor = ToolSearchExecutor::new(
+            tool_registry_state.registry.clone(),
+            embedding_state.model.clone(),
+        );
+        let search_input = ToolSearchInput {
+            queries: vec![message.clone()],
+            top_k: 5,
+        };
+        match executor.execute(search_input).await {
+            Ok(output) => {
+                executor.materialize_results(&output.tools).await;
+                println!(
+                    "[Chat] Auto tool_search discovered {} tools before first turn",
+                    output.tools.len()
+                );
+            }
+            Err(e) => {
+                println!(
+                    "[Chat] Auto tool_search failed (continuing without discoveries): {}",
+                    e
+                );
+            }
+        }
+    } else if tool_search_enabled {
+        println!("[Chat] Auto tool_search skipped: empty user prompt");
+    }
+
+    // Determine which MCP tools are visible after any materialization
+    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = {
+        let registry = tool_registry_state.registry.read().await;
+        let has_materialized = registry.stats().materialized_tools > 0;
+
+        if tool_search_enabled && !has_materialized {
+            Vec::new()
+        } else {
+            filtered_tool_descriptions
+                .iter()
+                .filter_map(|(server_id, tools)| {
+                    let visible_tools: Vec<McpTool> = tools
+                        .iter()
+                        .cloned()
+                        .filter(|tool| registry.is_tool_visible(server_id, &tool.name))
+                        .collect();
+                    if visible_tools.is_empty() {
+                        None
+                    } else {
+                        Some((server_id.clone(), visible_tools))
+                    }
+                })
+                .collect()
+        }
+    };
+
+    // Include visible tools in legacy/native tool calling payloads
+    if let Some(ref mut tools_list) = openai_tools {
+        let registry = tool_registry_state.registry.read().await;
+        let mut seen: HashSet<String> =
+            tools_list.iter().map(|t| t.function.name.clone()).collect();
+        for schema in registry.get_visible_tools() {
+            if !seen.insert(schema.name.clone()) {
+                continue;
+            }
+            tools_list.push(OpenAITool::from_tool_schema(&schema));
+        }
+    }
+
     if let Some(ref tools) = openai_tools {
         println!(
-            "[Chat] Total tools available (legacy mode): {} (built-in only)",
+            "[Chat] Total tools available (legacy/native mode): {}",
             tools.len()
         );
     } else {
@@ -2517,7 +2622,7 @@ async fn chat(
     // that don't support native tool calling
     let system_prompt = build_system_prompt(
         &base_system_prompt,
-        &filtered_tool_descriptions,
+        &visible_tool_descriptions,
         &server_configs,
         has_attachments,
         &tool_system_prompts,
@@ -2525,6 +2630,8 @@ async fn chat(
         primary_format_for_prompt,
         python_tool_mode,
         allow_tool_search_for_python,
+        python_execution_enabled,
+        tool_search_enabled,
     );
 
     // === LOGGING: System prompt construction ===
@@ -2533,11 +2640,11 @@ async fn chat(
         .filter(|c| c.auto_approve_tools)
         .map(|c| c.id.as_str())
         .collect();
-    let tool_count: usize = filtered_tool_descriptions
+    let tool_count: usize = visible_tool_descriptions
         .iter()
         .map(|(_, tools)| tools.len())
         .sum();
-    let server_count = filtered_tool_descriptions.len();
+    let server_count = visible_tool_descriptions.len();
 
     println!(
         "[Chat] System prompt: {}chars, servers={}, tools={}, auto_approve={:?}",
@@ -3001,6 +3108,18 @@ async fn update_python_execution_enabled(
     Ok(())
 }
 
+#[tauri::command]
+async fn update_tool_search_enabled(
+    enabled: bool,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.tool_search_enabled = enabled;
+    settings::save_settings(&guard).await?;
+    println!("[Settings] tool_search_enabled updated to: {}", enabled);
+    Ok(())
+}
+
 // ============ MCP Commands ============
 
 /// Result of syncing an MCP server - includes error message if failed
@@ -3210,7 +3329,8 @@ async fn get_system_prompt_preview(
     // Get current settings
     let settings = settings_state.settings.read().await;
     let base_prompt = settings.system_prompt.clone();
-    let server_configs = settings.mcp_servers.clone();
+    let mut server_configs = settings.mcp_servers.clone();
+    let tool_search_enabled = settings.tool_search_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
     let mut format_config = settings.tool_call_formats.clone();
@@ -3218,6 +3338,16 @@ async fn get_system_prompt_preview(
     let tool_prompts = settings.tool_system_prompts.clone();
     drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
+
+    if tool_search_enabled {
+        for config in &mut server_configs {
+            config.defer_tools = true;
+        }
+    } else {
+        for config in &mut server_configs {
+            config.defer_tools = false;
+        }
+    }
 
     // Get current tool descriptions from connected servers
     let (tx, rx) = oneshot::channel();
@@ -3255,6 +3385,12 @@ async fn get_system_prompt_preview(
         code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
     let allow_tool_search_for_python =
         python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
+
+    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
+        Vec::new()
+    } else {
+        filtered_tool_descriptions.clone()
+    };
 
     // Check if there are any attached documents
     let has_attachments = {
@@ -3274,7 +3410,7 @@ async fn get_system_prompt_preview(
     // Build the full system prompt
     let preview = build_system_prompt(
         &base_prompt,
-        &filtered_tool_descriptions,
+        &visible_tool_descriptions,
         &server_configs,
         has_attachments,
         &tool_prompts,
@@ -3282,6 +3418,8 @@ async fn get_system_prompt_preview(
         primary_format_for_prompt,
         python_tool_mode,
         allow_tool_search_for_python,
+        python_execution_enabled,
+        tool_search_enabled,
     );
 
     Ok(preview)
@@ -3296,7 +3434,8 @@ async fn get_system_prompt_layers(
     // Get current settings
     let settings = settings_state.settings.read().await;
     let base_prompt = settings.system_prompt.clone();
-    let server_configs = settings.mcp_servers.clone();
+    let mut server_configs = settings.mcp_servers.clone();
+    let tool_search_enabled = settings.tool_search_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
     let mut format_config = settings.tool_call_formats.clone();
@@ -3304,6 +3443,16 @@ async fn get_system_prompt_layers(
     let tool_prompts = settings.tool_system_prompts.clone();
     drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
+
+    if tool_search_enabled {
+        for config in &mut server_configs {
+            config.defer_tools = true;
+        }
+    } else {
+        for config in &mut server_configs {
+            config.defer_tools = false;
+        }
+    }
 
     // Get current tool descriptions from connected servers
     let (tx, rx) = oneshot::channel();
@@ -3342,6 +3491,12 @@ async fn get_system_prompt_layers(
     let allow_tool_search_for_python =
         python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
 
+    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
+        Vec::new()
+    } else {
+        filtered_tool_descriptions.clone()
+    };
+
     // Check if there are any attached documents
     let has_attachments = {
         let (tx, rx) = oneshot::channel();
@@ -3359,7 +3514,7 @@ async fn get_system_prompt_layers(
 
     let layers = build_system_prompt_layers(
         &base_prompt,
-        &filtered_tool_descriptions,
+        &visible_tool_descriptions,
         &server_configs,
         has_attachments,
         &tool_prompts,
@@ -3367,6 +3522,8 @@ async fn get_system_prompt_layers(
         primary_format_for_prompt,
         python_tool_mode,
         allow_tool_search_for_python,
+        python_execution_enabled,
+        tool_search_enabled,
     );
 
     Ok(layers)
@@ -3673,6 +3830,7 @@ pub fn run() {
             update_tool_system_prompt,
             update_tool_call_formats,
             update_python_execution_enabled,
+            update_tool_search_enabled,
             // MCP commands
             sync_mcp_servers,
             connect_mcp_server,
@@ -3932,6 +4090,7 @@ mod tests {
             ToolCallFormatName::CodeMode,
             true,
             false,
+            false,
         );
 
         assert_eq!(layers.base_prompt, "Base prompt");
@@ -3954,7 +4113,10 @@ mod tests {
         let mut server_config = McpServerConfig::new("srv1".to_string(), "Server 1".to_string());
         server_config.defer_tools = false;
         server_config.env = HashMap::from([
-            ("BIGQUERY_PROJECT".to_string(), "plugabot-colchuck".to_string()),
+            (
+                "BIGQUERY_PROJECT".to_string(),
+                "plugabot-colchuck".to_string(),
+            ),
             ("BQ_DATASET".to_string(), "finance".to_string()),
         ]);
         let server_configs = vec![server_config];
@@ -3970,6 +4132,7 @@ mod tests {
             &filter,
             ToolCallFormatName::CodeMode,
             true,
+            false,
             false,
         );
 

@@ -34,6 +34,7 @@ export interface AppSettings {
     mcp_servers: McpServerConfig[];
     tool_call_formats: ToolCallFormatConfig;
     tool_system_prompts: Record<string, string>;
+    tool_search_enabled: boolean;
     python_execution_enabled: boolean;
     python_tool_calling_enabled: boolean;
     legacy_tool_call_format_enabled: boolean;
@@ -78,6 +79,7 @@ interface SettingsState {
     updateSystemPrompt: (prompt: string) => Promise<void>;
     updateToolCallFormats: (config: ToolCallFormatConfig) => Promise<void>;
     updateCodeExecutionEnabled: (enabled: boolean) => Promise<void>;
+    updateToolSearchEnabled: (enabled: boolean) => Promise<void>;
     addMcpServer: (config: McpServerConfig) => Promise<void>;
     updateMcpServer: (config: McpServerConfig) => Promise<void>;
     removeMcpServer: (serverId: string) => Promise<void>;
@@ -194,7 +196,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 }),
             ]);
             const normalizedFormats = normalizeToolCallFormats(settings.tool_call_formats || DEFAULT_TOOL_CALL_FORMATS);
-            const mergedSettings: AppSettings = { ...settings, tool_call_formats: normalizedFormats };
+            const mergedSettings: AppSettings = {
+                ...settings,
+                tool_call_formats: normalizedFormats,
+                tool_search_enabled: settings.tool_search_enabled ?? false,
+            };
             const allowedImports = (allowedImportsRaw && allowedImportsRaw.length > 0)
                 ? allowedImportsRaw
                 : FALLBACK_PYTHON_ALLOWED_IMPORTS;
@@ -232,6 +238,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     mcp_servers: [],
                     tool_call_formats: DEFAULT_TOOL_CALL_FORMATS,
                     tool_system_prompts: {},
+                    tool_search_enabled: false,
                     python_execution_enabled: false,
                     python_tool_calling_enabled: true,
                     legacy_tool_call_format_enabled: false,
@@ -338,6 +345,29 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             set({ 
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+    
+    updateToolSearchEnabled: async (enabled: boolean) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+
+        // Optimistic update
+        set({
+            settings: { ...currentSettings, tool_search_enabled: enabled },
+            error: null,
+        });
+
+        try {
+            await invoke('update_tool_search_enabled', { enabled });
+            console.log('[SettingsStore] tool_search_enabled updated:', enabled);
+            get().bumpPromptRefresh();
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update tool_search_enabled:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`,
             });
         }
     },

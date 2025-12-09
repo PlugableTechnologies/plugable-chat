@@ -1212,8 +1212,15 @@ function BuiltinsTab({
     onRegisterSave?: (handler: () => Promise<void>) => void;
     onSavingChange?: (saving: boolean) => void;
 }) {
-    const { settings, updateCodeExecutionEnabled, updateToolSystemPrompt, pythonAllowedImports } = useSettingsStore();
+    const {
+        settings,
+        updateCodeExecutionEnabled,
+        updateToolSearchEnabled,
+        updateToolSystemPrompt,
+        pythonAllowedImports,
+    } = useSettingsStore();
     const codeExecutionEnabled = settings?.python_execution_enabled ?? false;
+    const toolSearchEnabled = settings?.tool_search_enabled ?? false;
     const allowedImports = (pythonAllowedImports && pythonAllowedImports.length > 0)
         ? pythonAllowedImports
         : FALLBACK_PYTHON_ALLOWED_IMPORTS;
@@ -1228,10 +1235,12 @@ function BuiltinsTab({
     const initialToolSearchPrompt = settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt;
 
     const [localCodeExecutionEnabled, setLocalCodeExecutionEnabled] = useState(codeExecutionEnabled);
+    const [localToolSearchEnabled, setLocalToolSearchEnabled] = useState(toolSearchEnabled);
     const [pythonPromptDraft, setPythonPromptDraft] = useState(initialPythonPrompt);
     const [toolSearchPromptDraft, setToolSearchPromptDraft] = useState(initialToolSearchPrompt);
     const [baselineBuiltins, setBaselineBuiltins] = useState({
         codeExecutionEnabled,
+        toolSearchEnabled,
         pythonPrompt: initialPythonPrompt,
         toolSearchPrompt: initialToolSearchPrompt,
     });
@@ -1240,17 +1249,20 @@ function BuiltinsTab({
     useEffect(() => {
         const nextBaseline = {
             codeExecutionEnabled: codeExecutionEnabled,
+            toolSearchEnabled: toolSearchEnabled,
             pythonPrompt: settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt,
             toolSearchPrompt: settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt,
         };
 
         const hasPending =
             localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
+            localToolSearchEnabled !== baselineBuiltins.toolSearchEnabled ||
             pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
             toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt;
 
         if (!hasPending) {
             setLocalCodeExecutionEnabled(nextBaseline.codeExecutionEnabled);
+            setLocalToolSearchEnabled(nextBaseline.toolSearchEnabled);
             setPythonPromptDraft(nextBaseline.pythonPrompt);
             setToolSearchPromptDraft(nextBaseline.toolSearchPrompt);
             setBaselineBuiltins(nextBaseline);
@@ -1259,19 +1271,23 @@ function BuiltinsTab({
         }
     }, [
         codeExecutionEnabled,
+        toolSearchEnabled,
         defaultPythonPrompt,
         defaultToolSearchPrompt,
         localCodeExecutionEnabled,
+        localToolSearchEnabled,
         pythonPromptDraft,
         settings?.tool_system_prompts,
         toolSearchPromptDraft,
         baselineBuiltins.codeExecutionEnabled,
+        baselineBuiltins.toolSearchEnabled,
         baselineBuiltins.pythonPrompt,
         baselineBuiltins.toolSearchPrompt,
     ]);
 
     const hasChanges =
         localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
+        localToolSearchEnabled !== baselineBuiltins.toolSearchEnabled ||
         pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
         toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt;
 
@@ -1285,6 +1301,21 @@ function BuiltinsTab({
 
     const handleToggleCodeExecution = () => {
         setLocalCodeExecutionEnabled((prev) => !prev);
+    };
+
+    const handleToggleToolSearch = async () => {
+        const next = !localToolSearchEnabled;
+        setLocalToolSearchEnabled(next);
+        // Persist immediately so deferred mode survives restarts
+        try {
+            await updateToolSearchEnabled(next);
+            setBaselineBuiltins((prev) => ({
+                ...prev,
+                toolSearchEnabled: next,
+            }));
+        } catch (e) {
+            console.error('[Settings] Failed to update tool_search_enabled:', e);
+        }
     };
 
     const handleResetPythonPrompt = () => {
@@ -1308,6 +1339,10 @@ function BuiltinsTab({
             saves.push(updateCodeExecutionEnabled(localCodeExecutionEnabled));
         }
 
+        if (localToolSearchEnabled !== (settings.tool_search_enabled ?? false)) {
+            saves.push(updateToolSearchEnabled(localToolSearchEnabled));
+        }
+
         if (targetPythonPrompt !== (settings.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt)) {
             saves.push(updateToolSystemPrompt('builtin', 'python_execution', targetPythonPrompt));
         }
@@ -1320,6 +1355,7 @@ function BuiltinsTab({
             await Promise.all(saves);
             setBaselineBuiltins({
                 codeExecutionEnabled: localCodeExecutionEnabled,
+                toolSearchEnabled: localToolSearchEnabled,
                 pythonPrompt: targetPythonPrompt,
                 toolSearchPrompt: targetToolSearchPrompt,
             });
@@ -1355,9 +1391,19 @@ function BuiltinsTab({
                 <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
                     <div className="flex items-start justify-between gap-3">
                         <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center">
-                                <Code2 size={16} className="text-amber-600" />
-                            </div>
+                            <button
+                                onClick={handleToggleCodeExecution}
+                                className={`relative w-10 h-5 rounded-full transition-colors ${
+                                    localCodeExecutionEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                                }`}
+                                title="Toggle python_execution"
+                            >
+                                <div
+                                    className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
+                                        localCodeExecutionEnabled ? 'translate-x-5' : ''
+                                    }`}
+                                />
+                            </button>
                             <div>
                                 <div className="flex items-center gap-2">
                                     <span className="font-medium text-gray-900">python_execution</span>
@@ -1368,18 +1414,6 @@ function BuiltinsTab({
                                 </p>
                             </div>
                         </div>
-                        <button
-                            onClick={handleToggleCodeExecution}
-                            className={`relative w-10 h-5 rounded-full transition-colors ${
-                                localCodeExecutionEnabled ? 'bg-blue-500' : 'bg-gray-300'
-                            }`}
-                        >
-                            <div
-                                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-                                    localCodeExecutionEnabled ? 'translate-x-5' : ''
-                                }`}
-                            />
-                        </button>
                     </div>
                     <div className="flex items-center justify-between gap-2">
                         <div className="text-xs font-semibold text-gray-900">System prompt (optional)</div>
@@ -1409,9 +1443,26 @@ function BuiltinsTab({
                 {/* tool_search prompt card */}
                 <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-2 w-full">
                     <div className="flex items-start justify-between">
-                        <div>
-                            <div className="text-sm font-semibold text-gray-900">tool_search</div>
-                            <p className="text-xs text-gray-500">Built-in discovery helper</p>
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={handleToggleToolSearch}
+                                className={`relative w-10 h-5 rounded-full transition-colors ${
+                                    localToolSearchEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                                }`}
+                                title="Toggle deferred mode"
+                            >
+                                <div
+                                    className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
+                                        localToolSearchEnabled ? 'translate-x-5' : ''
+                                    }`}
+                                />
+                            </button>
+                            <div>
+                                <div className="text-sm font-semibold text-gray-900">tool_search (Deferred mode)</div>
+                                <p className="text-xs text-gray-500">
+                                    When on, MCP tools stay hidden until tool_search runs (auto-run on first user prompt).
+                                </p>
+                            </div>
                         </div>
                         <div className="flex items-center gap-2">
                             <button
@@ -1432,7 +1483,11 @@ function BuiltinsTab({
                         className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
                         placeholder={defaultToolSearchPrompt}
                     />
-                    <p className="text-[11px] text-gray-500">Added when MCP tools are available.</p>
+                    <p className="text-[11px] text-gray-500">
+                        {localToolSearchEnabled
+                            ? 'Deferred mode on: MCP tools stay hidden until tool_search runs (auto-run on the first user prompt of a turn).'
+                            : 'Deferred mode off: MCP tools are exposed immediately in the system prompt.'}
+                    </p>
                 </div>
             </div>
         </div>

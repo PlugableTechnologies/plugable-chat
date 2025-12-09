@@ -1,15 +1,15 @@
-use tokio::sync::mpsc;
-use tokio::process::{Command, Child, ChildStdin};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 
-use crate::settings::{McpServerConfig, Transport};
 use crate::protocol::McpHostMsg;
+use crate::settings::{McpServerConfig, Transport};
 
 /// MCP JSON-RPC request
 #[derive(Debug, Serialize)]
@@ -88,11 +88,11 @@ impl McpServerConnection {
         self.request_id += 1;
         self.request_id
     }
-    
+
     /// Send a request and wait for response
     async fn send_request(&mut self, method: &str, params: Option<Value>) -> Result<Value, String> {
         let id = self.next_id();
-        
+
         let request = JsonRpcRequest {
             jsonrpc: "2.0",
             id,
@@ -106,30 +106,33 @@ impl McpServerConnection {
         println!("McpHostActor: Sending: {}", request_str);
 
         // Write request
-        self.stdin.write_all(format!("{}\n", request_str).as_bytes()).await
+        self.stdin
+            .write_all(format!("{}\n", request_str).as_bytes())
+            .await
             .map_err(|e| format!("Failed to write request: {}", e))?;
-        self.stdin.flush().await
+        self.stdin
+            .flush()
+            .await
             .map_err(|e| format!("Failed to flush request: {}", e))?;
 
         // Read response with timeout
-        let read_result = tokio::time::timeout(
-            Duration::from_secs(30),
-            self.read_response()
-        ).await;
-        
+        let read_result = tokio::time::timeout(Duration::from_secs(30), self.read_response()).await;
+
         match read_result {
             Ok(Ok(response)) => {
                 if let Some(error) = response.error {
                     Err(format!("MCP error {}: {}", error.code, error.message))
                 } else {
-                    response.result.ok_or_else(|| "No result in response".to_string())
+                    response
+                        .result
+                        .ok_or_else(|| "No result in response".to_string())
                 }
             }
             Ok(Err(e)) => Err(e),
             Err(_) => Err("Request timed out".to_string()),
         }
     }
-    
+
     /// Read a JSON-RPC response from stdout
     async fn read_response(&mut self) -> Result<JsonRpcResponse, String> {
         loop {
@@ -139,15 +142,18 @@ impl McpServerConnection {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    
+
                     println!("McpHostActor: Received: {}", trimmed);
-                    
+
                     // Try to parse as JSON-RPC response
                     match serde_json::from_str::<JsonRpcResponse>(trimmed) {
                         Ok(response) => return Ok(response),
                         Err(e) => {
                             // Might be a notification or other message, skip
-                            println!("McpHostActor: Skipping non-response line: {} ({})", trimmed, e);
+                            println!(
+                                "McpHostActor: Skipping non-response line: {} ({})",
+                                trimmed, e
+                            );
                             continue;
                         }
                     }
@@ -161,9 +167,13 @@ impl McpServerConnection {
             }
         }
     }
-    
+
     /// Send a notification (no response expected)
-    async fn send_notification(&mut self, method: &str, params: Option<Value>) -> Result<(), String> {
+    async fn send_notification(
+        &mut self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<(), String> {
         let notification = if let Some(p) = params {
             json!({
                 "jsonrpc": "2.0",
@@ -176,17 +186,21 @@ impl McpServerConnection {
                 "method": method
             })
         };
-        
+
         let notif_str = serde_json::to_string(&notification)
             .map_err(|e| format!("Failed to serialize notification: {}", e))?;
-        
+
         println!("McpHostActor: Sending notification: {}", notif_str);
-        
-        self.stdin.write_all(format!("{}\n", notif_str).as_bytes()).await
+
+        self.stdin
+            .write_all(format!("{}\n", notif_str).as_bytes())
+            .await
             .map_err(|e| format!("Failed to write notification: {}", e))?;
-        self.stdin.flush().await
+        self.stdin
+            .flush()
+            .await
             .map_err(|e| format!("Failed to flush notification: {}", e))?;
-        
+
         Ok(())
     }
 }
@@ -214,15 +228,26 @@ impl McpHostActor {
                     let result = self.connect_server(config).await;
                     let _ = respond_to.send(result);
                 }
-                McpHostMsg::DisconnectServer { server_id, respond_to } => {
+                McpHostMsg::DisconnectServer {
+                    server_id,
+                    respond_to,
+                } => {
                     let result = self.disconnect_server(&server_id).await;
                     let _ = respond_to.send(result);
                 }
-                McpHostMsg::ListTools { server_id, respond_to } => {
+                McpHostMsg::ListTools {
+                    server_id,
+                    respond_to,
+                } => {
                     let result = self.list_tools(&server_id).await;
                     let _ = respond_to.send(result);
                 }
-                McpHostMsg::ExecuteTool { server_id, tool_name, arguments, respond_to } => {
+                McpHostMsg::ExecuteTool {
+                    server_id,
+                    tool_name,
+                    arguments,
+                    respond_to,
+                } => {
                     let result = self.execute_tool(&server_id, &tool_name, arguments).await;
                     let _ = respond_to.send(result);
                 }
@@ -230,11 +255,17 @@ impl McpHostActor {
                     let result = self.get_all_tool_descriptions().await;
                     let _ = respond_to.send(result);
                 }
-                McpHostMsg::GetServerStatus { server_id, respond_to } => {
+                McpHostMsg::GetServerStatus {
+                    server_id,
+                    respond_to,
+                } => {
                     let status = self.get_server_status(&server_id).await;
                     let _ = respond_to.send(status);
                 }
-                McpHostMsg::SyncEnabledServers { configs, respond_to } => {
+                McpHostMsg::SyncEnabledServers {
+                    configs,
+                    respond_to,
+                } => {
                     let results = self.sync_enabled_servers(configs).await;
                     let _ = respond_to.send(results);
                 }
@@ -255,7 +286,10 @@ impl McpHostActor {
     }
 
     async fn connect_server(&self, config: McpServerConfig) -> Result<(), String> {
-        println!("McpHostActor: Connecting to server: {} ({})", config.name, config.id);
+        println!(
+            "McpHostActor: Connecting to server: {} ({})",
+            config.name, config.id
+        );
 
         // Check if already connected
         {
@@ -266,44 +300,55 @@ impl McpHostActor {
         }
 
         match &config.transport {
-            Transport::Stdio => {
-                self.connect_stdio_server(config).await
-            }
+            Transport::Stdio => self.connect_stdio_server(config).await,
             Transport::Sse { url } => {
                 // SSE transport - to be implemented later
-                Err(format!("SSE transport not yet implemented for URL: {}", url))
+                Err(format!(
+                    "SSE transport not yet implemented for URL: {}",
+                    url
+                ))
             }
         }
     }
 
     async fn connect_stdio_server(&self, config: McpServerConfig) -> Result<(), String> {
-        let command = config.command.clone()
+        let command = config
+            .command
+            .clone()
             .ok_or_else(|| "No command specified for stdio transport".to_string())?;
 
-        println!("McpHostActor: Spawning process: {} {:?}", command, config.args);
+        println!(
+            "McpHostActor: Spawning process: {} {:?}",
+            command, config.args
+        );
 
         let mut cmd = Command::new(&command);
         cmd.args(&config.args);
-        
+
         // Set environment variables
         for (key, value) in &config.env {
             cmd.env(key, value);
         }
-        
+
         // Set up stdio pipes
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        
+
         // Kill process on drop to avoid zombies
         cmd.kill_on_drop(true);
 
-        let mut child = cmd.spawn()
+        let mut child = cmd
+            .spawn()
             .map_err(|e| format!("Failed to spawn MCP server process '{}': {}", command, e))?;
 
-        let stdin = child.stdin.take()
+        let stdin = child
+            .stdin
+            .take()
             .ok_or_else(|| "Failed to open stdin".to_string())?;
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| "Failed to open stdout".to_string())?;
         let stderr = child.stderr.take();
 
@@ -311,7 +356,7 @@ impl McpHostActor {
         let stderr_buffer = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
         let stderr_buffer_clone = stderr_buffer.clone();
         let (stderr_ready_tx, mut stderr_ready_rx) = tokio::sync::mpsc::channel::<()>(1);
-        
+
         if let Some(stderr) = stderr {
             let server_id_clone = config.id.clone();
             let command_clone = command.clone();
@@ -321,7 +366,7 @@ impl McpHostActor {
                 let mut signaled_ready = false;
                 while let Ok(Some(line)) = lines.next_line().await {
                     println!("McpHostActor [{}] stderr: {}", server_id_clone, line);
-                    
+
                     // Store in buffer for error reporting (keep last 50 lines)
                     {
                         let mut buffer = stderr_buffer_clone.lock().await;
@@ -330,10 +375,12 @@ impl McpHostActor {
                         }
                         buffer.push(line.clone());
                     }
-                    
+
                     // For cargo run, detect when the actual server starts
-                    if !signaled_ready && command_clone == "cargo" && 
-                       (line.contains("MCP Test Server starting") || line.contains("Running `")) {
+                    if !signaled_ready
+                        && command_clone == "cargo"
+                        && (line.contains("MCP Test Server starting") || line.contains("Running `"))
+                    {
                         let _ = stderr_ready_tx.send(()).await;
                         signaled_ready = true;
                     }
@@ -343,7 +390,7 @@ impl McpHostActor {
 
         let server_id = config.id.clone();
         let stdout_lines = BufReader::new(stdout).lines();
-        
+
         // Create connection
         let mut connection = McpServerConnection {
             config,
@@ -373,7 +420,7 @@ impl McpHostActor {
             Duration::from_millis(500)
         };
         tokio::time::sleep(startup_delay).await;
-        
+
         // Helper to format error with captured output
         let format_error_with_output = |base_error: String, stderr_buf: &[String]| -> String {
             let mut error = base_error;
@@ -383,7 +430,7 @@ impl McpHostActor {
             }
             error
         };
-        
+
         // Check if process is still running
         match connection.process.try_wait() {
             Ok(Some(status)) => {
@@ -391,52 +438,74 @@ impl McpHostActor {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 let stderr_output = stderr_buffer.lock().await;
                 return Err(format_error_with_output(
-                    format!("Server process exited before initialization with status: {}", status),
-                    &stderr_output
+                    format!(
+                        "Server process exited before initialization with status: {}",
+                        status
+                    ),
+                    &stderr_output,
                 ));
             }
             Ok(None) => {
-                println!("McpHostActor: Server process is still running, proceeding with initialization");
+                println!(
+                    "McpHostActor: Server process is still running, proceeding with initialization"
+                );
             }
             Err(e) => {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 let stderr_output = stderr_buffer.lock().await;
                 return Err(format_error_with_output(
                     format!("Could not check process status: {}", e),
-                    &stderr_output
+                    &stderr_output,
                 ));
             }
         }
 
         // Send initialize request
-        let init_result = connection.send_request("initialize", Some(json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": {}
-            },
-            "clientInfo": {
-                "name": "plugable-chat",
-                "version": "0.1.0"
-            }
-        }))).await;
+        let init_result = connection
+            .send_request(
+                "initialize",
+                Some(json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {}
+                    },
+                    "clientInfo": {
+                        "name": "plugable-chat",
+                        "version": "0.1.0"
+                    }
+                })),
+            )
+            .await;
 
         match init_result {
             Ok(response) => {
-                println!("McpHostActor: Server {} initialized: {:?}", server_id, response);
-                
+                println!(
+                    "McpHostActor: Server {} initialized: {:?}",
+                    server_id, response
+                );
+
                 // Send initialized notification
-                if let Err(e) = connection.send_notification("notifications/initialized", None).await {
-                    println!("McpHostActor: Warning: Failed to send initialized notification: {}", e);
+                if let Err(e) = connection
+                    .send_notification("notifications/initialized", None)
+                    .await
+                {
+                    println!(
+                        "McpHostActor: Warning: Failed to send initialized notification: {}",
+                        e
+                    );
                 }
             }
             Err(e) => {
-                println!("McpHostActor: Failed to initialize server {}: {}", server_id, e);
+                println!(
+                    "McpHostActor: Failed to initialize server {}: {}",
+                    server_id, e
+                );
                 let _ = connection.process.kill().await;
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let stderr_output = stderr_buffer.lock().await;
                 return Err(format_error_with_output(
                     format!("Failed to initialize MCP server: {}", e),
-                    &stderr_output
+                    &stderr_output,
                 ));
             }
         }
@@ -445,18 +514,36 @@ impl McpHostActor {
         match connection.send_request("tools/list", None).await {
             Ok(tools_response) => {
                 if let Some(tools_array) = tools_response.get("tools").and_then(|t| t.as_array()) {
-                    connection.tools = tools_array.iter()
+                    connection.tools = tools_array
+                        .iter()
                         .filter_map(|t| serde_json::from_value(t.clone()).ok())
                         .collect();
-                    let mode = if connection.config.defer_tools { "DEFERRED" } else { "ACTIVE" };
-                    println!("McpHostActor: Server {} has {} tools [{}]", server_id, connection.tools.len(), mode);
+                    let mode = if connection.config.defer_tools {
+                        "DEFERRED"
+                    } else {
+                        "ACTIVE"
+                    };
+                    println!(
+                        "McpHostActor: Server {} has {} tools [{}]",
+                        server_id,
+                        connection.tools.len(),
+                        mode
+                    );
                     for tool in &connection.tools {
-                        println!("McpHostActor:   - {} [{}]: {}", tool.name, mode, tool.description.as_deref().unwrap_or("(no description)"));
+                        println!(
+                            "McpHostActor:   - {} [{}]: {}",
+                            tool.name,
+                            mode,
+                            tool.description.as_deref().unwrap_or("(no description)")
+                        );
                     }
                 }
             }
             Err(e) => {
-                println!("McpHostActor: Warning: Failed to fetch tools for {}: {}", server_id, e);
+                println!(
+                    "McpHostActor: Warning: Failed to fetch tools for {}: {}",
+                    server_id, e
+                );
             }
         }
 
@@ -472,10 +559,12 @@ impl McpHostActor {
 
     async fn disconnect_server(&self, server_id: &str) -> Result<(), String> {
         let mut connections = self.connections.write().await;
-        
+
         if let Some(mut conn) = connections.remove(server_id) {
             println!("McpHostActor: Disconnecting server: {}", server_id);
-            conn.process.kill().await
+            conn.process
+                .kill()
+                .await
                 .map_err(|e| format!("Failed to kill process: {}", e))?;
             Ok(())
         } else {
@@ -485,7 +574,7 @@ impl McpHostActor {
 
     async fn list_tools(&self, server_id: &str) -> Result<Vec<McpTool>, String> {
         let connections = self.connections.read().await;
-        
+
         if let Some(conn) = connections.get(server_id) {
             Ok(conn.tools.clone())
         } else {
@@ -493,34 +582,46 @@ impl McpHostActor {
         }
     }
 
-    async fn execute_tool(&self, server_id: &str, tool_name: &str, arguments: Value) -> Result<McpToolResult, String> {
+    async fn execute_tool(
+        &self,
+        server_id: &str,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<McpToolResult, String> {
         // Log the input
         println!("\n╔══════════════════════════════════════════════════════════════");
         println!("║ MCP TOOL CALL INPUT");
         println!("╠══════════════════════════════════════════════════════════════");
         println!("║ Server:    {}", server_id);
         println!("║ Tool:      {}", tool_name);
-        println!("║ Arguments: {}", serde_json::to_string_pretty(&arguments).unwrap_or_else(|_| arguments.to_string()));
+        println!(
+            "║ Arguments: {}",
+            serde_json::to_string_pretty(&arguments).unwrap_or_else(|_| arguments.to_string())
+        );
         println!("╚══════════════════════════════════════════════════════════════\n");
-        
+
         let mut connections = self.connections.write().await;
-        let connection = connections.get_mut(server_id)
-            .ok_or_else(|| {
-                println!("║ ERROR: Server {} not connected", server_id);
-                format!("Server {} not connected", server_id)
-            })?;
-        
-        let result = connection.send_request("tools/call", Some(json!({
-            "name": tool_name,
-            "arguments": arguments
-        }))).await;
+        let connection = connections.get_mut(server_id).ok_or_else(|| {
+            println!("║ ERROR: Server {} not connected", server_id);
+            format!("Server {} not connected", server_id)
+        })?;
+
+        let result = connection
+            .send_request(
+                "tools/call",
+                Some(json!({
+                    "name": tool_name,
+                    "arguments": arguments
+                })),
+            )
+            .await;
 
         match result {
             Ok(raw_result) => {
                 // Parse the result
                 let tool_result: McpToolResult = serde_json::from_value(raw_result.clone())
                     .map_err(|e| format!("Failed to parse tool result: {}", e))?;
-                
+
                 // Log the output
                 println!("\n╔══════════════════════════════════════════════════════════════");
                 println!("║ MCP TOOL CALL OUTPUT");
@@ -538,11 +639,15 @@ impl McpHostActor {
                     }
                     if let Some(data) = &content.data {
                         let preview: String = data.chars().take(200).collect();
-                        println!("║   [Binary data: {} bytes, preview: {}...]", data.len(), preview);
+                        println!(
+                            "║   [Binary data: {} bytes, preview: {}...]",
+                            data.len(),
+                            preview
+                        );
                     }
                 }
                 println!("╚══════════════════════════════════════════════════════════════\n");
-                
+
                 Ok(tool_result)
             }
             Err(e) => {
@@ -554,7 +659,7 @@ impl McpHostActor {
                 println!("║ Tool:   {}", tool_name);
                 println!("║ Error:  {}", e);
                 println!("╚══════════════════════════════════════════════════════════════\n");
-                
+
                 Err(e)
             }
         }
@@ -562,22 +667,35 @@ impl McpHostActor {
 
     async fn get_all_tool_descriptions(&self) -> Vec<(String, Vec<McpTool>)> {
         let connections = self.connections.read().await;
-        
-        let result: Vec<_> = connections.iter()
+
+        let result: Vec<_> = connections
+            .iter()
             .filter(|(_, conn)| conn.config.enabled)
             .map(|(id, conn)| (id.clone(), conn.tools.clone()))
             .collect();
-        
-        println!("McpHostActor: get_all_tool_descriptions returning {} servers", result.len());
+
+        println!(
+            "McpHostActor: get_all_tool_descriptions returning {} servers",
+            result.len()
+        );
         for (id, tools) in &result {
             if let Some(conn) = connections.get(id) {
-                let mode = if conn.config.defer_tools { "DEFERRED" } else { "ACTIVE" };
-                println!("McpHostActor:   {} has {} tools [{}]", id, tools.len(), mode);
+                let mode = if conn.config.defer_tools {
+                    "DEFERRED"
+                } else {
+                    "ACTIVE"
+                };
+                println!(
+                    "McpHostActor:   {} has {} tools [{}]",
+                    id,
+                    tools.len(),
+                    mode
+                );
             } else {
                 println!("McpHostActor:   {} has {} tools", id, tools.len());
             }
         }
-        
+
         result
     }
 
@@ -585,97 +703,129 @@ impl McpHostActor {
         let connections = self.connections.read().await;
         connections.contains_key(server_id)
     }
-    
+
     /// Sync enabled servers - connect enabled ones that aren't connected, disconnect disabled ones
-    async fn sync_enabled_servers(&self, configs: Vec<McpServerConfig>) -> Vec<(String, Result<(), String>)> {
+    async fn sync_enabled_servers(
+        &self,
+        configs: Vec<McpServerConfig>,
+    ) -> Vec<(String, Result<(), String>)> {
         let mut results = Vec::new();
-        
+
         // Get currently connected server IDs
         let connected_ids: Vec<String> = {
             let connections = self.connections.read().await;
             connections.keys().cloned().collect()
         };
-        
-        println!("McpHostActor: Syncing {} configs, {} currently connected", configs.len(), connected_ids.len());
-        
+
+        println!(
+            "McpHostActor: Syncing {} configs, {} currently connected",
+            configs.len(),
+            connected_ids.len()
+        );
+
         // Connect enabled servers that aren't connected
         for config in &configs {
             if config.enabled && !connected_ids.contains(&config.id) {
-                println!("McpHostActor: Auto-connecting enabled server: {} ({})", config.name, config.id);
+                println!(
+                    "McpHostActor: Auto-connecting enabled server: {} ({})",
+                    config.name, config.id
+                );
                 let result = self.connect_server(config.clone()).await;
                 results.push((config.id.clone(), result));
             }
         }
-        
+
         // Disconnect servers that are no longer enabled
-        let enabled_ids: Vec<&str> = configs.iter()
+        let enabled_ids: Vec<&str> = configs
+            .iter()
             .filter(|c| c.enabled)
             .map(|c| c.id.as_str())
             .collect();
-        
+
         for connected_id in &connected_ids {
             if !enabled_ids.contains(&connected_id.as_str()) {
-                println!("McpHostActor: Disconnecting disabled server: {}", connected_id);
+                println!(
+                    "McpHostActor: Disconnecting disabled server: {}",
+                    connected_id
+                );
                 let result = self.disconnect_server(connected_id).await;
                 results.push((connected_id.clone(), result));
             }
         }
-        
+
         // Log summary
         let connected_count = {
             let connections = self.connections.read().await;
             connections.len()
         };
-        println!("McpHostActor: Sync complete - {} servers now connected", connected_count);
-        
+        println!(
+            "McpHostActor: Sync complete - {} servers now connected",
+            connected_count
+        );
+
         results
     }
-    
+
     /// Test a server config by connecting, getting tools, then cleaning up
     /// This does NOT store the connection - it's purely for testing
     async fn test_server_config(&self, config: McpServerConfig) -> Result<Vec<McpTool>, String> {
-        println!("McpHostActor: Testing server config: {} ({})", config.name, config.id);
-        
+        println!(
+            "McpHostActor: Testing server config: {} ({})",
+            config.name, config.id
+        );
+
         match &config.transport {
-            Transport::Stdio => {
-                self.test_stdio_server_config(config).await
-            }
-            Transport::Sse { url } => {
-                Err(format!("SSE transport not yet implemented for URL: {}", url))
-            }
+            Transport::Stdio => self.test_stdio_server_config(config).await,
+            Transport::Sse { url } => Err(format!(
+                "SSE transport not yet implemented for URL: {}",
+                url
+            )),
         }
     }
-    
+
     /// Test a stdio server config - spawns process, initializes, gets tools, then cleans up
     /// Captures stdout/stderr and includes them in error messages for debugging
-    async fn test_stdio_server_config(&self, config: McpServerConfig) -> Result<Vec<McpTool>, String> {
-        let command = config.command.clone()
+    async fn test_stdio_server_config(
+        &self,
+        config: McpServerConfig,
+    ) -> Result<Vec<McpTool>, String> {
+        let command = config
+            .command
+            .clone()
             .ok_or_else(|| "No command specified for stdio transport".to_string())?;
 
-        println!("McpHostActor: Test - Spawning process: {} {:?}", command, config.args);
+        println!(
+            "McpHostActor: Test - Spawning process: {} {:?}",
+            command, config.args
+        );
 
         let mut cmd = Command::new(&command);
         cmd.args(&config.args);
-        
+
         // Set environment variables
         for (key, value) in &config.env {
             cmd.env(key, value);
         }
-        
+
         // Set up stdio pipes
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        
+
         // Kill process on drop
         cmd.kill_on_drop(true);
 
-        let mut child = cmd.spawn()
+        let mut child = cmd
+            .spawn()
             .map_err(|e| format!("Failed to spawn MCP server process '{}': {}", command, e))?;
 
-        let stdin = child.stdin.take()
+        let stdin = child
+            .stdin
+            .take()
             .ok_or_else(|| "Failed to open stdin".to_string())?;
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| "Failed to open stdout".to_string())?;
         let stderr = child.stderr.take();
 
@@ -683,7 +833,7 @@ impl McpHostActor {
         let stderr_buffer = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
         let stderr_buffer_clone = stderr_buffer.clone();
         let server_id_clone = config.id.clone();
-        
+
         if let Some(stderr) = stderr {
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
@@ -701,7 +851,7 @@ impl McpHostActor {
         }
 
         let stdout_lines = BufReader::new(stdout).lines();
-        
+
         // Create temporary connection
         let mut connection = McpServerConnection {
             config: config.clone(),
@@ -719,7 +869,7 @@ impl McpHostActor {
             Duration::from_millis(500)
         };
         tokio::time::sleep(startup_delay).await;
-        
+
         // Helper to format error with captured output
         let format_error_with_output = |base_error: String, stderr_buf: &[String]| -> String {
             let mut error = base_error;
@@ -729,7 +879,7 @@ impl McpHostActor {
             }
             error
         };
-        
+
         // Check if process is still running
         match connection.process.try_wait() {
             Ok(Some(status)) => {
@@ -737,8 +887,11 @@ impl McpHostActor {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 let stderr_output = stderr_buffer.lock().await;
                 return Err(format_error_with_output(
-                    format!("Server process exited before initialization with status: {}", status),
-                    &stderr_output
+                    format!(
+                        "Server process exited before initialization with status: {}",
+                        status
+                    ),
+                    &stderr_output,
                 ));
             }
             Ok(None) => {
@@ -749,27 +902,34 @@ impl McpHostActor {
                 let stderr_output = stderr_buffer.lock().await;
                 return Err(format_error_with_output(
                     format!("Could not check process status: {}", e),
-                    &stderr_output
+                    &stderr_output,
                 ));
             }
         }
 
         // Send initialize request
-        let init_result = connection.send_request("initialize", Some(json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": {}
-            },
-            "clientInfo": {
-                "name": "plugable-chat-test",
-                "version": "0.1.0"
-            }
-        }))).await;
+        let init_result = connection
+            .send_request(
+                "initialize",
+                Some(json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {}
+                    },
+                    "clientInfo": {
+                        "name": "plugable-chat-test",
+                        "version": "0.1.0"
+                    }
+                })),
+            )
+            .await;
 
         match init_result {
             Ok(_response) => {
                 // Send initialized notification
-                let _ = connection.send_notification("notifications/initialized", None).await;
+                let _ = connection
+                    .send_notification("notifications/initialized", None)
+                    .await;
             }
             Err(e) => {
                 let _ = connection.process.kill().await;
@@ -778,7 +938,7 @@ impl McpHostActor {
                 let stderr_output = stderr_buffer.lock().await;
                 return Err(format_error_with_output(
                     format!("Failed to initialize MCP server: {}", e),
-                    &stderr_output
+                    &stderr_output,
                 ));
             }
         }
@@ -787,7 +947,8 @@ impl McpHostActor {
         let tools: Vec<McpTool> = match connection.send_request("tools/list", None).await {
             Ok(tools_response) => {
                 if let Some(tools_array) = tools_response.get("tools").and_then(|t| t.as_array()) {
-                    tools_array.iter()
+                    tools_array
+                        .iter()
                         .filter_map(|t| serde_json::from_value::<McpTool>(t.clone()).ok())
                         .collect()
                 } else {
@@ -800,20 +961,33 @@ impl McpHostActor {
                 let stderr_output = stderr_buffer.lock().await;
                 return Err(format_error_with_output(
                     format!("Failed to fetch tools: {}", e),
-                    &stderr_output
+                    &stderr_output,
                 ));
             }
         };
 
         // Clean up - kill the process
         let _ = connection.process.kill().await;
-        
-        let mode = if config.defer_tools { "DEFERRED" } else { "ACTIVE" };
-        println!("McpHostActor: Test complete - found {} tools [{}]", tools.len(), mode);
+
+        let mode = if config.defer_tools {
+            "DEFERRED"
+        } else {
+            "ACTIVE"
+        };
+        println!(
+            "McpHostActor: Test complete - found {} tools [{}]",
+            tools.len(),
+            mode
+        );
         for tool in &tools {
-            println!("McpHostActor: Test -   {} [{}]: {}", tool.name, mode, tool.description.as_deref().unwrap_or("(no description)"));
+            println!(
+                "McpHostActor: Test -   {} [{}]: {}",
+                tool.name,
+                mode,
+                tool.description.as_deref().unwrap_or("(no description)")
+            );
         }
-        
+
         Ok(tools)
     }
 }

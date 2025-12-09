@@ -1,7 +1,7 @@
-use std::process::Command;
 use std::env;
-use std::path::Path;
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -27,7 +27,7 @@ fn main() {
             .current_dir(project_root)
             .status()
             .expect("Failed to execute npm install");
-        
+
         if !status.success() {
             panic!("Frontend dependency installation failed");
         }
@@ -45,7 +45,7 @@ fn find_rustup() -> Option<std::path::PathBuf> {
     if Command::new("rustup").arg("--version").output().is_ok() {
         return Some("rustup".into());
     }
-    
+
     // Try common locations
     if let Ok(home) = env::var("HOME") {
         let cargo_bin = Path::new(&home).join(".cargo/bin/rustup");
@@ -53,14 +53,14 @@ fn find_rustup() -> Option<std::path::PathBuf> {
             return Some(cargo_bin);
         }
     }
-    
+
     if let Ok(home) = env::var("USERPROFILE") {
         let cargo_bin = Path::new(&home).join(".cargo/bin/rustup.exe");
         if cargo_bin.exists() {
             return Some(cargo_bin);
         }
     }
-    
+
     None
 }
 
@@ -70,7 +70,7 @@ fn is_wasm_target_installed(rustup: &Path) -> bool {
     let output = Command::new(rustup)
         .args(["target", "list", "--installed"])
         .output();
-    
+
     match output {
         Ok(out) => {
             let installed = String::from_utf8_lossy(&out.stdout);
@@ -86,11 +86,11 @@ fn is_wasm_target_installed(rustup: &Path) -> bool {
 /// Try to install the wasm32-wasip1 target via rustup
 fn try_install_wasm_target(rustup: &Path) -> bool {
     println!("cargo:warning=Installing wasm32-wasip1 target via rustup...");
-    
+
     let status = Command::new(rustup)
         .args(["target", "add", "wasm32-wasip1"])
         .status();
-    
+
     match status {
         Ok(s) if s.success() => {
             println!("cargo:warning=Successfully installed wasm32-wasip1 target");
@@ -112,18 +112,18 @@ fn try_install_wasm_target(rustup: &Path) -> bool {
 fn build_python_sandbox_wasm(manifest_path: &Path) {
     let wasm_dir = manifest_path.join("wasm");
     let wasm_output = wasm_dir.join("python-sandbox.wasm");
-    
+
     // Create wasm directory if it doesn't exist
     if !wasm_dir.exists() {
         fs::create_dir_all(&wasm_dir).ok();
     }
-    
+
     // Check if WASM output already exists and is recent
     if wasm_output.exists() {
         println!("cargo:warning=python-sandbox.wasm found, skipping rebuild");
         return;
     }
-    
+
     // Find rustup and check/install the wasm32-wasip1 target
     let rustup = match find_rustup() {
         Some(path) => path,
@@ -136,7 +136,7 @@ fn build_python_sandbox_wasm(manifest_path: &Path) {
             return;
         }
     };
-    
+
     // Check if wasm32-wasip1 target is installed, try to install if not
     if !is_wasm_target_installed(&rustup) {
         println!("cargo:warning=wasm32-wasip1 target not found, attempting to install...");
@@ -150,20 +150,22 @@ fn build_python_sandbox_wasm(manifest_path: &Path) {
             return;
         }
     }
-    
+
     // Try to build for wasm32-wasip1 target
     println!("cargo:warning=Building python-sandbox for WASM...");
-    
+
     let status = Command::new("cargo")
         .args([
             "build",
-            "-p", "python-sandbox",
-            "--target", "wasm32-wasip1",
+            "-p",
+            "python-sandbox",
+            "--target",
+            "wasm32-wasip1",
             "--release",
         ])
         .current_dir(manifest_path)
         .status();
-    
+
     match status {
         Ok(s) if s.success() => {
             // Copy the built WASM to the wasm directory
@@ -172,7 +174,7 @@ fn build_python_sandbox_wasm(manifest_path: &Path) {
                 .join("wasm32-wasip1")
                 .join("release")
                 .join("python_sandbox.wasm");
-            
+
             if built_wasm.exists() {
                 if let Err(e) = fs::copy(&built_wasm, &wasm_output) {
                     println!("cargo:warning=Failed to copy WASM: {}", e);

@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
-use std::sync::Arc;
 use fastembed::TextEmbedding;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::oneshot;
 
 // ============ Tool Schema with Code Mode Extensions ============
 
@@ -41,7 +41,7 @@ impl ToolSchema {
             embedding: None,
         }
     }
-    
+
     /// Check if this tool can be called by a given caller type
     pub fn can_be_called_by(&self, caller_type: Option<&str>) -> bool {
         match (&self.allowed_callers, caller_type) {
@@ -50,12 +50,12 @@ impl ToolSchema {
             (Some(_), None) => false, // Has restrictions but no caller type specified
         }
     }
-    
+
     /// Check if this is the python_execution built-in tool
     pub fn is_python_execution(&self) -> bool {
         self.tool_type.as_deref() == Some("python_execution_20251206")
     }
-    
+
     /// Check if this is the tool_search built-in tool
     pub fn is_tool_search(&self) -> bool {
         self.tool_type.as_deref() == Some("tool_search_20251201")
@@ -153,7 +153,7 @@ impl From<ParsedToolCall> for ExtendedToolCall {
         } else {
             ToolCallKind::Normal
         };
-        
+
         Self {
             server: call.server,
             tool: call.tool,
@@ -215,38 +215,48 @@ pub struct ToolLoopFinishedEvent {
 /// Also handles unclosed tool calls where the model forgets </tool_call>
 pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
-    
+
     // Match <tool_call> with optional whitespace (use (?s) for DOTALL mode to match newlines)
     let re = Regex::new(r"(?s)<tool_call>\s*(.*?)\s*</tool_call>").unwrap();
-    
-    println!("[parse_tool_calls] Searching for tool calls in content ({} chars)", content.len());
-    
+
+    println!(
+        "[parse_tool_calls] Searching for tool calls in content ({} chars)",
+        content.len()
+    );
+
     // Also check for unclosed tool calls (model forgot to add </tool_call>)
     let unclosed_re = Regex::new(r"(?s)<tool_call>\s*(\{.*)");
-    
+
     for cap in re.captures_iter(content) {
         if let Some(json_match) = cap.get(1) {
             let json_str = json_match.as_str().trim();
             println!("[parse_tool_calls] Found tool_call block: {}", json_str);
-            
+
             // Try to fix common JSON issues from LLMs
             let fixed_json = fix_llm_json(json_str);
-            
+
             match serde_json::from_str::<serde_json::Value>(&fixed_json) {
                 Ok(parsed) => {
-                    let raw = cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
-                    
+                    let raw = cap
+                        .get(0)
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_default();
+
                     // Try Format 1: {"server": "...", "tool": "...", "arguments": {...}}
                     if let (Some(server), Some(tool)) = (
                         parsed.get("server").and_then(|v| v.as_str()),
                         parsed.get("tool").and_then(|v| v.as_str()),
                     ) {
-                        let arguments = parsed.get("arguments")
+                        let arguments = parsed
+                            .get("arguments")
                             .cloned()
                             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                        
-                        println!("[parse_tool_calls] Parsed format 1: server={}, tool={}", server, tool);
-                        
+
+                        println!(
+                            "[parse_tool_calls] Parsed format 1: server={}, tool={}",
+                            server, tool
+                        );
+
                         calls.push(ParsedToolCall {
                             server: server.to_string(),
                             tool: tool.to_string(),
@@ -255,47 +265,54 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                         });
                         continue;
                     }
-                    
-                // Try Format 2: {"name": "...", "arguments": {...}}
-                // This is what Qwen outputs when using native tool calling
-                if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
-                    let arguments = parsed.get("arguments")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                    
-                    // Parse server___tool format if present
-                    let (server, tool) = if let Some((s, t)) = parse_combined_tool_name(name) {
-                        println!("[parse_tool_calls] Parsed format 2 (native with server): server={}, tool={}", s, t);
-                        (s, t)
+
+                    // Try Format 2: {"name": "...", "arguments": {...}}
+                    // This is what Qwen outputs when using native tool calling
+                    if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
+                        let arguments = parsed
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                        // Parse server___tool format if present
+                        let (server, tool) = if let Some((s, t)) = parse_combined_tool_name(name) {
+                            println!("[parse_tool_calls] Parsed format 2 (native with server): server={}, tool={}", s, t);
+                            (s, t)
+                        } else {
+                            // name doesn't contain ___, use "unknown" server - will be resolved later
+                            println!("[parse_tool_calls] Parsed format 2 (no server prefix): tool={}, will resolve server later", name);
+                            ("unknown".to_string(), name.to_string())
+                        };
+
+                        calls.push(ParsedToolCall {
+                            server,
+                            tool,
+                            arguments,
+                            raw,
+                        });
                     } else {
-                        // name doesn't contain ___, use "unknown" server - will be resolved later
-                        println!("[parse_tool_calls] Parsed format 2 (no server prefix): tool={}, will resolve server later", name);
-                        ("unknown".to_string(), name.to_string())
-                    };
-                    
-                    calls.push(ParsedToolCall {
-                        server,
-                        tool,
-                        arguments,
-                        raw,
-                    });
-                } else {
-                    println!("[parse_tool_calls] WARNING: JSON parsed but no 'server'/'tool' or 'name' field found");
-                }
+                        println!("[parse_tool_calls] WARNING: JSON parsed but no 'server'/'tool' or 'name' field found");
+                    }
                 }
                 Err(e) => {
                     println!("[parse_tool_calls] ERROR: Failed to parse JSON: {}", e);
                     println!("[parse_tool_calls] Original JSON: {}", json_str);
                     println!("[parse_tool_calls] Fixed JSON: {}", fixed_json);
-                    
+
                     // Try fallback parser for malformed JSON (e.g., unescaped quotes in SQL)
                     if let Some((server, tool, arguments)) = parse_tool_call_fallback(json_str) {
-                        println!("[parse_tool_calls] Fallback succeeded: server={}, tool={}", server, tool);
+                        println!(
+                            "[parse_tool_calls] Fallback succeeded: server={}, tool={}",
+                            server, tool
+                        );
                         calls.push(ParsedToolCall {
                             server,
                             tool,
                             arguments,
-                            raw: cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+                            raw: cap
+                                .get(0)
+                                .map(|m| m.as_str().to_string())
+                                .unwrap_or_default(),
                         });
                     } else {
                         println!("[parse_tool_calls] Fallback also failed");
@@ -304,37 +321,47 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
             }
         }
     }
-    
+
     // If no tool calls found, check for unclosed tool calls
     if calls.is_empty() {
         if let Ok(unclosed_re) = unclosed_re {
             if let Some(cap) = unclosed_re.captures(content) {
                 if let Some(json_match) = cap.get(1) {
                     let json_str = json_match.as_str().trim();
-                    println!("[parse_tool_calls] Found UNCLOSED tool call, attempting to parse: {}...", 
-                        if json_str.len() > 100 { &json_str[..100] } else { json_str });
-                    
+                    println!(
+                        "[parse_tool_calls] Found UNCLOSED tool call, attempting to parse: {}...",
+                        if json_str.len() > 100 {
+                            &json_str[..100]
+                        } else {
+                            json_str
+                        }
+                    );
+
                     // Try to extract balanced JSON from the unclosed content
                     if let Some(balanced_json) = extract_balanced_braces(json_str) {
-                        println!("[parse_tool_calls] Extracted balanced JSON from unclosed tool call");
-                        
+                        println!(
+                            "[parse_tool_calls] Extracted balanced JSON from unclosed tool call"
+                        );
+
                         let fixed_json = fix_llm_json(&balanced_json);
-                        
+
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&fixed_json) {
                             // Try to extract tool call from parsed JSON
                             if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
-                                let arguments = parsed.get("arguments")
+                                let arguments = parsed
+                                    .get("arguments")
                                     .cloned()
                                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                                
-                                let (server, tool) = if let Some((s, t)) = parse_combined_tool_name(name) {
-                                    (s, t)
-                                } else {
-                                    ("unknown".to_string(), name.to_string())
-                                };
-                                
+
+                                let (server, tool) =
+                                    if let Some((s, t)) = parse_combined_tool_name(name) {
+                                        (s, t)
+                                    } else {
+                                        ("unknown".to_string(), name.to_string())
+                                    };
+
                                 println!("[parse_tool_calls] Successfully parsed unclosed tool call: server={}, tool={}", server, tool);
-                                
+
                                 calls.push(ParsedToolCall {
                                     server,
                                     tool,
@@ -344,7 +371,9 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                             }
                         } else {
                             // Try fallback parser
-                            if let Some((server, tool, arguments)) = parse_tool_call_fallback(&balanced_json) {
+                            if let Some((server, tool, arguments)) =
+                                parse_tool_call_fallback(&balanced_json)
+                            {
                                 println!("[parse_tool_calls] Fallback parsed unclosed tool call: server={}, tool={}", server, tool);
                                 calls.push(ParsedToolCall {
                                     server,
@@ -359,7 +388,7 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
             }
         }
     }
-    
+
     println!("[parse_tool_calls] Found {} tool call(s)", calls.len());
     calls
 }
@@ -368,12 +397,12 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
 /// - Trailing commas: {"key": "value",} -> {"key": "value"}
 fn fix_llm_json(json_str: &str) -> String {
     let mut result = json_str.to_string();
-    
+
     // Remove trailing commas before } or ]
     // Pattern: ,\s*} or ,\s*]
     let trailing_comma_re = Regex::new(r",(\s*[}\]])").unwrap();
     result = trailing_comma_re.replace_all(&result, "$1").to_string();
-    
+
     result
 }
 
@@ -381,28 +410,35 @@ fn fix_llm_json(json_str: &str) -> String {
 /// Extracts name and arguments using regex patterns
 fn parse_tool_call_fallback(json_str: &str) -> Option<(String, String, serde_json::Value)> {
     println!("[parse_tool_call_fallback] Attempting fallback parsing...");
-    
+
     // Try to extract "name": "value"
     let name_re = Regex::new(r#""name"\s*:\s*"([^"]+)""#).unwrap();
-    let name = name_re.captures(json_str)
+    let name = name_re
+        .captures(json_str)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())?;
-    
+
     println!("[parse_tool_call_fallback] Extracted name: {}", name);
-    
+
     // Try to extract "arguments": {...} or "arguments": "..."
     // Find the start of arguments
     let args_start_re = Regex::new(r#""arguments"\s*:\s*"#).unwrap();
     if let Some(args_match) = args_start_re.find(json_str) {
         let after_args_key = &json_str[args_match.end()..];
-        
+
         // Check if arguments is an object or a string
         if after_args_key.starts_with('{') {
             // It's an object - find matching closing brace
             if let Some(args_json) = extract_balanced_braces(after_args_key) {
-                println!("[parse_tool_call_fallback] Extracted arguments object: {}", 
-                    if args_json.len() > 100 { format!("{}...", &args_json[..100]) } else { args_json.clone() });
-                
+                println!(
+                    "[parse_tool_call_fallback] Extracted arguments object: {}",
+                    if args_json.len() > 100 {
+                        format!("{}...", &args_json[..100])
+                    } else {
+                        args_json.clone()
+                    }
+                );
+
                 // Try to parse the arguments, but if it fails, wrap the whole thing as a string
                 let arguments = match serde_json::from_str::<serde_json::Value>(&args_json) {
                     Ok(v) => v,
@@ -412,7 +448,7 @@ fn parse_tool_call_fallback(json_str: &str) -> Option<(String, String, serde_jso
                         extract_arguments_permissive(&args_json)
                     }
                 };
-                
+
                 // Parse server and tool from name
                 if let Some((server, tool)) = parse_combined_tool_name(&name) {
                     return Some((server, tool, arguments));
@@ -424,7 +460,7 @@ fn parse_tool_call_fallback(json_str: &str) -> Option<(String, String, serde_jso
             }
         }
     }
-    
+
     println!("[parse_tool_call_fallback] Failed to extract arguments");
     None
 }
@@ -434,17 +470,17 @@ fn extract_balanced_braces(s: &str) -> Option<String> {
     if !s.starts_with('{') {
         return None;
     }
-    
+
     let mut depth = 0;
     let mut in_string = false;
     let mut escape_next = false;
-    
+
     for (i, c) in s.char_indices() {
         if escape_next {
             escape_next = false;
             continue;
         }
-        
+
         match c {
             '\\' if in_string => escape_next = true,
             '"' => in_string = !in_string,
@@ -458,17 +494,17 @@ fn extract_balanced_braces(s: &str) -> Option<String> {
             _ => {}
         }
     }
-    
+
     None
 }
 
 /// Extract arguments permissively, handling malformed JSON
 fn extract_arguments_permissive(args_str: &str) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    
+
     // Try to find key-value pairs like "key": value or "key": "value"
     // This is a simplified extraction that handles common cases
-    
+
     // Pattern for "key": "value" (string value)
     let string_kv_re = Regex::new(r#""([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)""#).unwrap();
     for cap in string_kv_re.captures_iter(args_str) {
@@ -477,11 +513,14 @@ fn extract_arguments_permissive(args_str: &str) -> serde_json::Value {
             let value_str = value.as_str();
             // Skip if this looks like it's part of nested content
             if key_str != "name" && key_str != "arguments" {
-                map.insert(key_str.to_string(), serde_json::Value::String(value_str.to_string()));
+                map.insert(
+                    key_str.to_string(),
+                    serde_json::Value::String(value_str.to_string()),
+                );
             }
         }
     }
-    
+
     // Pattern for "key": true/false/null/number
     let literal_kv_re = Regex::new(r#""([^"]+)"\s*:\s*(true|false|null|-?\d+(?:\.\d+)?)"#).unwrap();
     for cap in literal_kv_re.captures_iter(args_str) {
@@ -509,7 +548,7 @@ fn extract_arguments_permissive(args_str: &str) -> serde_json::Value {
             }
         }
     }
-    
+
     // Special handling for "sql" field - extract everything between "sql": " and the last "
     // This handles cases where SQL contains unescaped quotes
     if !map.contains_key("sql") {
@@ -519,13 +558,22 @@ fn extract_arguments_permissive(args_str: &str) -> serde_json::Value {
             // Find the last quote before }} or end of string
             if let Some(end_pos) = after_sql.rfind('"') {
                 let sql_content = &after_sql[..end_pos];
-                println!("[extract_arguments_permissive] Extracted SQL: {}", 
-                    if sql_content.len() > 100 { format!("{}...", &sql_content[..100]) } else { sql_content.to_string() });
-                map.insert("sql".to_string(), serde_json::Value::String(sql_content.to_string()));
+                println!(
+                    "[extract_arguments_permissive] Extracted SQL: {}",
+                    if sql_content.len() > 100 {
+                        format!("{}...", &sql_content[..100])
+                    } else {
+                        sql_content.to_string()
+                    }
+                );
+                map.insert(
+                    "sql".to_string(),
+                    serde_json::Value::String(sql_content.to_string()),
+                );
             }
         }
     }
-    
+
     serde_json::Value::Object(map)
 }
 
@@ -567,7 +615,7 @@ impl ModelFamily {
     /// Detect model family from model ID string
     pub fn from_model_id(model_id: &str) -> Self {
         let lower = model_id.to_lowercase();
-        
+
         // Qwen, Mistral, LLaMA-Instruct models use OpenAI-compatible tool calling
         if lower.contains("qwen") || lower.contains("mistral") || lower.contains("llama") {
             ModelFamily::GptOss
@@ -671,7 +719,7 @@ impl OpenAITool {
             },
         }
     }
-    
+
     /// Create from a built-in ToolSchema (python_execution, tool_search)
     /// Built-in tools don't need server_id prefix since they're handled internally
     pub fn from_tool_schema(tool: &ToolSchema) -> Self {
@@ -685,7 +733,6 @@ impl OpenAITool {
         }
     }
 }
-
 
 /// A chunk of text from a document with its source information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -729,12 +776,12 @@ pub enum VectorMsg {
         messages: String, // JSON string of full history
         // The actor will handle embedding generation internally via Foundry
         // or receive a pre-computed vector.
-        vector: Option<Vec<f32>>, 
+        vector: Option<Vec<f32>>,
         pinned: bool,
     },
     /// Search for similar chats
     SearchHistory {
-        query_vector: Vec<f32>, 
+        query_vector: Vec<f32>,
         limit: usize,
         // Channel to send results back to the caller (Orchestrator)
         respond_to: oneshot::Sender<Vec<ChatSummary>>,
@@ -841,8 +888,8 @@ pub enum McpMsg {
     },
 }
 
-use crate::settings::McpServerConfig;
 use crate::actors::mcp_host_actor::{McpTool, McpToolResult};
+use crate::settings::McpServerConfig;
 
 /// Messages for the MCP Host Actor
 pub enum McpHostMsg {
@@ -904,9 +951,7 @@ pub enum RagMsg {
         respond_to: oneshot::Sender<Vec<RagChunk>>,
     },
     /// Clear all indexed documents (reset context)
-    ClearContext {
-        respond_to: oneshot::Sender<bool>,
-    },
+    ClearContext { respond_to: oneshot::Sender<bool> },
     /// Remove a specific file from the RAG index
     RemoveFile {
         source_file: String,

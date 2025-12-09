@@ -1,5 +1,5 @@
 //! Tool Format Adapters
-//! 
+//!
 //! Handles model-specific tool calling formats for different model families.
 //! Each model family may have different ways of:
 //! - Receiving tool definitions in the request
@@ -12,10 +12,10 @@
 //! - Gemini: function_call in response, "function" role for results  
 //! - Granite: <function_call>XML</function_call> format
 
-use serde_json::{json, Value};
-use regex::Regex;
-use crate::protocol::{ModelFamily, ToolFormat, OpenAITool, ParsedToolCall};
+use crate::protocol::{ModelFamily, OpenAITool, ParsedToolCall, ToolFormat};
 use crate::settings::{ToolCallFormatConfig, ToolCallFormatName};
+use regex::Regex;
+use serde_json::{json, Value};
 
 /// Format tools for a specific model family's expected input format.
 /// Most models accept OpenAI-compatible tool definitions, but some need adjustments.
@@ -31,19 +31,22 @@ pub fn format_tools_for_model(
         }
         ToolFormat::Gemini => {
             // Gemini uses a slightly different format with function_declarations
-            let function_declarations: Vec<Value> = tools.iter().map(|t| {
-                let mut decl = json!({
-                    "name": t.function.name,
-                });
-                if let Some(desc) = &t.function.description {
-                    decl["description"] = json!(desc);
-                }
-                if let Some(params) = &t.function.parameters {
-                    decl["parameters"] = params.clone();
-                }
-                decl
-            }).collect();
-            
+            let function_declarations: Vec<Value> = tools
+                .iter()
+                .map(|t| {
+                    let mut decl = json!({
+                        "name": t.function.name,
+                    });
+                    if let Some(desc) = &t.function.description {
+                        decl["description"] = json!(desc);
+                    }
+                    if let Some(params) = &t.function.parameters {
+                        decl["parameters"] = params.clone();
+                    }
+                    decl
+                })
+                .collect();
+
             json!([{
                 "function_declarations": function_declarations
             }])
@@ -100,14 +103,18 @@ pub fn parse_tool_calls_for_model(
             }
         }
         ToolFormat::Gemini => {
-            if formats.is_enabled(ToolCallFormatName::Hermes) || formats.is_enabled(ToolCallFormatName::PureJson) {
+            if formats.is_enabled(ToolCallFormatName::Hermes)
+                || formats.is_enabled(ToolCallFormatName::PureJson)
+            {
                 parse_gemini_tool_calls(response)
             } else {
                 Vec::new()
             }
         }
         ToolFormat::Granite | ToolFormat::TextBased => {
-            if formats.is_enabled(ToolCallFormatName::Mistral) || formats.is_enabled(ToolCallFormatName::Hermes) {
+            if formats.is_enabled(ToolCallFormatName::Mistral)
+                || formats.is_enabled(ToolCallFormatName::Hermes)
+            {
                 parse_granite_tool_calls(response)
             } else {
                 Vec::new()
@@ -125,28 +132,31 @@ pub fn parse_tool_calls_for_model(
 /// - `<function=name>{...}</function>` format (Braintrust Llama recipe)
 pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
-    
+
     // Match <tool_call> with optional whitespace
     let re = Regex::new(r"(?s)<tool_call>\s*(.*?)\s*</tool_call>").unwrap();
-    
+
     // Also check for unclosed tool calls (streaming)
     let unclosed_re = Regex::new(r"(?s)<tool_call>\s*(\{.*)").ok();
-    
+
     for cap in re.captures_iter(content) {
         if let Some(json_match) = cap.get(1) {
             let json_str = json_match.as_str().trim();
             let fixed_json = fix_llm_json(json_str);
-            
+
             if let Some(parsed) = parse_flexible_json(&fixed_json) {
-                let raw = cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
-                
+                let raw = cap
+                    .get(0)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default();
+
                 // Try Format 1: {"server": "...", "tool": "...", "arguments": {...}}
                 if let (Some(server), Some(tool)) = (
                     parsed.get("server").and_then(|v| v.as_str()),
                     parsed.get("tool").and_then(|v| v.as_str()),
                 ) {
                     let arguments = extract_arguments(&parsed);
-                    
+
                     calls.push(ParsedToolCall {
                         server: server.to_string(),
                         tool: tool.to_string(),
@@ -155,11 +165,11 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                     });
                     continue;
                 }
-                
+
                 // Try Format 2: {"name": "...", "arguments": {...}} or {"tool_name": "...", "tool_args": {...}}
                 if let Some(name) = extract_tool_name(&parsed) {
                     let arguments = extract_arguments(&parsed);
-                    
+
                     let (server, tool) = parse_combined_tool_name(&name);
                     calls.push(ParsedToolCall {
                         server,
@@ -171,21 +181,21 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
             }
         }
     }
-    
+
     // If no tool calls found, check for unclosed tool calls (streaming)
     if calls.is_empty() {
         if let Some(unclosed_re) = unclosed_re {
             if let Some(cap) = unclosed_re.captures(content) {
                 if let Some(json_match) = cap.get(1) {
                     let json_str = json_match.as_str().trim();
-                    
+
                     if let Some(balanced_json) = extract_balanced_braces(json_str) {
                         let fixed_json = fix_llm_json(&balanced_json);
-                        
+
                         if let Some(parsed) = parse_flexible_json(&fixed_json) {
                             if let Some(name) = extract_tool_name(&parsed) {
                                 let arguments = extract_arguments(&parsed);
-                                
+
                                 let (server, tool) = parse_combined_tool_name(&name);
                                 calls.push(ParsedToolCall {
                                     server,
@@ -200,23 +210,23 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
             }
         }
     }
-    
+
     // Fallback: tag-based formats like [TOOL_CALLS] ... (Mistral-style)
     if calls.is_empty() {
         calls = parse_tagged_tool_calls(content);
     }
-    
+
     // Fallback: check for Braintrust-style <function=name>{...}</function> format (Llama)
     if calls.is_empty() {
         calls = parse_braintrust_function_calls(content);
     }
-    
+
     // Fallback: check for markdown code blocks containing JSON tool calls
     // This handles smaller models that output ```json {...} ``` instead of <tool_call>
     if calls.is_empty() {
         calls = parse_markdown_json_tool_calls(content);
     }
-    
+
     calls
 }
 
@@ -224,28 +234,34 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
 /// This format is used by some Llama 3.x recipes
 fn parse_braintrust_function_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
-    
+
     // Match <function=name>{...}</function>
     let re = Regex::new(r"(?s)<function=([^>]+)>\s*(\{.*?\})\s*</function>").ok();
-    
+
     if let Some(re) = re {
         for cap in re.captures_iter(content) {
             let function_name = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
             let json_str = cap.get(2).map(|m| m.as_str().trim()).unwrap_or("{}");
-            
+
             if function_name.is_empty() {
                 continue;
             }
-            
+
             let fixed_json = fix_llm_json(json_str);
             let arguments = serde_json::from_str::<Value>(&fixed_json)
                 .unwrap_or(Value::Object(serde_json::Map::new()));
-            
-            let raw = cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
+
+            let raw = cap
+                .get(0)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
             let (server, tool) = parse_combined_tool_name(function_name);
-            
-            println!("[parse_braintrust_function_calls] Found tool call: {} (server: {})", tool, server);
-            
+
+            println!(
+                "[parse_braintrust_function_calls] Found tool call: {} (server: {})",
+                tool, server
+            );
+
             calls.push(ParsedToolCall {
                 server,
                 tool,
@@ -254,7 +270,7 @@ fn parse_braintrust_function_calls(content: &str) -> Vec<ParsedToolCall> {
             });
         }
     }
-    
+
     calls
 }
 
@@ -268,25 +284,28 @@ fn parse_braintrust_function_calls(content: &str) -> Vec<ParsedToolCall> {
 /// This is a fallback for smaller models that ignore <tool_call> format instructions.
 fn parse_markdown_json_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
-    
+
     // Match markdown code blocks: ```json ... ``` or ``` ... ```
     // (?s) for DOTALL mode, optional language specifier (json, etc.)
     let code_block_re = Regex::new(r"(?s)```(?:json)?\s*\n?(.*?)\n?```").unwrap();
-    
+
     for cap in code_block_re.captures_iter(content) {
         if let Some(json_match) = cap.get(1) {
             let json_str = json_match.as_str().trim();
-            
+
             // Skip if it doesn't look like a tool call JSON (must have name-like field)
             if !json_str.contains("\"name\"") && !json_str.contains("\"tool_name\"") {
                 continue;
             }
-            
+
             let fixed_json = fix_llm_json(json_str);
-            
+
             if let Ok(parsed) = serde_json::from_str::<Value>(&fixed_json) {
-                let raw = cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
-                
+                let raw = cap
+                    .get(0)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default();
+
                 // Check if this looks like a tool call (has name-like field)
                 if let Some(name) = extract_tool_name(&parsed) {
                     // Skip if it doesn't look like a tool name (e.g., just random JSON)
@@ -294,12 +313,12 @@ fn parse_markdown_json_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                     if name.len() > 100 || name.contains('\n') {
                         continue;
                     }
-                    
+
                     let arguments = extract_arguments(&parsed);
                     let (server, tool) = parse_combined_tool_name(&name);
-                    
+
                     println!("[parse_markdown_json_tool_calls] Found tool call in code block: {} (server: {})", tool, server);
-                    
+
                     calls.push(ParsedToolCall {
                         server,
                         tool,
@@ -310,7 +329,7 @@ fn parse_markdown_json_tool_calls(content: &str) -> Vec<ParsedToolCall> {
             }
         }
     }
-    
+
     calls
 }
 
@@ -331,7 +350,10 @@ fn parse_pythonic_tool_calls(content: &str) -> Vec<ParsedToolCall> {
             server,
             tool,
             arguments,
-            raw: cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+            raw: cap
+                .get(0)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default(),
         });
     }
 
@@ -398,7 +420,9 @@ fn parse_pythonic_arguments(arg_str: &str) -> Value {
 
 fn parse_pythonic_value(raw: &str) -> Value {
     let trimmed = raw.trim();
-    if trimmed.starts_with('"') && trimmed.ends_with('"') || trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+    if trimmed.starts_with('"') && trimmed.ends_with('"')
+        || trimmed.starts_with('\'') && trimmed.ends_with('\'')
+    {
         return Value::String(trimmed.trim_matches(|c| c == '"' || c == '\'').to_string());
     }
 
@@ -526,40 +550,44 @@ fn parse_tagged_tool_calls(content: &str) -> Vec<ParsedToolCall> {
 /// Parse Gemini function_call format
 pub fn parse_gemini_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
-    
+
     // Gemini may output function calls in JSON format
     // Try to find function_call patterns
     let re = Regex::new(r#"(?s)"function_call"\s*:\s*\{(.*?)\}"#).ok();
-    
+
     if let Some(re) = re {
         for cap in re.captures_iter(content) {
             if let Some(inner) = cap.get(1) {
                 let json_str = format!("{{{}}}", inner.as_str());
                 if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
                     if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
-                        let arguments = parsed.get("args")
+                        let arguments = parsed
+                            .get("args")
                             .or_else(|| parsed.get("arguments"))
                             .cloned()
                             .unwrap_or(Value::Object(serde_json::Map::new()));
-                        
+
                         let (server, tool) = parse_combined_tool_name(name);
                         calls.push(ParsedToolCall {
                             server,
                             tool,
                             arguments,
-                            raw: cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+                            raw: cap
+                                .get(0)
+                                .map(|m| m.as_str().to_string())
+                                .unwrap_or_default(),
                         });
                     }
                 }
             }
         }
     }
-    
+
     // Fallback to Hermes parser if no Gemini-style calls found
     if calls.is_empty() {
         return parse_hermes_tool_calls(content);
     }
-    
+
     calls
 }
 
@@ -567,15 +595,15 @@ pub fn parse_gemini_tool_calls(content: &str) -> Vec<ParsedToolCall> {
 /// Handles JSON inside <function_call> tags with flexible field names
 pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
-    
+
     // Granite/Gemma uses <function_call> tags
     let re = Regex::new(r"(?s)<function_call>\s*(.*?)\s*</function_call>").ok();
-    
+
     if let Some(re) = re {
         for cap in re.captures_iter(content) {
             if let Some(inner) = cap.get(1) {
                 let call_content = inner.as_str().trim();
-                
+
                 // Try parsing as JSON first
                 let fixed_json = fix_llm_json(call_content);
                 if let Ok(parsed) = serde_json::from_str::<Value>(&fixed_json) {
@@ -583,33 +611,40 @@ pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                     if let Some(name) = extract_tool_name(&parsed) {
                         let arguments = extract_arguments(&parsed);
                         let (server, tool) = parse_combined_tool_name(&name);
-                        
+
                         calls.push(ParsedToolCall {
                             server,
                             tool,
                             arguments,
-                            raw: cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+                            raw: cap
+                                .get(0)
+                                .map(|m| m.as_str().to_string())
+                                .unwrap_or_default(),
                         });
                     }
                 } else {
                     // Try XML-style parsing: <name>...</name><arguments>...</arguments>
                     let name_re = Regex::new(r"<name>(.*?)</name>").ok();
                     let args_re = Regex::new(r"(?s)<arguments>(.*?)</arguments>").ok();
-                    
+
                     if let (Some(name_re), Some(args_re)) = (name_re, args_re) {
                         if let Some(name_cap) = name_re.captures(call_content) {
                             let name = name_cap.get(1).map(|m| m.as_str()).unwrap_or("");
-                            let arguments = args_re.captures(call_content)
+                            let arguments = args_re
+                                .captures(call_content)
                                 .and_then(|c| c.get(1))
                                 .and_then(|m| serde_json::from_str::<Value>(m.as_str()).ok())
                                 .unwrap_or(Value::Object(serde_json::Map::new()));
-                            
+
                             let (server, tool) = parse_combined_tool_name(name);
                             calls.push(ParsedToolCall {
                                 server,
                                 tool,
                                 arguments,
-                                raw: cap.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+                                raw: cap
+                                    .get(0)
+                                    .map(|m| m.as_str().to_string())
+                                    .unwrap_or_default(),
                             });
                         }
                     }
@@ -617,12 +652,12 @@ pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
             }
         }
     }
-    
+
     // Fallback to Hermes parser if no Granite-style calls found
     if calls.is_empty() {
         return parse_hermes_tool_calls(content);
     }
-    
+
     calls
 }
 
@@ -660,10 +695,7 @@ pub fn format_tool_result(
                     result, ERROR_GUIDANCE
                 )
             } else {
-                format!(
-                    "<tool_response>\n{}\n</tool_response>",
-                    result
-                )
+                format!("<tool_response>\n{}\n</tool_response>", result)
             }
         }
         ToolFormat::Gemini => {
@@ -693,10 +725,7 @@ pub fn format_tool_result(
                     result, ERROR_GUIDANCE
                 )
             } else {
-                format!(
-                    "<function_response>\n{}\n</function_response>",
-                    result
-                )
+                format!("<function_response>\n{}\n</function_response>", result)
             }
         }
         ToolFormat::TextBased => {
@@ -794,17 +823,17 @@ fn extract_balanced_braces(s: &str) -> Option<String> {
     if !s.starts_with('{') {
         return None;
     }
-    
+
     let mut depth = 0;
     let mut in_string = false;
     let mut escape_next = false;
-    
+
     for (i, c) in s.char_indices() {
         if escape_next {
             escape_next = false;
             continue;
         }
-        
+
         match c {
             '\\' if in_string => escape_next = true,
             '"' => in_string = !in_string,
@@ -818,7 +847,7 @@ fn extract_balanced_braces(s: &str) -> Option<String> {
             _ => {}
         }
     }
-    
+
     None
 }
 
@@ -848,7 +877,7 @@ pub struct DetectedPythonCode {
 /// Returns all detected Python code blocks in order of appearance.
 pub fn detect_python_code(content: &str) -> Vec<DetectedPythonCode> {
     let mut results = Vec::new();
-    
+
     // Pattern 1: Explicit ```python or ```py code blocks
     let python_fence_re = Regex::new(r"(?s)```(python|py)\s*\n(.*?)```").unwrap();
     for cap in python_fence_re.captures_iter(content) {
@@ -861,7 +890,7 @@ pub fn detect_python_code(content: &str) -> Vec<DetectedPythonCode> {
             });
         }
     }
-    
+
     // Pattern 2: Generic code blocks that look like Python
     // Only match if not already matched as explicit python
     let generic_fence_re = Regex::new(r"(?s)```\s*\n(.*?)```").unwrap();
@@ -869,12 +898,12 @@ pub fn detect_python_code(content: &str) -> Vec<DetectedPythonCode> {
         if let (Some(code_match), Some(full_match)) = (cap.get(1), cap.get(0)) {
             let code = code_match.as_str();
             let start = full_match.start();
-            
+
             // Skip if this position is already covered by an explicit python block
             if results.iter().any(|r| start >= r.start && start < r.end) {
                 continue;
             }
-            
+
             // Check if it looks like Python
             if looks_like_python(code) {
                 results.push(DetectedPythonCode {
@@ -886,22 +915,22 @@ pub fn detect_python_code(content: &str) -> Vec<DetectedPythonCode> {
             }
         }
     }
-    
+
     // Pattern 3: Indented code after trigger phrases
     // Look for patterns like "Here's the code:\n    import ..."
     let trigger_re = Regex::new(r"(?im)(?:here(?:'s| is) (?:the )?(?:python )?code|execute this|run this):\s*\n((?:[ \t]+[^\n]+\n?)+)").unwrap();
     for cap in trigger_re.captures_iter(content) {
         if let (Some(code_match), Some(full_match)) = (cap.get(1), cap.get(0)) {
             let start = full_match.start();
-            
+
             // Skip if already matched
             if results.iter().any(|r| start >= r.start && start < r.end) {
                 continue;
             }
-            
+
             // Dedent the code
             let code = dedent_code(code_match.as_str());
-            
+
             if looks_like_python(&code) {
                 results.push(DetectedPythonCode {
                     code,
@@ -912,22 +941,22 @@ pub fn detect_python_code(content: &str) -> Vec<DetectedPythonCode> {
             }
         }
     }
-    
+
     // Sort by position
     results.sort_by_key(|r| r.start);
-    
+
     results
 }
 
 /// Check if code looks like Python based on common patterns
 fn looks_like_python(code: &str) -> bool {
     let code_trimmed = code.trim();
-    
+
     // Empty code doesn't look like Python
     if code_trimmed.is_empty() {
         return false;
     }
-    
+
     // Strong indicators of Python
     let python_patterns = [
         // Import statements
@@ -953,7 +982,7 @@ fn looks_like_python(code: &str) -> bool {
         // Python comments
         r"(?m)^\s*#[^!]",
     ];
-    
+
     for pattern in &python_patterns {
         if let Ok(re) = Regex::new(pattern) {
             if re.is_match(code_trimmed) {
@@ -961,22 +990,22 @@ fn looks_like_python(code: &str) -> bool {
             }
         }
     }
-    
+
     // Negative indicators (not Python)
     let not_python_patterns = [
-        r"(?m)^\s*function\s+\w+\s*\(",   // JavaScript
-        r"(?m)^\s*const\s+\w+\s*=",        // JavaScript/TypeScript
-        r"(?m)^\s*let\s+\w+\s*=",          // JavaScript/TypeScript
-        r"(?m)^\s*var\s+\w+\s*=",          // JavaScript
-        r"(?m)^\s*fn\s+\w+\s*\(",          // Rust
-        r"(?m)^\s*impl\s+",                // Rust
-        r"(?m)^\s*pub\s+fn\s+",            // Rust
-        r"(?m)^\s*int\s+main\s*\(",        // C/C++
-        r"(?m)^\s*#include\s*<",           // C/C++
-        r"\$\w+",                          // Shell/PHP variables
-        r"(?m)^\s*SELECT\s+",              // SQL
+        r"(?m)^\s*function\s+\w+\s*\(", // JavaScript
+        r"(?m)^\s*const\s+\w+\s*=",     // JavaScript/TypeScript
+        r"(?m)^\s*let\s+\w+\s*=",       // JavaScript/TypeScript
+        r"(?m)^\s*var\s+\w+\s*=",       // JavaScript
+        r"(?m)^\s*fn\s+\w+\s*\(",       // Rust
+        r"(?m)^\s*impl\s+",             // Rust
+        r"(?m)^\s*pub\s+fn\s+",         // Rust
+        r"(?m)^\s*int\s+main\s*\(",     // C/C++
+        r"(?m)^\s*#include\s*<",        // C/C++
+        r"\$\w+",                       // Shell/PHP variables
+        r"(?m)^\s*SELECT\s+",           // SQL
     ];
-    
+
     for pattern in &not_python_patterns {
         if let Ok(re) = Regex::new(pattern) {
             if re.is_match(code_trimmed) {
@@ -984,32 +1013,37 @@ fn looks_like_python(code: &str) -> bool {
             }
         }
     }
-    
+
     // If it has assignment with = and no strong Python indicators,
     // check for simple calculations (which might be Python)
     if code_trimmed.contains("=") && code_trimmed.lines().count() <= 5 {
         // Simple variable assignment like "result = 2 + 2"
-        if Regex::new(r"^\w+\s*=\s*.+$").map(|re| re.is_match(code_trimmed)).unwrap_or(false) {
+        if Regex::new(r"^\w+\s*=\s*.+$")
+            .map(|re| re.is_match(code_trimmed))
+            .unwrap_or(false)
+        {
             return true;
         }
     }
-    
+
     false
 }
 
 /// Remove common leading indentation from code
 fn dedent_code(code: &str) -> String {
     let lines: Vec<&str> = code.lines().collect();
-    
+
     // Find minimum indentation (ignoring empty lines)
-    let min_indent = lines.iter()
+    let min_indent = lines
+        .iter()
         .filter(|line| !line.trim().is_empty())
         .map(|line| line.len() - line.trim_start().len())
         .min()
         .unwrap_or(0);
-    
+
     // Remove that indentation from all lines
-    lines.iter()
+    lines
+        .iter()
         .map(|line| {
             if line.len() >= min_indent {
                 &line[min_indent..]
@@ -1024,24 +1058,24 @@ fn dedent_code(code: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_parse_hermes_tool_call() {
         let content = r#"I'll use the tool.
 <tool_call>{"name": "server1___get_data", "arguments": {"id": 123}}</tool_call>
 Done."#;
-        
+
         let calls = parse_hermes_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].server, "server1");
         assert_eq!(calls[0].tool, "get_data");
     }
-    
+
     #[test]
     fn test_parse_granite_tool_call() {
         let content = r#"Let me call the function.
 <function_call>{"name": "mcp___read_file", "arguments": {"path": "/tmp/test.txt"}}</function_call>"#;
-        
+
         let calls = parse_granite_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].server, "mcp");
@@ -1068,7 +1102,10 @@ Done."#;
         let calls = parse_hermes_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool, "calc");
-        assert_eq!(calls[0].arguments.get("a").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            calls[0].arguments.get("a").and_then(|v| v.as_i64()),
+            Some(1)
+        );
     }
 
     #[test]
@@ -1083,7 +1120,7 @@ Done."#;
             Some("hi")
         );
     }
-    
+
     #[test]
     fn test_format_tool_result_hermes() {
         let call = ParsedToolCall {
@@ -1092,14 +1129,14 @@ Done."#;
             arguments: json!({}),
             raw: "".to_string(),
         };
-        
+
         let result = format_tool_result(&call, "Hello, World!", false, ToolFormat::Hermes);
         assert!(result.contains("<tool_response>"));
         assert!(result.contains("Hello, World!"));
         // Success case should NOT include error guidance
         assert!(!result.contains("TOOL ERROR"));
     }
-    
+
     #[test]
     fn test_format_tool_result_error_includes_guidance() {
         let call = ParsedToolCall {
@@ -1108,27 +1145,39 @@ Done."#;
             arguments: json!({}),
             raw: "".to_string(),
         };
-        
+
         let error_msg = "MCP error -32602: provided parameters were invalid: parameter is required";
-        
+
         // Test all formats include error guidance
-        for format in [ToolFormat::OpenAI, ToolFormat::Hermes, ToolFormat::Granite, ToolFormat::TextBased, ToolFormat::Gemini] {
+        for format in [
+            ToolFormat::OpenAI,
+            ToolFormat::Hermes,
+            ToolFormat::Granite,
+            ToolFormat::TextBased,
+            ToolFormat::Gemini,
+        ] {
             let result = format_tool_result(&call, error_msg, true, format);
             assert!(
                 result.contains("TOOL ERROR"),
-                "Format {:?} should include error guidance, got: {}", format, result
+                "Format {:?} should include error guidance, got: {}",
+                format,
+                result
             );
             assert!(
                 result.contains("MCP error -32602"),
-                "Format {:?} should include error code, got: {}", format, result
+                "Format {:?} should include error code, got: {}",
+                format,
+                result
             );
             assert!(
                 result.contains("retry with corrected parameters"),
-                "Format {:?} should tell model to retry with corrected parameters, got: {}", format, result
+                "Format {:?} should tell model to retry with corrected parameters, got: {}",
+                format,
+                result
             );
         }
     }
-    
+
     #[test]
     fn test_parse_markdown_json_tool_call() {
         // Test case based on actual model output
@@ -1143,14 +1192,19 @@ Done."#;
 }
 ```
 "#;
-        
+
         let calls = parse_hermes_tool_calls(content);
-        assert_eq!(calls.len(), 1, "Expected 1 tool call, found {}", calls.len());
+        assert_eq!(
+            calls.len(),
+            1,
+            "Expected 1 tool call, found {}",
+            calls.len()
+        );
         assert_eq!(calls[0].server, "unknown");
         assert_eq!(calls[0].tool, "python_execution");
         assert!(calls[0].arguments.get("code").is_some());
     }
-    
+
     #[test]
     fn test_parse_markdown_json_without_language() {
         // Test markdown code block without language specifier
@@ -1159,12 +1213,12 @@ Done."#;
 {"name": "test_tool", "arguments": {"param": "value"}}
 ```
 "#;
-        
+
         let calls = parse_hermes_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool, "test_tool");
     }
-    
+
     #[test]
     fn test_parse_markdown_json_ignores_non_tool_json() {
         // Should not match JSON without "name" field
@@ -1177,57 +1231,76 @@ Done."#;
 }
 ```
 "#;
-        
+
         let calls = parse_hermes_tool_calls(content);
-        assert_eq!(calls.len(), 0, "Should not parse non-tool JSON as tool calls");
+        assert_eq!(
+            calls.len(),
+            0,
+            "Should not parse non-tool JSON as tool calls"
+        );
     }
-    
+
     #[test]
     fn test_parse_gpt_oss_legacy_format() {
         // GPT-OSS uses tool_name and tool_args instead of name and arguments
         let content = r#"<tool_call>{"tool_name": "get_weather", "tool_args": {"location": "Seattle"}}</tool_call>"#;
-        
+
         let calls = parse_hermes_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool, "get_weather");
-        assert_eq!(calls[0].arguments.get("location").and_then(|v| v.as_str()), Some("Seattle"));
+        assert_eq!(
+            calls[0].arguments.get("location").and_then(|v| v.as_str()),
+            Some("Seattle")
+        );
     }
-    
+
     #[test]
     fn test_parse_llama_parameters_format() {
         // Llama uses "parameters" instead of "arguments"
         let content = r#"<tool_call>{"name": "search", "parameters": {"query": "rust programming"}}</tool_call>"#;
-        
+
         let calls = parse_hermes_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool, "search");
-        assert_eq!(calls[0].arguments.get("query").and_then(|v| v.as_str()), Some("rust programming"));
+        assert_eq!(
+            calls[0].arguments.get("query").and_then(|v| v.as_str()),
+            Some("rust programming")
+        );
     }
-    
+
     #[test]
     fn test_parse_braintrust_function_format() {
         // Braintrust Llama recipe uses <function=name>{...}</function>
         let content = r#"Let me check the weather.
 <function=get_weather>{"location": "Tokyo, JP"}</function>
 The weather is..."#;
-        
+
         let calls = parse_hermes_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool, "get_weather");
-        assert_eq!(calls[0].arguments.get("location").and_then(|v| v.as_str()), Some("Tokyo, JP"));
+        assert_eq!(
+            calls[0].arguments.get("location").and_then(|v| v.as_str()),
+            Some("Tokyo, JP")
+        );
     }
-    
+
     #[test]
     fn test_parse_gemma_function_call_format() {
         // Gemma uses <function_call> tags like Granite
         let content = r#"<function_call>{"name": "get_product_details", "arguments": {"product_id": "1234"}}</function_call>"#;
-        
+
         let calls = parse_granite_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool, "get_product_details");
-        assert_eq!(calls[0].arguments.get("product_id").and_then(|v| v.as_str()), Some("1234"));
+        assert_eq!(
+            calls[0]
+                .arguments
+                .get("product_id")
+                .and_then(|v| v.as_str()),
+            Some("1234")
+        );
     }
-    
+
     #[test]
     fn test_parse_markdown_gpt_oss_format() {
         // GPT-OSS in markdown code block with legacy field names
@@ -1236,11 +1309,17 @@ The weather is..."#;
 {"tool_name": "calculate", "tool_args": {"expression": "2 + 2"}}
 ```
 "#;
-        
+
         let calls = parse_hermes_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool, "calculate");
-        assert_eq!(calls[0].arguments.get("expression").and_then(|v| v.as_str()), Some("2 + 2"));
+        assert_eq!(
+            calls[0]
+                .arguments
+                .get("expression")
+                .and_then(|v| v.as_str()),
+            Some("2 + 2")
+        );
     }
 
     #[test]
@@ -1322,9 +1401,9 @@ The weather is..."#;
         assert_eq!(calls[0].server, "builtin");
         assert_eq!(calls[0].tool, "echo");
     }
-    
+
     // ============ Python Code Detection Tests ============
-    
+
     #[test]
     fn test_detect_explicit_python_block() {
         let content = r#"Let me calculate that for you.
@@ -1336,24 +1415,24 @@ print(f"Result: {result}")
 ```
 
 The answer is 4."#;
-        
+
         let detected = detect_python_code(content);
         assert_eq!(detected.len(), 1);
         assert!(detected[0].explicit_python);
         assert!(detected[0].code.contains("import math"));
         assert!(detected[0].code.contains("print"));
     }
-    
+
     #[test]
     fn test_detect_py_short_form() {
         let content = "```py\nprint('hello')\n```";
-        
+
         let detected = detect_python_code(content);
         assert_eq!(detected.len(), 1);
         assert!(detected[0].explicit_python);
         assert_eq!(detected[0].code, "print('hello')");
     }
-    
+
     #[test]
     fn test_detect_implicit_python_block() {
         let content = r#"Here's a simple calculation:
@@ -1364,22 +1443,22 @@ print(result)
 ```
 
 Done."#;
-        
+
         let detected = detect_python_code(content);
         assert_eq!(detected.len(), 1);
         assert!(!detected[0].explicit_python);
         assert!(detected[0].code.contains("print"));
     }
-    
+
     #[test]
     fn test_detect_import_statement() {
         let content = "```\nimport json\ndata = json.loads('{}')\n```";
-        
+
         let detected = detect_python_code(content);
         assert_eq!(detected.len(), 1);
         assert!(detected[0].code.contains("import json"));
     }
-    
+
     #[test]
     fn test_detect_multiple_blocks() {
         let content = r#"First:
@@ -1391,13 +1470,13 @@ Second:
 ```python
 y = 2
 ```"#;
-        
+
         let detected = detect_python_code(content);
         assert_eq!(detected.len(), 2);
         assert!(detected[0].code.contains("x = 1"));
         assert!(detected[1].code.contains("y = 2"));
     }
-    
+
     #[test]
     fn test_ignore_non_python_blocks() {
         let content = r#"JavaScript code:
@@ -1415,11 +1494,11 @@ fn main() {
 }
 ```
 "#;
-        
+
         let detected = detect_python_code(content);
         assert_eq!(detected.len(), 0);
     }
-    
+
     #[test]
     fn test_looks_like_python_patterns() {
         // Should detect as Python
@@ -1430,7 +1509,7 @@ fn main() {
         assert!(looks_like_python("for x in range(10):\n    print(x)"));
         assert!(looks_like_python("[x*2 for x in range(5)]"));
         assert!(looks_like_python("f'Hello {name}'"));
-        
+
         // Should NOT detect as Python
         assert!(!looks_like_python("const x = 1;"));
         assert!(!looks_like_python("function foo() {}"));
@@ -1438,7 +1517,7 @@ fn main() {
         assert!(!looks_like_python("SELECT * FROM users"));
         assert!(!looks_like_python("$variable = 'value';"));
     }
-    
+
     #[test]
     fn test_dedent_code() {
         let code = "    x = 1\n    y = 2\n    print(x + y)";
@@ -1446,4 +1525,3 @@ fn main() {
         assert_eq!(dedented, "x = 1\ny = 2\nprint(x + y)");
     }
 }
-

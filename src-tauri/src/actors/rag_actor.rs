@@ -1,11 +1,11 @@
-use crate::protocol::{RagMsg, RagChunk, RagIndexResult, RemoveFileResult};
-use tokio::sync::mpsc;
+use crate::protocol::{RagChunk, RagIndexResult, RagMsg, RemoveFileResult};
+use fastembed::TextEmbedding;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use sha2::{Sha256, Digest};
-use fastembed::TextEmbedding;
+use tokio::sync::mpsc;
 
 /// Chunk size in characters
 const CHUNK_SIZE: usize = 500;
@@ -82,15 +82,23 @@ impl RagActor {
 
     pub async fn run(mut self) {
         println!("RagActor: Starting...");
-        
+
         while let Some(msg) = self.rx.recv().await {
             match msg {
-                RagMsg::ProcessDocuments { paths, embedding_model, respond_to } => {
+                RagMsg::ProcessDocuments {
+                    paths,
+                    embedding_model,
+                    respond_to,
+                } => {
                     println!("RagActor: Processing {} paths", paths.len());
                     let result = self.process_documents(paths, embedding_model).await;
                     let _ = respond_to.send(result);
                 }
-                RagMsg::SearchDocuments { query_vector, limit, respond_to } => {
+                RagMsg::SearchDocuments {
+                    query_vector,
+                    limit,
+                    respond_to,
+                } => {
                     println!("RagActor: Searching with limit {}", limit);
                     let results = self.search_documents(query_vector, limit);
                     let _ = respond_to.send(results);
@@ -102,12 +110,19 @@ impl RagActor {
                     self.cache_dir = None;
                     let _ = respond_to.send(true);
                 }
-                RagMsg::RemoveFile { source_file, respond_to } => {
+                RagMsg::RemoveFile {
+                    source_file,
+                    respond_to,
+                } => {
                     println!("RagActor: Removing file from index: {}", source_file);
                     let original_count = self.chunks.len();
                     self.chunks.retain(|chunk| chunk.source_file != source_file);
                     let chunks_removed = original_count - self.chunks.len();
-                    println!("RagActor: Removed {} chunks, {} remaining", chunks_removed, self.chunks.len());
+                    println!(
+                        "RagActor: Removed {} chunks, {} remaining",
+                        chunks_removed,
+                        self.chunks.len()
+                    );
                     let _ = respond_to.send(RemoveFileResult {
                         chunks_removed,
                         remaining_chunks: self.chunks.len(),
@@ -115,7 +130,8 @@ impl RagActor {
                 }
                 RagMsg::GetIndexedFiles { respond_to } => {
                     // Get unique source file names from all chunks
-                    let files: Vec<String> = self.chunks
+                    let files: Vec<String> = self
+                        .chunks
                         .iter()
                         .map(|chunk| chunk.source_file.clone())
                         .collect::<std::collections::HashSet<_>>()
@@ -126,7 +142,7 @@ impl RagActor {
                 }
             }
         }
-        
+
         println!("RagActor: Shutting down");
     }
 
@@ -155,14 +171,14 @@ impl RagActor {
             } else {
                 path.parent().unwrap_or(Path::new(".")).to_path_buf()
             };
-            
+
             // Create a hash of the source directory to create a unique cache subdirectory
             let source_hash = Self::compute_path_hash(&source_dir.to_string_lossy());
             let cache_base = std::env::temp_dir().join("plugable-chat-rag");
             self.cache_dir = Some(cache_base.join(&source_hash));
-            
+
             println!("RagActor: Cache directory: {:?}", self.cache_dir);
-            
+
             // Create cache directory if it doesn't exist
             if let Some(ref cache_dir) = self.cache_dir {
                 if let Err(e) = tokio::fs::create_dir_all(cache_dir).await {
@@ -188,11 +204,17 @@ impl RagActor {
             }
         }
 
-        println!("RagActor: Found {} files to process", files_to_process.len());
+        println!(
+            "RagActor: Found {} files to process",
+            files_to_process.len()
+        );
 
         // Process each file
         for file_path in files_to_process {
-            match self.process_single_file_with_stats(&file_path, &embedding_model).await {
+            match self
+                .process_single_file_with_stats(&file_path, &embedding_model)
+                .await
+            {
                 Ok(stats) => {
                     total_chunks += stats.chunks_added;
                     total_bytes += stats.bytes_processed;
@@ -223,26 +245,68 @@ impl RagActor {
         } else {
             0
         };
-        let memory_estimate_kb = (self.chunks.len() * (std::mem::size_of::<IndexedChunk>() + vector_dim * 4 + 500)) / 1024;
+        let memory_estimate_kb = (self.chunks.len()
+            * (std::mem::size_of::<IndexedChunk>() + vector_dim * 4 + 500))
+            / 1024;
 
         println!("\n┌──────────────────────────────────────────────────────────────┐");
         println!("│                  RAG INDEXING SUMMARY                        │");
         println!("├──────────────────────────────────────────────────────────────┤");
-        println!("│  Files processed:      {:>8}                              │", files_processed);
-        println!("│  Cache hits:           {:>8}                              │", cache_hits);
-        println!("│  Total chunks:         {:>8}                              │", total_chunks);
-        println!("│  Total bytes:          {:>8} ({:.2} KB)                   │", total_bytes, total_bytes as f64 / 1024.0);
-        println!("│  Total chars:          {:>8}                              │", total_chars);
-        println!("│  Avg chunk size:       {:>8} chars                        │", avg_chunk_chars);
-        println!("│  Vector dimension:     {:>8}                              │", vector_dim);
+        println!(
+            "│  Files processed:      {:>8}                              │",
+            files_processed
+        );
+        println!(
+            "│  Cache hits:           {:>8}                              │",
+            cache_hits
+        );
+        println!(
+            "│  Total chunks:         {:>8}                              │",
+            total_chunks
+        );
+        println!(
+            "│  Total bytes:          {:>8} ({:.2} KB)                   │",
+            total_bytes,
+            total_bytes as f64 / 1024.0
+        );
+        println!(
+            "│  Total chars:          {:>8}                              │",
+            total_chars
+        );
+        println!(
+            "│  Avg chunk size:       {:>8} chars                        │",
+            avg_chunk_chars
+        );
+        println!(
+            "│  Vector dimension:     {:>8}                              │",
+            vector_dim
+        );
         println!("├──────────────────────────────────────────────────────────────┤");
-        println!("│  Embedding time:       {:>8} ms                           │", embedding_time_ms);
-        println!("│  Total time:           {:>8} ms                           │", total_time.as_millis());
-        println!("│  Throughput:           {:>8.1} chunks/sec                  │", 
-            if total_time.as_secs_f64() > 0.0 { total_chunks as f64 / total_time.as_secs_f64() } else { 0.0 });
+        println!(
+            "│  Embedding time:       {:>8} ms                           │",
+            embedding_time_ms
+        );
+        println!(
+            "│  Total time:           {:>8} ms                           │",
+            total_time.as_millis()
+        );
+        println!(
+            "│  Throughput:           {:>8.1} chunks/sec                  │",
+            if total_time.as_secs_f64() > 0.0 {
+                total_chunks as f64 / total_time.as_secs_f64()
+            } else {
+                0.0
+            }
+        );
         println!("├──────────────────────────────────────────────────────────────┤");
-        println!("│  Total chunks in index:{:>8}                              │", self.chunks.len());
-        println!("│  Est. memory usage:    {:>8} KB                           │", memory_estimate_kb);
+        println!(
+            "│  Total chunks in index:{:>8}                              │",
+            self.chunks.len()
+        );
+        println!(
+            "│  Est. memory usage:    {:>8} KB                           │",
+            memory_estimate_kb
+        );
         println!("└──────────────────────────────────────────────────────────────┘\n");
 
         Ok(RagIndexResult {
@@ -254,21 +318,21 @@ impl RagActor {
 
     async fn collect_files_recursive(&self, dir: &Path) -> Result<Vec<PathBuf>, String> {
         let mut files = Vec::new();
-        
+
         let mut entries = tokio::fs::read_dir(dir)
             .await
             .map_err(|e| format!("Failed to read directory: {}", e))?;
-        
+
         while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
             let path = entry.path();
-            
+
             // Skip hidden files and directories (including .rag-cache)
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with('.') {
                     continue;
                 }
             }
-            
+
             if path.is_dir() {
                 if let Ok(mut sub_files) = Box::pin(self.collect_files_recursive(&path)).await {
                     files.append(&mut sub_files);
@@ -277,14 +341,16 @@ impl RagActor {
                 files.push(path);
             }
         }
-        
+
         Ok(files)
     }
 
     fn is_supported_file(&self, path: &Path) -> bool {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            matches!(ext.to_lowercase().as_str(), 
-                "txt" | "csv" | "tsv" | "md" | "json" | "pdf" | "docx")
+            matches!(
+                ext.to_lowercase().as_str(),
+                "txt" | "csv" | "tsv" | "md" | "json" | "pdf" | "docx"
+            )
         } else {
             // Also support files without extension if they look like text
             false
@@ -297,14 +363,15 @@ impl RagActor {
         embedding_model: &Arc<TextEmbedding>,
     ) -> Result<FileProcessingStats, String> {
         let path_str = file_path.to_string_lossy().to_string();
-        
+
         // Check if this is a binary file type (PDF, DOCX)
-        let ext = file_path.extension()
+        let ext = file_path
+            .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
         let is_binary = ext == "pdf" || ext == "docx";
-        
+
         // Read file content (as bytes for binary files, as string for text files)
         let (content, bytes_processed, content_hash) = if is_binary {
             // For binary files, read as bytes and hash the bytes
@@ -324,25 +391,38 @@ impl RagActor {
             let hash = self.compute_hash(&text);
             (text, bytes_len, hash)
         };
-        
+
         // Check if we have a valid cache (same hash AND not expired)
         if let Some(entry) = self.manifest.get(&path_str) {
             if entry.file_hash == content_hash && !Self::is_cache_expired(entry.generated_at) {
                 // Try to load cached embeddings from disk
                 if let Some(cached) = self.load_embeddings(&path_str).await {
-                    if cached.file_hash == content_hash && cached.chunks.len() == cached.embeddings.len() {
-                        println!("RagActor: Using cached embeddings for {:?} ({} chunks)", file_path, cached.chunks.len());
-                        
+                    if cached.file_hash == content_hash
+                        && cached.chunks.len() == cached.embeddings.len()
+                    {
+                        println!(
+                            "RagActor: Using cached embeddings for {:?} ({} chunks)",
+                            file_path,
+                            cached.chunks.len()
+                        );
+
                         // Reconstruct indexed chunks from cache
-                        let file_name = file_path.file_name()
+                        let file_name = file_path
+                            .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("unknown")
                             .to_string();
-                        
-                        let chars_processed: usize = cached.chunks.iter().map(|c| c.chars().count()).sum();
+
+                        let chars_processed: usize =
+                            cached.chunks.iter().map(|c| c.chars().count()).sum();
                         let chunk_count = cached.chunks.len();
-                        
-                        for (idx, (chunk_text, embedding)) in cached.chunks.into_iter().zip(cached.embeddings.into_iter()).enumerate() {
+
+                        for (idx, (chunk_text, embedding)) in cached
+                            .chunks
+                            .into_iter()
+                            .zip(cached.embeddings.into_iter())
+                            .enumerate()
+                        {
                             let chunk = IndexedChunk {
                                 id: format!("{}:{}", path_str, idx),
                                 content: chunk_text,
@@ -352,7 +432,7 @@ impl RagActor {
                             };
                             self.chunks.push(chunk);
                         }
-                        
+
                         return Ok(FileProcessingStats {
                             chunks_added: chunk_count,
                             bytes_processed,
@@ -363,18 +443,21 @@ impl RagActor {
                     }
                 }
             } else if entry.file_hash == content_hash {
-                println!("RagActor: Cache expired for {:?}, regenerating embeddings", file_path);
+                println!(
+                    "RagActor: Cache expired for {:?}, regenerating embeddings",
+                    file_path
+                );
             }
         }
-        
+
         // Parse content based on file type
         let text_content = self.extract_text(file_path, &content)?;
         let chars_processed = text_content.chars().count();
-        
+
         // Chunk the content
         let text_chunks = self.chunk_text(&text_content);
         let chunk_count = text_chunks.len();
-        
+
         if chunk_count == 0 {
             return Ok(FileProcessingStats {
                 chunks_added: 0,
@@ -384,35 +467,43 @@ impl RagActor {
                 was_cached: false,
             });
         }
-        
-        println!("RagActor: Generating embeddings for {:?} ({} chunks, {} bytes, {} chars)", 
-            file_path, chunk_count, bytes_processed, chars_processed);
-        
+
+        println!(
+            "RagActor: Generating embeddings for {:?} ({} chunks, {} bytes, {} chars)",
+            file_path, chunk_count, bytes_processed, chars_processed
+        );
+
         // Generate embeddings for all chunks
         let model = Arc::clone(embedding_model);
         let chunks_clone = text_chunks.clone();
-        
+
         let embed_start = Instant::now();
-        let embeddings = tokio::task::spawn_blocking(move || {
-            model.embed(chunks_clone, None)
-        })
-        .await
-        .map_err(|e| format!("Embedding task failed: {}", e))?
-        .map_err(|e| format!("Embedding generation failed: {}", e))?;
+        let embeddings = tokio::task::spawn_blocking(move || model.embed(chunks_clone, None))
+            .await
+            .map_err(|e| format!("Embedding task failed: {}", e))?
+            .map_err(|e| format!("Embedding generation failed: {}", e))?;
         let embedding_time_ms = embed_start.elapsed().as_millis();
-        
+
         // Save embeddings to disk cache
-        if let Err(e) = self.save_embeddings(&path_str, &content_hash, &text_chunks, &embeddings).await {
+        if let Err(e) = self
+            .save_embeddings(&path_str, &content_hash, &text_chunks, &embeddings)
+            .await
+        {
             println!("RagActor: Warning - failed to cache embeddings: {}", e);
         }
-        
+
         // Store indexed chunks
-        let file_name = file_path.file_name()
+        let file_name = file_path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
-        
-        for (idx, (chunk_text, embedding)) in text_chunks.into_iter().zip(embeddings.into_iter()).enumerate() {
+
+        for (idx, (chunk_text, embedding)) in text_chunks
+            .into_iter()
+            .zip(embeddings.into_iter())
+            .enumerate()
+        {
             let chunk = IndexedChunk {
                 id: format!("{}:{}", path_str, idx),
                 content: chunk_text,
@@ -422,14 +513,17 @@ impl RagActor {
             };
             self.chunks.push(chunk);
         }
-        
+
         // Update manifest with current timestamp
-        self.manifest.insert(path_str, ManifestEntry {
-            file_hash: content_hash,
-            chunk_count,
-            generated_at: Self::current_timestamp(),
-        });
-        
+        self.manifest.insert(
+            path_str,
+            ManifestEntry {
+                file_hash: content_hash,
+                chunk_count,
+                generated_at: Self::current_timestamp(),
+            },
+        );
+
         Ok(FileProcessingStats {
             chunks_added: chunk_count,
             bytes_processed,
@@ -440,11 +534,12 @@ impl RagActor {
     }
 
     fn extract_text(&self, file_path: &Path, content: &str) -> Result<String, String> {
-        let ext = file_path.extension()
+        let ext = file_path
+            .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        
+
         match ext.as_str() {
             "csv" => self.parse_csv(content, ','),
             "tsv" => self.parse_csv(content, '\t'),
@@ -457,26 +552,27 @@ impl RagActor {
 
     /// Extract text from a PDF file
     fn extract_pdf_text(&self, file_path: &Path) -> Result<String, String> {
-        pdf_extract::extract_text(file_path)
-            .map_err(|e| format!("PDF extraction failed: {}", e))
+        pdf_extract::extract_text(file_path).map_err(|e| format!("PDF extraction failed: {}", e))
     }
 
     /// Extract text from a DOCX file
     fn extract_docx_text(&self, file_path: &Path) -> Result<String, String> {
         use std::io::Read;
-        
-        let file = std::fs::File::open(file_path)
-            .map_err(|e| format!("Failed to open DOCX: {}", e))?;
-        let mut archive = zip::ZipArchive::new(file)
-            .map_err(|e| format!("Invalid DOCX archive: {}", e))?;
-        
-        let mut doc_xml = archive.by_name("word/document.xml")
+
+        let file =
+            std::fs::File::open(file_path).map_err(|e| format!("Failed to open DOCX: {}", e))?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|e| format!("Invalid DOCX archive: {}", e))?;
+
+        let mut doc_xml = archive
+            .by_name("word/document.xml")
             .map_err(|_| "No document.xml found in DOCX".to_string())?;
-        
+
         let mut xml_content = String::new();
-        doc_xml.read_to_string(&mut xml_content)
+        doc_xml
+            .read_to_string(&mut xml_content)
             .map_err(|e| format!("Failed to read document.xml: {}", e))?;
-        
+
         // Extract text from XML (strip tags, decode entities)
         Ok(extract_text_from_docx_xml(&xml_content))
     }
@@ -484,19 +580,19 @@ impl RagActor {
     fn parse_csv(&self, content: &str, delimiter: char) -> Result<String, String> {
         let mut result = String::new();
         let mut lines = content.lines();
-        
+
         // Get header
         let header: Vec<&str> = if let Some(header_line) = lines.next() {
             header_line.split(delimiter).collect()
         } else {
             return Ok(String::new());
         };
-        
+
         // Process rows
         for line in lines {
             let values: Vec<&str> = line.split(delimiter).collect();
             let mut row_text = String::new();
-            
+
             for (i, value) in values.iter().enumerate() {
                 if i < header.len() && !value.trim().is_empty() {
                     if !row_text.is_empty() {
@@ -505,13 +601,13 @@ impl RagActor {
                     row_text.push_str(&format!("{}: {}", header[i].trim(), value.trim()));
                 }
             }
-            
+
             if !row_text.is_empty() {
                 result.push_str(&row_text);
                 result.push('\n');
             }
         }
-        
+
         Ok(result)
     }
 
@@ -557,15 +653,15 @@ impl RagActor {
         let mut chunks = Vec::new();
         let chars: Vec<char> = text.chars().collect();
         let total_len = chars.len();
-        
+
         if total_len == 0 {
             return chunks;
         }
-        
+
         let mut start = 0;
         while start < total_len {
             let end = (start + CHUNK_SIZE).min(total_len);
-            
+
             // Try to find a good break point (end of sentence or paragraph)
             let mut actual_end = end;
             if end < total_len {
@@ -581,13 +677,13 @@ impl RagActor {
                     }
                 }
             }
-            
+
             let chunk: String = chars[start..actual_end].iter().collect();
             let trimmed = chunk.trim();
             if !trimmed.is_empty() {
                 chunks.push(trimmed.to_string());
             }
-            
+
             // Move start forward, accounting for overlap
             if actual_end >= total_len {
                 break;
@@ -597,7 +693,7 @@ impl RagActor {
                 start = actual_end;
             }
         }
-        
+
         chunks
     }
 
@@ -615,17 +711,18 @@ impl RagActor {
 
     fn search_documents(&self, query_vector: Vec<f32>, limit: usize) -> Vec<RagChunk> {
         let search_start = Instant::now();
-        
+
         if self.chunks.is_empty() {
             println!("\n┌─────────────────────────────────────────────────────────────┐");
             println!("│                   RAG SEARCH (empty index)                  │");
             println!("└─────────────────────────────────────────────────────────────┘\n");
             return Vec::new();
         }
-        
+
         // Compute cosine similarity with all chunks
         let similarity_start = Instant::now();
-        let mut scored: Vec<(f32, &IndexedChunk)> = self.chunks
+        let mut scored: Vec<(f32, &IndexedChunk)> = self
+            .chunks
             .iter()
             .map(|chunk| {
                 let score = cosine_similarity(&query_vector, &chunk.vector);
@@ -633,16 +730,16 @@ impl RagActor {
             })
             .collect();
         let similarity_time = similarity_start.elapsed();
-        
+
         // Sort by score descending
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         // Calculate score statistics
         let all_scores: Vec<f32> = scored.iter().map(|(s, _)| *s).collect();
         let min_score = all_scores.iter().cloned().fold(f32::INFINITY, f32::min);
         let max_score = all_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let avg_score: f32 = all_scores.iter().sum::<f32>() / all_scores.len() as f32;
-        
+
         // Take top results
         let results: Vec<RagChunk> = scored
             .into_iter()
@@ -655,9 +752,9 @@ impl RagActor {
                 score,
             })
             .collect();
-        
+
         let total_time = search_start.elapsed();
-        
+
         // Calculate top-K statistics
         let top_scores: Vec<f32> = results.iter().map(|r| r.score).collect();
         let top_min = top_scores.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -667,53 +764,98 @@ impl RagActor {
         } else {
             0.0
         };
-        
+
         // Collect unique source files in results
-        let unique_sources: std::collections::HashSet<&str> = results
-            .iter()
-            .map(|r| r.source_file.as_str())
-            .collect();
-        
+        let unique_sources: std::collections::HashSet<&str> =
+            results.iter().map(|r| r.source_file.as_str()).collect();
+
         println!("\n┌─────────────────────────────────────────────────────────────┐");
         println!("│                      RAG SEARCH RESULTS                     │");
         println!("├─────────────────────────────────────────────────────────────┤");
-        println!("│  Query vector dim:     {:>8}                             │", query_vector.len());
-        println!("│  Chunks searched:      {:>8}                             │", self.chunks.len());
-        println!("│  Results returned:     {:>8}                             │", results.len());
+        println!(
+            "│  Query vector dim:     {:>8}                             │",
+            query_vector.len()
+        );
+        println!(
+            "│  Chunks searched:      {:>8}                             │",
+            self.chunks.len()
+        );
+        println!(
+            "│  Results returned:     {:>8}                             │",
+            results.len()
+        );
         println!("├─────────────────────────────────────────────────────────────┤");
         println!("│  All Scores (cosine similarity):                           │");
-        println!("│    Min:                {:>8.4}                             │", min_score);
-        println!("│    Max:                {:>8.4}                             │", max_score);
-        println!("│    Avg:                {:>8.4}                             │", avg_score);
+        println!(
+            "│    Min:                {:>8.4}                             │",
+            min_score
+        );
+        println!(
+            "│    Max:                {:>8.4}                             │",
+            max_score
+        );
+        println!(
+            "│    Avg:                {:>8.4}                             │",
+            avg_score
+        );
         println!("├─────────────────────────────────────────────────────────────┤");
-        println!("│  Top-{} Scores:                                             │", limit);
-        println!("│    Min:                {:>8.4}                             │", top_min);
-        println!("│    Max:                {:>8.4}                             │", top_max);
-        println!("│    Avg:                {:>8.4}                             │", top_avg);
+        println!(
+            "│  Top-{} Scores:                                             │",
+            limit
+        );
+        println!(
+            "│    Min:                {:>8.4}                             │",
+            top_min
+        );
+        println!(
+            "│    Max:                {:>8.4}                             │",
+            top_max
+        );
+        println!(
+            "│    Avg:                {:>8.4}                             │",
+            top_avg
+        );
         println!("├─────────────────────────────────────────────────────────────┤");
-        println!("│  Source files in results: {}                               │", unique_sources.len());
+        println!(
+            "│  Source files in results: {}                               │",
+            unique_sources.len()
+        );
         for source in unique_sources.iter().take(5) {
             println!("│    - {:<52} │", truncate_str(source, 52));
         }
         if unique_sources.len() > 5 {
-            println!("│    ... and {} more                                         │", unique_sources.len() - 5);
+            println!(
+                "│    ... and {} more                                         │",
+                unique_sources.len() - 5
+            );
         }
         println!("├─────────────────────────────────────────────────────────────┤");
-        println!("│  Similarity calc:      {:>8.2} ms                         │", similarity_time.as_secs_f64() * 1000.0);
-        println!("│  Total search time:    {:>8.2} ms                         │", total_time.as_secs_f64() * 1000.0);
+        println!(
+            "│  Similarity calc:      {:>8.2} ms                         │",
+            similarity_time.as_secs_f64() * 1000.0
+        );
+        println!(
+            "│  Total search time:    {:>8.2} ms                         │",
+            total_time.as_secs_f64() * 1000.0
+        );
         println!("└─────────────────────────────────────────────────────────────┘\n");
-        
+
         // Log individual top results
         if !results.is_empty() {
             println!("Top {} results:", results.len().min(5));
             for (i, result) in results.iter().take(5).enumerate() {
                 let preview = truncate_str(&result.content.replace('\n', " "), 60);
-                println!("  {}. [{}] score={:.4}: \"{}\"", 
-                    i + 1, result.source_file, result.score, preview);
+                println!(
+                    "  {}. [{}] score={:.4}: \"{}\"",
+                    i + 1,
+                    result.source_file,
+                    result.score,
+                    preview
+                );
             }
             println!();
         }
-        
+
         results
     }
 
@@ -723,7 +865,10 @@ impl RagActor {
             if let Ok(content) = tokio::fs::read_to_string(&manifest_path).await {
                 if let Ok(manifest) = serde_json::from_str(&content) {
                     self.manifest = manifest;
-                    println!("RagActor: Loaded manifest with {} entries", self.manifest.len());
+                    println!(
+                        "RagActor: Loaded manifest with {} entries",
+                        self.manifest.len()
+                    );
                 }
             }
         }
@@ -782,11 +927,13 @@ impl RagActor {
         chunks: &[String],
         embeddings: &[Vec<f32>],
     ) -> Result<(), String> {
-        let cache_dir = self.cache_dir.as_ref()
+        let cache_dir = self
+            .cache_dir
+            .as_ref()
             .ok_or_else(|| "No cache directory set".to_string())?;
 
         let cache_file = cache_dir.join(Self::cache_filename_for_path(file_path));
-        
+
         let cached = CachedEmbeddings {
             file_path: file_path.to_string(),
             file_hash: file_hash.to_string(),
@@ -796,7 +943,7 @@ impl RagActor {
 
         let content = serde_json::to_string(&cached)
             .map_err(|e| format!("Failed to serialize embeddings: {}", e))?;
-        
+
         tokio::fs::write(&cache_file, content)
             .await
             .map_err(|e| format!("Failed to write embeddings cache: {}", e))?;
@@ -808,7 +955,7 @@ impl RagActor {
     async fn load_embeddings(&self, file_path: &str) -> Option<CachedEmbeddings> {
         let cache_dir = self.cache_dir.as_ref()?;
         let cache_file = cache_dir.join(Self::cache_filename_for_path(file_path));
-        
+
         let content = tokio::fs::read_to_string(&cache_file).await.ok()?;
         serde_json::from_str(&content).ok()
     }
@@ -820,7 +967,7 @@ fn extract_text_from_docx_xml(xml: &str) -> String {
     let mut result = String::new();
     let mut in_text = false;
     let mut chars = xml.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         if c == '<' {
             // Collect the tag content
@@ -831,7 +978,7 @@ fn extract_text_from_docx_xml(xml: &str) -> String {
                 }
                 tag.push(tc);
             }
-            
+
             // Check for <w:t> or <w:t ...> (text tag)
             if tag.starts_with("w:t") && !tag.starts_with("w:t/") && !tag.ends_with('/') {
                 in_text = true;
@@ -847,7 +994,7 @@ fn extract_text_from_docx_xml(xml: &str) -> String {
             result.push(c);
         }
     }
-    
+
     // Clean up: decode XML entities
     result
         .replace("&amp;", "&")
@@ -862,15 +1009,15 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    
+
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    
+
     if norm_a == 0.0 || norm_b == 0.0 {
         return 0.0;
     }
-    
+
     dot / (norm_a * norm_b)
 }
 
@@ -884,4 +1031,3 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         s[..max_len].to_string()
     }
 }
-

@@ -6,16 +6,15 @@
 //! - Injects the tool_call() function for calling external tools
 //! - Sets resource limits (recursion depth)
 
-use rustpython_vm::builtins::{PyStr, PyDict, PyFloat, PyInt, PyList, PyModule};
-use rustpython_vm::{
-    Interpreter, PyResult, Settings, VirtualMachine, PyObjectRef, AsObject,
-    PyRef, PyPayload,
-};
+use rustpython_vm::builtins::{PyDict, PyFloat, PyInt, PyList, PyModule, PyStr};
 use rustpython_vm::function::FuncArgs;
-use std::cell::RefCell;
+use rustpython_vm::{
+    AsObject, Interpreter, PyObjectRef, PyPayload, PyRef, PyResult, Settings, VirtualMachine,
+};
 use serde_json::Value;
+use std::cell::RefCell;
 
-use crate::protocol::{PendingToolCall, ToolInfo, ToolCallResult, ToolModuleInfo};
+use crate::protocol::{PendingToolCall, ToolCallResult, ToolInfo, ToolModuleInfo};
 
 // Thread-local state for collecting tool calls during execution
 thread_local! {
@@ -53,26 +52,29 @@ pub fn get_tool_modules() -> Vec<ToolModuleInfo> {
 }
 
 /// Generate Python code that creates callable tool functions
-/// 
+///
 /// This code creates wrapper functions that call the sandbox's `tool_call` function
 /// under the hood. Functions are injected directly into the global namespace so they
 /// can be called directly without imports (e.g., `list_dataset_ids()` works).
-/// 
+///
 /// For compatibility, we also create simple namespace classes that can be imported.
 pub fn generate_tool_module_code() -> String {
     let modules = get_tool_modules();
     if modules.is_empty() {
         return String::new();
     }
-    
+
     let mut code = String::new();
     code.push_str("\n# ============== Dynamic Tool Functions ==============\n");
     code.push_str("# Auto-generated wrapper functions for MCP tools\n\n");
-    
+
     // Generate all wrapper functions first (in global namespace)
     for module in &modules {
-        code.push_str(&format!("# Tools from: {} (server: {})\n", module.python_name, module.server_id));
-        
+        code.push_str(&format!(
+            "# Tools from: {} (server: {})\n",
+            module.python_name, module.server_id
+        ));
+
         for func in &module.functions {
             // Generate a global wrapper function for each tool
             let func_code = generate_global_tool_function(&func.name, &func.description);
@@ -80,37 +82,50 @@ pub fn generate_tool_module_code() -> String {
         }
         code.push_str("\n");
     }
-    
+
     // Create namespace classes for module-style imports (e.g., from bigquery import list_dataset_ids)
     code.push_str("# ============== Module Namespaces ==============\n");
     code.push_str("# Namespace classes for module-style imports\n\n");
     code.push_str("import sys\n\n");
-    
+
     for module in &modules {
         code.push_str(&format!("class _{}:\n", module.python_name));
-        code.push_str(&format!("    '''MCP tools from server: {}'''\n", module.server_id));
+        code.push_str(&format!(
+            "    '''MCP tools from server: {}'''\n",
+            module.server_id
+        ));
         for func in &module.functions {
             // Use staticmethod so accessing via instance doesn't add 'self' as first arg
-            code.push_str(&format!("    {} = staticmethod({})\n", func.name, func.name));
+            code.push_str(&format!(
+                "    {} = staticmethod({})\n",
+                func.name, func.name
+            ));
         }
         code.push_str("\n");
-        
+
         // Register in sys.modules (use class, not instance, to avoid method binding issues)
-        code.push_str(&format!("sys.modules['{}'] = _{}\n\n", module.python_name, module.python_name));
-        
+        code.push_str(&format!(
+            "sys.modules['{}'] = _{}\n\n",
+            module.python_name, module.python_name
+        ));
+
         // Add to allowed imports
-        code.push_str(&format!("_sandbox_allowed_modules.add('{}')\n\n", module.python_name));
+        code.push_str(&format!(
+            "_sandbox_allowed_modules.add('{}')\n\n",
+            module.python_name
+        ));
     }
-    
+
     code
 }
 
 /// Generate Python code for a global tool function wrapper
 fn generate_global_tool_function(func_name: &str, description: &Option<String>) -> String {
-    let docstring = description.as_ref()
+    let docstring = description
+        .as_ref()
         .map(|d| format!("\"\"\"{}\"\"\"", d))
         .unwrap_or_else(|| format!("\"\"\"Call the {} tool\"\"\"", func_name));
-    
+
     format!(
         r#"def {func}(**kwargs):
     {docstring}
@@ -159,14 +174,14 @@ pub fn create_sandboxed_interpreter() -> Interpreter {
     settings.isolated = true;
     settings.user_site_directory = false;
     settings.import_site = false;
-    
+
     Interpreter::with_init(settings, |vm| {
         // Add stdlib native modules (math, json, random, hashlib, etc.)
         // These are the Rust implementations of Python stdlib modules
         for (name, init) in rustpython_stdlib::get_module_inits() {
             vm.add_native_module(name, init);
         }
-        
+
         // Add our sandbox module with tool_call function
         vm.add_native_module("_sandbox".to_owned(), Box::new(make_sandbox_module));
     })
@@ -176,51 +191,55 @@ pub fn create_sandboxed_interpreter() -> Interpreter {
 fn make_sandbox_module(vm: &VirtualMachine) -> PyRef<PyModule> {
     let module = PyModule::new();
     let module_ref = module.into_ref(&vm.ctx);
-    
+
     // Get the module's __dict__ and add our functions
     let dict = module_ref.dict();
-    
+
     // Add tool_call function
     let _ = dict.set_item(
         "tool_call",
         vm.new_function("tool_call", tool_call_impl).into(),
         vm,
     );
-    
+
     // Add get_tool_result function
     let _ = dict.set_item(
-        "get_tool_result", 
-        vm.new_function("get_tool_result", get_tool_result_impl).into(),
+        "get_tool_result",
+        vm.new_function("get_tool_result", get_tool_result_impl)
+            .into(),
         vm,
     );
-    
+
     // Add print wrapper that captures output
     let _ = dict.set_item(
         "sandbox_print",
         vm.new_function("sandbox_print", sandbox_print_impl).into(),
         vm,
     );
-    
+
     // Add stderr-capable print wrapper for agentic handoffs
     let _ = dict.set_item(
         "sandbox_stderr",
-        vm.new_function("sandbox_stderr", sandbox_stderr_impl).into(),
+        vm.new_function("sandbox_stderr", sandbox_stderr_impl)
+            .into(),
         vm,
     );
-    
+
     module_ref
 }
 
 /// Implementation of tool_call(name, **kwargs) -> result or raises ToolCallPending
 fn tool_call_impl(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
     // Get tool name (first positional arg)
-    let tool_name: String = args.args.first()
+    let tool_name: String = args
+        .args
+        .first()
         .ok_or_else(|| vm.new_type_error("tool_call requires a tool name".to_string()))?
         .try_to_value(vm)?;
-    
+
     // Get keyword arguments as a map
     let arguments = funcargs_to_json(&args, vm)?;
-    
+
     // Find the tool info to get server_id
     let server_id = AVAILABLE_TOOLS.with(|at| {
         at.borrow()
@@ -229,20 +248,22 @@ fn tool_call_impl(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             .map(|t| t.server_id.clone())
             .unwrap_or_else(|| "unknown".to_string())
     });
-    
+
     // Generate a unique call ID
     let call_id = uuid::Uuid::new_v4().to_string();
-    
+
     // Check if we already have a result for this call pattern
-    let existing_result = TOOL_RESULTS.with(|tr| {
-        tr.borrow().get(&tool_name).cloned()
-    });
-    
+    let existing_result = TOOL_RESULTS.with(|tr| tr.borrow().get(&tool_name).cloned());
+
     if let Some(result) = existing_result {
         if result.success {
             json_to_pyobject(&result.result, vm)
         } else {
-            Err(vm.new_runtime_error(result.error.unwrap_or_else(|| "Tool call failed".to_string())))
+            Err(vm.new_runtime_error(
+                result
+                    .error
+                    .unwrap_or_else(|| "Tool call failed".to_string()),
+            ))
         }
     } else {
         // Queue the tool call and raise ToolCallPending
@@ -252,9 +273,9 @@ fn tool_call_impl(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             server_id,
             arguments,
         };
-        
+
         PENDING_CALLS.with(|pc| pc.borrow_mut().push(pending_call));
-        
+
         Err(vm.new_exception_msg(
             vm.ctx.exceptions.runtime_error.to_owned(),
             format!("ToolCallPending:{}", call_id),
@@ -264,19 +285,30 @@ fn tool_call_impl(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
 
 /// Get result of a previously made tool call
 fn get_tool_result_impl(args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-    let call_id: String = args.args.first()
+    let call_id: String = args
+        .args
+        .first()
         .ok_or_else(|| vm.new_type_error("get_tool_result requires a call_id".to_string()))?
         .try_to_value(vm)?;
-    
+
     TOOL_RESULTS.with(|tr| {
         if let Some(result) = tr.borrow().get(&call_id) {
             if result.success {
                 json_to_pyobject(&result.result, vm)
             } else {
-                Err(vm.new_runtime_error(result.error.clone().unwrap_or_else(|| "Tool call failed".to_string())))
+                Err(vm.new_runtime_error(
+                    result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Tool call failed".to_string()),
+                ))
             }
         } else {
-            Err(vm.new_key_error(vm.ctx.new_str(format!("No result for call_id: {}", call_id)).into()))
+            Err(vm.new_key_error(
+                vm.ctx
+                    .new_str(format!("No result for call_id: {}", call_id))
+                    .into(),
+            ))
         }
     })
 }
@@ -314,13 +346,13 @@ fn sandbox_stderr_impl(args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
 /// Convert FuncArgs kwargs to JSON Value
 fn funcargs_to_json(args: &FuncArgs, vm: &VirtualMachine) -> PyResult<Value> {
     let mut map = serde_json::Map::new();
-    
+
     // kwargs is IndexMap<String, PyObjectRef>
     for (key, value) in args.kwargs.iter() {
         let json_value = pyobject_to_json(value, vm)?;
         map.insert(key.clone(), json_value);
     }
-    
+
     Ok(Value::Object(map))
 }
 
@@ -330,7 +362,7 @@ pub fn pyobject_to_json(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Valu
     if obj.is(&vm.ctx.none) {
         return Ok(Value::Null);
     }
-    
+
     // Try as bool (must check before int since bool is subclass of int in Python)
     // Use class check since PyBool is just a marker type
     if obj.class().is(vm.ctx.types.bool_type) {
@@ -339,14 +371,14 @@ pub fn pyobject_to_json(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Valu
             return Ok(Value::Bool(b));
         }
     }
-    
+
     // Try as int
     if let Some(i) = obj.downcast_ref::<PyInt>() {
         if let Ok(n) = i.try_to_primitive::<i64>(vm) {
             return Ok(Value::Number(n.into()));
         }
     }
-    
+
     // Try as float
     if let Some(f) = obj.downcast_ref::<PyFloat>() {
         if let Some(n) = serde_json::Number::from_f64(f.to_f64()) {
@@ -354,21 +386,22 @@ pub fn pyobject_to_json(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Valu
         }
         return Ok(Value::Null);
     }
-    
+
     // Try as string
     if let Some(s) = obj.downcast_ref::<PyStr>() {
         return Ok(Value::String(s.as_str().to_string()));
     }
-    
+
     // Try as list
     if let Some(list) = obj.downcast_ref::<PyList>() {
-        let items: Result<Vec<Value>, _> = list.borrow_vec()
+        let items: Result<Vec<Value>, _> = list
+            .borrow_vec()
             .iter()
             .map(|item| pyobject_to_json(item, vm))
             .collect();
         return Ok(Value::Array(items?));
     }
-    
+
     // Try as dict
     if let Some(dict) = obj.downcast_ref::<PyDict>() {
         let mut map = serde_json::Map::new();
@@ -379,7 +412,7 @@ pub fn pyobject_to_json(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Valu
         }
         return Ok(Value::Object(map));
     }
-    
+
     // Fallback: convert to string representation
     let s: String = obj.str(vm)?.to_string();
     Ok(Value::String(s))
@@ -401,9 +434,7 @@ pub fn json_to_pyobject(value: &Value, vm: &VirtualMachine) -> PyResult {
         }
         Value::String(s) => Ok(vm.ctx.new_str(s.clone()).into()),
         Value::Array(arr) => {
-            let items: Result<Vec<_>, _> = arr.iter()
-                .map(|v| json_to_pyobject(v, vm))
-                .collect();
+            let items: Result<Vec<_>, _> = arr.iter().map(|v| json_to_pyobject(v, vm)).collect();
             Ok(vm.ctx.new_list(items?).into())
         }
         Value::Object(obj) => {
@@ -420,10 +451,28 @@ pub fn json_to_pyobject(value: &Value, vm: &VirtualMachine) -> PyResult {
 /// The list of modules allowed in the Python sandbox.
 /// This is exposed as a constant so it can be referenced in error messages.
 pub const ALLOWED_MODULES: &[&str] = &[
-    "math", "json", "random", "re", "datetime", "collections",
-    "itertools", "functools", "operator", "string", "textwrap",
-    "copy", "types", "typing", "abc", "numbers", "decimal",
-    "fractions", "statistics", "hashlib", "base64", "binascii",
+    "math",
+    "json",
+    "random",
+    "re",
+    "datetime",
+    "collections",
+    "itertools",
+    "functools",
+    "operator",
+    "string",
+    "textwrap",
+    "copy",
+    "types",
+    "typing",
+    "abc",
+    "numbers",
+    "decimal",
+    "fractions",
+    "statistics",
+    "hashlib",
+    "base64",
+    "binascii",
     "html",
 ];
 
@@ -702,51 +751,61 @@ del _blocked, _name
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ToolModuleInfo, ToolFunctionInfo};
-    
+    use crate::protocol::{ToolFunctionInfo, ToolModuleInfo};
+
     #[test]
     fn test_generate_tool_module_code() {
         // Set up some tool modules
-        let modules = vec![
-            ToolModuleInfo {
-                python_name: "bigquery".to_string(),
-                server_id: "bigquery_server".to_string(),
-                functions: vec![
-                    ToolFunctionInfo {
-                        name: "list_dataset_ids".to_string(),
-                        description: Some("List datasets".to_string()),
-                        parameters: serde_json::json!({}),
-                    },
-                ],
-            },
-        ];
-        
+        let modules = vec![ToolModuleInfo {
+            python_name: "bigquery".to_string(),
+            server_id: "bigquery_server".to_string(),
+            functions: vec![ToolFunctionInfo {
+                name: "list_dataset_ids".to_string(),
+                description: Some("List datasets".to_string()),
+                parameters: serde_json::json!({}),
+            }],
+        }];
+
         set_tool_modules(modules);
         let code = generate_tool_module_code();
-        
+
         println!("Generated code:\n{}", code);
-        
+
         // Verify the code contains expected elements
-        assert!(code.contains("def list_dataset_ids("), "Should define global wrapper function");
-        assert!(code.contains("tool_call(\"list_dataset_ids\""), "Should call tool_call with function name");
-        assert!(code.contains("sys.modules['bigquery']"), "Should register module namespace");
-        assert!(code.contains("class _bigquery:"), "Should create namespace class");
+        assert!(
+            code.contains("def list_dataset_ids("),
+            "Should define global wrapper function"
+        );
+        assert!(
+            code.contains("tool_call(\"list_dataset_ids\""),
+            "Should call tool_call with function name"
+        );
+        assert!(
+            code.contains("sys.modules['bigquery']"),
+            "Should register module namespace"
+        );
+        assert!(
+            code.contains("class _bigquery:"),
+            "Should create namespace class"
+        );
     }
-    
+
     #[test]
     fn test_reset_state() {
-        PENDING_CALLS.with(|pc| pc.borrow_mut().push(PendingToolCall {
-            id: "test".to_string(),
-            tool_name: "test".to_string(),
-            server_id: "test".to_string(),
-            arguments: Value::Null,
-        }));
-        
+        PENDING_CALLS.with(|pc| {
+            pc.borrow_mut().push(PendingToolCall {
+                id: "test".to_string(),
+                tool_name: "test".to_string(),
+                server_id: "test".to_string(),
+                arguments: Value::Null,
+            })
+        });
+
         reset_execution_state();
-        
+
         assert!(get_pending_calls().is_empty());
     }
-    
+
     #[test]
     fn test_stdout_capture() {
         reset_execution_state();

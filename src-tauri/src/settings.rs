@@ -101,15 +101,14 @@ impl ToolCallFormatConfig {
 
 /// Python reserved keywords that cannot be used as identifiers
 const PYTHON_KEYWORDS: &[&str] = &[
-    "False", "None", "True", "and", "as", "assert", "async", "await",
-    "break", "class", "continue", "def", "del", "elif", "else", "except",
-    "finally", "for", "from", "global", "if", "import", "in", "is",
-    "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
-    "while", "with", "yield",
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
 ];
 
 /// Validate that a string is a valid Python identifier (module name).
-/// 
+///
 /// Rules:
 /// - Only lowercase letters, digits, and underscores
 /// - Cannot start with a digit
@@ -300,6 +299,9 @@ pub struct AppSettings {
     /// Use "builtin" as server_id for built-in tools.
     #[serde(default)]
     pub tool_system_prompts: HashMap<String, String>,
+    /// Whether tool_search defers MCP tool exposure until discovery (off by default).
+    #[serde(default)]
+    pub tool_search_enabled: bool,
     /// Whether the python_execution built-in tool is enabled (disabled by default).
     /// When enabled, models can execute Python code in a sandboxed environment.
     /// Renamed from code_execution_enabled - alias preserved for backwards compatibility.
@@ -384,6 +386,7 @@ impl Default for AppSettings {
             mcp_servers: vec![default_mcp_test_server()],
             tool_call_formats: ToolCallFormatConfig::default(),
             tool_system_prompts: HashMap::new(),
+            tool_search_enabled: false,
             python_execution_enabled: false,
             python_tool_calling_enabled: default_python_tool_calling_enabled(),
             legacy_tool_call_format_enabled: false,
@@ -488,6 +491,8 @@ mod tests {
                 .enabled
         );
         assert!(settings.tool_system_prompts.is_empty());
+        // tool_search is disabled by default (no deferral)
+        assert!(!settings.tool_search_enabled);
         // python_execution is disabled by default
         assert!(!settings.python_execution_enabled);
         // python tool calling defaults
