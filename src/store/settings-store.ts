@@ -66,12 +66,12 @@ interface SettingsState {
     
     // Modal state
     isSettingsOpen: boolean;
-    activeTab: 'system-prompt' | 'interfaces' | 'tools';
+    activeTab: 'system-prompt' | 'tools';
     
     // Actions
     openSettings: () => void;
     closeSettings: () => void;
-    setActiveTab: (tab: 'system-prompt' | 'interfaces' | 'tools') => void;
+    setActiveTab: (tab: 'system-prompt' | 'tools') => void;
     
     // Settings CRUD
     fetchSettings: () => Promise<void>;
