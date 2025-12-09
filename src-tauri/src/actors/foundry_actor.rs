@@ -967,68 +967,159 @@ impl FoundryActor {
         Ok(())
     }
 
-    async fn restart_service(&self) -> std::io::Result<()> {
-        println!("Restarting Foundry service...");
-        let restart_timeout_secs: u64 = 75;
-        
-        // Emit event: service restart started
-        let _ = self.app_handle.emit("service-restart-started", json!({
-            "message": "Restarting Foundry service..."
-        }));
-        
-        // Run `foundry service restart` with timeout to prevent hanging
-        let child = Command::new("foundry")
-            .args(&["service", "restart"])
-            .output();
-            
-        let output = match timeout(Duration::from_secs(restart_timeout_secs), child).await {
-            Ok(Ok(output)) => output,
+    async fn run_foundry_command_with_timeout(
+        &self,
+        args: &[&str],
+        timeout_secs: u64,
+        op_desc: &str,
+    ) -> std::io::Result<std::process::Output> {
+        println!("FoundryActor: Running `foundry {}` ...", args.join(" "));
+        let child = Command::new("foundry").args(args).output();
+        match timeout(Duration::from_secs(timeout_secs), child).await {
+            Ok(Ok(output)) => Ok(output),
             Ok(Err(e)) => {
-                println!("FoundryActor: Failed to run 'foundry service restart': {}", e);
-                let _ = self.app_handle.emit("service-restart-complete", json!({
-                    "success": false,
-                    "error": format!("Failed to run foundry command: {}", e)
-                }));
-                return Err(e);
+                println!(
+                    "FoundryActor: Failed to run `foundry {}` during {}: {}",
+                    args.join(" "),
+                    op_desc,
+                    e
+                );
+                Err(e)
             }
             Err(_) => {
-                println!("FoundryActor: 'foundry service restart' timed out after {}s", restart_timeout_secs);
-                let _ = self.app_handle.emit("service-restart-complete", json!({
-                    "success": false,
-                    "error": format!("Service restart timed out after {} seconds", restart_timeout_secs)
-                }));
-                return Err(std::io::Error::new(
+                println!(
+                    "FoundryActor: `foundry {}` timed out after {}s during {}",
+                    args.join(" "),
+                    timeout_secs,
+                    op_desc
+                );
+                Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    format!("foundry service restart timed out after {} seconds", restart_timeout_secs),
-                ));
+                    format!("foundry {} timed out after {} seconds", args.join(" "), timeout_secs),
+                ))
             }
-        };
-            
-        if output.status.success() {
-             println!("Foundry service restart command issued successfully.");
-        } else {
-             let stderr = String::from_utf8_lossy(&output.stderr);
-             println!("Foundry service restart command failed: {}", stderr);
-             // If restart fails (e.g. not running), try start
-             if let Err(e) = self.ensure_service_running().await {
-                 let _ = self.app_handle.emit("service-restart-complete", json!({
-                     "success": false,
-                     "error": format!("Failed to start service: {}", e)
-                 }));
-                 return Err(e);
-             }
         }
-        
-        // Wait for service to be ready
+    }
+
+    async fn stop_service_immediately(&self, timeout_secs: u64) -> std::io::Result<()> {
+        // Single stop command (CLI does not accept --no-wait/--force)
+        let output = self
+            .run_foundry_command_with_timeout(&["service", "stop"], timeout_secs, "service stop")
+            .await?;
+
+        if output.status.success() {
+            println!("Foundry service stop command succeeded.");
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("Foundry service stop command failed: {}", stderr);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("service stop failed: {}", stderr),
+        ))
+    }
+
+    async fn start_service_after_stop(&self, timeout_secs: u64) -> std::io::Result<()> {
+        match self
+            .run_foundry_command_with_timeout(&["service", "start"], timeout_secs, "service start")
+            .await
+        {
+            Ok(output) => {
+                if output.status.success() {
+                    println!("Foundry service start command issued successfully.");
+                    Ok(())
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!("Foundry service start command failed: {}", stderr);
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("service start failed: {}", stderr),
+                    ))
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn restart_service(&mut self) -> std::io::Result<()> {
+        println!("Restarting Foundry service (stop then start)...");
+
+        let stop_timeout_secs: u64 = 20;
+        let start_timeout_secs: u64 = 75;
+
+        // Emit event: stop started
+        let _ = self.app_handle.emit("service-restart-started", json!({
+            "message": "Stopping Foundry service..."
+        }));
+        let _ = self.app_handle.emit("service-stop-started", json!({
+            "message": "Stopping Foundry service..."
+        }));
+
+        if let Err(e) = self.stop_service_immediately(stop_timeout_secs).await {
+            let _ = self.app_handle.emit("service-stop-complete", json!({
+                "success": false,
+                "error": format!("Failed to stop service: {}", e)
+            }));
+            let _ = self.app_handle.emit("service-restart-complete", json!({
+                "success": false,
+                "error": format!("Failed to stop service: {}", e)
+            }));
+            return Err(e);
+        }
+
+        let _ = self.app_handle.emit("service-stop-complete", json!({
+            "success": true,
+            "message": "Service stopped"
+        }));
+
+        // Emit event: start started
+        let _ = self.app_handle.emit("service-start-started", json!({
+            "message": "Starting Foundry service..."
+        }));
+
+        if let Err(e) = self.start_service_after_stop(start_timeout_secs).await {
+            let _ = self.app_handle.emit("service-start-complete", json!({
+                "success": false,
+                "error": format!("Failed to start service: {}", e)
+            }));
+            let _ = self.app_handle.emit("service-restart-complete", json!({
+                "success": false,
+                "error": format!("Failed to start service: {}", e)
+            }));
+            return Err(e);
+        }
+
+        // Wait for the service to come up and verify connectivity
         println!("Waiting for service to be ready...");
-        sleep(Duration::from_secs(3)).await;
-        
-        // Emit event: service restart completed successfully
+        if !self
+            .update_connection_info_with_retry(5, Duration::from_secs(2))
+            .await
+        {
+            let err = "Service start reported success, but endpoint not reachable";
+            println!("FoundryActor: {}", err);
+            let _ = self.app_handle.emit("service-start-complete", json!({
+                "success": false,
+                "error": err
+            }));
+            let _ = self.app_handle.emit("service-restart-complete", json!({
+                "success": false,
+                "error": err
+            }));
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, err));
+        }
+
+        let _ = self.app_handle.emit("service-start-complete", json!({
+            "success": true,
+            "message": "Service started"
+        }));
+
+        // Emit overall restart complete
         let _ = self.app_handle.emit("service-restart-complete", json!({
             "success": true,
             "message": "Service restarted successfully"
         }));
-        
+
         Ok(())
     }
 

@@ -291,6 +291,10 @@ let unlistenToolResult: (() => void) | undefined;
 let unlistenToolLoopFinished: (() => void) | undefined;
 let unlistenDownloadProgress: (() => void) | undefined;
 let unlistenLoadComplete: (() => void) | undefined;
+let unlistenServiceStopStarted: (() => void) | undefined;
+let unlistenServiceStopComplete: (() => void) | undefined;
+let unlistenServiceStartStarted: (() => void) | undefined;
+let unlistenServiceStartComplete: (() => void) | undefined;
 let unlistenServiceRestartStarted: (() => void) | undefined;
 let unlistenServiceRestartComplete: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
@@ -1148,7 +1152,64 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }));
             });
 
-            // Service restart listeners (for Foundry service restart via CLI)
+            // Service restart listeners (stop/start granularity)
+            const serviceStopStartedListener = await listen<{ message: string }>('service-stop-started', (event) => {
+                console.log(`[ChatStore] Service stop started: ${event.payload.message}`);
+                set({
+                    operationStatus: {
+                        type: 'reloading',
+                        message: event.payload.message || 'Stopping Foundry service...',
+                        startTime: Date.now(),
+                    },
+                    statusBarDismissed: false,
+                });
+            });
+
+            const serviceStopCompleteListener = await listen<{ success: boolean; message?: string; error?: string }>('service-stop-complete', (event) => {
+                console.log(`[ChatStore] Service stop complete: success=${event.payload.success}`);
+                const baseStart = get().operationStatus?.startTime || Date.now();
+                set({
+                    operationStatus: {
+                        type: 'reloading',
+                        message: event.payload.success
+                            ? (event.payload.message || 'Service stopped')
+                            : `Service stop failed: ${event.payload.error || 'Unknown error'}`,
+                        startTime: baseStart,
+                        completed: event.payload.success ? false : undefined,
+                    },
+                    statusBarDismissed: false,
+                });
+            });
+
+            const serviceStartStartedListener = await listen<{ message: string }>('service-start-started', (event) => {
+                console.log(`[ChatStore] Service start started: ${event.payload.message}`);
+                const baseStart = get().operationStatus?.startTime || Date.now();
+                set({
+                    operationStatus: {
+                        type: 'reloading',
+                        message: event.payload.message || 'Starting Foundry service...',
+                        startTime: baseStart,
+                    },
+                    statusBarDismissed: false,
+                });
+            });
+
+            const serviceStartCompleteListener = await listen<{ success: boolean; message?: string; error?: string }>('service-start-complete', (event) => {
+                console.log(`[ChatStore] Service start complete: success=${event.payload.success}`);
+                const baseStart = get().operationStatus?.startTime || Date.now();
+                set({
+                    operationStatus: {
+                        type: 'reloading',
+                        message: event.payload.success
+                            ? (event.payload.message || 'Service started')
+                            : `Service start failed: ${event.payload.error || 'Unknown error'}`,
+                        startTime: baseStart,
+                        completed: event.payload.success ? false : undefined,
+                    },
+                    statusBarDismissed: false,
+                });
+            });
+
             const serviceRestartStartedListener = await listen<{ message: string }>('service-restart-started', (event) => {
                 console.log(`[ChatStore] Service restart started: ${event.payload.message}`);
                 set({
@@ -1162,13 +1223,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
             const serviceRestartCompleteListener = await listen<{ success: boolean; message?: string; error?: string }>('service-restart-complete', (event) => {
                 console.log(`[ChatStore] Service restart complete: success=${event.payload.success}`);
+                const baseStart = get().operationStatus?.startTime || Date.now();
                 if (event.payload.success) {
                     set({
                         operationStatus: {
                             type: 'reloading',
                             message: event.payload.message || 'Service restarted successfully',
                             completed: true,
-                            startTime: Date.now(),
+                            startTime: baseStart,
                         },
                     });
                     // Auto-dismiss after 3 seconds
@@ -1183,7 +1245,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         operationStatus: {
                             type: 'reloading',
                             message: `Service restart failed: ${event.payload.error || 'Unknown error'}`,
-                            startTime: Date.now(),
+                            startTime: baseStart,
                         },
                     });
                     // Auto-dismiss errors after 10 seconds
@@ -1210,6 +1272,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 toolLoopFinishedListener();
                 downloadProgressListener();
                 loadCompleteListener();
+                serviceStopStartedListener();
+                serviceStopCompleteListener();
+                serviceStartStartedListener();
+                serviceStartCompleteListener();
                 serviceRestartStartedListener();
                 serviceRestartCompleteListener();
                 isSettingUp = false;
@@ -1228,6 +1294,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenSidebarUpdate = sidebarUpdateListener;
             unlistenDownloadProgress = downloadProgressListener;
             unlistenLoadComplete = loadCompleteListener;
+            unlistenServiceStopStarted = serviceStopStartedListener;
+            unlistenServiceStopComplete = serviceStopCompleteListener;
+            unlistenServiceStartStarted = serviceStartStartedListener;
+            unlistenServiceStartComplete = serviceStartCompleteListener;
             unlistenServiceRestartStarted = serviceRestartStartedListener;
             unlistenServiceRestartComplete = serviceRestartCompleteListener;
 
@@ -1289,6 +1359,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenLoadComplete) {
             unlistenLoadComplete();
             unlistenLoadComplete = undefined;
+        }
+        if (unlistenServiceStopStarted) {
+            unlistenServiceStopStarted();
+            unlistenServiceStopStarted = undefined;
+        }
+        if (unlistenServiceStopComplete) {
+            unlistenServiceStopComplete();
+            unlistenServiceStopComplete = undefined;
+        }
+        if (unlistenServiceStartStarted) {
+            unlistenServiceStartStarted();
+            unlistenServiceStartStarted = undefined;
+        }
+        if (unlistenServiceStartComplete) {
+            unlistenServiceStartComplete();
+            unlistenServiceStartComplete = undefined;
         }
         if (unlistenServiceRestartStarted) {
             unlistenServiceRestartStarted();
