@@ -1442,6 +1442,28 @@ export function ChatArea() {
                                                         ? toolCallPartIndices[toolCallPartIndices.length - 1]
                                                         : (lastThinkIndex !== -1 ? lastThinkIndex : (parts.length > 0 ? 0 : -1)))
                                                     : -1;
+                                                const isCodeOnlyBlock = (text: string) => {
+                                                    const trimmed = text.trim();
+                                                    // Treat pure fenced code blocks (with optional language) as non-visible for final answer purposes
+                                                    return /^```[\s\S]*```$/.test(trimmed);
+                                                };
+                                                const textParts = parts.filter((part) => part.type === 'text');
+                                                const hasAnyText = textParts.some((part) => part.content.trim().length > 0);
+                                                const textAllCodeOnly = textParts.length > 0 && textParts.every((part) => isCodeOnlyBlock(part.content));
+                                                const hasVisibleText = hasAnyText && !textAllCodeOnly;
+                                                const latestStdout = m.codeExecutions
+                                                    ?.slice()
+                                                    .reverse()
+                                                    .find((exec) => exec.stdout && exec.stdout.trim().length > 0)
+                                                    ?.stdout.trim();
+                                                const latestToolResult = toolCalls
+                                                    .slice()
+                                                    .reverse()
+                                                    .find((call) => call.result && call.result.trim().length > 0)
+                                                    ?.result.trim();
+                                                const fallbackAnswer = !hasVisibleText
+                                                    ? (latestStdout || latestToolResult || '')
+                                                    : '';
 
                                                 let toolCallIndex = 0;
                                                 const renderedParts: JSX.Element[] = [];
@@ -1468,6 +1490,11 @@ export function ChatArea() {
                                                             toolCallIndex++;
                                                         }
                                                     } else {
+                                                        // If there is no visible text (only code/tool calls), suppress rendering this text block
+                                                        // so we don't duplicate the python program above the tool call accordion.
+                                                        if ((!hasVisibleText || textAllCodeOnly) && toolCalls.length > 0) {
+                                                            return;
+                                                        }
                                                         renderedParts.push(
                                                             <ReactMarkdown
                                                                 key={`text-${idx}`}
@@ -1545,6 +1572,15 @@ export function ChatArea() {
                                                             <RagContextBlock chunks={m.ragChunks} />
                                                         )}
                                                         {renderedParts}
+                                                        {/* When the model only returned tool calls, surface the final output below the accordion */}
+                                                        {fallbackAnswer && (
+                                                            <div className="mt-3">
+                                                                <div className="text-xs font-medium text-gray-500 mb-1">Answer</div>
+                                                                <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 text-gray-900 whitespace-pre-wrap">
+                                                                    {fallbackAnswer}
+                                                                </div>
+                                                            </div>
+                                                        )}
                                                         {/* Show thinking indicator when only think content is visible */}
                                                         {thinkingStartTime && 
                                                          chatMessages[chatMessages.length - 1]?.id === m.id && 
