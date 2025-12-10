@@ -26,8 +26,3 @@ uuid = { version = "1", features = ["v4"] }
 # WASI-specific dependencies if needed
 getrandom = { version = "0.2", features = ["js"] }
 
-[profile.release]
-opt-level = "s"
-lto = true
-codegen-units = 1
-

@@ -1,6 +1,3 @@
-[workspace]
-members = ["crates/python-sandbox"]
-
 [package]
 name = "plugable-chat"
 version = "0.1.0"
@@ -62,6 +59,7 @@ async-channel = "2"
 
 # Python sandbox for code execution
 python-sandbox = { path = "crates/python-sandbox" }
+mcp-test-server = { path = "../mcp-test-server" }
 
 # PDF text extraction
 pdf-extract = "0.9"

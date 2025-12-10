@@ -4,37 +4,6 @@ import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, P
 import { invoke } from '../lib/api';
 import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
 
-// Python reserved keywords (cannot be used as identifiers)
-const PYTHON_KEYWORDS = new Set([
-    'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
-    'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
-    'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is',
-    'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try',
-    'while', 'with', 'yield'
-]);
-
-/**
- * Validate that a string is a valid Python identifier
- * - Must start with a letter or underscore
- * - Can contain letters, numbers, and underscores
- * - Cannot be a Python keyword
- */
-function isValidPythonIdentifier(name: string): boolean {
-    if (!name || name.length === 0) return false;
-    
-    // Check first character (must be letter or underscore)
-    const firstChar = name[0];
-    if (!/^[a-zA-Z_]$/.test(firstChar)) return false;
-    
-    // Check all characters (must be alphanumeric or underscore)
-    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) return false;
-    
-    // Check if it's a reserved keyword
-    if (PYTHON_KEYWORDS.has(name)) return false;
-    
-    return true;
-}
-
 // Tag input component for args - auto-splits on spaces
 function TagInput({ 
     tags, 
@@ -436,6 +405,21 @@ function McpServerCard({
             setIsTesting(false);
         }
     }, [localConfig]);
+
+    const handleResetToDefault = useCallback(async () => {
+        if (!isTestServer) return;
+        setToolsError(null);
+        setTestResult(null);
+        setIsTesting(false);
+        try {
+            const defaultConfig = await invoke<McpServerConfig>('get_default_mcp_test_server');
+            setLocalConfig(structuredClone(defaultConfig));
+            setIsDirty(true);
+            setTools([]);
+        } catch (e: any) {
+            setToolsError(e.message || String(e));
+        }
+    }, [isTestServer]);
     
     // Load tools for prompt editing when expanded and enabled
     useEffect(() => {
@@ -651,34 +635,6 @@ function McpServerCard({
                         </button>
                     </div>
                     
-                    {/* Python Module Name */}
-                    <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1.5">
-                            Python Module Name <span className="text-gray-400">(optional)</span>
-                        </label>
-                        <div className="relative">
-                            <input
-                                type="text"
-                                value={localConfig.python_name || ''}
-                                onChange={(e) => updateField('python_name', e.target.value || undefined)}
-                                placeholder={`e.g., ${localConfig.id.replace(/-/g, '_').toLowerCase()}`}
-                                className={`w-full px-3 py-2 text-sm font-mono border rounded-lg focus:outline-none focus:ring-1 ${
-                                    localConfig.python_name && !isValidPythonIdentifier(localConfig.python_name)
-                                        ? 'border-red-300 focus:border-red-400 focus:ring-red-400'
-                                        : 'border-gray-200 focus:border-blue-400 focus:ring-blue-400'
-                                }`}
-                            />
-                        </div>
-                        {localConfig.python_name && !isValidPythonIdentifier(localConfig.python_name) && (
-                            <p className="mt-1 text-xs text-red-500">
-                                Must be a valid Python identifier (lowercase letters, numbers, underscores; cannot start with a number)
-                            </p>
-                        )}
-                        <p className="mt-1 text-xs text-gray-500">
-                            Name used when importing tools in Python code: <code className="bg-gray-100 px-1 rounded">from {localConfig.python_name || localConfig.id.replace(/-/g, '_').toLowerCase()} import tool_name</code>
-                        </p>
-                    </div>
-                    
                     {/* Tool system prompts */}
                     <div className="space-y-2">
                         <div className="flex items-center justify-between">
@@ -843,6 +799,17 @@ function McpServerCard({
                                 {isTesting ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
                                 Test
                             </button>
+                            {isTestServer && (
+                                <button
+                                    onClick={handleResetToDefault}
+                                    disabled={isTesting}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="Reset built-in server to defaults"
+                                >
+                                    <RotateCcw size={14} />
+                                    Reset
+                                </button>
+                            )}
                             <button
                                 onClick={handleSave}
                                 disabled={!isDirty || isTesting}
@@ -1207,10 +1174,12 @@ function BuiltinsTab({
     onDirtyChange,
     onRegisterSave,
     onSavingChange,
+    onRegisterReset,
 }: {
     onDirtyChange?: (dirty: boolean) => void;
     onRegisterSave?: (handler: () => Promise<void>) => void;
     onSavingChange?: (saving: boolean) => void;
+    onRegisterReset?: (handler: () => void) => void;
 }) {
     const {
         settings,
@@ -1299,6 +1268,13 @@ function BuiltinsTab({
         onSavingChange?.(isSaving);
     }, [isSaving, onSavingChange]);
 
+    const handleResetAll = useCallback(() => {
+        setLocalCodeExecutionEnabled(false);
+        setLocalToolSearchEnabled(false);
+        setPythonPromptDraft(defaultPythonPrompt);
+        setToolSearchPromptDraft(defaultToolSearchPrompt);
+    }, [defaultPythonPrompt, defaultToolSearchPrompt]);
+
     const handleToggleCodeExecution = () => {
         setLocalCodeExecutionEnabled((prev) => !prev);
     };
@@ -1378,6 +1354,10 @@ function BuiltinsTab({
     useEffect(() => {
         onRegisterSave?.(handleSave);
     }, [handleSave, onRegisterSave]);
+
+    useEffect(() => {
+        onRegisterReset?.(handleResetAll);
+    }, [handleResetAll, onRegisterReset]);
 
     return (
         <div className="space-y-3">
@@ -1653,6 +1633,7 @@ export function SettingsModal() {
     const [builtinsDirty, setBuiltinsDirty] = useState(false);
     const [builtinsSaving, setBuiltinsSaving] = useState(false);
     const builtinsSaveHandlerRef = useRef<(() => Promise<void>) | null>(null);
+    const builtinsResetHandlerRef = useRef<(() => void) | null>(null);
 
     const handleRegisterSystemSave = useCallback((handler: () => Promise<void>) => {
         systemSaveHandlerRef.current = handler;
@@ -1682,9 +1663,19 @@ export function SettingsModal() {
         builtinsSaveHandlerRef.current = handler;
     }, []);
 
+    const handleRegisterBuiltinsReset = useCallback((handler: () => void) => {
+        builtinsResetHandlerRef.current = handler;
+    }, []);
+
     const handleBuiltinsSavingChange = useCallback((saving: boolean) => {
         setBuiltinsSaving(saving);
     }, []);
+
+    const handleHeaderReset = useCallback(() => {
+        if (activeTab === 'builtins') {
+            builtinsResetHandlerRef.current?.();
+        }
+    }, [activeTab]);
 
     const handleHeaderSave = useCallback(async () => {
         let handler: (() => Promise<void>) | null = null;
@@ -1739,6 +1730,16 @@ export function SettingsModal() {
                 <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
                     <h2 className="text-lg font-semibold text-gray-900">Settings</h2>
                     <div className="flex items-center gap-2">
+                        {activeTab === 'builtins' && (
+                            <button
+                                onClick={handleHeaderReset}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
+                                title="Reset built-ins to defaults"
+                            >
+                                <RotateCcw size={16} />
+                                Reset
+                            </button>
+                        )}
                         {activeTab && (
                             <button
                                 onClick={handleHeaderSave}
@@ -1840,6 +1841,7 @@ export function SettingsModal() {
                                     onDirtyChange={setBuiltinsDirty}
                                     onRegisterSave={handleRegisterBuiltinsSave}
                                     onSavingChange={handleBuiltinsSavingChange}
+                                    onRegisterReset={handleRegisterBuiltinsReset}
                                 />
                             )}
                         </>

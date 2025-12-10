@@ -100,6 +100,48 @@ The binary will be located at: `target/release/plugable-chat`
 
 ---
 
+## MCP Test Server (dev)
+
+- The dev MCP test server stays **disabled by default**, but you can launch it from the workspace:
+
+```bash
+cargo mcp-test
+```
+
+Or run it directly from the backend binary (no model/agentic loop):
+
+```bash
+cargo run -p plugable-chat -- --run-mcp-test-server
+```
+
+- If port `43030` is in use, override it:
+
+```bash
+cargo run -p plugable-chat -- --run-mcp-test-server --mcp-test-port 3333
+```
+
+- On startup it will:
+  - Serve a small status UI at `http://127.0.0.1:43030` by default (opens your browser automatically; disable with `--open-ui false` or `--serve-ui false`; override with `--mcp-test-port <PORT>`).
+  - Print a ready-made prompt you can paste into chat to trigger the full red/green sweep.
+  - Expose MCP tools including `run_all_tests`, `get_test_status`, and the existing echo/math/json/error helpers.
+- Endpoints:
+  - `GET /` — UI with live red/green board and logs
+  - `POST /api/run-all` — trigger full test sweep (same as the MCP tool)
+  - `GET /api/status` — JSON with counts, per-test results, and the recommended prompt
+  - `GET /api/logs` — recent log lines for agentic debugging
+
+To auto-connect the desktop app to the dev test server, launch it with:
+
+```bash
+PLUGABLE_ENABLE_MCP_TEST=1 npx tauri dev
+```
+
+Helper scripts (start server + app together):
+- macOS/Linux: `./scripts/mcp-test.sh`
+- Windows: `powershell -ExecutionPolicy Bypass -File scripts/mcp-test.ps1`
+
+---
+
 ## Build Automation & Bundling
 
 For creating distributable installers (DMG, MSI, etc.), use the automation scripts in `scripts/`:

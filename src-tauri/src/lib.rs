@@ -13,6 +13,10 @@ use actors::rag_actor::RagActor;
 use actors::vector_actor::VectorActor;
 use clap::Parser;
 use fastembed::TextEmbedding;
+use mcp_test_server::{
+    run_with_args as run_mcp_test_server, CliArgs as McpTestCliArgs,
+    DEFAULT_HOST as MCP_TEST_DEFAULT_HOST, DEFAULT_PORT as MCP_TEST_DEFAULT_PORT,
+};
 use model_profiles::resolve_profile;
 use protocol::{
     parse_tool_calls, CachedModel, ChatMessage, FoundryMsg, McpHostMsg, ModelFamily, ModelInfo,
@@ -21,11 +25,15 @@ use protocol::{
     VectorMsg,
 };
 use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use settings::{
-    enforce_python_name, AppSettings, McpServerConfig, ToolCallFormatConfig, ToolCallFormatName,
+    enforce_python_name, ensure_default_servers, AppSettings, McpServerConfig,
+    ToolCallFormatConfig, ToolCallFormatName,
 };
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
@@ -35,9 +43,6 @@ use tool_registry::{create_shared_registry, SharedToolRegistry, ToolSearchResult
 use tools::code_execution::{CodeExecutionExecutor, CodeExecutionInput, CodeExecutionOutput};
 use tools::tool_search::{precompute_tool_embeddings, ToolSearchExecutor, ToolSearchInput};
 use uuid::Uuid;
-use std::fs;
-use std::path::Path;
-use serde::de::DeserializeOwned;
 
 /// Approval decision for tool calls
 #[derive(Debug, Clone)]
@@ -112,10 +117,19 @@ struct CliArgs {
     #[arg(long, value_name = "BOOL", env = "PLUGABLE_LEGACY_TOOL_FORMAT", value_parser = clap::builder::BoolishValueParser::new())]
     legacy_tool_call_format: Option<bool>,
     /// Comma-separated list of tool call formats to enable (hermes,mistral,pythonic,pure_json,code_mode)
-    #[arg(long = "tool-call-enabled", value_delimiter = ',', value_name = "FORMAT[,FORMAT...]", env = "PLUGABLE_TOOL_CALL_ENABLED")]
+    #[arg(
+        long = "tool-call-enabled",
+        value_delimiter = ',',
+        value_name = "FORMAT[,FORMAT...]",
+        env = "PLUGABLE_TOOL_CALL_ENABLED"
+    )]
     tool_call_enabled: Option<Vec<String>>,
     /// Primary tool call format to prompt
-    #[arg(long = "tool-call-primary", value_name = "FORMAT", env = "PLUGABLE_TOOL_CALL_PRIMARY")]
+    #[arg(
+        long = "tool-call-primary",
+        value_name = "FORMAT",
+        env = "PLUGABLE_TOOL_CALL_PRIMARY"
+    )]
     tool_call_primary: Option<String>,
     /// Override per-tool system prompts (server_id::tool_name=prompt_or_@file). Use server_id=builtin for built-ins.
     #[arg(long = "tool-system-prompt", value_name = "KEY=VALUE_OR_@FILE", env = "PLUGABLE_TOOL_SYSTEM_PROMPTS", value_delimiter = None)]
@@ -129,6 +143,66 @@ struct CliArgs {
     /// Servers: server_id (enables all tools from that server)
     #[arg(long, value_delimiter = ',', env = "PLUGABLE_TOOLS")]
     tools: Option<Vec<String>>,
+    /// Enable the built-in dev MCP test server (off by default)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        env = "PLUGABLE_ENABLE_MCP_TEST",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    enable_mcp_test: Option<bool>,
+    /// Run only the dev MCP test server (no app; blocks until exit)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        env = "PLUGABLE_RUN_MCP_TEST_SERVER",
+        default_value_t = false,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
+    run_mcp_test_server: bool,
+    /// Host for the dev MCP test server when run standalone
+    #[arg(long, value_name = "HOST", default_value = MCP_TEST_DEFAULT_HOST)]
+    mcp_test_host: String,
+    /// Port for the dev MCP test server when run standalone
+    #[arg(long, value_name = "PORT", default_value_t = MCP_TEST_DEFAULT_PORT)]
+    mcp_test_port: u16,
+    /// Auto-run the full MCP test sweep on start (standalone mode)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        default_value_t = false,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
+    mcp_test_run_all_on_start: bool,
+    /// Serve the MCP test server UI (standalone mode)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        default_value_t = true,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
+    mcp_test_serve_ui: bool,
+    /// Auto-open the MCP test server UI in a browser (standalone mode)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        default_value_t = true,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
+    mcp_test_open_ui: bool,
+    /// Print the recommended MCP test prompt to stdout (standalone mode)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        default_value_t = true,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
+    mcp_test_print_prompt: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -255,6 +329,20 @@ fn parse_tool_filter(args: &CliArgs) -> ToolLaunchFilter {
 
 /// Apply CLI overrides to settings without persisting them.
 fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> LaunchOverrides {
+    fn resolve_mcp_manifest() -> Option<String> {
+        // Probe current dir and a couple parents for the repo root
+        let mut dir = std::env::current_dir().ok()?;
+        for _ in 0..5 {
+            let candidate = dir.join("mcp-test-server").join("Cargo.toml");
+            if candidate.exists() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        None
+    }
     // System prompt
     if let Some(raw) = &args.system_prompt {
         match read_value_or_file(raw) {
@@ -347,9 +435,50 @@ fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> LaunchOver
         None => None,
     };
 
+    // Enable default dev MCP test server when requested
+    let mut enable_mcp_prompt: Option<String> = None;
+    if args.enable_mcp_test == Some(true) {
+        ensure_default_servers(settings);
+        if let Some(test_server) = settings
+            .mcp_servers
+            .iter_mut()
+            .find(|s| s.id == "mcp-test-server")
+        {
+            test_server.enabled = true;
+            test_server.defer_tools = false;
+
+            // Normalize manifest path to an absolute path if available
+            if test_server.command.as_deref() == Some("cargo") {
+                if let Some(abs_manifest) = resolve_mcp_manifest() {
+                    test_server.args = vec![
+                        "run".to_string(),
+                        "--manifest-path".to_string(),
+                        abs_manifest,
+                        "--release".to_string(),
+                    ];
+                }
+            }
+        }
+
+        // Force deterministic, test-friendly settings:
+        // - Disable tool_search so the test server tools stay active (not deferred)
+        // - Keep native tool calling as the primary path (no python code mode)
+        settings.tool_search_enabled = false;
+        settings.python_execution_enabled = false;
+        settings.python_tool_calling_enabled = false;
+
+        // Auto-populate initial prompt to trigger the dev test suite if none provided
+        if launch_prompt.is_none() {
+            enable_mcp_prompt = Some(
+                "Connect to the dev MCP test server and run all tests. Report red/green for each test, a summary, and any errors or logs you see."
+                    .to_string(),
+            );
+        }
+    }
+
     LaunchOverrides {
         model: launch_model,
-        initial_prompt: launch_prompt,
+        initial_prompt: launch_prompt.or(enable_mcp_prompt),
     }
 }
 
@@ -2039,7 +2168,9 @@ fn collect_tool_prompt_additions(
     let python_prompt_allowed =
         python_execution_enabled && filter.builtin_allowed("python_execution");
     if python_prompt_allowed {
-        let tool_search_available = tool_search_enabled && filter.builtin_allowed("tool_search");
+        let tool_search_available = allow_tool_search_for_python
+            && tool_search_enabled
+            && filter.builtin_allowed("tool_search");
         let mut body =
             default_python_prompt(has_attachments, has_deferred_tools, tool_search_available);
         if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "python_execution")) {
@@ -2757,11 +2888,19 @@ async fn chat(
         let registry = tool_registry_state.registry.read().await;
         let mut seen: HashSet<String> =
             tools_list.iter().map(|t| t.function.name.clone()).collect();
-        for schema in registry.get_visible_tools() {
-            if !seen.insert(schema.name.clone()) {
+
+        for (server_id, schema) in registry.get_visible_tools_with_servers() {
+            // Build OpenAI tool; MCP tools get server prefix for routing (sanitized)
+            let openai_tool = if server_id == "builtin" {
+                OpenAITool::from_tool_schema(&schema)
+            } else {
+                OpenAITool::from_mcp_schema(&server_id, &schema)
+            };
+
+            if !seen.insert(openai_tool.function.name.clone()) {
                 continue;
             }
-            tools_list.push(OpenAITool::from_tool_schema(&schema));
+            tools_list.push(openai_tool);
         }
     }
 
@@ -3110,6 +3249,11 @@ async fn get_rag_indexed_files(handles: State<'_, ActorHandles>) -> Result<Vec<S
 async fn get_settings(settings_state: State<'_, SettingsState>) -> Result<AppSettings, String> {
     let guard = settings_state.settings.read().await;
     Ok(guard.clone())
+}
+
+#[tauri::command]
+fn get_default_mcp_test_server() -> McpServerConfig {
+    settings::default_mcp_test_server()
 }
 
 #[tauri::command]
@@ -3836,6 +3980,26 @@ pub fn run() {
         // Fall back to defaults (no overrides) if parsing fails
         CliArgs::parse_from(["plugable-chat"])
     });
+    if cli_args.run_mcp_test_server {
+        let mut server_args = McpTestCliArgs::default();
+        server_args.host = cli_args.mcp_test_host.clone();
+        server_args.port = cli_args.mcp_test_port;
+        server_args.run_all_on_start = cli_args.mcp_test_run_all_on_start;
+        server_args.print_prompt = cli_args.mcp_test_print_prompt;
+        server_args.open_ui = cli_args.mcp_test_open_ui;
+        server_args.serve_ui = cli_args.mcp_test_serve_ui;
+
+        println!(
+            "[Launch] Starting dev MCP test server at http://{}:{} (ui={}, open_ui={}, run_all_on_start={})",
+            server_args.host, server_args.port, server_args.serve_ui, server_args.open_ui, server_args.run_all_on_start
+        );
+
+        if let Err(e) = tauri::async_runtime::block_on(run_mcp_test_server(server_args)) {
+            eprintln!("[Launch] MCP test server exited with error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
     let cli_args_for_setup = cli_args.clone();
     let launch_filter = parse_tool_filter(&cli_args);
 
@@ -3906,7 +4070,11 @@ pub fn run() {
                 println!(
                     "[Launch] CLI overrides applied (model_override={}, initial_prompt={})",
                     launch_overrides.model.as_deref().unwrap_or("none"),
-                    if launch_overrides.initial_prompt.is_some() { "provided" } else { "none" }
+                    if launch_overrides.initial_prompt.is_some() {
+                        "provided"
+                    } else {
+                        "none"
+                    }
                 );
             }
 
@@ -4027,6 +4195,7 @@ pub fn run() {
             get_rag_indexed_files,
             // Settings commands
             get_settings,
+            get_default_mcp_test_server,
             get_python_allowed_imports,
             save_app_settings,
             add_mcp_server,

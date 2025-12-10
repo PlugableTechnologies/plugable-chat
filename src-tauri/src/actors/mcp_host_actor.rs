@@ -115,8 +115,9 @@ impl McpServerConnection {
             .await
             .map_err(|e| format!("Failed to flush request: {}", e))?;
 
-        // Read response with timeout
-        let read_result = tokio::time::timeout(Duration::from_secs(30), self.read_response()).await;
+        // Read response with timeout, ensuring we match on the request id
+        let read_result =
+            tokio::time::timeout(Duration::from_secs(30), self.read_response(id)).await;
 
         match read_result {
             Ok(Ok(response)) => {
@@ -129,12 +130,12 @@ impl McpServerConnection {
                 }
             }
             Ok(Err(e)) => Err(e),
-            Err(_) => Err("Request timed out".to_string()),
+            Err(_) => Err(format!("Request timed out waiting for id {}", id)),
         }
     }
 
     /// Read a JSON-RPC response from stdout
-    async fn read_response(&mut self) -> Result<JsonRpcResponse, String> {
+    async fn read_response(&mut self, expected_id: u64) -> Result<JsonRpcResponse, String> {
         loop {
             match self.stdout_lines.next_line().await {
                 Ok(Some(line)) => {
@@ -147,7 +148,25 @@ impl McpServerConnection {
 
                     // Try to parse as JSON-RPC response
                     match serde_json::from_str::<JsonRpcResponse>(trimmed) {
-                        Ok(response) => return Ok(response),
+                        Ok(response) => {
+                            match response.id {
+                                Some(id) if id == expected_id => return Ok(response),
+                                Some(other_id) => {
+                                    println!(
+                                        "McpHostActor: Skipping response with mismatched id {} (expected {})",
+                                        other_id, expected_id
+                                    );
+                                    continue;
+                                }
+                                None => {
+                                    println!(
+                                        "McpHostActor: Skipping response with null id (expected {})",
+                                        expected_id
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
                         Err(e) => {
                             // Might be a notification or other message, skip
                             println!(

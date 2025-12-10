@@ -8,3 +8,8 @@ lto = true
 strip = true
 panic = "abort"
 
+[profile.release.package."python-sandbox"]
+opt-level = "s"
+codegen-units = 1
+
+

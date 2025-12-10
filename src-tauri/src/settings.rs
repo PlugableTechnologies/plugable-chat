@@ -280,8 +280,18 @@ impl McpServerConfig {
 
 /// Ensure python_name is populated and sanitized from the display name.
 pub fn enforce_python_name(config: &mut McpServerConfig) {
-    let sanitized = to_python_identifier(&config.name);
-    config.name = sanitized.clone();
+    let candidate = config
+        .python_name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| {
+            if config.name.is_empty() {
+                config.id.as_str()
+            } else {
+                config.name.as_str()
+            }
+        });
+    let sanitized = to_python_identifier(candidate);
     config.python_name = Some(sanitized);
 }
 
@@ -324,16 +334,34 @@ fn default_python_tool_calling_enabled() -> bool {
     true
 }
 
+fn find_workspace_root() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    for _ in 0..5 {
+        if dir.join("mcp-test-server").join("Cargo.toml").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
 /// Create the default MCP test server configuration
-fn default_mcp_test_server() -> McpServerConfig {
+pub fn default_mcp_test_server() -> McpServerConfig {
+    let workspace_root = find_workspace_root();
+    let manifest_path = workspace_root
+        .as_ref()
+        .map(|root| root.join("mcp-test-server").join("Cargo.toml"));
+
     // Try to find the pre-built binary in common locations
     // Priority: target/release > cargo run
-    let binary_path = std::env::current_dir().ok().and_then(|cwd| {
-        let release_path = cwd.join("target/release/mcp-test-server");
+    let binary_path = workspace_root.as_ref().and_then(|root| {
+        let release_path = root.join("target/release/mcp-test-server");
         if release_path.exists() {
             Some(release_path.to_string_lossy().to_string())
         } else {
-            let alt_path = cwd.join("mcp-test-server/target/release/mcp-test-server");
+            let alt_path = root.join("mcp-test-server/target/release/mcp-test-server");
             if alt_path.exists() {
                 Some(alt_path.to_string_lossy().to_string())
             } else {
@@ -345,33 +373,36 @@ fn default_mcp_test_server() -> McpServerConfig {
     let mut base = if let Some(path) = binary_path {
         McpServerConfig {
             id: "mcp-test-server".to_string(),
-            name: "mcp_test_server_dev".to_string(),
+            name: "mcp_test_server".to_string(),
             enabled: false, // Disabled by default
             transport: Transport::Stdio,
             command: Some(path),
             args: vec![],
             env: HashMap::new(),
             auto_approve_tools: true, // Auto-approve for dev testing
-            defer_tools: true,        // Tools deferred by default (discovered via tool_search)
+            defer_tools: false,       // Expose tools immediately for quick testing
             python_name: None,
         }
     } else {
         // Fall back to cargo run if binary not found
         McpServerConfig {
             id: "mcp-test-server".to_string(),
-            name: "mcp_test_server_dev".to_string(),
+            name: "mcp_test_server".to_string(),
             enabled: false, // Disabled by default
             transport: Transport::Stdio,
             command: Some("cargo".to_string()),
             args: vec![
                 "run".to_string(),
                 "--manifest-path".to_string(),
-                "mcp-test-server/Cargo.toml".to_string(),
+                manifest_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "mcp-test-server/Cargo.toml".to_string()),
                 "--release".to_string(),
             ],
             env: HashMap::new(),
             auto_approve_tools: true, // Auto-approve for dev testing
-            defer_tools: true,        // Tools deferred by default (discovered via tool_search)
+            defer_tools: false,       // Expose tools immediately for quick testing
             python_name: None,
         }
     };
@@ -667,7 +698,7 @@ mod tests {
     fn test_enforce_python_name_sanitizes_name_and_python_name() {
         let mut config = McpServerConfig::new("server-1".to_string(), "Server Name 1".to_string());
         enforce_python_name(&mut config);
-        assert_eq!(config.name, "server_name_1");
+        assert_eq!(config.name, "Server Name 1");
         assert_eq!(config.python_name.as_deref(), Some("server_name_1"));
     }
 

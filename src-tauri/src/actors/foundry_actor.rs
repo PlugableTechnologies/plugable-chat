@@ -135,7 +135,9 @@ fn build_chat_request_body(
             body["temperature"] = json!(0.7);
 
             if use_native_tools {
-                body["tools"] = json!(tools);
+                if let Some(tool_list) = tools {
+                    body["tools"] = json!(tool_list);
+                }
             }
         }
         ModelFamily::Phi => {
@@ -148,11 +150,13 @@ fn build_chat_request_body(
                 body["max_tokens"] = json!(8192);
                 body["reasoning_effort"] = json!(reasoning_effort);
                 // Note: Reasoning models typically don't use tools in the same request
-            } else if use_native_tools {
-                body["max_tokens"] = json!(16384);
-                body["tools"] = json!(tools);
             } else {
                 body["max_tokens"] = json!(16384);
+                if use_native_tools {
+                    if let Some(tool_list) = tools {
+                        body["tools"] = json!(tool_list);
+                    }
+                }
             }
         }
         ModelFamily::Gemma => {
@@ -164,7 +168,9 @@ fn build_chat_request_body(
 
             if use_native_tools {
                 // Gemma may use a different tool format, but Foundry handles this
-                body["tools"] = json!(tools);
+                if let Some(tool_list) = tools {
+                    body["tools"] = json!(tool_list);
+                }
             }
         }
         ModelFamily::Granite => {
@@ -180,7 +186,9 @@ fn build_chat_request_body(
             }
 
             if use_native_tools {
-                body["tools"] = json!(tools);
+                if let Some(tool_list) = tools {
+                    body["tools"] = json!(tool_list);
+                }
             }
         }
         ModelFamily::Generic => {
@@ -188,11 +196,13 @@ fn build_chat_request_body(
             if supports_reasoning && supports_reasoning_effort {
                 body["max_tokens"] = json!(8192);
                 body["reasoning_effort"] = json!(reasoning_effort);
-            } else if use_native_tools {
-                body["max_tokens"] = json!(16384);
-                body["tools"] = json!(tools);
             } else {
                 body["max_tokens"] = json!(16384);
+                if use_native_tools {
+                    if let Some(tool_list) = tools {
+                        body["tools"] = json!(tool_list);
+                    }
+                }
             }
         }
     }
@@ -484,9 +494,12 @@ impl FoundryActor {
                             .map(|m| m.family)
                             .unwrap_or(ModelFamily::Generic);
 
-                        // Only use native tools if model supports them AND tools were provided
+                        // Only use native tools if model supports them AND tools were provided.
+                        // Phi/Hermes models work best with text-based Hermes tags; sending OpenAI
+                        // tools causes Foundry to reject the request. Disable native tools for Phi.
                         let use_native_tools = model_supports_tools
-                            && tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
+                            && tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
+                            && model_family != ModelFamily::Phi;
 
                         println!("[FoundryActor] Model: {} | family: {:?} | reasoning: {} | tools: {} | reasoning_effort: {}",
                             model, model_family, model_supports_reasoning, use_native_tools, supports_reasoning_effort);
@@ -554,6 +567,13 @@ impl FoundryActor {
                                 supports_reasoning_effort,
                                 &reasoning_effort,
                             );
+
+                            // Temporary debug: log request body when native tools are included
+                            if use_native_tools {
+                                if let Ok(pretty) = serde_json::to_string_pretty(&current_body) {
+                                    println!("[FoundryActor] Request body (with tools): {}", pretty);
+                                }
+                            }
 
                             // NOTE: Removed verbose tool JSON logging for cleaner output
                             // Enable RUST_LOG=debug for full request body if needed

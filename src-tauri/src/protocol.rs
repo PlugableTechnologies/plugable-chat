@@ -1,6 +1,7 @@
 use fastembed::TextEmbedding;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -709,13 +710,21 @@ impl OpenAITool {
     /// Create from MCP tool definition
     /// The function name is prefixed with server_id for routing
     pub fn from_mcp(server_id: &str, tool: &crate::actors::mcp_host_actor::McpTool) -> Self {
+        // Ensure the schema is OpenAI-compatible: always an object with properties
+        let parameters = match &tool.input_schema {
+            Some(schema) if schema.is_object() => schema.clone(),
+            _ => json!({"type": "object", "properties": {}}),
+        };
+
+        let name = sanitize_function_name(&format!("{}___{}", server_id, tool.name));
+
         Self {
             tool_type: "function".to_string(),
             function: OpenAIFunction {
                 // Encode server_id in the function name for routing
-                name: format!("{}___{}", server_id, tool.name),
+                name,
                 description: tool.description.clone(),
-                parameters: tool.input_schema.clone(),
+                parameters: Some(parameters),
             },
         }
     }
@@ -732,6 +741,39 @@ impl OpenAITool {
             },
         }
     }
+
+    /// Create from a ToolSchema using server id (for registry->OpenAI conversion)
+    pub fn from_mcp_schema(server_id: &str, schema: &ToolSchema) -> Self {
+        let name = sanitize_function_name(&format!("{}___{}", server_id, schema.name));
+        Self {
+            tool_type: "function".to_string(),
+            function: OpenAIFunction {
+                name,
+                description: schema.description.clone(),
+                parameters: Some(schema.parameters.clone()),
+            },
+        }
+    }
+}
+
+/// Sanitize a function name to OpenAI-compatible charset and length (<=64)
+/// Allowed chars: a-zA-Z0-9_ (we replace anything else with '_')
+fn sanitize_function_name(raw: &str) -> String {
+    let mut sanitized: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+
+    if sanitized.is_empty() {
+        sanitized.push_str("tool");
+    }
+
+    // Truncate to 64 chars to satisfy OpenAI limits
+    if sanitized.len() > 64 {
+        sanitized.truncate(64);
+    }
+
+    sanitized
 }
 
 /// A chunk of text from a document with its source information

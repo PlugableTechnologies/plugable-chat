@@ -153,6 +153,9 @@ Key log prefixes to watch:
 - "No tool calls detected" → Model output doesn't match any parser format
 - Logs appear to hang → Check `std::io::stdout().flush()` is called after prints
 
+### TODOs
+- Re-enable native tool payloads for Phi/Hermes once Foundry JSON schema validation accepts OpenAI tool definitions; currently disabled and using Hermes/text-based prompts to avoid 500s.
+
 ## Python Sandbox Configuration Sync
 
 The Python code execution sandbox has allowed/disallowed modules and builtins defined in **multiple locations** that must be kept in sync:

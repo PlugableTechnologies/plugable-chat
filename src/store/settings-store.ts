@@ -17,7 +17,8 @@ export interface McpServerConfig {
     args: string[];
     env: Record<string, string>;
     auto_approve_tools: boolean;
-    python_name?: string;  // Python module name for imports (must be valid Python identifier)
+    defer_tools?: boolean;
+    python_name?: string;  // Derived from server name for Python imports
 }
 
 // Shared tool-calling format names (must match Rust)
@@ -115,15 +116,18 @@ function normalizeToolCallFormats(config: ToolCallFormatConfig): ToolCallFormatC
 
 // Helper to create a new server config
 export function createNewServerConfig(): McpServerConfig {
+    const defaultName = 'New MCP Server';
     return {
         id: `mcp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        name: 'New MCP Server',
+        name: defaultName,
         enabled: false,
         transport: { type: 'stdio' },
         command: null,
         args: [],
         env: {},
         auto_approve_tools: false,
+        defer_tools: true,
+        python_name: toPythonIdentifier(defaultName),
     };
 }
 
@@ -196,8 +200,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 }),
             ]);
             const normalizedFormats = normalizeToolCallFormats(settings.tool_call_formats || DEFAULT_TOOL_CALL_FORMATS);
+            const normalizedServers = (settings.mcp_servers || []).map((server) => {
+                const isTestServer = server.id === 'mcp-test-server';
+                const name = isTestServer ? 'mcp_test_server' : server.name;
+                return {
+                    ...server,
+                    name,
+                    defer_tools: isTestServer ? false : (server.defer_tools ?? true),
+                    python_name: server.python_name ?? toPythonIdentifier(name || server.id),
+                };
+            });
             const mergedSettings: AppSettings = {
                 ...settings,
+                mcp_servers: normalizedServers,
                 tool_call_formats: normalizedFormats,
                 tool_search_enabled: settings.tool_search_enabled ?? false,
             };
@@ -375,8 +390,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     addMcpServer: async (config: McpServerConfig) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
-        const sanitizedName = toPythonIdentifier(config.name);
-        const newConfig = { ...config, name: sanitizedName, python_name: sanitizedName };
+        const isTestServer = config.id === 'mcp-test-server';
+        const name = isTestServer ? 'mcp_test_server' : config.name;
+        const pythonName = toPythonIdentifier(name || config.id);
+        const newConfig: McpServerConfig = {
+            ...config,
+            name,
+            defer_tools: isTestServer ? false : (config.defer_tools ?? true),
+            python_name: pythonName,
+        };
         
         // Optimistic update
         const newSettings = {
@@ -402,8 +424,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     updateMcpServer: async (config: McpServerConfig) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
-        const sanitizedName = toPythonIdentifier(config.name);
-        const newConfig = { ...config, name: sanitizedName, python_name: sanitizedName };
+        const isTestServer = config.id === 'mcp-test-server';
+        const name = isTestServer ? 'mcp_test_server' : config.name;
+        const pythonName = toPythonIdentifier(name || config.id);
+        const newConfig: McpServerConfig = {
+            ...config,
+            name,
+            defer_tools: isTestServer ? false : (config.defer_tools ?? true),
+            python_name: pythonName,
+        };
         
         // Optimistic update
         const newSettings = {
