@@ -1,4 +1,4 @@
-import { useChatStore, ToolCallRecord, CodeExecutionRecord, RagChunk } from '../store/chat-store';
+import { useChatStore, ToolCallRecord, CodeExecutionRecord, RagChunk, type Message } from '../store/chat-store';
 import { StatusBar, StreamingWarningBar } from './StatusBar';
 // Icons replaced with unicode characters
 import ReactMarkdown from 'react-markdown';
@@ -8,7 +8,7 @@ import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
 import 'katex/dist/katex.min.css';
 import { invoke } from '../lib/api';
-import { useEffect, useRef, useState, useCallback, type JSX } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo, memo, type JSX } from 'react';
 import { parseMessageContent, hasOnlyThinkContent, hasOnlyToolCallContent } from '../lib/response-parser';
 
 // Format elapsed time helper
@@ -1079,6 +1079,229 @@ const preprocessLaTeX = (content: string) => {
     return result;
 };
 
+type AssistantMessageProps = {
+    message: Message;
+    isLastMessage: boolean;
+    thinkingStartTime: number | null;
+    toolProcessingStartTime: number | null;
+};
+
+const AssistantMessage = memo(function AssistantMessage({
+    message,
+    isLastMessage,
+    thinkingStartTime,
+    toolProcessingStartTime,
+}: AssistantMessageProps) {
+    const toolCalls = message.toolCalls || [];
+    const parsedParts = useMemo(() => parseMessageContent(message.content), [message.content]);
+    const textParts = useMemo(() => parsedParts.filter((p) => p.type === 'text'), [parsedParts]);
+    const toolCallParts = useMemo(() => parsedParts.filter((p) => p.type === 'tool_call'), [parsedParts]);
+    const pythonToolCalls = useMemo(
+        () => toolCalls.filter((call) => call.tool === 'python_execution'),
+        [toolCalls]
+    );
+    const hasPythonToolCalls = pythonToolCalls.length > 0;
+    const toolCallPartIndices = useMemo(
+        () => parsedParts.map((p, idx) => (p.type === 'tool_call' ? idx : -1)).filter((idx) => idx !== -1),
+        [parsedParts]
+    );
+    const lastThinkIndex = useMemo(
+        () => parsedParts.reduce((last, part, idx) => (part.type === 'think' ? idx : last), -1),
+        [parsedParts]
+    );
+    const hasAnyText = useMemo(
+        () => textParts.some((part) => part.content.trim().length > 0),
+        [textParts]
+    );
+    const isCodeOnlyBlock = useCallback((text: string) => {
+        const trimmed = text.trim();
+        return /^```[\s\S]*```$/.test(trimmed);
+    }, []);
+    const textAllCodeOnly = useMemo(
+        () => textParts.length > 0 && textParts.every((part) => isCodeOnlyBlock(part.content)),
+        [textParts, isCodeOnlyBlock]
+    );
+    const hasVisibleText = hasAnyText && !textAllCodeOnly;
+    const shouldInlineFallbackToolCalls = toolCalls.length > toolCallPartIndices.length;
+    const fallbackInsertAfter = shouldInlineFallbackToolCalls
+        ? toolCallPartIndices.length > 0
+            ? toolCallPartIndices[toolCallPartIndices.length - 1]
+            : lastThinkIndex !== -1
+            ? lastThinkIndex
+            : parsedParts.length > 0
+            ? 0
+            : -1
+        : -1;
+    const latestCodeExecutionStdout = useMemo(
+        () =>
+            message.codeExecutions
+                ?.slice()
+                .reverse()
+                .find((exec) => exec.stdout && exec.stdout.trim().length > 0)
+                ?.stdout.trim(),
+        [message.codeExecutions]
+    );
+    const latestPythonStdout = useMemo(
+        () =>
+            pythonToolCalls
+                .slice()
+                .reverse()
+                .find((call) => call.result && call.result.trim().length > 0)
+                ?.result.trim(),
+        [pythonToolCalls]
+    );
+    const latestNonPythonToolResult = useMemo(
+        () =>
+            toolCalls
+                .slice()
+                .reverse()
+                .find((call) => call.tool !== 'python_execution' && call.result && call.result.trim().length > 0)
+                ?.result.trim(),
+        [toolCalls]
+    );
+    const pythonOutputToShow = latestPythonStdout || latestCodeExecutionStdout || '';
+    const fallbackAnswer = !hasVisibleText ? latestNonPythonToolResult || '' : '';
+    const renderedParts = useMemo(() => {
+        let toolCallIndex = 0;
+        const nodes: JSX.Element[] = [];
+
+        parsedParts.forEach((part, idx) => {
+            if (part.type === 'think') {
+                nodes.push(
+                    <details key={`think-${idx}`} className="mb-4 group">
+                        <summary className="cursor-pointer text-xs font-medium text-gray-400 hover:text-gray-600 select-none flex items-center gap-2 mb-2">
+                            <span className="h-px flex-1 bg-gray-200 group-open:bg-gray-300 transition-colors"></span>
+                            <span className="text-sm group-open:rotate-180 transition-transform inline-block">▼</span>
+                        </summary>
+                        <div className="pl-3 border-l-2 border-gray-300 text-gray-600 text-sm italic bg-gray-50 p-3 rounded-r-lg">
+                            {part.content || "Thinking..."}
+                        </div>
+                    </details>
+                );
+                return;
+            }
+
+            if (part.type === 'tool_call') {
+                const toolCallRecord = toolCalls[toolCallIndex];
+                if (toolCallRecord) {
+                    nodes.push(
+                        <InlineToolCallResult key={`toolcall-${toolCallRecord.id}`} call={toolCallRecord} />
+                    );
+                    toolCallIndex++;
+                }
+                return;
+            }
+
+            // Skip rendering text when Python tool calls will show outputs separately
+            if (!hasPythonToolCalls) {
+                const processedContent = preprocessLaTeX(part.content);
+                nodes.push(
+                    <ReactMarkdown
+                        key={`text-${idx}`}
+                        remarkPlugins={[remarkGfm, remarkMath]}
+                        rehypePlugins={[
+                            rehypeRaw,
+                            [
+                                rehypeKatex,
+                                {
+                                    throwOnError: false,
+                                    errorColor: '#666666',
+                                    strict: false,
+                                },
+                            ],
+                        ]}
+                        components={{
+                            code({ inline, className, children, ...props }: any) {
+                                const match = /language-(\w+)/.exec(className || '');
+                                const codeContent = String(children).replace(/\n$/, '');
+
+                                return !inline && match ? (
+                                    <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
+                                        <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
+                                            <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
+                                            <button
+                                                onClick={() => navigator.clipboard.writeText(codeContent)}
+                                                className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
+                                            >
+                                                📋
+                                            </button>
+                                        </div>
+                                        <div className="bg-white p-4 overflow-x-auto text-sm">
+                                            <code className={className} {...props}>
+                                                {children}
+                                            </code>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
+                                        {children}
+                                    </code>
+                                );
+                            },
+                        }}
+                    >
+                        {processedContent}
+                    </ReactMarkdown>
+                );
+            }
+
+            if (shouldInlineFallbackToolCalls && idx === fallbackInsertAfter && toolCallIndex < toolCalls.length) {
+                for (; toolCallIndex < toolCalls.length; toolCallIndex++) {
+                    const call = toolCalls[toolCallIndex];
+                    nodes.push(
+                        <InlineToolCallResult key={`toolcall-fallback-${call.id}`} call={call} />
+                    );
+                }
+            }
+        });
+
+        if (shouldInlineFallbackToolCalls && parsedParts.length === 0 && toolCalls.length > 0) {
+            toolCalls.forEach((call) => {
+                nodes.push(<InlineToolCallResult key={`toolcall-fallback-${call.id}`} call={call} />);
+            });
+        }
+
+        return nodes;
+    }, [parsedParts, toolCalls, hasPythonToolCalls, fallbackInsertAfter, shouldInlineFallbackToolCalls]);
+
+    const hasThinkOnly = useMemo(() => {
+        const hasThink = parsedParts.some((p) => p.type === 'think');
+        const textHasMeaning = textParts.some((p) => p.content.trim());
+        return hasThink && !textHasMeaning;
+    }, [parsedParts, textParts]);
+
+    const hasToolOnly = useMemo(() => {
+        const hasTool = toolCallParts.length > 0;
+        const textHasMeaning = textParts.some((p) => p.content.trim());
+        return hasTool && !textHasMeaning;
+    }, [toolCallParts, textParts]);
+
+    return (
+        <>
+            {message.ragChunks && message.ragChunks.length > 0 && (
+                <RagContextBlock chunks={message.ragChunks} />
+            )}
+            {renderedParts}
+            {(pythonOutputToShow || fallbackAnswer) && (
+                <div className="mt-3">
+                    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 text-gray-900 whitespace-pre-wrap">
+                        {pythonOutputToShow || fallbackAnswer}
+                    </div>
+                </div>
+            )}
+            {thinkingStartTime && isLastMessage && hasThinkOnly && (
+                <ThinkingIndicator startTime={thinkingStartTime} />
+            )}
+            {toolProcessingStartTime && isLastMessage && hasToolOnly && (
+                <ToolProcessingBlock content={message.content} startTime={toolProcessingStartTime} />
+            )}
+            {message.codeExecutions && message.codeExecutions.length > 0 && (
+                <CodeExecutionBlock executions={message.codeExecutions} />
+            )}
+        </>
+    );
+});
+
 export function ChatArea() {
     const {
         chatMessages,
@@ -1428,186 +1651,12 @@ export function ChatArea() {
                                 >
                                     <div className="chat-message-content prose prose-slate max-w-none break-words text-gray-900">
                                         {m.role === 'assistant' ? (
-                                            (() => {
-                                                // Parse content and track tool call index for inline rendering
-                                                const parts = parseMessageContent(m.content);
-                                                const toolCalls = m.toolCalls || [];
-                                                const pythonToolCalls = toolCalls.filter((call) => call.tool === 'python_execution');
-                                                const hasPythonToolCalls = pythonToolCalls.length > 0;
-                                                const toolCallPartIndices = parts
-                                                    .map((p, idx) => p.type === 'tool_call' ? idx : -1)
-                                                    .filter(idx => idx !== -1);
-                                                const lastThinkIndex = parts.reduce((last, part, idx) => part.type === 'think' ? idx : last, -1);
-                                                const shouldInlineFallbackToolCalls = toolCalls.length > toolCallPartIndices.length;
-                                                const fallbackInsertAfter = shouldInlineFallbackToolCalls
-                                                    ? (toolCallPartIndices.length > 0
-                                                        ? toolCallPartIndices[toolCallPartIndices.length - 1]
-                                                        : (lastThinkIndex !== -1 ? lastThinkIndex : (parts.length > 0 ? 0 : -1)))
-                                                    : -1;
-                                                const isCodeOnlyBlock = (text: string) => {
-                                                    const trimmed = text.trim();
-                                                    // Treat pure fenced code blocks (with optional language) as non-visible for final answer purposes
-                                                    return /^```[\s\S]*```$/.test(trimmed);
-                                                };
-                                                const textParts = parts.filter((part) => part.type === 'text');
-                                                const hasAnyText = textParts.some((part) => part.content.trim().length > 0);
-                                                const textAllCodeOnly = textParts.length > 0 && textParts.every((part) => isCodeOnlyBlock(part.content));
-                                                const hasVisibleText = hasAnyText && !textAllCodeOnly;
-                                                // Once a python tool call is present, hide the assistant-rendered code/text (it will be shown via tool UI/output below).
-                                                const shouldHideTextForToolCalls = hasPythonToolCalls;
-                                                const latestCodeExecutionStdout = m.codeExecutions
-                                                    ?.slice()
-                                                    .reverse()
-                                                    .find((exec) => exec.stdout && exec.stdout.trim().length > 0)
-                                                    ?.stdout.trim();
-                                                const latestPythonStdout = pythonToolCalls
-                                                    .slice()
-                                                    .reverse()
-                                                    .find((call) => call.result && call.result.trim().length > 0)
-                                                    ?.result.trim();
-                                                const latestNonPythonToolResult = toolCalls
-                                                    .slice()
-                                                    .reverse()
-                                                    .find((call) => call.tool !== 'python_execution' && call.result && call.result.trim().length > 0)
-                                                    ?.result.trim();
-                                                // Always show Python stdout separately so it can't be hidden by text-rendering logic.
-                                                const pythonOutputToShow = latestPythonStdout || latestCodeExecutionStdout || '';
-                                                // Fallback answer is only for non-Python tool results when there is no visible text.
-                                                const fallbackAnswer = !hasVisibleText
-                                                    ? (latestNonPythonToolResult || '')
-                                                    : '';
-                                                let toolCallIndex = 0;
-                                                const renderedParts: JSX.Element[] = [];
-
-                                                parts.forEach((part, idx) => {
-                                                    if (part.type === 'think') {
-                                                        renderedParts.push(
-                                                            <details key={`think-${idx}`} className="mb-4 group">
-                                                                <summary className="cursor-pointer text-xs font-medium text-gray-400 hover:text-gray-600 select-none flex items-center gap-2 mb-2">
-                                                                    <span className="h-px flex-1 bg-gray-200 group-open:bg-gray-300 transition-colors"></span>
-                                                                    <span className="text-sm group-open:rotate-180 transition-transform inline-block">▼</span>
-                                                                </summary>
-                                                                <div className="pl-3 border-l-2 border-gray-300 text-gray-600 text-sm italic bg-gray-50 p-3 rounded-r-lg">
-                                                                    {part.content || "Thinking..."}
-                                                                </div>
-                                                            </details>
-                                                        );
-                                                    } else if (part.type === 'tool_call') {
-                                                        const toolCallRecord = toolCalls[toolCallIndex];
-                                                        if (toolCallRecord) {
-                                                            renderedParts.push(
-                                                                <InlineToolCallResult key={`toolcall-${toolCallRecord.id}`} call={toolCallRecord} />
-                                                            );
-                                                            toolCallIndex++;
-                                                        }
-                                                    } else {
-                                                        // Skip rendering the raw text if we're hiding it for tool calls,
-                                                        // but still continue so fallback tool insertion can happen.
-                                                        if (!shouldHideTextForToolCalls) {
-                                                            renderedParts.push(
-                                                                <ReactMarkdown
-                                                                    key={`text-${idx}`}
-                                                                    remarkPlugins={[remarkGfm, remarkMath]}
-                                                                    rehypePlugins={[
-                                                                        rehypeRaw, 
-                                                                        [rehypeKatex, { 
-                                                                            throwOnError: false, 
-                                                                            errorColor: '#666666',
-                                                                            strict: false
-                                                                        }]
-                                                                    ]}
-                                                                    components={{
-                                                                        code({ node, inline, className, children, ...props }: any) {
-                                                                            const match = /language-(\w+)/.exec(className || '')
-                                                                            const codeContent = String(children).replace(/\n$/, '');
-
-                                                                            return !inline && match ? (
-                                                                                <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
-                                                                                    <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
-                                                                                        <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
-                                                                                        <button
-                                                                                            onClick={() => navigator.clipboard.writeText(codeContent)}
-                                                                                            className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
-                                                                                        >
-                                                                                            📋
-                                                                                        </button>
-                                                                                    </div>
-                                                                                    <div className="bg-white p-4 overflow-x-auto text-sm">
-                                                                                        <code className={className} {...props}>
-                                                                                            {children}
-                                                                                        </code>
-                                                                                    </div>
-                                                                                </div>
-                                                                            ) : (
-                                                                                <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
-                                                                                    {children}
-                                                                                </code>
-                                                                            )
-                                                                        }
-                                                                    }}
-                                                                >
-                                                                    {preprocessLaTeX(part.content)}
-                                                                </ReactMarkdown>
-                                                            );
-                                                        }
-                                                    }
-
-                                                    if (
-                                                        shouldInlineFallbackToolCalls &&
-                                                        idx === fallbackInsertAfter &&
-                                                        toolCallIndex < toolCalls.length
-                                                    ) {
-                                                        for (; toolCallIndex < toolCalls.length; toolCallIndex++) {
-                                                            const call = toolCalls[toolCallIndex];
-                                                            renderedParts.push(
-                                                                <InlineToolCallResult key={`toolcall-fallback-${call.id}`} call={call} />
-                                                            );
-                                                        }
-                                                    }
-                                                });
-
-                                                if (shouldInlineFallbackToolCalls && parts.length === 0 && toolCalls.length > 0) {
-                                                    toolCalls.forEach((call) => {
-                                                        renderedParts.push(
-                                                            <InlineToolCallResult key={`toolcall-fallback-${call.id}`} call={call} />
-                                                        );
-                                                    });
-                                                    toolCallIndex = toolCalls.length;
-                                                }
-                                                
-                                                return (
-                                                    <>
-                                                        {/* RAG context block - shows document chunks used as context (before response) */}
-                                                        {m.ragChunks && m.ragChunks.length > 0 && (
-                                                            <RagContextBlock chunks={m.ragChunks} />
-                                                        )}
-                                                        {renderedParts}
-                                                        {(pythonOutputToShow || fallbackAnswer) && (
-                                                            <div className="mt-3">
-                                                                <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 text-gray-900 whitespace-pre-wrap">
-                                                                    {pythonOutputToShow || fallbackAnswer}
-                                                                </div>
-                                                            </div>
-                                                        )}
-                                                        {/* Show thinking indicator when only think content is visible */}
-                                                        {thinkingStartTime && 
-                                                         chatMessages[chatMessages.length - 1]?.id === m.id && 
-                                                         hasOnlyThinkContent(m.content) && (
-                                                            <ThinkingIndicator startTime={thinkingStartTime} />
-                                                        )}
-                                                        {/* Show tool processing block when only tool_call content is visible */}
-                                                        {toolProcessingStartTime && 
-                                                         chatMessages[chatMessages.length - 1]?.id === m.id && 
-                                                         hasOnlyToolCallContent(m.content) && (
-                                                            <ToolProcessingBlock content={m.content} startTime={toolProcessingStartTime} />
-                                                        )}
-                                                        {/* Collapsible code execution block - shown at end since executions aren't tracked by position */}
-                                                        {m.codeExecutions && m.codeExecutions.length > 0 && (
-                                                            <CodeExecutionBlock executions={m.codeExecutions} />
-                                                        )}
-                                                    </>
-                                                );
-                                            })()
+                                            <AssistantMessage
+                                                message={m}
+                                                isLastMessage={m.role === 'assistant' && chatMessages[chatMessages.length - 1]?.id === m.id}
+                                                thinkingStartTime={thinkingStartTime}
+                                                toolProcessingStartTime={toolProcessingStartTime}
+                                            />
                                         ) : (
                                             <div className="whitespace-pre-wrap">{m.content}</div>
                                         )}
