@@ -537,9 +537,9 @@ const RagFilePills = ({
     };
     
     return (
-        <div className="flex flex-wrap gap-2 px-2 py-2 max-w-[900px] mx-auto">
+        <div className="rag-file-pill-bar flex flex-wrap gap-2 px-2 py-2 max-w-[900px] mx-auto">
             {isIndexing && (
-                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-100 text-blue-700 rounded-full text-xs font-medium">
+                <div className="rag-indexing-pill inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-100 text-blue-700 rounded-full text-xs font-medium">
                     <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse" />
                     <span>Indexing...</span>
                 </div>
@@ -547,7 +547,7 @@ const RagFilePills = ({
             {files.map((file) => (
                 <div 
                     key={file}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-medium group"
+                    className="rag-file-pill inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-medium group"
                     title={file}
                 >
                     <span>📄</span>
@@ -652,13 +652,13 @@ const InputBar = ({
     const isDisabled = disabled || isLoading;
     
     return (
-        <div className={`w-full flex justify-center ${className}`}>
-            <div className={`flex items-center gap-3 w-full max-w-[900px] bg-[#f5f5f5] border border-transparent px-4 py-2.5 shadow-[0px_2px_8px_rgba(15,23,42,0.08)] focus-within:border-gray-300 transition-all ${isMultiline ? 'rounded-2xl' : 'rounded-full'}`}>
-                <div className="relative">
+        <div className={`chat-input-shell w-full flex justify-center ${className}`}>
+            <div className={`chat-input-surface flex items-center gap-3 w-full max-w-[900px] bg-[#f5f5f5] border border-transparent px-4 py-2.5 shadow-[0px_2px_8px_rgba(15,23,42,0.08)] focus-within:border-gray-300 transition-all ${isMultiline ? 'rounded-2xl' : 'rounded-full'}`}>
+                <div className="chat-attachment-trigger relative">
                     <button
                         type="button"
                         onClick={() => setMenuOpen(!menuOpen)}
-                        className={`flex h-9 w-9 items-center justify-center rounded-full text-xl shadow-sm transition shrink-0 relative ${
+                        className={`chat-attach-button flex h-9 w-9 items-center justify-center rounded-full text-xl shadow-sm transition shrink-0 relative ${
                             hasAttachments 
                                 ? 'bg-blue-500 text-white hover:bg-blue-600' 
                                 : 'bg-white text-gray-600 hover:bg-gray-100'
@@ -690,7 +690,7 @@ const InputBar = ({
                 )}
                 <textarea
                     ref={textareaRef}
-                    className={`flex-1 bg-transparent text-gray-700 resize-none focus:outline-none focus:ring-0 focus:border-none max-h-[200px] overflow-y-auto placeholder:text-gray-400 font-normal text-[15px] leading-6 border-none py-1 ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    className={`chat-input-textarea flex-1 bg-transparent text-gray-700 resize-none focus:outline-none focus:ring-0 focus:border-none max-h-[200px] overflow-y-auto placeholder:text-gray-400 font-normal text-[15px] leading-6 border-none py-1 ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                     rows={1}
                     value={input}
                     onChange={(e) => !disabled && setInput(e.target.value)}
@@ -1396,7 +1396,7 @@ export function ChatArea() {
     };
 
     return (
-    <div className="h-full w-full flex flex-col text-gray-800 font-sans relative overflow-hidden">
+    <div id="chat-area" className="chat-area h-full w-full flex flex-col text-gray-800 font-sans relative overflow-hidden">
         {/* Status Bar for model operations */}
         <StatusBar />
         
@@ -1404,29 +1404,29 @@ export function ChatArea() {
         <StreamingWarningBar />
         
         {/* Scrollable Messages Area - takes all remaining space */}
-        <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-4 sm:px-6 pt-6 pb-6">
+        <div ref={scrollContainerRef} onScroll={handleScroll} className="chat-scroll-region flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-4 sm:px-6 pt-6 pb-6">
                 {chatMessages.length === 0 ? (
-                    <div className="flex-1 flex flex-col items-center justify-center px-6">
-                        <div className="mb-8 text-center">
-                            <h1 className="text-2xl font-bold text-gray-900">
+                    <div className="chat-empty-state flex-1 flex flex-col items-center justify-center px-6">
+                        <div className="chat-empty-copy mb-8 text-center">
+                            <h1 className="chat-empty-title text-2xl font-bold text-gray-900">
                                 {isConnecting ? "Wait, Loading Local Models ..." : "How can I help you today?"}
                             </h1>
                         </div>
                     </div>
                 ) : (
-                    <div className="w-full max-w-none space-y-6 py-0">
+                    <div className="chat-thread w-full max-w-none space-y-6 py-0">
                         {chatMessages.map(m => (
-                            <div key={m.id} className={`flex w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div key={m.id} className={`chat-message-row flex w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                 <div
                                     className={`
-                                    relative w-full max-w-none rounded-2xl px-5 py-3.5 text-[15px] leading-7
+                                    chat-bubble relative w-full max-w-none rounded-2xl px-5 py-3.5 text-[15px] leading-7
                                     ${m.role === 'user'
-                                            ? 'bg-gray-100 text-gray-900'
-                                            : 'bg-gray-50 text-gray-900'
+                                            ? 'chat-bubble-user bg-gray-100 text-gray-900'
+                                            : 'chat-bubble-assistant bg-gray-50 text-gray-900'
                                         }
                                 `}
                                 >
-                                    <div className="prose prose-slate max-w-none break-words text-gray-900">
+                                    <div className="chat-message-content prose prose-slate max-w-none break-words text-gray-900">
                                         {m.role === 'assistant' ? (
                                             (() => {
                                                 // Parse content and track tool call index for inline rendering
@@ -1666,16 +1666,16 @@ export function ChatArea() {
             )}
 
             {/* Fixed Input Area at Bottom */}
-            <div className="flex-shrink-0 mt-1 pb-4">
+            <div className="chat-input-section flex-shrink-0 mt-1 pb-4">
                 {/* RAG File Pills - show indexed files above input */}
-                <div className="px-2 sm:px-6">
+                <div className="chat-input-pill-row px-2 sm:px-6">
                     <RagFilePills 
                         files={ragIndexedFiles} 
                         onRemove={removeRagFile}
                         isIndexing={isIndexingRag}
                     />
                 </div>
-                <div className="px-2 sm:px-6">
+                <div className="chat-input-bar-row px-2 sm:px-6">
                     <InputBar
                         className=""
                         input={chatInputValue}

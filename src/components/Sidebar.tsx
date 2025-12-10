@@ -43,7 +43,7 @@ function ChatItem({
 }: ChatItemProps) {
     return (
         <div
-            className={`group relative flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all text-sm border border-transparent
+            className={`chat-list-item group relative flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all text-sm border border-transparent
                 ${isActive ? 'bg-gray-200 text-gray-900 font-medium' : 'text-gray-700 hover:bg-gray-100'}
             `}
             onClick={() => !isEditing && onLoadChat(chat.id)}
@@ -192,9 +192,9 @@ export function Sidebar({ className = "" }: SidebarProps) {
     const recentChats = displayChats.filter(c => !c.pinned);
 
     return (
-        <div className={`text-gray-900 flex flex-col h-full w-full font-sans text-sm ${className}`} style={{ backgroundColor: '#e5e7eb' }}>
+        <div className={`sidebar-layout text-gray-900 flex flex-col h-full w-full font-sans text-sm ${className}`} style={{ backgroundColor: '#e5e7eb' }}>
             {/* Scrollable Content - History */}
-            <div className="flex-1 overflow-y-auto scrollbar-hide px-3 pt-4">
+            <div className="sidebar-scroll-region flex-1 overflow-y-auto scrollbar-hide px-3 pt-4">
                 {/* New Chat Button */}
                 <button
                     onClick={() => {
@@ -204,7 +204,7 @@ export function Sidebar({ className = "" }: SidebarProps) {
                             currentChatId: null,
                         });
                     }}
-                    className="inline-flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors px-3 py-1.5 rounded-full group text-xs font-semibold uppercase tracking-wide self-start"
+                    className="sidebar-new-chat-button inline-flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors px-3 py-1.5 rounded-full group text-xs font-semibold uppercase tracking-wide self-start"
                     style={{ marginBottom: '24px' }}
                 >
                     <Plus size={16} className="text-gray-500 group-hover:text-gray-700" />
@@ -213,7 +213,7 @@ export function Sidebar({ className = "" }: SidebarProps) {
 
                 {/* Pinned Section */}
                 {pinnedChats.length > 0 && (
-                    <div style={{ paddingBottom: '24px' }}>
+                    <div className="sidebar-pinned-section" style={{ paddingBottom: '24px' }}>
                         <div className="text-xs font-semibold text-gray-500 mb-2 px-3 uppercase tracking-wider flex items-center gap-2">
                             <Pin size={10} /> Pinned
                         </div>
@@ -241,7 +241,7 @@ export function Sidebar({ className = "" }: SidebarProps) {
                 )}
 
                 {/* Chat History Section */}
-                <div className="mb-8">
+                <div className="sidebar-history-section mb-8">
                     {isShowingRelevance && (
                         <div className="text-xs font-semibold text-gray-500 mb-2 px-3 uppercase tracking-wider flex items-center gap-2">
                             <Search size={10} />
@@ -279,10 +279,10 @@ export function Sidebar({ className = "" }: SidebarProps) {
             </div>
 
             {/* Bottom Actions */}
-            <div className="p-3 border-t border-gray-300">
+            <div className="sidebar-footer p-3 border-t border-gray-300">
                 <button
                     onClick={() => useSettingsStore.getState().openSettings()}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded-lg transition-colors"
+                    className="sidebar-settings-button flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded-lg transition-colors"
                 >
                     <Settings size={16} />
                     <span>Settings</span>

@@ -1716,19 +1716,19 @@ export function SettingsModal() {
             : false;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div id="settings-modal" className="settings-modal fixed inset-0 z-50 flex items-center justify-center">
             {/* Backdrop */}
             <div 
-                className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+                className="settings-backdrop absolute inset-0 bg-black/40 backdrop-blur-sm"
                 onClick={closeSettings}
             />
             
             {/* Modal */}
-            <div className="relative w-full max-w-2xl max-h-[85vh] bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col m-4">
+            <div className="settings-surface relative w-full max-w-2xl max-h-[85vh] bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col m-4">
                 {/* Header */}
-                <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-                    <h2 className="text-lg font-semibold text-gray-900">Settings</h2>
-                    <div className="flex items-center gap-2">
+                <div className="settings-header flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                    <h2 className="settings-title text-lg font-semibold text-gray-900">Settings</h2>
+                    <div className="settings-header-actions flex items-center gap-2">
                         {activeTab === 'builtins' && (
                             <button
                                 onClick={handleHeaderReset}
@@ -1759,7 +1759,7 @@ export function SettingsModal() {
                 </div>
                 
                 {/* Tabs */}
-                <div className="flex border-b border-gray-100">
+                <div className="settings-tablist flex border-b border-gray-100">
                     <button
                         onClick={() => setActiveTab('system-prompt')}
                         className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
@@ -1807,7 +1807,7 @@ export function SettingsModal() {
                 </div>
                 
                 {/* Content */}
-                <div className="flex-1 overflow-y-auto p-6">
+                <div className="settings-content flex-1 overflow-y-auto p-6">
                     {isLoading ? (
                         <div className="flex items-center justify-center py-12">
                             <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />

@@ -16,16 +16,16 @@ export function EditorPanel() {
     };
 
     return (
-        <div className="w-[500px] h-full bg-[#0d1117] border-l border-gray-700 flex flex-col shadow-xl animate-in slide-in-from-right-10 duration-200">
+        <div id="editor-panel" className="editor-panel w-[500px] h-full bg-[#0d1117] border-l border-gray-700 flex flex-col shadow-xl animate-in slide-in-from-right-10 duration-200">
             {/* Header */}
-            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 bg-[#161b22]">
-                <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold text-white">Code Editor</span>
-                    <span className="text-xs text-gray-400 px-2 py-0.5 bg-gray-800 rounded-full border border-gray-700 uppercase">
+            <div className="editor-header flex items-center justify-between px-4 py-3 border-b border-gray-700 bg-[#161b22]">
+                <div className="editor-title-row flex items-center gap-2">
+                    <span className="editor-title text-sm font-bold text-white">Code Editor</span>
+                    <span className="editor-language-pill text-xs text-gray-400 px-2 py-0.5 bg-gray-800 rounded-full border border-gray-700 uppercase">
                         {editorLanguage}
                     </span>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="editor-actions flex items-center gap-1">
                     <button
                         onClick={handleCopy}
                         className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg transition-colors"

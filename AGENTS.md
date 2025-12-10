@@ -13,6 +13,12 @@
 - **Frontend examples (TS/React)**: `messages` ➜ `chatMessages`; `onSend` ➜ `onSendChatMessage`; `inputValue` ➜ `chatInputValue`; store guards `listenerGeneration` ➜ `listenerGenerationCounter`.
 - **Do not rename** persisted schema fields, IPC channel names, or external protocol keys without migration/compat review; keep column names and event names stable unless explicitly migrating.
 
+### Descriptive UI Selectors
+- **Directive**: Give every major UI element a clear, descriptive class and/or id that reflects its role (e.g., `app-header-bar`, `chat-thread`, `sidebar-history-list`, `settings-modal`). Avoid anonymous wrappers like plain `div` with only utility classes.
+- **Purpose**: Makes styling and QA selectors stable and greppable; reduces brittle nth-child targeting.
+- **Scope**: Apply to structural containers (pages, panels, toolbars, lists, dialogs, input bars, status toasts). Inline atoms (icons, badges) can inherit parent tags.
+- **Format**: Kebab-case, role-first naming; prefer class to id unless uniqueness is required.
+
 ## Architectural Choices
 
 ### State Management & Event Listeners

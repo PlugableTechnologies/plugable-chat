@@ -115,7 +115,7 @@ export function StatusBar() {
     const icon = getOperationIcon(operationStatus);
     
     return (
-        <div className={`flex items-center justify-between px-4 py-2 ${colors.bg} border-b ${colors.border} transition-all`}>
+        <div className={`status-bar flex items-center justify-between px-4 py-2 ${colors.bg} border-b ${colors.border} transition-all`}>
             <div className="flex items-center gap-3 flex-1 min-w-0">
                 {/* Icon/spinner */}
                 <div className={`flex-shrink-0 ${colors.icon}`}>
@@ -175,7 +175,7 @@ export function StatusBar() {
             {/* Dismiss button */}
             <button
                 onClick={dismissStatusBar}
-                className={`flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors ${colors.icon}`}
+                className={`status-dismiss-button flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors ${colors.icon}`}
                 aria-label="Dismiss status"
             >
                 <X size={16} />
@@ -198,7 +198,7 @@ export function StreamingWarningBar() {
     const chatName = streamingChat?.title || 'another chat';
     
     return (
-        <div className="flex items-center justify-between px-4 py-2 bg-amber-50 border-b border-amber-200">
+        <div className="streaming-warning-bar flex items-center justify-between px-4 py-2 bg-amber-50 border-b border-amber-200">
             <div className="flex items-center gap-3 flex-1 min-w-0">
                 <span className="text-lg">⚠️</span>
                 <span className="text-sm font-medium text-amber-800 truncate">

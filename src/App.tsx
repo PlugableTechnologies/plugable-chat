@@ -47,7 +47,7 @@ function ErrorBanner() {
   if (!backendError) return null;
 
   return (
-    <div className="absolute top-4 left-4 right-4 z-50 flex items-center justify-between bg-red-50 border border-red-300 text-red-800 px-4 py-3 rounded-lg shadow-md">
+    <div className="error-banner absolute top-4 left-4 right-4 z-50 flex items-center justify-between bg-red-50 border border-red-300 text-red-800 px-4 py-3 rounded-lg shadow-md">
       <div className="flex items-center gap-3">
         <AlertTriangle className="text-red-600" size={20} />
         <span className="font-medium text-sm">{backendError}</span>
@@ -247,41 +247,41 @@ function App() {
   return (
     <>
     <SettingsModal />
-    <div className="h-screen w-screen fixed inset-0 bg-white text-gray-800 overflow-hidden font-sans antialiased flex items-start justify-center pt-0 pb-3">
-      <div className="w-[calc(100%-24px)] h-[calc(100%-12px)] sm:w-[calc(100%-32px)] sm:h-[calc(100%-16px)] bg-white rounded-b-2xl shadow-lg overflow-hidden flex flex-col">
+    <div id="app-shell" className="app-shell h-screen w-screen fixed inset-0 bg-white text-gray-800 overflow-hidden font-sans antialiased flex items-start justify-center pt-0 pb-3">
+      <div className="app-window-frame w-[calc(100%-24px)] h-[calc(100%-12px)] sm:w-[calc(100%-32px)] sm:h-[calc(100%-16px)] bg-white rounded-b-2xl shadow-lg overflow-hidden flex flex-col">
         {/* Header */}
-        <div className="h-14 shrink-0 flex items-center px-4 sm:px-6 bg-white">
-          <div className="flex items-center gap-3">
-            <img src="/plugable-logo.png" alt="Plugable" className="h-12 max-w-[240px] w-auto object-contain" />
-            <span className="font-semibold text-sm text-gray-900">Local Chat - Microsoft Foundry</span>
+        <div className="app-header-bar h-14 shrink-0 flex items-center px-4 sm:px-6 bg-white">
+          <div className="app-branding-block flex items-center gap-3">
+            <img src="/plugable-logo.png" alt="Plugable" className="app-logo h-12 max-w-[240px] w-auto object-contain" />
+            <span className="app-product-label font-semibold text-sm text-gray-900">Local Chat - Microsoft Foundry</span>
           </div>
           <div className="flex-1" />
-          <div className="flex items-center gap-2 text-sm text-gray-500">
-            <span>Model:</span>
+          <div className="app-model-controls flex items-center gap-2 text-sm text-gray-500">
+            <span className="app-model-label">Model:</span>
             {isConnecting ? (
-              <span className="text-gray-500 flex items-center gap-1.5">
+              <span className="app-model-status text-gray-500 flex items-center gap-1.5">
                 <span className="inline-block w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></span>
                 Connecting...
               </span>
             ) : currentModel === 'Unavailable' ? (
-              <button onClick={retryConnection} className="text-red-600 hover:text-red-800 underline underline-offset-2 transition-colors" title="Click to retry connection">
+              <button onClick={retryConnection} className="app-model-unavailable text-red-600 hover:text-red-800 underline underline-offset-2 transition-colors" title="Click to retry connection">
                 Unavailable (retry)
               </button>
             ) : currentModel === 'No models' ? (
               <button 
                 onClick={handleRefreshModels}
-                className="text-amber-600 hover:text-amber-800 text-[11px] font-semibold underline underline-offset-2 transition-colors"
+                className="app-model-refresh text-amber-600 hover:text-amber-800 text-[11px] font-semibold underline underline-offset-2 transition-colors"
                 title="No models found. Click to check for newly loaded models."
               >
                 No models (click to refresh)
               </button>
             ) : currentModel === 'Downloading...' ? (
-              <span className="text-blue-600 flex items-center gap-1.5 text-[11px] font-semibold">
+              <span className="app-model-downloading text-blue-600 flex items-center gap-1.5 text-[11px] font-semibold">
                 <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></span>
                 Downloading model...
               </span>
             ) : cachedModels.length > 0 ? (
-              <div className="flex items-center gap-1.5">
+              <div className="app-model-selector flex items-center gap-1.5">
                 <select 
                   value={currentModel} 
                   onChange={(e) => {
@@ -341,11 +341,11 @@ function App() {
           </div>
         </div>
         {/* Main Content */}
-        <div className="flex-1 flex overflow-hidden min-h-0" style={{ gap: '12px' }}>
-          <div className="flex-[1] min-w-[260px] overflow-hidden" style={{ backgroundColor: '#e5e7eb', borderRadius: '12px' }}>
-            <Sidebar className="h-full" />
+        <div className="app-main-region flex-1 flex overflow-hidden min-h-0" style={{ gap: '12px' }}>
+          <div className="app-sidebar-container flex-[1] min-w-[260px] overflow-hidden" style={{ backgroundColor: '#e5e7eb', borderRadius: '12px' }}>
+            <Sidebar className="h-full sidebar-panel" />
           </div>
-          <div className="flex-[2] min-w-0 flex flex-col overflow-hidden h-full bg-white">
+          <div className="chat-pane flex-[2] min-w-0 flex flex-col overflow-hidden h-full bg-white">
             <ErrorBanner />
             <ChatArea />
           </div>
