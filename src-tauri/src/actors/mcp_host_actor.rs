@@ -50,6 +50,12 @@ pub struct McpTool {
     pub description: Option<String>,
     #[serde(rename = "inputSchema", alias = "input_schema", default)]
     pub input_schema: Option<Value>,
+    /// Optional examples to help small models use the tool correctly
+    #[serde(default, rename = "inputExamples", alias = "input_examples")]
+    pub input_examples: Option<Vec<Value>>,
+    /// Allowed callers for programmatic tool use (e.g., ["python_execution_20251206"])
+    #[serde(default, rename = "allowedCallers", alias = "allowed_callers")]
+    pub allowed_callers: Option<Vec<String>>,
 }
 
 /// Result from tool execution

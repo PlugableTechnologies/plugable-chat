@@ -110,12 +110,30 @@ struct CliArgs {
     /// Enable/disable tool_search
     #[arg(long, value_name = "BOOL", env = "PLUGABLE_TOOL_SEARCH", value_parser = clap::builder::BoolishValueParser::new())]
     tool_search: Option<bool>,
+    /// Maximum number of tools returned by tool_search (caps auto and explicit searches)
+    #[arg(long, value_name = "INT", env = "PLUGABLE_TOOL_SEARCH_MAX_RESULTS")]
+    tool_search_max_results: Option<usize>,
     /// Enable/disable python_execution built-in
     #[arg(long, value_name = "BOOL", env = "PLUGABLE_PYTHON_EXECUTION", value_parser = clap::builder::BoolishValueParser::new())]
     python_execution: Option<bool>,
     /// Enable/disable python-driven tool calling
     #[arg(long, value_name = "BOOL", env = "PLUGABLE_PYTHON_TOOL_CALLING", value_parser = clap::builder::BoolishValueParser::new())]
     python_tool_calling: Option<bool>,
+    /// Enable/disable inclusion of tool input_examples in prompts
+    #[arg(long, value_name = "BOOL", env = "PLUGABLE_TOOL_EXAMPLES", value_parser = clap::builder::BoolishValueParser::new())]
+    tool_examples: Option<bool>,
+    /// Maximum number of examples per tool when tool_examples is enabled
+    #[arg(long, value_name = "INT", env = "PLUGABLE_TOOL_EXAMPLES_MAX")]
+    tool_examples_max: Option<usize>,
+    /// Enable compact prompt mode for small models
+    #[arg(long, value_name = "BOOL", env = "PLUGABLE_COMPACT_MODE", value_parser = clap::builder::BoolishValueParser::new())]
+    compact_mode: Option<bool>,
+    /// Maximum number of tools to surface in prompts when compact mode is on
+    #[arg(long, value_name = "INT", env = "PLUGABLE_COMPACT_MAX_TOOLS")]
+    compact_max_tools: Option<usize>,
+    /// Override per-server defer_tools setting at launch
+    #[arg(long, value_name = "BOOL", env = "PLUGABLE_DEFER_TOOLS", value_parser = clap::builder::BoolishValueParser::new())]
+    defer_tools: Option<bool>,
     /// Enable/disable legacy <tool_call> parsing
     #[arg(long, value_name = "BOOL", env = "PLUGABLE_LEGACY_TOOL_FORMAT", value_parser = clap::builder::BoolishValueParser::new())]
     legacy_tool_call_format: Option<bool>,
@@ -261,6 +279,7 @@ struct LaunchConfigState {
 
 /// Maximum number of tool call iterations before stopping (safety limit)
 const MAX_TOOL_ITERATIONS: usize = 20;
+const PYTHON_EXECUTION_TOOL_TYPE: &str = "python_execution_20251206";
 
 /// Check if a tool call is for a built-in tool (python_execution or tool_search)
 fn is_builtin_tool(tool_name: &str) -> bool {
@@ -358,11 +377,34 @@ fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> LaunchOver
     if let Some(v) = args.tool_search {
         settings.tool_search_enabled = v;
     }
+    if let Some(max_results) = args.tool_search_max_results {
+        let capped = max_results.clamp(1, 20);
+        settings.tool_search_max_results = capped;
+    }
     if let Some(v) = args.python_execution {
         settings.python_execution_enabled = v;
     }
     if let Some(v) = args.python_tool_calling {
         settings.python_tool_calling_enabled = v;
+    }
+    if let Some(v) = args.tool_examples {
+        settings.tool_use_examples_enabled = v;
+    }
+    if let Some(max_examples) = args.tool_examples_max {
+        let capped = max_examples.clamp(1, 5);
+        settings.tool_use_examples_max = capped;
+    }
+    if let Some(v) = args.compact_mode {
+        settings.compact_prompt_enabled = v;
+    }
+    if let Some(max_tools) = args.compact_max_tools {
+        let capped = max_tools.clamp(1, 10);
+        settings.compact_prompt_max_tools = capped;
+    }
+    if let Some(defer) = args.defer_tools {
+        for server in &mut settings.mcp_servers {
+            server.defer_tools = defer;
+        }
     }
     if let Some(v) = args.legacy_tool_call_format {
         settings.legacy_tool_call_format_enabled = v;
@@ -490,12 +532,33 @@ async fn execute_tool_search(
     input: ToolSearchInput,
     tool_registry: SharedToolRegistry,
     embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+    max_results: usize,
 ) -> Result<(String, Vec<ToolSearchResult>), String> {
     let executor = ToolSearchExecutor::new(tool_registry.clone(), embedding_model);
-    let output = executor.execute(input).await?;
+    let mut capped_input = input.clone();
+    let top_cap = std::cmp::max(1, max_results);
+    capped_input.top_k = std::cmp::max(1, std::cmp::min(capped_input.top_k, top_cap));
+    let output = executor.execute(capped_input).await?;
+
+    // Filter out tools that cannot be called from python_execution (respect allowed_callers)
+    let filtered_tools: Vec<ToolSearchResult> = {
+        let registry_guard = tool_registry.read().await;
+        output
+            .tools
+            .iter()
+            .filter(|tool| {
+                let key = format!("{}___{}", tool.server_id, tool.name);
+                match registry_guard.get_tool(&key) {
+                    Some(schema) => schema.can_be_called_by(Some(PYTHON_EXECUTION_TOOL_TYPE)),
+                    None => true,
+                }
+            })
+            .cloned()
+            .collect()
+    };
 
     // Materialize discovered tools
-    executor.materialize_results(&output.tools).await;
+    executor.materialize_results(&filtered_tools).await;
 
     // Format result for the model with clear instructions to use python_execution
     let mut result = String::new();
@@ -508,7 +571,7 @@ async fn execute_tool_search(
     let mut python_lines: Vec<String> = vec![];
     let mut tool_docs: Vec<String> = vec![];
 
-    for tool in &output.tools {
+    for tool in &filtered_tools {
         // Document the tool
         let mut doc = format!("### {}(", tool.name);
         let mut params: Vec<String> = vec![];
@@ -586,7 +649,7 @@ async fn execute_tool_search(
     }
     result.push_str("```\n");
 
-    Ok((result, output.tools))
+    Ok((result, filtered_tools))
 }
 
 /// Parse python_execution arguments, handling multiple formats from different models.
@@ -856,6 +919,9 @@ async fn execute_python_execution(
     let mut filtered_tools = Vec::new();
     for (server_id, tool) in available_tools_with_servers {
         if tool.name == "python_execution" {
+            continue;
+        }
+        if !tool.can_be_called_by(Some(PYTHON_EXECUTION_TOOL_TYPE)) {
             continue;
         }
         if tool.name == "tool_search" && !allow_tool_search {
@@ -1203,6 +1269,7 @@ async fn run_agentic_loop(
     format_config: ToolCallFormatConfig,
     primary_format: ToolCallFormatName,
     allow_tool_search_for_python: bool,
+    tool_search_max_results: usize,
 ) {
     // Resolve model profile from model name
     let profile = resolve_profile(&model_name);
@@ -1563,13 +1630,14 @@ async fn run_agentic_loop(
                                 .map_err(|e| format!("Invalid tool_search arguments: {}", e))
                                 .unwrap_or(ToolSearchInput {
                                     queries: vec![],
-                                    top_k: 3,
+                                    top_k: tool_search_max_results,
                                 });
 
                         match execute_tool_search(
                             input,
                             tool_registry.clone(),
                             embedding_model.clone(),
+                            tool_search_max_results,
                         )
                         .await
                         {
@@ -2149,6 +2217,25 @@ fn legacy_build_system_prompt(
     prompt
 }
 
+#[derive(Clone, Copy)]
+struct PromptTuningOptions {
+    include_examples: bool,
+    examples_max_per_tool: usize,
+    compact_mode: bool,
+    compact_max_tools: usize,
+}
+
+impl Default for PromptTuningOptions {
+    fn default() -> Self {
+        Self {
+            include_examples: false,
+            examples_max_per_tool: 0,
+            compact_mode: false,
+            compact_max_tools: usize::MAX,
+        }
+    }
+}
+
 /// Build the full system prompt with tool capabilities (new tool-prompt driven version)
 fn build_system_prompt(
     base_prompt: &str,
@@ -2162,6 +2249,7 @@ fn build_system_prompt(
     allow_tool_search_for_python: bool,
     python_execution_enabled: bool,
     tool_search_enabled: bool,
+    tuning: &PromptTuningOptions,
 ) -> String {
     let additions = collect_tool_prompt_additions(
         tool_descriptions,
@@ -2174,6 +2262,7 @@ fn build_system_prompt(
         allow_tool_search_for_python,
         python_execution_enabled,
         tool_search_enabled,
+        tuning,
     );
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
@@ -2196,12 +2285,20 @@ fn collect_tool_prompt_additions(
     allow_tool_search_for_python: bool,
     python_execution_enabled: bool,
     tool_search_enabled: bool,
+    tuning: &PromptTuningOptions,
 ) -> Vec<String> {
     const BUILTIN_SERVER_LABEL: &str = "Built-in Tools";
     const PYTHON_LABEL: &str = "Python Execution";
     const TOOL_SEARCH_LABEL: &str = "Tool Search";
 
     let mut additions: Vec<String> = Vec::new();
+    let mut tools_included: usize = 0;
+    let max_tools = if tuning.compact_mode {
+        tuning.compact_max_tools.max(1)
+    } else {
+        usize::MAX
+    };
+    let mut tool_search_prompt_added = false;
 
     // Track server defer modes for contextual guidance
     let mut has_deferred_tools = tool_search_enabled && !server_configs.is_empty();
@@ -2262,11 +2359,37 @@ fn collect_tool_prompt_additions(
                 BUILTIN_SERVER_LABEL,
                 body.trim()
             ));
+            tool_search_prompt_added = true;
         }
     } else if has_any_tools {
         if let Some(format_prompt) = tool_calling_format_prompt(primary_format) {
             additions.push(format_prompt);
         }
+    }
+
+    // If tool_search is enabled but not yet surfaced (e.g., python disabled), still provide guidance.
+    if !tool_search_prompt_added && tool_search_enabled && filter.builtin_allowed("tool_search") {
+        let mut body = String::from(
+            "Call tool_search to list relevant MCP tools before using them. Example:\n\
+             <tool_call>{\"server\": \"builtin\", \"tool\": \"tool_search\", \"arguments\": {\"queries\": [\"your goal\"], \"top_k\": 3}}</tool_call>\n\
+             Then call the returned tools directly.",
+        );
+        if has_deferred_tools {
+            body.push_str("\n\nSome MCP tools are deferred; run tool_search early to discover them.");
+        } else {
+            body.push_str("\n\nUse tool_search when you are unsure which MCP tool to call.");
+        }
+        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "tool_search")) {
+            let trimmed = custom.trim();
+            if !trimmed.is_empty() {
+                body.push_str("\n\n");
+                body.push_str(trimmed);
+            }
+        }
+        additions.push(format!(
+            "### {} ({})\n{}",
+            TOOL_SEARCH_LABEL, BUILTIN_SERVER_LABEL, body.trim()
+        ));
     }
 
     // MCP tools
@@ -2281,6 +2404,9 @@ fn collect_tool_prompt_additions(
             .filter(|env| !env.is_empty());
 
         for tool in tools {
+            if tuning.compact_mode && tools_included >= max_tools {
+                continue;
+            }
             let mut parts: Vec<String> = Vec::new();
 
             if let Some(desc) = &tool.description {
@@ -2349,8 +2475,40 @@ fn collect_tool_prompt_additions(
                     param_lines.push(line);
                 }
 
+                if tuning.compact_mode && param_lines.len() > 3 {
+                    param_lines.truncate(3);
+                    param_lines.push("- ...".to_string());
+                }
+
                 if !param_lines.is_empty() {
                     parts.push(format!("Parameters:\n{}", param_lines.join("\n")));
+                }
+            }
+
+            if tuning.include_examples && tuning.examples_max_per_tool > 0 {
+                if let Some(examples) = tool.input_examples.as_ref() {
+                    let capped_count = examples
+                        .len()
+                        .min(tuning.examples_max_per_tool);
+                    if capped_count > 0 {
+                        let mut example_lines: Vec<String> = Vec::new();
+                        for example in examples.iter().take(capped_count) {
+                            let mut text = serde_json::to_string(example)
+                                .unwrap_or_else(|_| "<example serialization failed>".to_string());
+                            if text.len() > 240 {
+                                text.truncate(240);
+                                text.push_str("...");
+                            }
+                            example_lines.push(format!("- {}", text));
+                        }
+                        if !example_lines.is_empty() {
+                            parts.push(format!(
+                                "Usage examples ({} max):\n{}",
+                                tuning.examples_max_per_tool,
+                                example_lines.join("\n")
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -2364,6 +2522,7 @@ fn collect_tool_prompt_additions(
                 server_name,
                 parts.join("\n\n")
             ));
+            tools_included += 1;
         }
     }
 
@@ -2389,6 +2548,7 @@ fn build_system_prompt_layers(
     allow_tool_search_for_python: bool,
     python_execution_enabled: bool,
     tool_search_enabled: bool,
+    tuning: &PromptTuningOptions,
 ) -> SystemPromptLayers {
     let additions = collect_tool_prompt_additions(
         tool_descriptions,
@@ -2401,6 +2561,7 @@ fn build_system_prompt_layers(
         allow_tool_search_for_python,
         python_execution_enabled,
         tool_search_enabled,
+        tuning,
     );
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
@@ -2740,6 +2901,11 @@ async fn chat(
     let tool_search_enabled = settings.tool_search_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let tool_search_max_results = settings.tool_search_max_results.max(1);
+    let tool_use_examples_enabled = settings.tool_use_examples_enabled;
+    let tool_use_examples_max = settings.tool_use_examples_max;
+    let compact_prompt_enabled = settings.compact_prompt_enabled;
+    let compact_prompt_max_tools = settings.compact_prompt_max_tools;
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
     let tool_system_prompts = settings.tool_system_prompts.clone();
@@ -2905,7 +3071,7 @@ async fn chat(
         );
         let search_input = ToolSearchInput {
             queries: vec![message.clone()],
-            top_k: 5,
+            top_k: tool_search_max_results,
         };
         match executor.execute(search_input).await {
             Ok(output) => {
@@ -2957,8 +3123,17 @@ async fn chat(
         let registry = tool_registry_state.registry.read().await;
         let mut seen: HashSet<String> =
             tools_list.iter().map(|t| t.function.name.clone()).collect();
+        let mut included_count: usize = 0;
+        let max_tools_for_prompt = if compact_prompt_enabled {
+            compact_prompt_max_tools.max(1)
+        } else {
+            usize::MAX
+        };
 
         for (server_id, schema) in registry.get_visible_tools_with_servers() {
+            if compact_prompt_enabled && included_count >= max_tools_for_prompt {
+                break;
+            }
             // Build OpenAI tool; MCP tools get server prefix for routing (sanitized)
             let openai_tool = if server_id == "builtin" {
                 OpenAITool::from_tool_schema(&schema)
@@ -2970,6 +3145,7 @@ async fn chat(
                 continue;
             }
             tools_list.push(openai_tool);
+            included_count += 1;
         }
     }
 
@@ -3000,6 +3176,30 @@ async fn chat(
         }
     };
 
+    let prompt_tuning = PromptTuningOptions {
+        include_examples: tool_use_examples_enabled,
+        examples_max_per_tool: tool_use_examples_max.max(1),
+        compact_mode: compact_prompt_enabled,
+        compact_max_tools: compact_prompt_max_tools.max(1),
+    };
+
+    if compact_prompt_enabled {
+        println!(
+            "[Chat] Compact prompt mode enabled (max_tools_in_prompt={})",
+            prompt_tuning.compact_max_tools
+        );
+    }
+    if tool_use_examples_enabled {
+        println!(
+            "[Chat] Tool examples enabled (max_per_tool={})",
+            prompt_tuning.examples_max_per_tool
+        );
+    }
+    println!(
+        "[Chat] tool_search_max_results={}",
+        tool_search_max_results
+    );
+
     // Build the full system prompt with tool descriptions
     // Note: We still include text-based tool instructions as a fallback for models
     // that don't support native tool calling
@@ -3015,6 +3215,7 @@ async fn chat(
         allow_tool_search_for_python,
         python_execution_enabled,
         tool_search_enabled,
+        &prompt_tuning,
     );
 
     // === LOGGING: System prompt construction ===
@@ -3101,6 +3302,7 @@ async fn chat(
     let format_config_task = format_config.clone();
     let primary_format_task = primary_format_for_prompt;
     let allow_tool_search_for_python_task = allow_tool_search_for_python;
+    let tool_search_max_results_task = tool_search_max_results;
 
     // Spawn the agentic loop task
     tauri::async_runtime::spawn(async move {
@@ -3126,6 +3328,7 @@ async fn chat(
             format_config_task,
             primary_format_task,
             allow_tool_search_for_python_task,
+            tool_search_max_results_task,
         )
         .await;
     });
@@ -3724,6 +3927,10 @@ async fn get_system_prompt_preview(
     let tool_search_enabled = settings.tool_search_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let tool_use_examples_enabled = settings.tool_use_examples_enabled;
+    let tool_use_examples_max = settings.tool_use_examples_max;
+    let compact_prompt_enabled = settings.compact_prompt_enabled;
+    let compact_prompt_max_tools = settings.compact_prompt_max_tools;
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
     let tool_prompts = settings.tool_system_prompts.clone();
@@ -3798,6 +4005,13 @@ async fn get_system_prompt_preview(
         }
     };
 
+    let prompt_tuning = PromptTuningOptions {
+        include_examples: tool_use_examples_enabled,
+        examples_max_per_tool: tool_use_examples_max.max(1),
+        compact_mode: compact_prompt_enabled,
+        compact_max_tools: compact_prompt_max_tools.max(1),
+    };
+
     // Build the full system prompt
     let preview = build_system_prompt(
         &base_prompt,
@@ -3811,6 +4025,7 @@ async fn get_system_prompt_preview(
         allow_tool_search_for_python,
         python_execution_enabled,
         tool_search_enabled,
+        &prompt_tuning,
     );
 
     Ok(preview)
@@ -3829,6 +4044,10 @@ async fn get_system_prompt_layers(
     let tool_search_enabled = settings.tool_search_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let tool_use_examples_enabled = settings.tool_use_examples_enabled;
+    let tool_use_examples_max = settings.tool_use_examples_max;
+    let compact_prompt_enabled = settings.compact_prompt_enabled;
+    let compact_prompt_max_tools = settings.compact_prompt_max_tools;
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
     let tool_prompts = settings.tool_system_prompts.clone();
@@ -3903,6 +4122,13 @@ async fn get_system_prompt_layers(
         }
     };
 
+    let prompt_tuning = PromptTuningOptions {
+        include_examples: tool_use_examples_enabled,
+        examples_max_per_tool: tool_use_examples_max.max(1),
+        compact_mode: compact_prompt_enabled,
+        compact_max_tools: compact_prompt_max_tools.max(1),
+    };
+
     let layers = build_system_prompt_layers(
         &base_prompt,
         &visible_tool_descriptions,
@@ -3915,6 +4141,7 @@ async fn get_system_prompt_layers(
         allow_tool_search_for_python,
         python_execution_enabled,
         tool_search_enabled,
+        &prompt_tuning,
     );
 
     Ok(layers)
@@ -4514,6 +4741,8 @@ mod tests {
             name: "tool_a".to_string(),
             description: Some("Demo tool".to_string()),
             input_schema: None,
+            input_examples: None,
+            allowed_callers: None,
         };
         let tool_descriptions = vec![("srv1".to_string(), vec![tool])];
 
@@ -4537,6 +4766,7 @@ mod tests {
             false,
             false,
             false,
+            &PromptTuningOptions::default(),
         );
 
         assert_eq!(layers.base_prompt, "Base prompt");
@@ -4553,6 +4783,8 @@ mod tests {
             name: "tool_a".to_string(),
             description: Some("Demo tool".to_string()),
             input_schema: None,
+            input_examples: None,
+            allowed_callers: None,
         };
         let tool_descriptions = vec![("srv1".to_string(), vec![tool])];
 
@@ -4581,6 +4813,7 @@ mod tests {
             false,
             false,
             false,
+            &PromptTuningOptions::default(),
         );
 
         let addition = layers
@@ -4590,6 +4823,150 @@ mod tests {
             .expect("env section missing");
         assert!(addition.contains("BIGQUERY_PROJECT=plugabot-colchuck"));
         assert!(addition.contains("BQ_DATASET=finance"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_layers_compact_limits_tools() {
+        let base_prompt = "Base prompt";
+        let tool_a = McpTool {
+            name: "tool_a".to_string(),
+            description: Some("A".to_string()),
+            input_schema: None,
+            input_examples: None,
+            allowed_callers: None,
+        };
+        let tool_b = McpTool {
+            name: "tool_b".to_string(),
+            description: Some("B".to_string()),
+            input_schema: None,
+            input_examples: None,
+            allowed_callers: None,
+        };
+        let tool_descriptions = vec![("srv".to_string(), vec![tool_a, tool_b])];
+
+        let mut server_config = McpServerConfig::new("srv".to_string(), "Server".to_string());
+        server_config.defer_tools = false;
+        let server_configs = vec![server_config];
+        let tool_prompts = HashMap::new();
+        let filter = ToolLaunchFilter::default();
+        let tuning = PromptTuningOptions {
+            include_examples: false,
+            examples_max_per_tool: 1,
+            compact_mode: true,
+            compact_max_tools: 1,
+        };
+
+        let layers = build_system_prompt_layers(
+            base_prompt,
+            &tool_descriptions,
+            &server_configs,
+            false,
+            &tool_prompts,
+            &filter,
+            ToolCallFormatName::CodeMode,
+            false,
+            false,
+            false,
+            false,
+            &tuning,
+        );
+
+        // Only one tool section should be present due to compact cap
+        assert!(layers.additions.iter().filter(|s| s.contains("###")).count() <= 1);
+    }
+
+    #[test]
+    fn test_build_system_prompt_layers_adds_tool_search_when_deferred_without_python() {
+        let base_prompt = "Base prompt";
+        let tool = McpTool {
+            name: "tool_a".to_string(),
+            description: Some("Demo tool".to_string()),
+            input_schema: None,
+            input_examples: None,
+            allowed_callers: None,
+        };
+        let tool_descriptions = vec![("srv1".to_string(), vec![tool])];
+
+        let mut server_config = McpServerConfig::new("srv1".to_string(), "Server 1".to_string());
+        server_config.defer_tools = true;
+        let server_configs = vec![server_config];
+        let tool_prompts = HashMap::new();
+        let filter = ToolLaunchFilter::default();
+        let tuning = PromptTuningOptions {
+            include_examples: false,
+            examples_max_per_tool: 1,
+            compact_mode: false,
+            compact_max_tools: usize::MAX,
+        };
+
+        let layers = build_system_prompt_layers(
+            base_prompt,
+            &tool_descriptions,
+            &server_configs,
+            false,
+            &tool_prompts,
+            &filter,
+            ToolCallFormatName::Hermes,
+            false, // python_tool_mode
+            false, // allow_tool_search_for_python
+            false, // python_execution_enabled
+            true,  // tool_search_enabled
+            &tuning,
+        );
+
+        assert!(
+            layers
+                .combined
+                .contains("Call tool_search to list relevant MCP tools"),
+            "tool_search instructions should be present when deferred tools exist without python"
+        );
+    }
+
+    #[test]
+    fn test_build_system_prompt_layers_adds_tool_search_when_enabled_no_defer() {
+        let base_prompt = "Base prompt";
+        let tool = McpTool {
+            name: "tool_a".to_string(),
+            description: Some("Demo tool".to_string()),
+            input_schema: None,
+            input_examples: None,
+            allowed_callers: None,
+        };
+        let tool_descriptions = vec![("srv1".to_string(), vec![tool])];
+
+        let mut server_config = McpServerConfig::new("srv1".to_string(), "Server 1".to_string());
+        server_config.defer_tools = false;
+        let server_configs = vec![server_config];
+        let tool_prompts = HashMap::new();
+        let filter = ToolLaunchFilter::default();
+        let tuning = PromptTuningOptions {
+            include_examples: false,
+            examples_max_per_tool: 1,
+            compact_mode: false,
+            compact_max_tools: usize::MAX,
+        };
+
+        let layers = build_system_prompt_layers(
+            base_prompt,
+            &tool_descriptions,
+            &server_configs,
+            false,
+            &tool_prompts,
+            &filter,
+            ToolCallFormatName::Hermes,
+            false, // python_tool_mode
+            false, // allow_tool_search_for_python
+            false, // python_execution_enabled
+            true,  // tool_search_enabled
+            &tuning,
+        );
+
+        assert!(
+            layers
+                .combined
+                .contains("Call tool_search to list relevant MCP tools"),
+            "tool_search instructions should be present whenever enabled"
+        );
     }
 
     #[test]

@@ -74,6 +74,12 @@
 
 The system supports multiple model families with different tool calling behaviors. Model-specific handling flows through four layers:
 
+### Code Mode Philosophy (Advanced Tool Use)
+- Code Mode is our implementation of Anthropic’s “advanced tool use”: discover tools on-demand with `tool_search`, orchestrate them programmatically in Python (`python_execution`), and include concise usage examples when useful.
+- Goals: keep prompts lean for small models, defer non-critical tool schemas, and push multi-step/parallel work into Python to cut inference round-trips and context bloat.
+- Guidance: when Code Mode is primary, remind the model to search first, then return one runnable Python program that calls discovered tools; built-ins (python_execution, tool_search) must be documented whenever enabled.
+- Token discipline: examples are capped/optional, `defer_loading` plus compact prompt mode protects context for small-window models.
+
 ### 1. Model Profiles (`src-tauri/src/model_profiles.rs`)
 
 Each model has a `ModelProfile` that defines its capabilities:

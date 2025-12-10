@@ -1184,6 +1184,11 @@ function BuiltinsTab({
         settings,
         updateCodeExecutionEnabled,
         updateToolSearchEnabled,
+        updateToolSearchMaxResults,
+        updateToolExamplesEnabled,
+        updateToolExamplesMax,
+        updateCompactPromptEnabled,
+        updateCompactPromptMaxTools,
         updateToolSystemPrompt,
         pythonAllowedImports,
     } = useSettingsStore();
@@ -1199,6 +1204,11 @@ function BuiltinsTab({
         `Here are the allowed imports: ${allowedImports.join(', ')}.`
     ].join(' ');
     const defaultToolSearchPrompt = "Call tool_search to discover MCP tools related to your search string. If the returned tools appear to be relevant to your goal, use them";
+    const defaultToolSearchMaxResults = settings?.tool_search_max_results ?? 3;
+    const defaultToolExamplesEnabled = settings?.tool_use_examples_enabled ?? false;
+    const defaultToolExamplesMax = settings?.tool_use_examples_max ?? 2;
+    const defaultCompactPromptEnabled = settings?.compact_prompt_enabled ?? false;
+    const defaultCompactPromptMaxTools = settings?.compact_prompt_max_tools ?? 4;
     const initialPythonPrompt = settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt;
     const initialToolSearchPrompt = settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt;
 
@@ -1206,11 +1216,21 @@ function BuiltinsTab({
     const [localToolSearchEnabled, setLocalToolSearchEnabled] = useState(toolSearchEnabled);
     const [pythonPromptDraft, setPythonPromptDraft] = useState(initialPythonPrompt);
     const [toolSearchPromptDraft, setToolSearchPromptDraft] = useState(initialToolSearchPrompt);
+    const [localToolSearchMaxResults, setLocalToolSearchMaxResults] = useState(defaultToolSearchMaxResults);
+    const [localToolExamplesEnabled, setLocalToolExamplesEnabled] = useState(defaultToolExamplesEnabled);
+    const [localToolExamplesMax, setLocalToolExamplesMax] = useState(defaultToolExamplesMax);
+    const [localCompactPromptEnabled, setLocalCompactPromptEnabled] = useState(defaultCompactPromptEnabled);
+    const [localCompactPromptMaxTools, setLocalCompactPromptMaxTools] = useState(defaultCompactPromptMaxTools);
     const [baselineBuiltins, setBaselineBuiltins] = useState({
         codeExecutionEnabled,
         toolSearchEnabled,
         pythonPrompt: initialPythonPrompt,
         toolSearchPrompt: initialToolSearchPrompt,
+        toolSearchMaxResults: defaultToolSearchMaxResults,
+        toolExamplesEnabled: defaultToolExamplesEnabled,
+        toolExamplesMax: defaultToolExamplesMax,
+        compactPromptEnabled: defaultCompactPromptEnabled,
+        compactPromptMaxTools: defaultCompactPromptMaxTools,
     });
     const [isSaving, setIsSaving] = useState(false);
 
@@ -1220,19 +1240,34 @@ function BuiltinsTab({
             toolSearchEnabled: toolSearchEnabled,
             pythonPrompt: settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt,
             toolSearchPrompt: settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt,
+            toolSearchMaxResults: settings?.tool_search_max_results ?? defaultToolSearchMaxResults,
+            toolExamplesEnabled: settings?.tool_use_examples_enabled ?? defaultToolExamplesEnabled,
+            toolExamplesMax: settings?.tool_use_examples_max ?? defaultToolExamplesMax,
+            compactPromptEnabled: settings?.compact_prompt_enabled ?? defaultCompactPromptEnabled,
+            compactPromptMaxTools: settings?.compact_prompt_max_tools ?? defaultCompactPromptMaxTools,
         };
 
         const hasPending =
             localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
             localToolSearchEnabled !== baselineBuiltins.toolSearchEnabled ||
             pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
-            toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt;
+            toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt ||
+            localToolSearchMaxResults !== baselineBuiltins.toolSearchMaxResults ||
+            localToolExamplesEnabled !== baselineBuiltins.toolExamplesEnabled ||
+            localToolExamplesMax !== baselineBuiltins.toolExamplesMax ||
+            localCompactPromptEnabled !== baselineBuiltins.compactPromptEnabled ||
+            localCompactPromptMaxTools !== baselineBuiltins.compactPromptMaxTools;
 
         if (!hasPending) {
             setLocalCodeExecutionEnabled(nextBaseline.codeExecutionEnabled);
             setLocalToolSearchEnabled(nextBaseline.toolSearchEnabled);
             setPythonPromptDraft(nextBaseline.pythonPrompt);
             setToolSearchPromptDraft(nextBaseline.toolSearchPrompt);
+            setLocalToolSearchMaxResults(nextBaseline.toolSearchMaxResults);
+            setLocalToolExamplesEnabled(nextBaseline.toolExamplesEnabled);
+            setLocalToolExamplesMax(nextBaseline.toolExamplesMax);
+            setLocalCompactPromptEnabled(nextBaseline.compactPromptEnabled);
+            setLocalCompactPromptMaxTools(nextBaseline.compactPromptMaxTools);
             setBaselineBuiltins(nextBaseline);
         } else {
             setBaselineBuiltins(nextBaseline);
@@ -1242,22 +1277,42 @@ function BuiltinsTab({
         toolSearchEnabled,
         defaultPythonPrompt,
         defaultToolSearchPrompt,
+        defaultToolSearchMaxResults,
+        defaultToolExamplesEnabled,
+        defaultToolExamplesMax,
+        defaultCompactPromptEnabled,
+        defaultCompactPromptMaxTools,
         localCodeExecutionEnabled,
         localToolSearchEnabled,
         pythonPromptDraft,
+        localToolSearchMaxResults,
+        localToolExamplesEnabled,
+        localToolExamplesMax,
+        localCompactPromptEnabled,
+        localCompactPromptMaxTools,
         settings?.tool_system_prompts,
         toolSearchPromptDraft,
         baselineBuiltins.codeExecutionEnabled,
         baselineBuiltins.toolSearchEnabled,
         baselineBuiltins.pythonPrompt,
         baselineBuiltins.toolSearchPrompt,
+        baselineBuiltins.toolSearchMaxResults,
+        baselineBuiltins.toolExamplesEnabled,
+        baselineBuiltins.toolExamplesMax,
+        baselineBuiltins.compactPromptEnabled,
+        baselineBuiltins.compactPromptMaxTools,
     ]);
 
     const hasChanges =
         localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
         localToolSearchEnabled !== baselineBuiltins.toolSearchEnabled ||
         pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
-        toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt;
+        toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt ||
+        localToolSearchMaxResults !== baselineBuiltins.toolSearchMaxResults ||
+        localToolExamplesEnabled !== baselineBuiltins.toolExamplesEnabled ||
+        localToolExamplesMax !== baselineBuiltins.toolExamplesMax ||
+        localCompactPromptEnabled !== baselineBuiltins.compactPromptEnabled ||
+        localCompactPromptMaxTools !== baselineBuiltins.compactPromptMaxTools;
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -1272,7 +1327,20 @@ function BuiltinsTab({
         setLocalToolSearchEnabled(false);
         setPythonPromptDraft(defaultPythonPrompt);
         setToolSearchPromptDraft(defaultToolSearchPrompt);
-    }, [defaultPythonPrompt, defaultToolSearchPrompt]);
+        setLocalToolSearchMaxResults(defaultToolSearchMaxResults);
+        setLocalToolExamplesEnabled(defaultToolExamplesEnabled);
+        setLocalToolExamplesMax(defaultToolExamplesMax);
+        setLocalCompactPromptEnabled(defaultCompactPromptEnabled);
+        setLocalCompactPromptMaxTools(defaultCompactPromptMaxTools);
+    }, [
+        defaultPythonPrompt,
+        defaultToolSearchPrompt,
+        defaultToolSearchMaxResults,
+        defaultToolExamplesEnabled,
+        defaultToolExamplesMax,
+        defaultCompactPromptEnabled,
+        defaultCompactPromptMaxTools,
+    ]);
 
     const handleToggleCodeExecution = () => {
         setLocalCodeExecutionEnabled((prev) => !prev);
@@ -1318,6 +1386,26 @@ function BuiltinsTab({
             saves.push(updateToolSearchEnabled(localToolSearchEnabled));
         }
 
+        if (localToolSearchMaxResults !== (settings.tool_search_max_results ?? defaultToolSearchMaxResults)) {
+            saves.push(updateToolSearchMaxResults(localToolSearchMaxResults));
+        }
+
+        if (localToolExamplesEnabled !== (settings.tool_use_examples_enabled ?? defaultToolExamplesEnabled)) {
+            saves.push(updateToolExamplesEnabled(localToolExamplesEnabled));
+        }
+
+        if (localToolExamplesMax !== (settings.tool_use_examples_max ?? defaultToolExamplesMax)) {
+            saves.push(updateToolExamplesMax(localToolExamplesMax));
+        }
+
+        if (localCompactPromptEnabled !== (settings.compact_prompt_enabled ?? defaultCompactPromptEnabled)) {
+            saves.push(updateCompactPromptEnabled(localCompactPromptEnabled));
+        }
+
+        if (localCompactPromptMaxTools !== (settings.compact_prompt_max_tools ?? defaultCompactPromptMaxTools)) {
+            saves.push(updateCompactPromptMaxTools(localCompactPromptMaxTools));
+        }
+
         if (targetPythonPrompt !== (settings.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt)) {
             saves.push(updateToolSystemPrompt('builtin', 'python_execution', targetPythonPrompt));
         }
@@ -1333,6 +1421,11 @@ function BuiltinsTab({
                 toolSearchEnabled: localToolSearchEnabled,
                 pythonPrompt: targetPythonPrompt,
                 toolSearchPrompt: targetToolSearchPrompt,
+                toolSearchMaxResults: localToolSearchMaxResults,
+                toolExamplesEnabled: localToolExamplesEnabled,
+                toolExamplesMax: localToolExamplesMax,
+                compactPromptEnabled: localCompactPromptEnabled,
+                compactPromptMaxTools: localCompactPromptMaxTools,
             });
         } finally {
             setIsSaving(false);
@@ -1341,12 +1434,29 @@ function BuiltinsTab({
     }, [
         defaultPythonPrompt,
         defaultToolSearchPrompt,
+        defaultToolSearchMaxResults,
+        defaultToolExamplesEnabled,
+        defaultToolExamplesMax,
+        defaultCompactPromptEnabled,
+        defaultCompactPromptMaxTools,
         localCodeExecutionEnabled,
+        localToolSearchEnabled,
+        localToolSearchMaxResults,
+        localToolExamplesEnabled,
+        localToolExamplesMax,
+        localCompactPromptEnabled,
+        localCompactPromptMaxTools,
         onSavingChange,
         pythonPromptDraft,
         settings,
         toolSearchPromptDraft,
         updateCodeExecutionEnabled,
+        updateToolSearchEnabled,
+        updateToolSearchMaxResults,
+        updateToolExamplesEnabled,
+        updateToolExamplesMax,
+        updateCompactPromptEnabled,
+        updateCompactPromptMaxTools,
         updateToolSystemPrompt,
     ]);
 
@@ -1467,6 +1577,100 @@ function BuiltinsTab({
                             ? 'Deferred mode on: MCP tools stay hidden until tool_search runs (auto-run on the first user prompt of a turn).'
                             : 'Deferred mode off: MCP tools are exposed immediately in the system prompt.'}
                     </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                        <label className="flex flex-col text-xs text-gray-600">
+                            <span className="font-semibold text-gray-800 mb-1">Max results per search</span>
+                            <input
+                                type="number"
+                                min={1}
+                                max={20}
+                                value={localToolSearchMaxResults}
+                                onChange={(e) => {
+                                    const next = Math.min(20, Math.max(1, Number(e.target.value) || 1));
+                                    setLocalToolSearchMaxResults(next);
+                                }}
+                                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                            />
+                            <span className="text-[11px] text-gray-500 mt-1">Caps tool_search and auto-discovery results.</span>
+                        </label>
+                        <div className="flex flex-col gap-2 border border-gray-100 rounded-lg p-3 bg-gray-50">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <div className="text-xs font-semibold text-gray-800">Tool examples</div>
+                                    <p className="text-[11px] text-gray-500">Include input_examples in prompts (capped for small models).</p>
+                                </div>
+                                <button
+                                    onClick={() => setLocalToolExamplesEnabled((prev) => !prev)}
+                                    className={`relative w-9 h-5 rounded-full transition-colors ${
+                                        localToolExamplesEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                                    }`}
+                                    title="Toggle tool input_examples in prompts"
+                                >
+                                    <div
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
+                                            localToolExamplesEnabled ? 'translate-x-4' : ''
+                                        }`}
+                                    />
+                                </button>
+                            </div>
+                            {localToolExamplesEnabled && (
+                                <div className="flex items-center gap-2">
+                                    <span className="text-[11px] text-gray-600">Max per tool:</span>
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={5}
+                                        value={localToolExamplesMax}
+                                        onChange={(e) => {
+                                            const next = Math.min(5, Math.max(1, Number(e.target.value) || 1));
+                                            setLocalToolExamplesMax(next);
+                                        }}
+                                        className="w-20 px-2 py-1 text-sm border border-gray-200 rounded-md focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                                    />
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Compact prompt mode */}
+                <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
+                    <div className="flex items-start justify-between">
+                        <div className="space-y-1">
+                            <div className="text-sm font-semibold text-gray-900">Compact prompt mode</div>
+                            <p className="text-xs text-gray-500">
+                                Limit how many tools are surfaced to reduce token usage for small models.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setLocalCompactPromptEnabled((prev) => !prev)}
+                            className={`relative w-10 h-5 rounded-full transition-colors ${
+                                localCompactPromptEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                            }`}
+                            title="Toggle compact prompt mode"
+                        >
+                            <div
+                                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
+                                    localCompactPromptEnabled ? 'translate-x-5' : ''
+                                }`}
+                            />
+                        </button>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-gray-800">Max tools in prompt</span>
+                        <input
+                            type="number"
+                            min={1}
+                            max={10}
+                            value={localCompactPromptMaxTools}
+                            onChange={(e) => {
+                                const next = Math.min(10, Math.max(1, Number(e.target.value) || 1));
+                                setLocalCompactPromptMaxTools(next);
+                            }}
+                            className="w-24 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                            disabled={!localCompactPromptEnabled}
+                        />
+                    </div>
                 </div>
             </div>
         </div>

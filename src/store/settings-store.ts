@@ -35,10 +35,15 @@ export interface AppSettings {
     mcp_servers: McpServerConfig[];
     tool_call_formats: ToolCallFormatConfig;
     tool_system_prompts: Record<string, string>;
+    tool_search_max_results: number;
     tool_search_enabled: boolean;
     python_execution_enabled: boolean;
     python_tool_calling_enabled: boolean;
     legacy_tool_call_format_enabled: boolean;
+    tool_use_examples_enabled: boolean;
+    tool_use_examples_max: number;
+    compact_prompt_enabled: boolean;
+    compact_prompt_max_tools: number;
 }
 
 // Connection status for MCP servers
@@ -53,6 +58,8 @@ export interface McpTool {
     name: string;
     description?: string;
     inputSchema?: Record<string, unknown>;
+    inputExamples?: any[];
+    allowed_callers?: string[];
 }
 
 interface SettingsState {
@@ -81,6 +88,11 @@ interface SettingsState {
     updateToolCallFormats: (config: ToolCallFormatConfig) => Promise<void>;
     updateCodeExecutionEnabled: (enabled: boolean) => Promise<void>;
     updateToolSearchEnabled: (enabled: boolean) => Promise<void>;
+    updateToolSearchMaxResults: (maxResults: number) => Promise<void>;
+    updateToolExamplesEnabled: (enabled: boolean) => Promise<void>;
+    updateToolExamplesMax: (maxExamples: number) => Promise<void>;
+    updateCompactPromptEnabled: (enabled: boolean) => Promise<void>;
+    updateCompactPromptMaxTools: (maxTools: number) => Promise<void>;
     addMcpServer: (config: McpServerConfig) => Promise<void>;
     updateMcpServer: (config: McpServerConfig) => Promise<void>;
     removeMcpServer: (serverId: string) => Promise<void>;
@@ -215,6 +227,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 mcp_servers: normalizedServers,
                 tool_call_formats: normalizedFormats,
                 tool_search_enabled: settings.tool_search_enabled ?? false,
+                tool_search_max_results: settings.tool_search_max_results ?? 3,
+                tool_use_examples_enabled: settings.tool_use_examples_enabled ?? false,
+                tool_use_examples_max: settings.tool_use_examples_max ?? 2,
+                compact_prompt_enabled: settings.compact_prompt_enabled ?? false,
+                compact_prompt_max_tools: settings.compact_prompt_max_tools ?? 4,
             };
             const allowedImports = (allowedImportsRaw && allowedImportsRaw.length > 0)
                 ? allowedImportsRaw
@@ -253,10 +270,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     mcp_servers: [],
                     tool_call_formats: DEFAULT_TOOL_CALL_FORMATS,
                     tool_system_prompts: {},
+                    tool_search_max_results: 3,
                     tool_search_enabled: false,
                     python_execution_enabled: false,
                     python_tool_calling_enabled: true,
                     legacy_tool_call_format_enabled: false,
+                    tool_use_examples_enabled: false,
+                    tool_use_examples_max: 2,
+                    compact_prompt_enabled: false,
+                    compact_prompt_max_tools: 4,
                 },
                 pythonAllowedImports: FALLBACK_PYTHON_ALLOWED_IMPORTS,
             });
@@ -382,6 +404,94 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             get().bumpPromptRefresh();
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update tool_search_enabled:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`,
+            });
+        }
+    },
+    updateToolSearchMaxResults: async (maxResults: number) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const capped = Math.min(Math.max(Math.floor(maxResults), 1), 20);
+        const newSettings = { ...currentSettings, tool_search_max_results: capped };
+        set({ settings: newSettings, error: null });
+        try {
+            await invoke('save_app_settings', { newSettings });
+            console.log('[SettingsStore] tool_search_max_results updated:', capped);
+            get().bumpPromptRefresh();
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update tool_search_max_results:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`,
+            });
+        }
+    },
+    updateToolExamplesEnabled: async (enabled: boolean) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const newSettings = { ...currentSettings, tool_use_examples_enabled: enabled };
+        set({ settings: newSettings, error: null });
+        try {
+            await invoke('save_app_settings', { newSettings });
+            console.log('[SettingsStore] tool_use_examples_enabled updated:', enabled);
+            get().bumpPromptRefresh();
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update tool_use_examples_enabled:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`,
+            });
+        }
+    },
+    updateToolExamplesMax: async (maxExamples: number) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const capped = Math.min(Math.max(Math.floor(maxExamples), 1), 5);
+        const newSettings = { ...currentSettings, tool_use_examples_max: capped };
+        set({ settings: newSettings, error: null });
+        try {
+            await invoke('save_app_settings', { newSettings });
+            console.log('[SettingsStore] tool_use_examples_max updated:', capped);
+            get().bumpPromptRefresh();
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update tool_use_examples_max:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`,
+            });
+        }
+    },
+    updateCompactPromptEnabled: async (enabled: boolean) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const newSettings = { ...currentSettings, compact_prompt_enabled: enabled };
+        set({ settings: newSettings, error: null });
+        try {
+            await invoke('save_app_settings', { newSettings });
+            console.log('[SettingsStore] compact_prompt_enabled updated:', enabled);
+            get().bumpPromptRefresh();
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update compact_prompt_enabled:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`,
+            });
+        }
+    },
+    updateCompactPromptMaxTools: async (maxTools: number) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const capped = Math.min(Math.max(Math.floor(maxTools), 1), 10);
+        const newSettings = { ...currentSettings, compact_prompt_max_tools: capped };
+        set({ settings: newSettings, error: null });
+        try {
+            await invoke('save_app_settings', { newSettings });
+            console.log('[SettingsStore] compact_prompt_max_tools updated:', capped);
+            get().bumpPromptRefresh();
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update compact_prompt_max_tools:', e);
             set({
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`,

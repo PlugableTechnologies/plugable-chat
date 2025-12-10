@@ -15,6 +15,9 @@ pub struct ToolSchema {
     pub description: Option<String>,
     #[serde(default)]
     pub parameters: serde_json::Value,
+    /// Optional input examples to guide correct usage (capped when prompting)
+    #[serde(default)]
+    pub input_examples: Vec<serde_json::Value>,
     /// Tool type identifier (e.g., "python_execution_20251206", "tool_search_20251201")
     #[serde(default)]
     pub tool_type: Option<String>,
@@ -36,6 +39,7 @@ impl ToolSchema {
             name: name.to_string(),
             description: None,
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            input_examples: Vec::new(),
             tool_type: None,
             allowed_callers: None,
             defer_loading: false,

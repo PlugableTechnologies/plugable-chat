@@ -309,6 +309,9 @@ pub struct AppSettings {
     /// Use "builtin" as server_id for built-in tools.
     #[serde(default)]
     pub tool_system_prompts: HashMap<String, String>,
+    /// Maximum number of tools returned by tool_search (defaults to 3 for token control)
+    #[serde(default = "default_tool_search_max_results")]
+    pub tool_search_max_results: usize,
     /// Whether tool_search defers MCP tool exposure until discovery (off by default).
     #[serde(default)]
     pub tool_search_enabled: bool,
@@ -324,14 +327,38 @@ pub struct AppSettings {
     /// Whether to allow legacy <tool_call> parsing. Disabled by default.
     #[serde(default)]
     pub legacy_tool_call_format_enabled: bool,
+    /// Whether to include tool input_examples in prompts (capped for small models)
+    #[serde(default)]
+    pub tool_use_examples_enabled: bool,
+    /// Maximum number of examples per tool when enabled
+    #[serde(default = "default_tool_use_examples_max")]
+    pub tool_use_examples_max: usize,
+    /// Compact prompt mode for small models (caps tool listings)
+    #[serde(default)]
+    pub compact_prompt_enabled: bool,
+    /// Maximum tools to surface in prompts when compact mode is on
+    #[serde(default = "default_compact_prompt_max_tools")]
+    pub compact_prompt_max_tools: usize,
 }
 
 fn default_system_prompt() -> String {
     r#"You are a helpful AI assistant. Be direct and concise in your responses. When you don't know something, say so rather than guessing."#.to_string()
 }
 
+fn default_tool_search_max_results() -> usize {
+    3
+}
+
 fn default_python_tool_calling_enabled() -> bool {
     true
+}
+
+fn default_tool_use_examples_max() -> usize {
+    2
+}
+
+fn default_compact_prompt_max_tools() -> usize {
+    4
 }
 
 fn find_workspace_root() -> Option<PathBuf> {
@@ -417,10 +444,15 @@ impl Default for AppSettings {
             mcp_servers: vec![default_mcp_test_server()],
             tool_call_formats: ToolCallFormatConfig::default(),
             tool_system_prompts: HashMap::new(),
+            tool_search_max_results: default_tool_search_max_results(),
             tool_search_enabled: false,
             python_execution_enabled: false,
             python_tool_calling_enabled: default_python_tool_calling_enabled(),
             legacy_tool_call_format_enabled: false,
+            tool_use_examples_enabled: false,
+            tool_use_examples_max: default_tool_use_examples_max(),
+            compact_prompt_enabled: false,
+            compact_prompt_max_tools: default_compact_prompt_max_tools(),
         }
     }
 }
@@ -529,6 +561,20 @@ mod tests {
         // python tool calling defaults
         assert!(settings.python_tool_calling_enabled);
         assert!(!settings.legacy_tool_call_format_enabled);
+        assert_eq!(
+            settings.tool_search_max_results,
+            default_tool_search_max_results()
+        );
+        assert!(!settings.tool_use_examples_enabled);
+        assert_eq!(
+            settings.tool_use_examples_max,
+            default_tool_use_examples_max()
+        );
+        assert!(!settings.compact_prompt_enabled);
+        assert_eq!(
+            settings.compact_prompt_max_tools,
+            default_compact_prompt_max_tools()
+        );
         assert_eq!(settings.tool_call_formats, ToolCallFormatConfig::default());
     }
 

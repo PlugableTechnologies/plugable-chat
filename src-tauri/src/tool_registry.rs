@@ -17,6 +17,8 @@ use crate::protocol::ToolSchema;
 // Re-export python_sandbox types for Python module integration
 pub use python_sandbox::protocol::{ToolFunctionInfo, ToolModuleInfo};
 
+const PYTHON_CALLER_TYPE: &str = "python_execution_20251206";
+
 // ========== Built-in Tool Definitions ==========
 
 /// Create the python_execution built-in tool schema
@@ -40,6 +42,7 @@ pub fn python_execution_tool() -> ToolSchema {
             },
             "required": ["code"]
         }),
+            input_examples: Vec::new(),
         tool_type: Some("python_execution_20251206".to_string()),
         allowed_callers: None, // Anyone can call python_execution
         defer_loading: false,
@@ -72,6 +75,7 @@ pub fn tool_search_tool() -> ToolSchema {
             },
             "required": ["queries"]
         }),
+            input_examples: Vec::new(),
         tool_type: Some("tool_search_20251201".to_string()),
         allowed_callers: None, // Anyone can call tool_search
         defer_loading: false,
@@ -142,6 +146,19 @@ impl ToolRegistry {
 
         for tool in tools {
             let key = format!("{}___{}", server_id, tool.name);
+            let mut allowed_callers = tool.allowed_callers.clone();
+            if defer {
+                match &mut allowed_callers {
+                    Some(list) => {
+                        if !list.contains(&PYTHON_CALLER_TYPE.to_string()) {
+                            list.push(PYTHON_CALLER_TYPE.to_string());
+                        }
+                    }
+                    None => {
+                        allowed_callers = Some(vec![PYTHON_CALLER_TYPE.to_string()]);
+                    }
+                }
+            }
             let schema = ToolSchema {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
@@ -149,13 +166,9 @@ impl ToolRegistry {
                     .input_schema
                     .clone()
                     .unwrap_or(json!({"type": "object", "properties": {}})),
+                input_examples: tool.input_examples.clone().unwrap_or_default(),
                 tool_type: None,
-                allowed_callers: if defer {
-                    // Deferred tools can only be called from python_execution
-                    Some(vec!["python_execution_20251206".to_string()])
-                } else {
-                    None
-                },
+                allowed_callers,
                 defer_loading: defer,
                 embedding: None,
             };
@@ -235,6 +248,9 @@ impl ToolRegistry {
             if schema.defer_loading && !is_materialized {
                 continue;
             }
+            if !schema.can_be_called_by(Some(PYTHON_CALLER_TYPE)) {
+                continue;
+            }
 
             println!("[ToolRegistry]   Processing materialized tool: {}", key);
 
@@ -298,6 +314,9 @@ impl ToolRegistry {
             let prefix = format!("{}___", server_id);
             for (key, schema) in &self.domain_tools {
                 if !key.starts_with(&prefix) {
+                    continue;
+                }
+                if !schema.can_be_called_by(Some(PYTHON_CALLER_TYPE)) {
                     continue;
                 }
 
@@ -568,6 +587,8 @@ mod tests {
             input_schema: Some(
                 json!({"type": "object", "properties": {"city": {"type": "string"}}}),
             ),
+            input_examples: None,
+            allowed_callers: None,
         }];
 
         registry.register_mcp_tools("weather_server", "weather", &mcp_tools, false);
@@ -591,6 +612,8 @@ mod tests {
             name: "internal_api".to_string(),
             description: Some("Internal API call".to_string()),
             input_schema: None,
+            input_examples: None,
+            allowed_callers: None,
         }];
 
         registry.register_mcp_tools("internal", "internal_tools", &mcp_tools, true);
