@@ -1432,6 +1432,8 @@ export function ChatArea() {
                                                 // Parse content and track tool call index for inline rendering
                                                 const parts = parseMessageContent(m.content);
                                                 const toolCalls = m.toolCalls || [];
+                                                const pythonToolCalls = toolCalls.filter((call) => call.tool === 'python_execution');
+                                                const hasPythonToolCalls = pythonToolCalls.length > 0;
                                                 const toolCallPartIndices = parts
                                                     .map((p, idx) => p.type === 'tool_call' ? idx : -1)
                                                     .filter(idx => idx !== -1);
@@ -1451,20 +1453,29 @@ export function ChatArea() {
                                                 const hasAnyText = textParts.some((part) => part.content.trim().length > 0);
                                                 const textAllCodeOnly = textParts.length > 0 && textParts.every((part) => isCodeOnlyBlock(part.content));
                                                 const hasVisibleText = hasAnyText && !textAllCodeOnly;
-                                                const latestStdout = m.codeExecutions
+                                                // Once a python tool call is present, hide the assistant-rendered code/text (it will be shown via tool UI/output below).
+                                                const shouldHideTextForToolCalls = hasPythonToolCalls;
+                                                const latestCodeExecutionStdout = m.codeExecutions
                                                     ?.slice()
                                                     .reverse()
                                                     .find((exec) => exec.stdout && exec.stdout.trim().length > 0)
                                                     ?.stdout.trim();
-                                                const latestToolResult = toolCalls
+                                                const latestPythonStdout = pythonToolCalls
                                                     .slice()
                                                     .reverse()
                                                     .find((call) => call.result && call.result.trim().length > 0)
                                                     ?.result.trim();
+                                                const latestNonPythonToolResult = toolCalls
+                                                    .slice()
+                                                    .reverse()
+                                                    .find((call) => call.tool !== 'python_execution' && call.result && call.result.trim().length > 0)
+                                                    ?.result.trim();
+                                                // Always show Python stdout separately so it can't be hidden by text-rendering logic.
+                                                const pythonOutputToShow = latestPythonStdout || latestCodeExecutionStdout || '';
+                                                // Fallback answer is only for non-Python tool results when there is no visible text.
                                                 const fallbackAnswer = !hasVisibleText
-                                                    ? (latestStdout || latestToolResult || '')
+                                                    ? (latestNonPythonToolResult || '')
                                                     : '';
-
                                                 let toolCallIndex = 0;
                                                 const renderedParts: JSX.Element[] = [];
 
@@ -1490,56 +1501,55 @@ export function ChatArea() {
                                                             toolCallIndex++;
                                                         }
                                                     } else {
-                                                        // If there is no visible text (only code/tool calls), suppress rendering this text block
-                                                        // so we don't duplicate the python program above the tool call accordion.
-                                                        if ((!hasVisibleText || textAllCodeOnly) && toolCalls.length > 0) {
-                                                            return;
-                                                        }
-                                                        renderedParts.push(
-                                                            <ReactMarkdown
-                                                                key={`text-${idx}`}
-                                                                remarkPlugins={[remarkGfm, remarkMath]}
-                                                                rehypePlugins={[
-                                                                    rehypeRaw, 
-                                                                    [rehypeKatex, { 
-                                                                        throwOnError: false, 
-                                                                        errorColor: '#666666',
-                                                                        strict: false
-                                                                    }]
-                                                                ]}
-                                                                components={{
-                                                                    code({ node, inline, className, children, ...props }: any) {
-                                                                        const match = /language-(\w+)/.exec(className || '')
-                                                                        const codeContent = String(children).replace(/\n$/, '');
+                                                        // Skip rendering the raw text if we're hiding it for tool calls,
+                                                        // but still continue so fallback tool insertion can happen.
+                                                        if (!shouldHideTextForToolCalls) {
+                                                            renderedParts.push(
+                                                                <ReactMarkdown
+                                                                    key={`text-${idx}`}
+                                                                    remarkPlugins={[remarkGfm, remarkMath]}
+                                                                    rehypePlugins={[
+                                                                        rehypeRaw, 
+                                                                        [rehypeKatex, { 
+                                                                            throwOnError: false, 
+                                                                            errorColor: '#666666',
+                                                                            strict: false
+                                                                        }]
+                                                                    ]}
+                                                                    components={{
+                                                                        code({ node, inline, className, children, ...props }: any) {
+                                                                            const match = /language-(\w+)/.exec(className || '')
+                                                                            const codeContent = String(children).replace(/\n$/, '');
 
-                                                                        return !inline && match ? (
-                                                                            <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
-                                                                                <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
-                                                                                    <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
-                                                                                    <button
-                                                                                        onClick={() => navigator.clipboard.writeText(codeContent)}
-                                                                                        className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
-                                                                                    >
-                                                                                        📋
-                                                                                    </button>
+                                                                            return !inline && match ? (
+                                                                                <div className="my-4 rounded-xl overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group/code">
+                                                                                    <div className="flex justify-between items-center bg-gray-100 px-3 py-2 border-b border-gray-200">
+                                                                                        <span className="text-xs text-gray-600 font-mono font-medium">{match[1]}</span>
+                                                                                        <button
+                                                                                            onClick={() => navigator.clipboard.writeText(codeContent)}
+                                                                                            className="text-xs text-gray-600 hover:text-gray-900 transition-colors px-2 py-1 hover:bg-gray-200 rounded opacity-0 group-hover/code:opacity-100"
+                                                                                        >
+                                                                                            📋
+                                                                                        </button>
+                                                                                    </div>
+                                                                                    <div className="bg-white p-4 overflow-x-auto text-sm">
+                                                                                        <code className={className} {...props}>
+                                                                                            {children}
+                                                                                        </code>
+                                                                                    </div>
                                                                                 </div>
-                                                                                <div className="bg-white p-4 overflow-x-auto text-sm">
-                                                                                    <code className={className} {...props}>
-                                                                                        {children}
-                                                                                    </code>
-                                                                                </div>
-                                                                            </div>
-                                                                        ) : (
-                                                                            <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
-                                                                                {children}
-                                                                            </code>
-                                                                        )
-                                                                    }
-                                                                }}
-                                                            >
-                                                                {preprocessLaTeX(part.content)}
-                                                            </ReactMarkdown>
-                                                        );
+                                                                            ) : (
+                                                                                <code className={`${className} bg-gray-200 px-1.5 py-0.5 rounded text-[13px] text-gray-900 font-mono`} {...props}>
+                                                                                    {children}
+                                                                                </code>
+                                                                            )
+                                                                        }
+                                                                    }}
+                                                                >
+                                                                    {preprocessLaTeX(part.content)}
+                                                                </ReactMarkdown>
+                                                            );
+                                                        }
                                                     }
 
                                                     if (
@@ -1572,12 +1582,10 @@ export function ChatArea() {
                                                             <RagContextBlock chunks={m.ragChunks} />
                                                         )}
                                                         {renderedParts}
-                                                        {/* When the model only returned tool calls, surface the final output below the accordion */}
-                                                        {fallbackAnswer && (
+                                                        {(pythonOutputToShow || fallbackAnswer) && (
                                                             <div className="mt-3">
-                                                                <div className="text-xs font-medium text-gray-500 mb-1">Answer</div>
                                                                 <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 text-gray-900 whitespace-pre-wrap">
-                                                                    {fallbackAnswer}
+                                                                    {pythonOutputToShow || fallbackAnswer}
                                                                 </div>
                                                             </div>
                                                         )}
