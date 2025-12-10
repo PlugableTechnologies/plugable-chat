@@ -21,7 +21,8 @@ use model_profiles::resolve_profile;
 use protocol::{
     parse_tool_calls, CachedModel, ChatMessage, FoundryMsg, McpHostMsg, ModelFamily, ModelInfo,
     OpenAITool, ParsedToolCall, RagChunk, RagIndexResult, RagMsg, RemoveFileResult,
-    ToolCallsPendingEvent, ToolExecutingEvent, ToolFormat, ToolLoopFinishedEvent, ToolResultEvent,
+    ToolCallsPendingEvent, ToolExecutingEvent, ToolFormat, ToolHeartbeatEvent, ToolLoopFinishedEvent,
+    ToolResultEvent,
     VectorMsg,
 };
 use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
@@ -1616,6 +1617,38 @@ async fn run_agentic_loop(
                 },
             );
 
+            // Start heartbeat task to keep UI informed during long tool runs
+            let heartbeat_app = app_handle.clone();
+            let heartbeat_server = resolved_call.server.clone();
+            let heartbeat_tool = resolved_call.tool.clone();
+            let heartbeat_start = std::time::Instant::now();
+            let (heartbeat_stop_tx, mut heartbeat_stop_rx) = tokio::sync::oneshot::channel::<()>();
+            let _heartbeat_handle = tokio::spawn(async move {
+                use tokio::time::Duration;
+                let mut ticker = tokio::time::interval(Duration::from_millis(1000));
+                let mut beat: u64 = 0;
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            beat += 1;
+                            let elapsed_ms = heartbeat_start.elapsed().as_millis() as u64;
+                            let _ = heartbeat_app.emit(
+                                "tool-heartbeat",
+                                ToolHeartbeatEvent {
+                                    server: heartbeat_server.clone(),
+                                    tool: heartbeat_tool.clone(),
+                                    elapsed_ms,
+                                    beat,
+                                },
+                            );
+                        }
+                        _ = &mut heartbeat_stop_rx => {
+                            break;
+                        }
+                    }
+                }
+            });
+
             // Execute the tool - check for built-in tools first
             let (result_text, is_error) = if is_builtin_tool(&resolved_call.tool) {
                 match resolved_call.tool.as_str() {
@@ -1806,6 +1839,9 @@ async fn run_agentic_loop(
                     is_error,
                 },
             );
+
+            // Stop heartbeat after tool completion
+            let _ = heartbeat_stop_tx.send(());
 
             // Check for repeated errors - if the same tool produces the same error twice in a row,
             // disable tool calling and prompt the model to answer without tools

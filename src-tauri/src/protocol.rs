@@ -197,6 +197,17 @@ pub struct ToolExecutingEvent {
     pub arguments: serde_json::Value,
 }
 
+/// Event payload emitted periodically while a tool is running
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolHeartbeatEvent {
+    pub server: String,
+    pub tool: String,
+    /// Elapsed time in milliseconds since the tool started
+    pub elapsed_ms: u64,
+    /// Monotonic heartbeat counter (1,2,3,...)
+    pub beat: u64,
+}
+
 /// Event payload when a tool finishes executing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultEvent {

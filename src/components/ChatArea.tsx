@@ -108,6 +108,15 @@ interface ParsedToolCallInfo {
 }
 
 function parseToolCallJson(jsonContent: string): ParsedToolCallInfo | null {
+    // Protect against giant payloads blocking the UI; fall back to raw display.
+    if (jsonContent.length > 50000) {
+        return {
+            server: 'unknown',
+            tool: 'large-payload',
+            arguments: {},
+            rawContent: jsonContent,
+        };
+    }
     try {
         const parsed = JSON.parse(jsonContent.trim());
         
@@ -144,6 +153,7 @@ function parseToolCallJson(jsonContent: string): ParsedToolCallInfo | null {
 // Shows a collapsible block with tool call details and processing status
 const ToolProcessingBlock = ({ content, startTime }: { content: string; startTime: number }) => {
     const [elapsed, setElapsed] = useState(0);
+    const [showRaw, setShowRaw] = useState(false);
     
     useEffect(() => {
         const interval = setInterval(() => {
@@ -152,20 +162,25 @@ const ToolProcessingBlock = ({ content, startTime }: { content: string; startTim
         return () => clearInterval(interval);
     }, [startTime]);
 
-    // Parse tool calls from the message content
-    const parts = parseMessageContent(content);
-    const toolCallParts = parts.filter(p => p.type === 'tool_call');
-    
-    // Parse each tool call JSON
-    const parsedCalls = toolCallParts
-        .map(part => parseToolCallJson(part.content))
-        .filter((call): call is ParsedToolCallInfo => call !== null);
+    const parsedData = useMemo(() => {
+        // Avoid expensive parsing for very large payloads; show raw toggle instead.
+        if (content.length > 80000) {
+            return { parsedCalls: [] as ParsedToolCallInfo[], rawContent: content, oversized: true };
+        }
+        const parts = parseMessageContent(content);
+        const toolCallParts = parts.filter(p => p.type === 'tool_call');
+        const parsedCalls = toolCallParts
+            .map(part => parseToolCallJson(part.content))
+            .filter((call): call is ParsedToolCallInfo => call !== null);
+        const rawToolContent = toolCallParts.map(p => p.content).join('\n\n');
+        return { parsedCalls, rawContent: rawToolContent, oversized: false };
+    }, [content]);
+
+    const { parsedCalls, rawContent, oversized } = parsedData;
 
     if (parsedCalls.length === 0) {
         // Fallback with expandable raw content if we can't parse the tool calls
         // Extract the raw tool call content to display
-        const rawToolContent = toolCallParts.map(p => p.content).join('\n\n');
-        
         return (
             <details className="my-2 group/processing border border-purple-300 rounded-xl overflow-hidden bg-purple-50/70">
                 <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-purple-100/50 transition-colors select-none">
@@ -183,9 +198,19 @@ const ToolProcessingBlock = ({ content, startTime }: { content: string; startTim
                     <span className="ml-auto text-xs text-purple-400 group-open/processing:rotate-180 transition-transform">▼</span>
                 </summary>
                 <div className="border-t border-purple-200 px-4 py-3 bg-white/80">
-                    {rawToolContent ? (
+                    {oversized && !showRaw ? (
+                        <div className="text-xs text-gray-600">
+                            Large tool payload omitted for performance.{" "}
+                            <button
+                                className="underline text-purple-700"
+                                onClick={() => setShowRaw(true)}
+                            >
+                                Show anyway
+                            </button>
+                        </div>
+                    ) : rawContent ? (
                         <pre className="text-xs bg-gray-50 p-2 rounded overflow-x-auto text-gray-700 whitespace-pre-wrap">
-                            {rawToolContent}
+                            {rawContent}
                         </pre>
                     ) : (
                         <p className="text-xs text-gray-500 italic">Tool call content is being streamed...</p>
@@ -313,6 +338,31 @@ const formatDurationMs = (ms?: number): string => {
 
 // Inline Tool Call Result - shows a single tool call result inline in the message
 const InlineToolCallResult = ({ call }: { call: ToolCallRecord }) => {
+    const [showArgs, setShowArgs] = useState(false);
+    const [argsText, setArgsText] = useState<string | null>(null);
+
+    const handleToggleArgs = useCallback(
+        (next: boolean) => {
+            setShowArgs(next);
+            if (next && argsText === null) {
+                // Defer heavy stringify to next tick to avoid blocking render.
+                const run = () => {
+                    try {
+                        setArgsText(JSON.stringify(call.arguments, null, 2));
+                    } catch (e) {
+                        setArgsText('Failed to stringify arguments');
+                    }
+                };
+                if (typeof requestIdleCallback === 'function') {
+                    requestIdleCallback(run);
+                } else {
+                    setTimeout(run, 0);
+                }
+            }
+        },
+        [argsText, call.arguments]
+    );
+
     return (
         <details className="my-3 group/tool border border-purple-200 rounded-xl overflow-hidden bg-purple-50/50">
             <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-purple-100/50 transition-colors select-none">
@@ -347,12 +397,14 @@ const InlineToolCallResult = ({ call }: { call: ToolCallRecord }) => {
                         )}
                     </div>
                     {Object.keys(call.arguments).length > 0 && (
-                        <details className="mt-2">
+                        <details className="mt-2" onToggle={(e) => handleToggleArgs((e.target as HTMLDetailsElement).open)}>
                             <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
                                 Arguments
                             </summary>
                             <pre className="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto text-gray-700">
-                                {JSON.stringify(call.arguments, null, 2)}
+                                {showArgs
+                                    ? argsText ?? 'Loading arguments...'
+                                    : 'Expand to view arguments'}
                             </pre>
                         </details>
                     )}

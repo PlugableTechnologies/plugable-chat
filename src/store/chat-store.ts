@@ -131,6 +131,8 @@ export interface ToolExecutionState {
     lastResult: { server: string; tool: string; result: string; isError: boolean } | null;
     totalIterations: number;
     hadToolCalls: boolean;
+    /** Last heartbeat timestamp (ms since epoch) while tool runs */
+    lastHeartbeatTs?: number;
 }
 
 // Code execution state for code_execution tool
@@ -294,6 +296,7 @@ let unlistenChatSaved: (() => void) | undefined;
 let unlistenSidebarUpdate: (() => void) | undefined;
 let unlistenToolCallsPending: (() => void) | undefined;
 let unlistenToolExecuting: (() => void) | undefined;
+let unlistenToolHeartbeat: (() => void) | undefined;
 let unlistenToolResult: (() => void) | undefined;
 let unlistenToolLoopFinished: (() => void) | undefined;
 let unlistenDownloadProgress: (() => void) | undefined;
@@ -1275,6 +1278,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
             });
 
+            const toolHeartbeatListener = await listen<{ server: string; tool: string; elapsed_ms: number; beat: number }>('tool-heartbeat', (event) => {
+                set((state) => {
+                    const current = state.toolExecution.currentTool;
+                    if (!current) return state;
+                    if (current.server !== event.payload.server || current.tool !== event.payload.tool) {
+                        return state;
+                    }
+                    return {
+                        toolExecution: {
+                            ...state.toolExecution,
+                            lastHeartbeatTs: Date.now(),
+                        },
+                    };
+                });
+            });
+
             const toolResultListener = await listen<ToolResultEvent>('tool-result', (event) => {
                 console.log(`[ChatStore] Tool result: ${event.payload.server}::${event.payload.tool}, error=${event.payload.is_error}`);
                 set((state) => {
@@ -1483,6 +1502,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenModelSelected = modelSelectedListener;
             unlistenToolCallsPending = toolCallsPendingListener;
             unlistenToolExecuting = toolExecutingListener;
+            unlistenToolHeartbeat = toolHeartbeatListener;
             unlistenToolResult = toolResultListener;
             unlistenToolLoopFinished = toolLoopFinishedListener;
             unlistenChatSaved = chatSavedListener;
@@ -1538,6 +1558,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenToolExecuting) {
             unlistenToolExecuting();
             unlistenToolExecuting = undefined;
+        }
+        if (unlistenToolHeartbeat) {
+            unlistenToolHeartbeat();
+            unlistenToolHeartbeat = undefined;
         }
         if (unlistenToolResult) {
             unlistenToolResult();
@@ -1719,6 +1743,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         lastResult: null,
         totalIterations: 0,
         hadToolCalls: false,
+        lastHeartbeatTs: undefined,
     },
     
     approveCurrentToolCall: async () => {
