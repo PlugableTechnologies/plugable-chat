@@ -468,6 +468,11 @@ function Install-Requirements {
     if (-not (Install-BuildToolsWithCpp)) {
         $allSucceeded = $false
     }
+
+    # Microsoft Foundry Local - Local model runtime
+    if (-not (Install-WingetPackage -PackageId "Microsoft.FoundryLocal" -DisplayName "Microsoft Foundry Local")) {
+        $allSucceeded = $false
+    }
     
     # Git - For version control (optional but recommended)
     if (-not (Install-WingetPackage -PackageId "Git.Git" -DisplayName "Git" -TrackVariable "Git")) {

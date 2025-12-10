@@ -35,6 +35,30 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Ensure a Homebrew tap is present before installing formulas from it
+install_brew_tap() {
+    local tap=$1
+    local display_name=$2
+
+    echo -n "Checking $display_name tap... "
+
+    if brew tap | grep -q "^$tap\$"; then
+        echo -e "${GREEN}already tapped${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}adding tap...${NC}"
+
+    if brew tap "$tap"; then
+        echo -e "  -> ${GREEN}Tap added successfully${NC}"
+        INSTALLED_ANYTHING=true
+        return 0
+    else
+        echo -e "  -> ${RED}Failed to add tap${NC}"
+        return 1
+    fi
+}
+
 # Probe known installation paths and add them to the session PATH
 # This handles cases where tools were installed but PATH wasn't updated
 probe_known_paths() {
@@ -335,27 +359,36 @@ install_requirements() {
     echo "Using Homebrew to install dependencies..."
     echo ""
     
-    # Step 3: Node.js - Required for frontend build (React/Vite)
+    # Step 3: Microsoft Foundry Local - Local model runtime
+    if install_brew_tap "microsoft/foundrylocal" "Microsoft Foundry Local"; then
+        if ! install_brew_formula "foundrylocal" "Microsoft Foundry Local"; then
+            all_succeeded=false
+        fi
+    else
+        all_succeeded=false
+    fi
+
+    # Step 4: Node.js - Required for frontend build (React/Vite)
     if ! install_brew_formula "node" "Node.js"; then
         all_succeeded=false
     fi
     
-    # Step 4: Rust - Required for Tauri backend
+    # Step 5: Rust - Required for Tauri backend
     # Using rustup (official installer) instead of Homebrew for better toolchain management
     if ! install_rust; then
         all_succeeded=false
     fi
     
-    # Step 4b: wasm32-wasip1 target - Required for WASM sandboxing of Python code execution
+    # Step 5b: wasm32-wasip1 target - Required for WASM sandboxing of Python code execution
     # This is optional but recommended for enhanced security
     install_wasm_target  # Don't fail if this doesn't work
     
-    # Step 5: Git (usually pre-installed on macOS, but ensure it's available)
+    # Step 6: Git (usually pre-installed on macOS, but ensure it's available)
     if ! install_brew_formula "git" "Git"; then
         all_succeeded=false
     fi
     
-    # Step 6: Protocol Buffers (protoc) - Required for compiling lance-embedding
+    # Step 7: Protocol Buffers (protoc) - Required for compiling lance-embedding
     if ! install_brew_formula "protobuf" "Protocol Buffers (protoc)"; then
         all_succeeded=false
     fi
