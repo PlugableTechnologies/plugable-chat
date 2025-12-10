@@ -38,12 +38,13 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, oneshot};
-use tool_adapters::{format_tool_result, parse_tool_calls_for_model_profile};
+use tool_adapters::{detect_python_code, format_tool_result, parse_tool_calls_for_model_profile};
 use tool_registry::{create_shared_registry, SharedToolRegistry, ToolSearchResult};
 use tools::code_execution::{CodeExecutionExecutor, CodeExecutionInput, CodeExecutionOutput};
 use tools::tool_search::{
     precompute_tool_search_embeddings, ToolSearchExecutor, ToolSearchInput,
 };
+use rustpython_parser::{ast, Parse};
 use uuid::Uuid;
 
 /// Approval decision for tool calls
@@ -1046,6 +1047,23 @@ fn extract_python_program(response: &str) -> Option<Vec<String>> {
         return None;
     }
 
+    // Prefer structured detections (fenced blocks, explicit python, dedented snippets)
+    let detected_blocks = detect_python_code(trimmed);
+    if let Some(block) = detected_blocks
+        .iter()
+        .find(|b| b.explicit_python)
+        .or_else(|| detected_blocks.first())
+    {
+        let lines: Vec<String> = block
+            .code
+            .lines()
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .collect();
+        if !lines.is_empty() {
+            return Some(lines);
+        }
+    }
+
     if let Ok(re) = regex::Regex::new(r"(?s)```(?:python|py)?\s*(.*?)\s*```") {
         if let Some(cap) = re.captures(trimmed) {
             let body = cap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
@@ -1059,8 +1077,22 @@ fn extract_python_program(response: &str) -> Option<Vec<String>> {
         }
     }
 
-    // Fallback: if the response looks code-like, treat the whole thing as code
-    if trimmed.contains('\n') || trimmed.contains('=') || trimmed.contains('(') {
+    // Fallback: only accept inline snippets that clearly look like Python.
+    // Do NOT treat arbitrary multi-line text as code.
+    let looks_like_inline_python = regex::Regex::new(r"(?m)^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*.+")
+        .map(|re| re.is_match(trimmed))
+        .unwrap_or(false)
+        || trimmed.contains("print(")
+        || trimmed.starts_with("import ")
+        || trimmed.starts_with("from ")
+        || trimmed.starts_with("def ")
+        || trimmed.starts_with("class ")
+        || trimmed.starts_with("for ")
+        || trimmed.starts_with("while ")
+        || trimmed.starts_with("if ")
+        || trimmed.starts_with("with ");
+
+    if looks_like_inline_python {
         return Some(
             trimmed
                 .lines()
@@ -1070,6 +1102,21 @@ fn extract_python_program(response: &str) -> Option<Vec<String>> {
     }
 
     None
+}
+
+/// Quick syntax validation for Python code before execution to avoid looping on non-code text.
+fn is_valid_python_syntax(code_lines: &[String]) -> bool {
+    let code = code_lines.join("\n");
+    match ast::Suite::parse(&code, "<embedded>") {
+        Ok(_) => true,
+        Err(err) => {
+            println!(
+                "[PythonSyntaxCheck] Skipping python_execution due to parse error: {}",
+                err
+            );
+            false
+        }
+    }
 }
 
 /// Result of deciding what the agentic loop should do with a model response.
@@ -1092,14 +1139,20 @@ pub(crate) fn detect_agentic_action(
 
     if python_tool_mode {
         if let Some(code_lines) = extract_python_program(assistant_response) {
-            return AgenticAction::ToolCalls {
-                calls: vec![ParsedToolCall {
-                    server: "builtin".to_string(),
-                    tool: "python_execution".to_string(),
-                    arguments: json!({ "code": code_lines }),
-                    raw: "[python_program]".to_string(),
-                }],
-            };
+            if is_valid_python_syntax(&code_lines) {
+                return AgenticAction::ToolCalls {
+                    calls: vec![ParsedToolCall {
+                        server: "builtin".to_string(),
+                        tool: "python_execution".to_string(),
+                        arguments: json!({ "code": code_lines }),
+                        raw: "[python_program]".to_string(),
+                    }],
+                };
+            } else {
+                return AgenticAction::Final {
+                    response: assistant_response.to_string(),
+                };
+            }
         }
 
         if !non_code_formats_enabled {
@@ -4483,6 +4536,7 @@ mod tests {
             true,
             false,
             false,
+            false,
         );
 
         assert_eq!(layers.base_prompt, "Base prompt");
@@ -4526,6 +4580,7 @@ mod tests {
             true,
             false,
             false,
+            false,
         );
 
         let addition = layers
@@ -4554,6 +4609,64 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool, "python_execution");
         assert!(calls[0].arguments.get("code").is_some());
+    }
+
+    #[test]
+    fn detect_agentic_action_rejects_invalid_python_syntax() {
+        let response =
+            "```python\nThe result of the expression 1 + 1 is 2.\n```"; // Not valid Python code
+        let formats = ToolCallFormatConfig::default();
+        let action = detect_agentic_action(
+            response,
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            true,
+            &formats,
+            ToolCallFormatName::CodeMode,
+        );
+
+        match action {
+            AgenticAction::Final { .. } => {}
+            other => panic!("expected final response due to parse failure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn detect_agentic_action_ignores_plaintext_multiline() {
+        let response = "plaintext\n75992863";
+        let formats = ToolCallFormatConfig::default();
+        let action = detect_agentic_action(
+            response,
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            true,
+            &formats,
+            ToolCallFormatName::CodeMode,
+        );
+
+        match action {
+            AgenticAction::Final { .. } => {}
+            other => panic!("expected final response (not code), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn detect_agentic_action_ignores_natural_language_with_parentheses() {
+        let response = "The result of the mathematical expression 343 + (343423 * 343343) + (34234 / 2343) is 117911883446.61118.";
+        let formats = ToolCallFormatConfig::default();
+        let action = detect_agentic_action(
+            response,
+            ModelFamily::GptOss,
+            ToolFormat::Hermes,
+            true,
+            &formats,
+            ToolCallFormatName::CodeMode,
+        );
+
+        match action {
+            AgenticAction::Final { .. } => {}
+            other => panic!("expected final response, got {:?}", other),
+        }
     }
 
     #[test]

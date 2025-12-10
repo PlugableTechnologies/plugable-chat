@@ -6777,6 +6777,7 @@ dependencies = [
  "python-sandbox",
  "regex",
  "reqwest 0.12.24",
+ "rustpython-parser",
  "serde",
  "serde_json",
  "sha2",

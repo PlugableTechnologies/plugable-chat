@@ -47,6 +47,9 @@ regex = "1"
 # URL encoding for API calls
 urlencoding = "2"
 
+# Python syntax parsing (for pre-exec validation)
+rustpython-parser = { version = "0.4", default-features = false }
+
 # Lazy static for profile registry
 lazy_static = "1.4"
 

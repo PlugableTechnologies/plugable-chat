@@ -284,8 +284,6 @@ pub async fn precompute_tool_search_embeddings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actors::mcp_host_actor::McpTool;
-    use crate::tool_registry::ToolRegistry;
     use serde_json::json;
 
     #[test]
