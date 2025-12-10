@@ -15,7 +15,7 @@ type ChatItemProps = {
     isEditing: boolean;
     isMenuOpen: boolean;
     editTitle: string;
-    menuRef: React.RefObject<HTMLDivElement>;
+    menuRef: React.RefObject<HTMLDivElement | null>;
     onLoadChat: (id: string) => void;
     onMenuToggle: (id: string | null) => void;
     onEditTitleChange: (title: string) => void;
@@ -128,13 +128,13 @@ function ChatItem({
 export function Sidebar({ className = "" }: SidebarProps) {
     const {
         history, fetchHistory, loadChat, deleteChat, renameChat, togglePin, currentChatId,
-        relevanceResults, isSearchingRelevance, input
+        relevanceResults, isSearchingRelevance, chatInputValue
     } = useChatStore();
 
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editTitle, setEditTitle] = useState("");
     const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
-    const menuRef = useRef<HTMLDivElement>(null);
+    const menuRef = useRef<HTMLDivElement | null>(null);
 
     useEffect(() => {
         console.log('[Sidebar] Component mounted, fetching history...');
@@ -184,7 +184,8 @@ export function Sidebar({ className = "" }: SidebarProps) {
     };
 
     // Use relevance results if available (user is typing), otherwise use normal history
-    const isShowingRelevance = relevanceResults !== null && input.trim().length >= 3;
+    const isShowingRelevance =
+        relevanceResults !== null && chatInputValue.trim().length >= 3;
     const displayChats = isShowingRelevance ? relevanceResults : history;
     
     const pinnedChats = displayChats.filter(c => c.pinned);
@@ -197,7 +198,11 @@ export function Sidebar({ className = "" }: SidebarProps) {
                 {/* New Chat Button */}
                 <button
                     onClick={() => {
-                        useChatStore.setState({ messages: [], input: '', currentChatId: null });
+                        useChatStore.setState({
+                            chatMessages: [],
+                            chatInputValue: '',
+                            currentChatId: null,
+                        });
                     }}
                     className="inline-flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors px-3 py-1.5 rounded-full group text-xs font-semibold uppercase tracking-wide self-start"
                     style={{ marginBottom: '24px' }}

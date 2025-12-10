@@ -219,7 +219,7 @@ impl ToolSearchExecutor {
 }
 
 /// Pre-compute embeddings for all tools in the registry
-pub async fn precompute_tool_embeddings(
+pub async fn precompute_tool_search_embeddings(
     registry: SharedToolRegistry,
     embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
 ) -> Result<usize, String> {

@@ -5,6 +5,13 @@
 - **Desktop Wrapper**: Tauri v2
 - **Styling**: Tailwind CSS v4
 - **State Management**: Zustand
+- **Package Manager**: Use **npm only**. Do not introduce or run pnpm/yarn/bun; keep dependency installs and scripts on npm to match existing setup.
+
+### Grep-Friendly Identifier Naming
+- **Directive**: Prefer descriptive, tag-like names for all identifiers (functions, variables, types, props). Each segment should be greppable to find all related code paths.
+- **Backend examples (Rust)**: `VectorActor` ➜ `ChatVectorStoreActor`; `perform_search` ➜ `search_chats_by_embedding`; `vector` ➜ `embedding_vector`; channels like `tx` ➜ `chat_vector_request_tx`.
+- **Frontend examples (TS/React)**: `messages` ➜ `chatMessages`; `onSend` ➜ `onSendChatMessage`; `inputValue` ➜ `chatInputValue`; store guards `listenerGeneration` ➜ `listenerGenerationCounter`.
+- **Do not rename** persisted schema fields, IPC channel names, or external protocol keys without migration/compat review; keep column names and event names stable unless explicitly migrating.
 
 ## Architectural Choices
 

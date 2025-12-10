@@ -64,7 +64,7 @@ function ErrorBanner() {
 
 
 function App() {
-  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, fetchCachedModels, startSystemChat, messages, hasFetchedCachedModels, loadModel, operationStatus } = useChatStore();
+  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, fetchCachedModels, startSystemChat, chatMessages, hasFetchedCachedModels, loadModel, operationStatus } = useChatStore();
   const effortOptions: ReasoningEffort[] = ['low', 'medium', 'high'];
   const hasShownHelpChat = useRef(false);
   console.log("App component rendering...");
@@ -86,12 +86,12 @@ function App() {
     // 5. No existing messages in chat
     // Note: We show help even during auto-download so users understand what's happening
     const shouldShowHelp = currentModel === 'No models' || currentModel === 'Downloading...';
-    if (!isConnecting && hasFetchedCachedModels && shouldShowHelp && !hasShownHelpChat.current && messages.length === 0) {
+    if (!isConnecting && hasFetchedCachedModels && shouldShowHelp && !hasShownHelpChat.current && chatMessages.length === 0) {
       hasShownHelpChat.current = true;
       console.log('[App] No cached models found after startup complete. Showing help chat.');
       startSystemChat(NO_MODELS_HELP_MESSAGE, 'Getting Started');
     }
-  }, [isConnecting, hasFetchedCachedModels, currentModel, startSystemChat, messages.length]);
+  }, [isConnecting, hasFetchedCachedModels, currentModel, startSystemChat, chatMessages.length]);
   
   // Handle clicking on the "no models" dropdown to refresh
   const handleRefreshModels = async () => {

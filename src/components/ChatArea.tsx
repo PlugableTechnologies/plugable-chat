@@ -8,7 +8,7 @@ import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
 import 'katex/dist/katex.min.css';
 import { invoke } from '../lib/api';
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, type JSX } from 'react';
 import { parseMessageContent, hasOnlyThinkContent, hasOnlyToolCallContent } from '../lib/response-parser';
 
 // Format elapsed time helper
@@ -415,77 +415,6 @@ const RagContextBlock = ({ chunks }: { chunks: RagChunk[] }) => {
                         <p className="mt-2 text-xs text-gray-600 italic">
                             "{truncateContent(chunk.content)}"
                         </p>
-                    </div>
-                ))}
-            </div>
-        </details>
-    );
-};
-
-// Collapsible Tool Calls Block - shows multiple tool calls made during a message
-const ToolCallsBlock = ({ toolCalls }: { toolCalls: ToolCallRecord[] }) => {
-    if (!toolCalls || toolCalls.length === 0) return null;
-    
-    const errorCount = toolCalls.filter(tc => tc.isError).length;
-    const successCount = toolCalls.length - errorCount;
-    
-    return (
-        <details className="my-4 group/tools border border-purple-200 rounded-xl overflow-hidden bg-purple-50/50">
-            <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-purple-100/50 transition-colors select-none">
-                <span className="text-purple-600 text-lg">🔧</span>
-                <span className="font-medium text-purple-900 text-sm">
-                    {toolCalls.length} tool call{toolCalls.length !== 1 ? 's' : ''}
-                </span>
-                {successCount > 0 && (
-                    <span className="text-xs px-1.5 py-0.5 rounded-full bg-green-100 text-green-700">
-                        {successCount} ✓
-                    </span>
-                )}
-                {errorCount > 0 && (
-                    <span className="text-xs px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">
-                        {errorCount} ✗
-                    </span>
-                )}
-                <span className="ml-auto text-xs text-purple-400 group-open/tools:rotate-180 transition-transform">▼</span>
-            </summary>
-            <div className="border-t border-purple-200 divide-y divide-purple-100">
-                {toolCalls.map((call) => (
-                    <div key={call.id} className="px-4 py-3 bg-white">
-                        <div className="flex items-center gap-2 flex-wrap">
-                            <code className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600">{call.server}</code>
-                            <span className="text-gray-400">›</span>
-                            <code className="text-sm px-2 py-1 rounded bg-purple-100 text-purple-800 font-medium">{call.tool}</code>
-                            {call.isError ? (
-                                <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-600 ml-auto">Error</span>
-                            ) : (
-                                <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-600 ml-auto">Success</span>
-                            )}
-                            {call.durationMs && (
-                                <span className="text-xs text-gray-400">{formatDurationMs(call.durationMs)}</span>
-                            )}
-                        </div>
-                        {Object.keys(call.arguments).length > 0 && (
-                            <details className="mt-2">
-                                <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
-                                    Arguments
-                                </summary>
-                                <pre className="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto text-gray-700">
-                                    {JSON.stringify(call.arguments, null, 2)}
-                                </pre>
-                            </details>
-                        )}
-                        <details className="mt-2">
-                            <summary className={`text-xs cursor-pointer hover:text-gray-700 ${call.isError ? 'text-red-500' : 'text-gray-500'}`}>
-                                {call.isError ? 'Error' : 'Result'}
-                            </summary>
-                            <pre className={`mt-1 text-xs p-2 rounded overflow-x-auto whitespace-pre-wrap ${
-                                call.isError ? 'bg-red-50 text-red-700' : 'bg-gray-50 text-gray-700'
-                            }`}>
-                                {call.result.length > 2000 
-                                    ? call.result.slice(0, 2000) + '\n... (truncated)'
-                                    : call.result}
-                            </pre>
-                        </details>
                     </div>
                 ))}
             </div>
@@ -1152,7 +1081,15 @@ const preprocessLaTeX = (content: string) => {
 
 export function ChatArea() {
     const {
-        messages, input, setInput, addMessage, isLoading, setIsLoading, stopGeneration, currentChatId, reasoningEffort,
+        chatMessages,
+        chatInputValue,
+        setChatInputValue,
+        appendChatMessage,
+        assistantStreamingActive,
+        setAssistantStreamingActive,
+        stopActiveChatGeneration,
+        currentChatId,
+        reasoningEffort,
         triggerRelevanceSearch, clearRelevanceSearch, isConnecting,
         // RAG state
         attachedPaths, ragIndexedFiles, isIndexingRag,
@@ -1189,31 +1126,31 @@ export function ChatArea() {
 
     // Track when thinking phase starts
     useEffect(() => {
-        const lastMessage = messages[messages.length - 1];
-        const isThinkingOnly = lastMessage?.role === 'assistant' && 
-                               hasOnlyThinkContent(lastMessage.content) && 
-                               isLoading;
+        const lastMessage = chatMessages[chatMessages.length - 1];
+        const isThinkingOnly = lastMessage?.role === 'assistant' &&
+                               hasOnlyThinkContent(lastMessage.content) &&
+                               assistantStreamingActive;
         
         if (isThinkingOnly && !thinkingStartTime) {
             setThinkingStartTime(Date.now());
-        } else if (!isLoading || (lastMessage?.role === 'assistant' && !hasOnlyThinkContent(lastMessage.content))) {
+        } else if (!assistantStreamingActive || (lastMessage?.role === 'assistant' && !hasOnlyThinkContent(lastMessage.content))) {
             setThinkingStartTime(null);
         }
-    }, [messages, isLoading, thinkingStartTime]);
+    }, [chatMessages, assistantStreamingActive, thinkingStartTime]);
 
     // Track when tool processing phase starts (only tool_call content, no visible text)
     useEffect(() => {
-        const lastMessage = messages[messages.length - 1];
-        const isToolProcessingOnly = lastMessage?.role === 'assistant' && 
-                                      hasOnlyToolCallContent(lastMessage.content) && 
-                                      isLoading;
+        const lastMessage = chatMessages[chatMessages.length - 1];
+        const isToolProcessingOnly = lastMessage?.role === 'assistant' &&
+                                      hasOnlyToolCallContent(lastMessage.content) &&
+                                      assistantStreamingActive;
         
         if (isToolProcessingOnly && !toolProcessingStartTime) {
             setToolProcessingStartTime(Date.now());
-        } else if (!isLoading || (lastMessage?.role === 'assistant' && !hasOnlyToolCallContent(lastMessage.content))) {
+        } else if (!assistantStreamingActive || (lastMessage?.role === 'assistant' && !hasOnlyToolCallContent(lastMessage.content))) {
             setToolProcessingStartTime(null);
         }
-    }, [messages, isLoading, toolProcessingStartTime]);
+    }, [chatMessages, assistantStreamingActive, toolProcessingStartTime]);
 
     // Reset follow mode when switching chats
     useEffect(() => {
@@ -1225,13 +1162,7 @@ export function ChatArea() {
         if (isFollowMode) {
             messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
         }
-    }, [messages, isLoading, isFollowMode]);
-
-    // Setup Streaming Listeners
-    useEffect(() => {
-        // Initialize listeners via the store
-        useChatStore.getState().setupListeners();
-    }, []);
+    }, [chatMessages, assistantStreamingActive, isFollowMode]);
 
     // Setup Streaming Listeners
     useEffect(() => {
@@ -1253,16 +1184,16 @@ export function ChatArea() {
             const newHeight = Math.max(32, Math.min(textareaRef.current.scrollHeight, 200));
             textareaRef.current.style.height = `${newHeight}px`;
         }
-    }, [input]);
+    }, [chatInputValue]);
 
     // Trigger relevance search as user types (debounced in store)
     useEffect(() => {
-        if (input.trim().length >= 3) {
-            triggerRelevanceSearch(input);
+        if (chatInputValue.trim().length >= 3) {
+            triggerRelevanceSearch(chatInputValue);
         } else {
             clearRelevanceSearch();
         }
-    }, [input, triggerRelevanceSearch, clearRelevanceSearch]);
+    }, [chatInputValue, triggerRelevanceSearch, clearRelevanceSearch]);
 
     // Handle file selection via Tauri dialog
     const handleAttachFiles = async () => {
@@ -1309,7 +1240,7 @@ export function ChatArea() {
     };
 
     const handleSend = async () => {
-        const text = input;
+        const text = chatInputValue;
         if (!text.trim()) return;
         const trimmedText = text.trim();
 
@@ -1344,11 +1275,16 @@ export function ChatArea() {
         });
 
         // Add user message (show original text to user)
-        addMessage({ id: Date.now().toString(), role: 'user', content: text, timestamp: Date.now() });
-        setInput('');
+        appendChatMessage({
+            id: Date.now().toString(),
+            role: 'user',
+            content: text,
+            timestamp: Date.now(),
+        });
+        setChatInputValue('');
         clearRelevanceSearch(); // Clear relevance results when sending
         if (textareaRef.current) textareaRef.current.style.height = 'auto';
-        setIsLoading(true);
+        setAssistantStreamingActive(true);
         
         // Track which chat we're streaming to (for cross-chat switching)
         storeState.setStreamingChatId(chatId);
@@ -1361,7 +1297,7 @@ export function ChatArea() {
         });
 
         // Add placeholder for assistant
-        addMessage({
+        appendChatMessage({
             id: (Date.now() + 1).toString(),
             role: 'assistant',
             content: '',
@@ -1386,12 +1322,12 @@ export function ChatArea() {
                 if (relevantChunks.length > 0) {
                     // Store chunks on the assistant message for display
                     useChatStore.setState((state) => {
-                        const newMessages = [...state.messages];
+                        const newMessages = [...state.chatMessages];
                         const lastIdx = newMessages.length - 1;
                         if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
                             newMessages[lastIdx] = { ...newMessages[lastIdx], ragChunks: relevantChunks };
                         }
-                        return { messages: newMessages };
+                        return { chatMessages: newMessages };
                     });
                     
                     // Build context string for the model
@@ -1410,7 +1346,7 @@ export function ChatArea() {
                 setRagStartTime(null);
             }
 
-            const history = messages.map(m => ({ role: m.role, content: m.content }));
+            const history = chatMessages.map((m) => ({ role: m.role, content: m.content }));
             // Call backend - streaming will trigger events
             const returnedChatId = await invoke<string>('chat', {
                 chatId,
@@ -1438,7 +1374,7 @@ export function ChatArea() {
             setRagStartTime(null);
             // Update the last message with error
             useChatStore.setState((state) => {
-                const newMessages = [...state.messages];
+                const newMessages = [...state.chatMessages];
                 const lastIdx = newMessages.length - 1;
                 if (lastIdx >= 0) {
                     newMessages[lastIdx] = {
@@ -1446,9 +1382,9 @@ export function ChatArea() {
                         content: `Error: ${error}`
                     };
                 }
-                return { messages: newMessages };
+                return { chatMessages: newMessages };
             });
-            setIsLoading(false);
+            setAssistantStreamingActive(false);
         }
     };
 
@@ -1469,7 +1405,7 @@ export function ChatArea() {
         
         {/* Scrollable Messages Area - takes all remaining space */}
         <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-4 sm:px-6 pt-6 pb-6">
-                {messages.length === 0 ? (
+                {chatMessages.length === 0 ? (
                     <div className="flex-1 flex flex-col items-center justify-center px-6">
                         <div className="mb-8 text-center">
                             <h1 className="text-2xl font-bold text-gray-900">
@@ -1479,7 +1415,7 @@ export function ChatArea() {
                     </div>
                 ) : (
                     <div className="w-full max-w-none space-y-6 py-0">
-                        {messages.map(m => (
+                        {chatMessages.map(m => (
                             <div key={m.id} className={`flex w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                 <div
                                     className={`
@@ -1611,13 +1547,13 @@ export function ChatArea() {
                                                         {renderedParts}
                                                         {/* Show thinking indicator when only think content is visible */}
                                                         {thinkingStartTime && 
-                                                         messages[messages.length - 1]?.id === m.id && 
+                                                         chatMessages[chatMessages.length - 1]?.id === m.id && 
                                                          hasOnlyThinkContent(m.content) && (
                                                             <ThinkingIndicator startTime={thinkingStartTime} />
                                                         )}
                                                         {/* Show tool processing block when only tool_call content is visible */}
                                                         {toolProcessingStartTime && 
-                                                         messages[messages.length - 1]?.id === m.id && 
+                                                         chatMessages[chatMessages.length - 1]?.id === m.id && 
                                                          hasOnlyToolCallContent(m.content) && (
                                                             <ToolProcessingBlock content={m.content} startTime={toolProcessingStartTime} />
                                                         )}
@@ -1635,7 +1571,7 @@ export function ChatArea() {
                                 </div>
                             </div>
                         ))}
-                        {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
+                        {assistantStreamingActive && chatMessages[chatMessages.length - 1]?.role !== 'assistant' && (
                             <div className="flex w-full justify-start">
                                 <div className="bg-gray-50 rounded-2xl px-6 py-4">
                                     <div className="flex gap-1.5">
@@ -1698,13 +1634,13 @@ export function ChatArea() {
                 <div className="px-2 sm:px-6">
                     <InputBar
                         className=""
-                        input={input}
-                        setInput={setInput}
+                        input={chatInputValue}
+                        setInput={setChatInputValue}
                         handleSend={handleSend}
-                        handleStop={stopGeneration}
+                        handleStop={stopActiveChatGeneration}
                         handleKeyDown={handleKeyDown}
                         textareaRef={textareaRef}
-                        isLoading={isLoading}
+                        isLoading={assistantStreamingActive}
                         attachedCount={attachedPaths.length}
                         onAttachFiles={handleAttachFiles}
                         onAttachFolder={handleAttachFolder}

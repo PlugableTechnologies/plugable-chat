@@ -811,39 +811,39 @@ pub struct ChatMessage {
 
 pub enum VectorMsg {
     /// Index a new chat or update an existing one
-    UpsertChat {
+    UpsertChatRecord {
         id: String,
         title: String,
         content: String,
         messages: String, // JSON string of full history
         // The actor will handle embedding generation internally via Foundry
         // or receive a pre-computed vector.
-        vector: Option<Vec<f32>>,
+        embedding_vector: Option<Vec<f32>>,
         pinned: bool,
     },
     /// Search for similar chats
-    SearchHistory {
+    SearchChatsByEmbedding {
         query_vector: Vec<f32>,
         limit: usize,
         // Channel to send results back to the caller (Orchestrator)
         respond_to: oneshot::Sender<Vec<ChatSummary>>,
     },
     /// Get all chats
-    GetAllChats {
+    FetchAllChats {
         respond_to: oneshot::Sender<Vec<ChatSummary>>,
     },
     /// Get a specific chat's messages
-    GetChat {
+    FetchChatMessages {
         id: String,
         respond_to: oneshot::Sender<Option<String>>, // Returns JSON string of messages
     },
     /// Delete a chat
-    DeleteChat {
+    DeleteChatById {
         id: String,
         respond_to: oneshot::Sender<bool>,
     },
     /// Update chat metadata (title, pinned)
-    UpdateChatMetadata {
+    UpdateChatTitleAndPin {
         id: String,
         title: Option<String>,
         pinned: Option<bool>,
@@ -859,13 +859,13 @@ pub enum FoundryMsg {
     },
     /// Chat with the model (streaming)
     Chat {
-        history: Vec<ChatMessage>,
+        chat_history_messages: Vec<ChatMessage>,
         reasoning_effort: String,
         /// Optional OpenAI-format tools for native tool calling
-        tools: Option<Vec<OpenAITool>>,
+        native_tool_specs: Option<Vec<OpenAITool>>,
         respond_to: tokio::sync::mpsc::UnboundedSender<String>,
         /// Cancellation signal - when true, abort the stream
-        cancel_rx: tokio::sync::watch::Receiver<bool>,
+        stream_cancel_rx: tokio::sync::watch::Receiver<bool>,
     },
     /// Get available models from running service
     GetModels {
@@ -981,13 +981,13 @@ pub enum McpHostMsg {
 /// Messages for the RAG (Retrieval Augmented Generation) actor
 pub enum RagMsg {
     /// Process and index documents for RAG
-    ProcessDocuments {
+    IndexRagDocuments {
         paths: Vec<String>,
         embedding_model: Arc<TextEmbedding>,
         respond_to: oneshot::Sender<Result<RagIndexResult, String>>,
     },
     /// Search indexed documents for relevant chunks
-    SearchDocuments {
+    SearchRagChunksByEmbedding {
         query_vector: Vec<f32>,
         limit: usize,
         respond_to: oneshot::Sender<Vec<RagChunk>>,

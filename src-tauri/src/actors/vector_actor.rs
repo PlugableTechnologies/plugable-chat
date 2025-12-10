@@ -11,75 +11,90 @@ use lancedb::{connect, Connection, Table};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub struct VectorActor {
-    rx: mpsc::Receiver<VectorMsg>,
-    table: Table,
+pub struct ChatVectorStoreActor {
+    vector_msg_rx: mpsc::Receiver<VectorMsg>,
+    chat_table: Table,
 }
 
-impl VectorActor {
-    pub async fn new(rx: mpsc::Receiver<VectorMsg>, db_path: &str) -> Self {
-        let db = connect(db_path)
+impl ChatVectorStoreActor {
+    pub async fn new(vector_msg_rx: mpsc::Receiver<VectorMsg>, db_path: &str) -> Self {
+        let db_connection = connect(db_path)
             .execute()
             .await
             .expect("Failed to connect to LanceDB");
 
         // Ensure table exists
-        let table = setup_table(&db).await;
+        let chat_table = ensure_chats_table_schema(&db_connection).await;
 
-        Self { rx, table }
+        Self {
+            vector_msg_rx,
+            chat_table,
+        }
     }
 
     pub async fn run(mut self) {
         println!("VectorActor loop starting");
-        while let Some(msg) = self.rx.recv().await {
+        while let Some(msg) = self.vector_msg_rx.recv().await {
             // Clone table handle for parallel execution (it's cheap, just an Arc internally)
-            let table = self.table.clone();
+            let chat_table = self.chat_table.clone();
 
             // Spawn a detached task for every request.
             // This ensures the actor mailbox never clogs, even if a query takes 100ms.
             tokio::spawn(async move {
                 match msg {
-                    VectorMsg::SearchHistory {
+                    VectorMsg::SearchChatsByEmbedding {
                         query_vector,
                         limit,
                         respond_to,
                     } => {
                         println!("VectorActor: Searching history (limit: {})", limit);
-                        let results = perform_search(table, query_vector, limit).await;
-                        let _ = respond_to.send(results);
+                        let search_results =
+                            search_chats_by_embedding(chat_table, query_vector, limit).await;
+                        let _ = respond_to.send(search_results);
                     }
-                    VectorMsg::GetAllChats { respond_to } => {
+                    VectorMsg::FetchAllChats { respond_to } => {
                         println!("VectorActor: Getting all chats");
-                        let zero_vector = vec![0.0; 384];
-                        let results = perform_search(table, zero_vector, 100).await;
-                        let _ = respond_to.send(results);
+                        let zero_embedding_vector = vec![0.0; 384];
+                        let search_results =
+                            search_chats_by_embedding(chat_table, zero_embedding_vector, 100)
+                                .await;
+                        let _ = respond_to.send(search_results);
                     }
-                    VectorMsg::UpsertChat {
+                    VectorMsg::UpsertChatRecord {
                         id,
                         title,
                         content,
                         messages,
-                        vector,
+                        embedding_vector,
                         pinned,
                     } => {
                         println!(
                             "VectorActor: Upserting chat (id: {}, title: {}, has_vector: {})",
                             &id[..8.min(id.len())],
                             title,
-                            vector.is_some()
+                            embedding_vector.is_some()
                         );
-                        if let Some(vec) = vector {
-                            println!("VectorActor: Vector length: {}", vec.len());
-                            perform_upsert(&table, id, title, content, messages, vec, pinned).await;
+                        if let Some(vector_values) = embedding_vector {
+                            println!("VectorActor: Vector length: {}", vector_values.len());
+                            upsert_chat_record_with_embedding(
+                                &chat_table,
+                                id,
+                                title,
+                                content,
+                                messages,
+                                vector_values,
+                                pinned,
+                            )
+                            .await;
                         } else {
                             println!("VectorActor WARNING: No vector provided, skipping upsert!");
                         }
                     }
-                    VectorMsg::GetChat { id, respond_to } => {
-                        let messages = perform_get_chat(table, id).await;
-                        let _ = respond_to.send(messages);
+                    VectorMsg::FetchChatMessages { id, respond_to } => {
+                        let chat_messages_json = fetch_chat_messages_json(chat_table, id).await;
+                        let _ = respond_to.send(chat_messages_json);
                     }
-                    VectorMsg::UpdateChatMetadata {
+                    VectorMsg::UpdateChatTitleAndPin {
                         id,
                         title,
                         pinned,
@@ -92,9 +107,9 @@ impl VectorActor {
                             pinned
                         );
                         // We need to clone table for async block if we were spawning, but we are in spawned block
-                        let table_clone = table.clone();
+                        let chat_table_clone = chat_table.clone();
                         if let Some((_, old_title, content, messages, vector, old_pinned)) =
-                            perform_get_full_chat(table_clone.clone(), id.clone()).await
+                            fetch_full_chat_record(chat_table_clone.clone(), id.clone()).await
                         {
                             let new_title = title.unwrap_or(old_title.clone());
                             let new_pinned = pinned.unwrap_or(old_pinned);
@@ -102,8 +117,8 @@ impl VectorActor {
                                 "VectorActor: Found chat to update: '{}' -> '{}', pinned: {} -> {}",
                                 old_title, new_title, old_pinned, new_pinned
                             );
-                            perform_upsert(
-                                &table_clone,
+                            upsert_chat_record_with_embedding(
+                                &chat_table_clone,
                                 id,
                                 new_title,
                                 content,
@@ -121,11 +136,11 @@ impl VectorActor {
                             let _ = respond_to.send(false);
                         }
                     }
-                    VectorMsg::DeleteChat { id, respond_to } => {
+                    VectorMsg::DeleteChatById { id, respond_to } => {
                         println!("VectorActor: Deleting chat (id: {})", id);
                         let filter = format!("id = '{}'", id);
                         println!("VectorActor: Delete filter: {}", filter);
-                        match table.delete(&filter).await {
+                        match chat_table.delete(&filter).await {
                             Ok(_) => {
                                 println!("VectorActor: Successfully deleted chat {}", id);
                                 let _ = respond_to.send(true);
@@ -142,11 +157,15 @@ impl VectorActor {
     }
 }
 
-async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<ChatSummary> {
+async fn search_chats_by_embedding(
+    chat_table: Table,
+    embedding_vector: Vec<f32>,
+    limit: usize,
+) -> Vec<ChatSummary> {
     // LanceDB Async Query - results are automatically sorted by similarity (closest first)
-    let query_result = table.query().nearest_to(vector); // Vector search
+    let embedding_query = chat_table.query().nearest_to(embedding_vector); // Vector search
 
-    let query = match query_result {
+    let query = match embedding_query {
         Ok(q) => q,
         Err(e) => {
             println!("VectorActor ERROR: Failed to create vector query: {}", e);
@@ -154,12 +173,12 @@ async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<Cha
         }
     };
 
-    let stream = query.limit(limit).execute().await;
+    let query_stream = query.limit(limit).execute().await;
 
-    let mut results = Vec::new();
+    let mut search_results = Vec::new();
 
-    if let Ok(mut stream) = stream {
-        while let Some(batch) = stream.next().await {
+    if let Ok(mut query_stream) = query_stream {
+        while let Some(batch) = query_stream.next().await {
             if let Ok(batch) = batch {
                 let ids = batch
                     .column_by_name("id")
@@ -212,7 +231,7 @@ async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<Cha
                         content.clone()
                     };
 
-                    results.push(ChatSummary {
+                    search_results.push(ChatSummary {
                         id,
                         title,
                         preview,
@@ -224,11 +243,14 @@ async fn perform_search(table: Table, vector: Vec<f32>, limit: usize) -> Vec<Cha
         }
     }
 
-    println!("VectorActor: Search returned {} results", results.len());
-    results
+    println!(
+        "VectorActor: Search returned {} results",
+        search_results.len()
+    );
+    search_results
 }
 
-fn get_expected_schema() -> Arc<Schema> {
+fn expected_chats_table_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("title", DataType::Utf8, false),
@@ -243,12 +265,12 @@ fn get_expected_schema() -> Arc<Schema> {
     ]))
 }
 
-async fn setup_table(db: &Connection) -> Table {
-    let expected_schema = get_expected_schema();
+async fn ensure_chats_table_schema(db_connection: &Connection) -> Table {
+    let expected_schema = expected_chats_table_schema();
     let expected_field_count = expected_schema.fields().len();
 
     // Try to open existing table
-    let result = db.open_table("chats").execute().await;
+    let result = db_connection.open_table("chats").execute().await;
 
     match result {
         Ok(table) => {
@@ -261,12 +283,12 @@ async fn setup_table(db: &Connection) -> Table {
                             existing_field_count, expected_field_count);
 
                         // Drop and recreate the table
-                        if let Err(e) = db.drop_table("chats").await {
+                        if let Err(e) = db_connection.drop_table("chats").await {
                             println!("VectorActor WARNING: Failed to drop old table: {}", e);
                         }
 
                         let batch = RecordBatch::new_empty(expected_schema.clone());
-                        db.create_table(
+                        db_connection.create_table(
                             "chats",
                             RecordBatchIterator::new(
                                 vec![batch].into_iter().map(Ok),
@@ -301,7 +323,7 @@ async fn setup_table(db: &Connection) -> Table {
             );
             let batch = RecordBatch::new_empty(expected_schema.clone());
 
-            db.create_table(
+            db_connection.create_table(
                 "chats",
                 RecordBatchIterator::new(vec![batch].into_iter().map(Ok), expected_schema),
             )
@@ -312,21 +334,21 @@ async fn setup_table(db: &Connection) -> Table {
     }
 }
 
-async fn perform_upsert(
-    table: &Table,
+async fn upsert_chat_record_with_embedding(
+    chat_table: &Table,
     id: String,
     title: String,
     content: String,
     messages: String,
-    vector: Vec<f32>,
+    embedding_vector: Vec<f32>,
     pinned: bool,
 ) {
     println!(
-        "VectorActor: perform_upsert starting for id={}",
+        "VectorActor: upsert_chat_record_with_embedding starting for id={}",
         &id[..8.min(id.len())]
     );
 
-    let schema = match table.schema().await {
+    let schema = match chat_table.schema().await {
         Ok(s) => s,
         Err(e) => {
             println!("VectorActor ERROR: Failed to get schema: {}", e);
@@ -340,7 +362,7 @@ async fn perform_upsert(
     let messages_array = StringArray::from(vec![messages]);
     let pinned_array = BooleanArray::from(vec![pinned]);
 
-    let vector_values = Float32Array::from(vector);
+    let vector_values = Float32Array::from(embedding_vector);
     let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
         vec![Some(
             vector_values
@@ -372,14 +394,14 @@ async fn perform_upsert(
 
     // Perform upsert by deleting existing record (if any) and adding new one
     // This is a workaround for merge_insert API issues in lancedb 0.4
-    if let Err(e) = table.delete(&format!("id = '{}'", id)).await {
+    if let Err(e) = chat_table.delete(&format!("id = '{}'", id)).await {
         println!(
             "VectorActor WARNING: Delete before upsert failed (may be ok if new): {}",
             e
         );
     }
 
-    match table
+    match chat_table
         .add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
         .execute()
         .await
@@ -392,10 +414,13 @@ async fn perform_upsert(
     }
 }
 
-async fn perform_get_chat(table: Table, id: String) -> Option<String> {
-    let query = table.query().only_if(format!("id = '{}'", id)).limit(1);
-    let mut stream = query.execute().await.ok()?;
-    if let Some(Ok(batch)) = stream.next().await {
+async fn fetch_chat_messages_json(chat_table: Table, id: String) -> Option<String> {
+    let query = chat_table
+        .query()
+        .only_if(format!("id = '{}'", id))
+        .limit(1);
+    let mut query_stream = query.execute().await.ok()?;
+    if let Some(Ok(batch)) = query_stream.next().await {
         let messages = batch
             .column_by_name("messages")?
             .as_any()
@@ -407,13 +432,16 @@ async fn perform_get_chat(table: Table, id: String) -> Option<String> {
     None
 }
 
-async fn perform_get_full_chat(
-    table: Table,
+async fn fetch_full_chat_record(
+    chat_table: Table,
     id: String,
 ) -> Option<(String, String, String, String, Vec<f32>, bool)> {
-    let query = table.query().only_if(format!("id = '{}'", id)).limit(1);
-    let mut stream = query.execute().await.ok()?;
-    if let Some(Ok(batch)) = stream.next().await {
+    let query = chat_table
+        .query()
+        .only_if(format!("id = '{}'", id))
+        .limit(1);
+    let mut query_stream = query.execute().await.ok()?;
+    if let Some(Ok(batch)) = query_stream.next().await {
         if batch.num_rows() == 0 {
             return None;
         }

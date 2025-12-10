@@ -170,14 +170,14 @@ export interface ToolSearchState {
 }
 
 interface ChatState {
-    messages: Message[];
-    addMessage: (msg: Message) => void;
-    input: string;
-    setInput: (s: string) => void;
-    isLoading: boolean;
-    setIsLoading: (loading: boolean) => void;
-    stopGeneration: () => Promise<void>;
-    generationId: number;
+    chatMessages: Message[];
+    appendChatMessage: (msg: Message) => void;
+    chatInputValue: string;
+    setChatInputValue: (s: string) => void;
+    assistantStreamingActive: boolean;
+    setAssistantStreamingActive: (loading: boolean) => void;
+    stopActiveChatGeneration: () => Promise<void>;
+    chatGenerationCounter: number;
 
     currentChatId: string | null;
     setCurrentChatId: (id: string | null) => void;
@@ -487,23 +487,25 @@ async function initializeModelsOnStartup(
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
-    messages: [],
-    addMessage: (msg) => set((state) => ({ messages: [...state.messages, msg] })),
-    input: '',
-    setInput: (input) => set({ input }),
-    isLoading: false,
-    setIsLoading: (isLoading) => set({ isLoading }),
-    generationId: 0,
-    stopGeneration: async () => {
+    chatMessages: [],
+    appendChatMessage: (msg) =>
+        set((state) => ({ chatMessages: [...state.chatMessages, msg] })),
+    chatInputValue: '',
+    setChatInputValue: (chatInputValue) => set({ chatInputValue }),
+    assistantStreamingActive: false,
+    setAssistantStreamingActive: (assistantStreamingActive) =>
+        set({ assistantStreamingActive }),
+    chatGenerationCounter: 0,
+    stopActiveChatGeneration: async () => {
         console.log('[ChatStore] 🛑 STOP BUTTON PRESSED by user');
         
         // Increment generationId to ignore any incoming tokens from the stopped generation
-        const currentGenId = get().generationId;
+        const currentGenId = get().chatGenerationCounter;
         console.log('[ChatStore] Current generation to cancel:', currentGenId);
         
         set((state) => ({ 
-            isLoading: false, 
-            generationId: state.generationId + 1,
+            assistantStreamingActive: false, 
+            chatGenerationCounter: state.chatGenerationCounter + 1,
             streamingChatId: null,
         }));
         
@@ -686,7 +688,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const state = get();
         if (state.launchPromptApplied) return;
         const rawPrompt = state.launchInitialPrompt;
-        if (!rawPrompt || state.messages.length > 0) {
+        if (!rawPrompt || state.chatMessages.length > 0) {
             set({ launchPromptApplied: true });
             return;
         }
@@ -714,13 +716,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         // Seed UI messages
         set({
-            messages: [
+            chatMessages: [
                 { id: timestamp.toString(), role: 'user', content: text, timestamp },
                 { id: (timestamp + 1).toString(), role: 'assistant', content: '', timestamp: timestamp + 1 },
             ],
             currentChatId: chatId,
-            input: '',
-            isLoading: true,
+            chatInputValue: '',
+            assistantStreamingActive: true,
             streamingChatId: chatId,
             operationStatus: {
                 type: 'streaming',
@@ -752,7 +754,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         } catch (error) {
             console.error('[ChatStore] Failed to send launch prompt:', error);
             set((s) => {
-                const newMessages = [...s.messages];
+                const newMessages = [...s.chatMessages];
                 const lastIdx = newMessages.length - 1;
                 if (lastIdx >= 0) {
                     newMessages[lastIdx] = {
@@ -760,7 +762,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         content: `Error: ${error}`,
                     };
                 }
-                return { messages: newMessages, isLoading: false };
+                return {
+                    chatMessages: newMessages,
+                    assistantStreamingActive: false,
+                };
             });
         } finally {
             set({ launchPromptApplied: true });
@@ -946,14 +951,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // If we're switching away from a streaming chat, save current messages to streamingMessages
             if (streamingChatId && streamingChatId === currentChatId && id !== currentChatId) {
                 console.log(`[ChatStore] Switching away from streaming chat ${currentChatId?.slice(0, 8)}, saving messages`);
-                set({ streamingMessages: [...state.messages] });
+                set({ streamingMessages: [...state.chatMessages] });
             }
             
             // If we're switching to the streaming chat, restore messages from streamingMessages
             if (streamingChatId && streamingChatId === id && state.streamingMessages.length > 0) {
                 console.log(`[ChatStore] Switching to streaming chat ${id.slice(0, 8)}, restoring messages`);
                 set({ 
-                    messages: state.streamingMessages, 
+                    chatMessages: state.streamingMessages, 
                     currentChatId: id, 
                     streamingMessages: [], 
                     backendError: null 
@@ -970,9 +975,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     id: m.id || `${Date.now()}-${idx}`,
                     timestamp: m.timestamp || Date.now()
                 }));
-                set({ messages: processedMessages, currentChatId: id, backendError: null });
+                set({ chatMessages: processedMessages, currentChatId: id, backendError: null });
             } else {
-                set({ messages: [], currentChatId: id });
+                set({ chatMessages: [], currentChatId: id });
             }
         } catch (e: any) {
             console.error("Failed to load chat", e);
@@ -985,7 +990,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const result = await invoke<boolean>('delete_chat', { id });
             console.log('[ChatStore] delete_chat backend returned:', result);
             if (get().currentChatId === id) {
-                set({ messages: [], currentChatId: null });
+                set({ chatMessages: [], currentChatId: null });
             }
             // Clear from pending summaries (important for newly created chats)
             get().clearPendingSummary(id);
@@ -1104,7 +1109,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const tokenListener = await listen<string>('chat-token', (event) => {
                 set((state) => {
                     // Ignore tokens if generation was stopped
-                    if (!state.isLoading) {
+                    if (!state.assistantStreamingActive) {
                         return state;
                     }
                     
@@ -1127,15 +1132,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     }
                     
                     // Normal case: streaming to current chat
-                    const lastMsg = state.messages[state.messages.length - 1];
+                    const lastMsg = state.chatMessages[state.chatMessages.length - 1];
                     // Only append if the last message is from assistant
                     if (lastMsg && lastMsg.role === 'assistant') {
-                        const newMessages = [...state.messages];
+                        const newMessages = [...state.chatMessages];
                         newMessages[newMessages.length - 1] = {
                             ...lastMsg,
                             content: lastMsg.content + event.payload
                         };
-                        return { messages: newMessages };
+                        return { chatMessages: newMessages };
                     }
                     return state;
                 });
@@ -1145,7 +1150,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 // If we were streaming to a different chat, the messages are in streamingMessages
                 // They should have been saved to LanceDB by the backend, so we don't need to do anything special
                 set({ 
-                    isLoading: false,
+                    assistantStreamingActive: false,
                     streamingChatId: null,
                     streamingMessages: [],
                     operationStatus: null,
@@ -1289,7 +1294,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     };
                     
                     // Append to last assistant message's toolCalls
-                    const newMessages = [...state.messages];
+                    const newMessages = [...state.chatMessages];
                     const lastIdx = newMessages.length - 1;
                     if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
                         const existingToolCalls = newMessages[lastIdx].toolCalls || [];
@@ -1313,7 +1318,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         };
                     
                     return {
-                        messages: newMessages,
+                        chatMessages: newMessages,
                         operationStatus: newOperationStatus,
                         toolExecution: {
                             ...state.toolExecution,
@@ -1772,14 +1777,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         console.log(`[ChatStore] Starting system chat: ${chatId.slice(0, 8)} "${title || 'System Message'}"`);
         
         set({
-            messages: [{
+            chatMessages: [{
                 id: Date.now().toString(),
                 role: 'assistant',
                 content: assistantMessage,
                 timestamp: Date.now()
             }],
             currentChatId: null, // Don't set a chat ID - this is a non-persistent help chat
-            input: '',
+            chatInputValue: '',
         });
     }
 }))

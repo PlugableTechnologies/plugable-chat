@@ -406,6 +406,8 @@ function McpServerCard({
         }
     }, [localConfig]);
 
+    const isTestServer = config.id === 'mcp-test-server';
+
     const handleResetToDefault = useCallback(async () => {
         if (!isTestServer) return;
         setToolsError(null);
@@ -483,9 +485,6 @@ function McpServerCard({
         await onSaveToolPrompt(localConfig.id, toolName, value);
     }, [localConfig.id, onSaveToolPrompt]);
     
-    // Check if this is the built-in test server
-    const isTestServer = config.id === 'mcp-test-server';
-
     return (
         <div className={`border rounded-xl bg-white overflow-hidden ${isDirty ? 'border-amber-300' : 'border-gray-200'}`}>
             {/* Header */}

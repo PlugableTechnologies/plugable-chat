@@ -225,15 +225,15 @@ impl McpServerConnection {
 }
 
 /// MCP Host Actor - manages MCP server connections
-pub struct McpHostActor {
-    rx: mpsc::Receiver<McpHostMsg>,
+pub struct McpToolRouterActor {
+    mcp_tool_msg_rx: mpsc::Receiver<McpHostMsg>,
     connections: Arc<RwLock<HashMap<String, McpServerConnection>>>,
 }
 
-impl McpHostActor {
-    pub fn new(rx: mpsc::Receiver<McpHostMsg>) -> Self {
+impl McpToolRouterActor {
+    pub fn new(mcp_tool_msg_rx: mpsc::Receiver<McpHostMsg>) -> Self {
         Self {
-            rx,
+            mcp_tool_msg_rx,
             connections: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -241,7 +241,7 @@ impl McpHostActor {
     pub async fn run(mut self) {
         println!("McpHostActor: Starting...");
 
-        while let Some(msg) = self.rx.recv().await {
+        while let Some(msg) = self.mcp_tool_msg_rx.recv().await {
             match msg {
                 McpHostMsg::ConnectServer { config, respond_to } => {
                     let result = self.connect_server(config).await;

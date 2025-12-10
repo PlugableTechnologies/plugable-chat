@@ -59,7 +59,7 @@ struct FileProcessingStats {
 }
 
 /// The RAG Actor handles document processing and retrieval
-pub struct RagActor {
+pub struct RagRetrievalActor {
     rx: mpsc::Receiver<RagMsg>,
     /// In-memory index of all chunks (for simplicity, we keep it in memory)
     /// In production, this would be persisted to LanceDB
@@ -70,7 +70,7 @@ pub struct RagActor {
     manifest: HashMap<String, ManifestEntry>,
 }
 
-impl RagActor {
+impl RagRetrievalActor {
     pub fn new(rx: mpsc::Receiver<RagMsg>) -> Self {
         Self {
             rx,
@@ -85,7 +85,7 @@ impl RagActor {
 
         while let Some(msg) = self.rx.recv().await {
             match msg {
-                RagMsg::ProcessDocuments {
+                RagMsg::IndexRagDocuments {
                     paths,
                     embedding_model,
                     respond_to,
@@ -94,7 +94,7 @@ impl RagActor {
                     let result = self.process_documents(paths, embedding_model).await;
                     let _ = respond_to.send(result);
                 }
-                RagMsg::SearchDocuments {
+                RagMsg::SearchRagChunksByEmbedding {
                     query_vector,
                     limit,
                     respond_to,

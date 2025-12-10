@@ -6,11 +6,11 @@ pub mod tool_adapters;
 pub mod tool_registry;
 pub mod tools;
 
-use actors::foundry_actor::FoundryActor;
-use actors::mcp_host_actor::{McpHostActor, McpTool, McpToolResult};
-use actors::python_actor::{PythonActor, PythonMsg};
-use actors::rag_actor::RagActor;
-use actors::vector_actor::VectorActor;
+use actors::foundry_actor::ModelGatewayActor;
+use actors::mcp_host_actor::{McpToolRouterActor, McpTool, McpToolResult};
+use actors::python_actor::{PythonMsg, PythonSandboxActor};
+use actors::rag_actor::RagRetrievalActor;
+use actors::vector_actor::ChatVectorStoreActor;
 use clap::Parser;
 use fastembed::TextEmbedding;
 use mcp_test_server::{
@@ -38,10 +38,12 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, oneshot};
-use tool_adapters::{format_tool_result, parse_tool_calls_for_model};
+use tool_adapters::{format_tool_result, parse_tool_calls_for_model_profile};
 use tool_registry::{create_shared_registry, SharedToolRegistry, ToolSearchResult};
 use tools::code_execution::{CodeExecutionExecutor, CodeExecutionInput, CodeExecutionOutput};
-use tools::tool_search::{precompute_tool_embeddings, ToolSearchExecutor, ToolSearchInput};
+use tools::tool_search::{
+    precompute_tool_search_embeddings, ToolSearchExecutor, ToolSearchInput,
+};
 use uuid::Uuid;
 
 /// Approval decision for tool calls
@@ -935,7 +937,7 @@ async fn execute_python_execution(
     // Send to Python actor for execution
     let (respond_to, rx) = oneshot::channel();
     python_tx
-        .send(PythonMsg::Execute {
+        .send(PythonMsg::ExecuteSandboxedCode {
             input: cleaned_input,
             context,
             respond_to,
@@ -1108,7 +1110,7 @@ pub(crate) fn detect_agentic_action(
     }
 
     if non_code_formats_enabled {
-        let calls = parse_tool_calls_for_model(
+        let calls = parse_tool_calls_for_model_profile(
             assistant_response,
             model_family,
             tool_format,
@@ -1151,8 +1153,8 @@ async fn run_agentic_loop(
 ) {
     // Resolve model profile from model name
     let profile = resolve_profile(&model_name);
-    let model_family = profile.family;
-    let tool_format = profile.tool_format;
+    let model_family = profile.model_family;
+    let tool_format = profile.tool_call_format;
     let mut iteration = 0;
     let mut had_tool_calls = false;
     let mut final_response = String::new();
@@ -1197,11 +1199,11 @@ async fn run_agentic_loop(
         let _ = std::io::stdout().flush();
         if let Err(e) = foundry_tx
             .send(FoundryMsg::Chat {
-                history: full_history.clone(),
+                chat_history_messages: full_history.clone(),
                 reasoning_effort: reasoning_effort.clone(),
-                tools: openai_tools.clone(),
+                native_tool_specs: openai_tools.clone(),
                 respond_to: tx,
-                cancel_rx: cancel_rx.clone(),
+                stream_cancel_rx: cancel_rx.clone(),
             })
             .await
         {
@@ -1782,25 +1784,30 @@ async fn run_agentic_loop(
             match emb_rx.await {
                 Ok(vector) => {
                     println!(
-                        "[ChatSave] Got embedding (len={}), sending to VectorActor...",
+                        "[ChatSave] Got embedding (len={}), sending to ChatVectorStoreActor...",
                         vector.len()
                     );
                     match vector_tx
-                        .send(VectorMsg::UpsertChat {
+                        .send(VectorMsg::UpsertChatRecord {
                             id: chat_id.clone(),
                             title: title.clone(),
                             content: embedding_text,
                             messages: messages_json,
-                            vector: Some(vector),
+                            embedding_vector: Some(vector),
                             pinned: false,
                         })
                         .await
                     {
                         Ok(_) => {
-                            println!("[ChatSave] UpsertChat sent, emitting chat-saved event");
+                            println!(
+                                "[ChatSave] UpsertChatRecord sent, emitting chat-saved event"
+                            );
                             let _ = app_handle.emit("chat-saved", chat_id.clone());
                         }
-                        Err(e) => println!("[ChatSave] ERROR: Failed to send UpsertChat: {}", e),
+                        Err(e) => println!(
+                            "[ChatSave] ERROR: Failed to send UpsertChatRecord: {}",
+                            e
+                        ),
                     }
                 }
                 Err(e) => println!("[ChatSave] ERROR: Failed to receive embedding: {}", e),
@@ -2442,7 +2449,7 @@ async fn search_history(
     let (search_tx, search_rx) = oneshot::channel();
     handles
         .vector_tx
-        .send(VectorMsg::SearchHistory {
+        .send(VectorMsg::SearchChatsByEmbedding {
             query_vector: embedding,
             limit: 10,
             respond_to: search_tx,
@@ -2464,9 +2471,8 @@ async fn get_all_chats(
     handles: State<'_, ActorHandles>,
 ) -> Result<Vec<protocol::ChatSummary>, String> {
     let (tx, rx) = oneshot::channel();
-    handles
-        .vector_tx
-        .send(VectorMsg::GetAllChats { respond_to: tx })
+    handles.vector_tx
+        .send(VectorMsg::FetchAllChats { respond_to: tx })
         .await
         .map_err(|e| e.to_string())?;
     rx.await.map_err(|_| "Vector actor died".to_string())
@@ -2813,7 +2819,7 @@ async fn chat(
 
     // Pre-compute embeddings for all domain tools so tool_search can find them
     if !filtered_tool_descriptions.is_empty() {
-        match precompute_tool_embeddings(
+        match precompute_tool_search_embeddings(
             tool_registry_state.registry.clone(),
             embedding_state.model.clone(),
         )
@@ -3069,7 +3075,7 @@ async fn delete_chat(id: String, handles: State<'_, ActorHandles>) -> Result<boo
     let (tx, rx) = oneshot::channel();
     handles
         .vector_tx
-        .send(VectorMsg::DeleteChat { id, respond_to: tx })
+        .send(VectorMsg::DeleteChatById { id, respond_to: tx })
         .await
         .map_err(|e| e.to_string())?;
     rx.await.map_err(|_| "Vector actor died".to_string())
@@ -3080,7 +3086,7 @@ async fn load_chat(id: String, handles: State<'_, ActorHandles>) -> Result<Optio
     let (tx, rx) = oneshot::channel();
     handles
         .vector_tx
-        .send(VectorMsg::GetChat { id, respond_to: tx })
+        .send(VectorMsg::FetchChatMessages { id, respond_to: tx })
         .await
         .map_err(|e| e.to_string())?;
     rx.await.map_err(|_| "Vector actor died".to_string())
@@ -3096,7 +3102,7 @@ async fn update_chat(
     let (tx, rx) = oneshot::channel();
     handles
         .vector_tx
-        .send(VectorMsg::UpdateChatMetadata {
+        .send(VectorMsg::UpdateChatTitleAndPin {
             id,
             title,
             pinned,
@@ -3145,7 +3151,7 @@ async fn process_rag_documents(
     let (tx, rx) = oneshot::channel();
     handles
         .rag_tx
-        .send(RagMsg::ProcessDocuments {
+        .send(RagMsg::IndexRagDocuments {
             paths,
             embedding_model,
             respond_to: tx,
@@ -3184,7 +3190,7 @@ async fn search_rag_context(
     let (search_tx, search_rx) = oneshot::channel();
     handles
         .rag_tx
-        .send(RagMsg::SearchDocuments {
+        .send(RagMsg::SearchRagChunksByEmbedding {
             query_vector,
             limit,
             respond_to: search_tx,
@@ -4094,34 +4100,34 @@ pub fn run() {
             let app_handle = app.handle();
             // Spawn Vector Actor
             tauri::async_runtime::spawn(async move {
-                println!("Starting Vector Actor...");
+                println!("Starting Chat Vector Store Actor...");
                 // Ensure data directory exists
                 let _ = tokio::fs::create_dir_all("./data").await;
 
-                let actor = VectorActor::new(vector_rx, "./data/lancedb").await;
-                println!("Vector Actor initialized.");
+                let actor = ChatVectorStoreActor::new(vector_rx, "./data/lancedb").await;
+                println!("Chat Vector Store Actor initialized.");
                 actor.run().await;
             });
 
             // Spawn Foundry Actor
             let foundry_app_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                println!("Starting Foundry Actor...");
-                let actor = FoundryActor::new(foundry_rx, foundry_app_handle);
+                println!("Starting Model Gateway Actor...");
+                let actor = ModelGatewayActor::new(foundry_rx, foundry_app_handle);
                 actor.run().await;
             });
 
             // Spawn RAG Actor
             tauri::async_runtime::spawn(async move {
                 println!("Starting RAG Actor...");
-                let actor = RagActor::new(rag_rx);
+                let actor = RagRetrievalActor::new(rag_rx);
                 actor.run().await;
             });
 
             // Spawn MCP Host Actor
             tauri::async_runtime::spawn(async move {
                 println!("Starting MCP Host Actor...");
-                let actor = McpHostActor::new(mcp_host_rx);
+                let actor = McpToolRouterActor::new(mcp_host_rx);
                 actor.run().await;
             });
 
@@ -4129,7 +4135,7 @@ pub fn run() {
             let python_tool_registry = tool_registry.clone();
             tauri::async_runtime::spawn(async move {
                 println!("Starting Python Actor...");
-                let actor = PythonActor::new(
+                let actor = PythonSandboxActor::new(
                     python_rx,
                     python_tool_registry,
                     python_mcp_host_tx,

@@ -25,9 +25,9 @@ pub struct ModelProfile {
     /// Regex pattern to match model names (case-insensitive)
     pattern: Regex,
     /// Model family for format-specific handling
-    pub family: ModelFamily,
+    pub model_family: ModelFamily,
     /// Tool calling format
-    pub tool_format: ToolFormat,
+    pub tool_call_format: ToolFormat,
 }
 
 impl ModelProfile {
@@ -36,8 +36,8 @@ impl ModelProfile {
         Self {
             id,
             pattern: Regex::new(&format!("(?i){}", pattern)).expect("Invalid regex pattern"),
-            family,
-            tool_format,
+            model_family: family,
+            tool_call_format: tool_format,
         }
     }
 
@@ -58,7 +58,7 @@ impl ModelProfile {
         tools: &[ToolSchema],
         options: &PromptOptions,
     ) -> ModelInput {
-        match self.family {
+        match self.model_family {
             ModelFamily::GptOss => self.build_prompt_openai_style(history, tools, options),
             ModelFamily::Phi => self.build_prompt_phi(history, tools, options),
             ModelFamily::Granite => self.build_prompt_granite(history, tools, options),
@@ -69,7 +69,7 @@ impl ModelProfile {
 
     /// Parse tool calls from model output
     pub fn parse_tool_calls(&self, output: &str) -> Vec<ParsedToolCall> {
-        match self.tool_format {
+        match self.tool_call_format {
             ToolFormat::OpenAI => {
                 // OpenAI format typically uses structured responses, but we can fall back to Hermes
                 parse_hermes_tool_calls(output)

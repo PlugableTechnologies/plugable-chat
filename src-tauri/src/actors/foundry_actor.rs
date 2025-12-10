@@ -217,8 +217,8 @@ struct ServiceStatus {
     valid_eps: Vec<String>,
 }
 
-pub struct FoundryActor {
-    rx: mpsc::Receiver<FoundryMsg>,
+pub struct ModelGatewayActor {
+    foundry_msg_rx: mpsc::Receiver<FoundryMsg>,
     port: Option<u16>,
     model_id: Option<String>,
     available_models: Vec<String>,
@@ -231,10 +231,10 @@ pub struct FoundryActor {
     valid_eps: Vec<String>,
 }
 
-impl FoundryActor {
-    pub fn new(rx: mpsc::Receiver<FoundryMsg>, app_handle: AppHandle) -> Self {
+impl ModelGatewayActor {
+    pub fn new(foundry_msg_rx: mpsc::Receiver<FoundryMsg>, app_handle: AppHandle) -> Self {
         Self {
-            rx,
+            foundry_msg_rx,
             port: None,
             model_id: None,
             available_models: Vec::new(),
@@ -289,7 +289,7 @@ impl FoundryActor {
 
         let client = reqwest::Client::new();
 
-        while let Some(msg) = self.rx.recv().await {
+        while let Some(msg) = self.foundry_msg_rx.recv().await {
             match msg {
                 FoundryMsg::GetEmbedding { text, respond_to } => {
                     // Generate embeddings using local fastembed model
@@ -373,11 +373,11 @@ impl FoundryActor {
                     let _ = respond_to.send(true);
                 }
                 FoundryMsg::Chat {
-                    history,
+                    chat_history_messages,
                     reasoning_effort,
-                    tools,
+                    native_tool_specs,
                     respond_to,
-                    mut cancel_rx,
+                    mut stream_cancel_rx,
                 } => {
                     // Check if we need to restart/reconnect
                     if self.port.is_none() || self.available_models.is_empty() {
@@ -419,8 +419,11 @@ impl FoundryActor {
                         let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
 
                         // Log incoming messages for debugging
-                        println!("\n[FoundryActor] Received {} messages:", history.len());
-                        for (i, msg) in history.iter().enumerate() {
+                        println!(
+                            "\n[FoundryActor] Received {} messages:",
+                            chat_history_messages.len()
+                        );
+                        for (i, msg) in chat_history_messages.iter().enumerate() {
                             let preview: String = msg.content.chars().take(100).collect();
                             println!(
                                 "  [{}] role={}, len={}, preview: {}...",
@@ -433,7 +436,7 @@ impl FoundryActor {
 
                         // For reasoning models, ensure we have a system message that instructs
                         // the model to provide a final answer after thinking
-                        let mut messages = history.clone();
+                        let mut messages = chat_history_messages.clone();
                         let has_system_msg = messages.iter().any(|m| m.role == "system");
 
                         println!("[FoundryActor] has_system_msg={}", has_system_msg);
@@ -498,14 +501,17 @@ impl FoundryActor {
                         // Phi/Hermes models work best with text-based Hermes tags; sending OpenAI
                         // tools causes Foundry to reject the request. Disable native tools for Phi.
                         let use_native_tools = model_supports_tools
-                            && tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
+                            && native_tool_specs
+                                .as_ref()
+                                .map(|t| !t.is_empty())
+                                .unwrap_or(false)
                             && model_family != ModelFamily::Phi;
 
                         println!("[FoundryActor] Model: {} | family: {:?} | reasoning: {} | tools: {} | reasoning_effort: {}",
                             model, model_family, model_supports_reasoning, use_native_tools, supports_reasoning_effort);
 
                         if use_native_tools {
-                            let tool_names: Vec<&str> = tools
+                            let tool_names: Vec<&str> = native_tool_specs
                                 .as_ref()
                                 .map(|t| t.iter().map(|tool| tool.function.name.as_str()).collect())
                                 .unwrap_or_default();
@@ -514,7 +520,11 @@ impl FoundryActor {
                                 tool_names.len(),
                                 tool_names
                             );
-                        } else if tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
+                        } else if native_tool_specs
+                            .as_ref()
+                            .map(|t| !t.is_empty())
+                            .unwrap_or(false)
+                        {
                             println!("[FoundryActor] Model does NOT support native tool calling, falling back to text-based tools");
                         }
 
@@ -561,7 +571,7 @@ impl FoundryActor {
                                 &model,
                                 model_family,
                                 &messages,
-                                &tools,
+                                &native_tool_specs,
                                 use_native_tools,
                                 model_supports_reasoning,
                                 supports_reasoning_effort,
@@ -654,8 +664,8 @@ impl FoundryActor {
                                                 biased;
 
                                                 // Check for cancellation (higher priority)
-                                                _ = cancel_rx.changed() => {
-                                                    if *cancel_rx.borrow() {
+                                                _ = stream_cancel_rx.changed() => {
+                                                    if *stream_cancel_rx.borrow() {
                                                         let elapsed = stream_start.elapsed();
                                                         println!("[FoundryActor] 🛑 Stream CANCELLED by user after {} tokens in {:.2}s",
                                                             token_count, elapsed.as_secs_f64());

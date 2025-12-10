@@ -38,7 +38,7 @@ const MAX_TOOL_CALL_ROUNDS: usize = 10;
 /// Message types for the Python actor
 pub enum PythonMsg {
     /// Execute Python code
-    Execute {
+    ExecuteSandboxedCode {
         input: CodeExecutionInput,
         context: ExecutionContext,
         respond_to: oneshot::Sender<Result<CodeExecutionOutput, String>>,
@@ -70,8 +70,8 @@ pub struct PythonToolCallResult {
 }
 
 /// The Python actor that manages code execution
-pub struct PythonActor {
-    rx: mpsc::Receiver<PythonMsg>,
+pub struct PythonSandboxActor {
+    python_msg_rx: mpsc::Receiver<PythonMsg>,
     tool_registry: SharedToolRegistry,
     mcp_host_tx: mpsc::Sender<McpHostMsg>,
     embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
@@ -80,9 +80,9 @@ pub struct PythonActor {
     tool_call_rx: mpsc::Receiver<(InnerToolCall, oneshot::Sender<InnerCallResult>)>,
 }
 
-impl PythonActor {
+impl PythonSandboxActor {
     pub fn new(
-        rx: mpsc::Receiver<PythonMsg>,
+        python_msg_rx: mpsc::Receiver<PythonMsg>,
         tool_registry: SharedToolRegistry,
         mcp_host_tx: mpsc::Sender<McpHostMsg>,
         embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
@@ -90,7 +90,7 @@ impl PythonActor {
         let (tool_call_tx, tool_call_rx) = mpsc::channel(32);
 
         Self {
-            rx,
+            python_msg_rx,
             tool_registry,
             mcp_host_tx,
             embedding_model,
@@ -104,9 +104,9 @@ impl PythonActor {
 
         loop {
             tokio::select! {
-                msg = self.rx.recv() => {
+                msg = self.python_msg_rx.recv() => {
                     match msg {
-                        Some(PythonMsg::Execute { input, context, respond_to }) => {
+                        Some(PythonMsg::ExecuteSandboxedCode { input, context, respond_to }) => {
                             let result = self.execute_code(input, context).await;
                             let _ = respond_to.send(result);
                         }
@@ -456,7 +456,7 @@ mod tests {
         let (mcp_tx, _mcp_rx) = mpsc::channel(1);
         let embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>> = Arc::new(RwLock::new(None));
 
-        let mut actor = PythonActor::new(rx, registry, mcp_tx, embedding_model);
+        let mut actor = PythonSandboxActor::new(rx, registry, mcp_tx, embedding_model);
 
         let input = CodeExecutionInput {
             code: vec!["x = 1 + 2".to_string(), "print(x)".to_string()],

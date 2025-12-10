@@ -65,7 +65,7 @@ pub fn format_tools_for_model(
 
 /// Parse tool calls from a model response based on the model's tool format.
 /// Returns a vector of ParsedToolCall structs.
-pub fn parse_tool_calls_for_model(
+pub fn parse_tool_calls_for_model_profile(
     response: &str,
     _family: ModelFamily,
     tool_format: ToolFormat,
@@ -1329,7 +1329,7 @@ The weather is..."#;
             primary: ToolCallFormatName::Pythonic,
         };
 
-        let calls = parse_tool_calls_for_model(
+        let calls = parse_tool_calls_for_model_profile(
             "builtin___echo(text=\"hi\")",
             ModelFamily::GptOss,
             ToolFormat::Hermes,
@@ -1349,7 +1349,7 @@ The weather is..."#;
             primary: ToolCallFormatName::Pythonic,
         };
 
-        let calls = parse_tool_calls_for_model(
+        let calls = parse_tool_calls_for_model_profile(
             "<tool_call>{\"name\": \"builtin___echo\", \"arguments\": {\"text\": \"hi\"}}</tool_call>",
             ModelFamily::GptOss,
             ToolFormat::Hermes,
@@ -1368,7 +1368,7 @@ The weather is..."#;
         };
         let content = r#"[TOOL_CALLS] [{"name": "builtin___echo", "arguments": {"text": "hi"}}]"#;
 
-        let calls = parse_tool_calls_for_model(
+        let calls = parse_tool_calls_for_model_profile(
             content,
             ModelFamily::GptOss,
             ToolFormat::Hermes,
@@ -1389,7 +1389,7 @@ The weather is..."#;
         };
         let content = r#"{"tool": "builtin___echo", "args": {"text": "hi"}}"#;
 
-        let calls = parse_tool_calls_for_model(
+        let calls = parse_tool_calls_for_model_profile(
             content,
             ModelFamily::GptOss,
             ToolFormat::Hermes,
