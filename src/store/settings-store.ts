@@ -3,7 +3,7 @@ import { invoke } from '../lib/api';
 import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
 
 // Transport type matching Rust backend
-export type Transport = 
+export type Transport =
     | { type: 'stdio' }
     | { type: 'sse'; url: string };
 
@@ -29,6 +29,27 @@ export interface ToolCallFormatConfig {
     primary: ToolCallFormatName;
 }
 
+// Database source kinds (must match Rust SupportedDatabaseKind)
+export type SupportedDatabaseKind = 'bigquery' | 'postgres' | 'mysql' | 'sqlite' | 'spanner';
+
+// Individual database source configuration
+export interface DatabaseSourceConfig {
+    id: string;
+    name: string;
+    kind: SupportedDatabaseKind;
+    enabled: boolean;
+    project_id?: string; // For BigQuery
+}
+
+// Database Toolbox configuration
+export interface DatabaseToolboxConfig {
+    enabled: boolean;
+    toolbox_path?: string;
+    tools_yaml_path?: string;
+    sources: DatabaseSourceConfig[];
+    port: number;
+}
+
 // Application settings
 export interface AppSettings {
     system_prompt: string;
@@ -44,6 +65,10 @@ export interface AppSettings {
     tool_use_examples_max: number;
     compact_prompt_enabled: boolean;
     compact_prompt_max_tools: number;
+    // Database built-ins
+    database_toolbox: DatabaseToolboxConfig;
+    search_schemas_enabled: boolean;
+    execute_sql_enabled: boolean;
 }
 
 // Connection status for MCP servers
@@ -69,19 +94,19 @@ interface SettingsState {
     error: string | null;
     pythonAllowedImports: string[];
     promptRefreshTick: number;
-    
+
     // MCP Server statuses
     serverStatuses: Record<string, McpServerStatus>;
-    
+
     // Modal state
     isSettingsOpen: boolean;
-    activeTab: 'system-prompt' | 'interfaces' | 'builtins' | 'tools';
-    
+    activeTab: 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas';
+
     // Actions
     openSettings: () => void;
     closeSettings: () => void;
-    setActiveTab: (tab: 'system-prompt' | 'interfaces' | 'builtins' | 'tools') => void;
-    
+    setActiveTab: (tab: 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas') => void;
+
     // Settings CRUD
     fetchSettings: () => Promise<void>;
     updateSystemPrompt: (prompt: string) => Promise<void>;
@@ -93,13 +118,16 @@ interface SettingsState {
     updateToolExamplesMax: (maxExamples: number) => Promise<void>;
     updateCompactPromptEnabled: (enabled: boolean) => Promise<void>;
     updateCompactPromptMaxTools: (maxTools: number) => Promise<void>;
+    updateSearchSchemasEnabled: (enabled: boolean) => Promise<void>;
+    updateExecuteSqlEnabled: (enabled: boolean) => Promise<void>;
+    updateDatabaseToolboxConfig: (config: DatabaseToolboxConfig) => Promise<void>;
     addMcpServer: (config: McpServerConfig) => Promise<void>;
     updateMcpServer: (config: McpServerConfig) => Promise<void>;
     removeMcpServer: (serverId: string) => Promise<void>;
     updateToolSystemPrompt: (serverId: string, toolName: string, prompt: string) => Promise<void>;
     bumpPromptRefresh: () => void;
     refreshMcpTools: (serverId: string) => Promise<McpTool[]>;
-    
+
     // MCP Server operations
     connectServer: (serverId: string) => Promise<void>;
     disconnectServer: (serverId: string) => Promise<void>;
@@ -168,7 +196,7 @@ function toPythonIdentifier(name: string): string {
         result = `_${result}`;
     }
     const PYTHON_KEYWORDS = new Set([
-        'false','none','true','and','as','assert','async','await','break','class','continue','def','del','elif','else','except','finally','for','from','global','if','import','in','is','lambda','nonlocal','not','or','pass','raise','return','try','while','with','yield'
+        'false', 'none', 'true', 'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try', 'while', 'with', 'yield'
     ]);
     if (PYTHON_KEYWORDS.has(result)) {
         result = `${result}_`;
@@ -186,21 +214,21 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     isSettingsOpen: false,
     activeTab: 'system-prompt',
     bumpPromptRefresh: () => set(state => ({ promptRefreshTick: state.promptRefreshTick + 1 })),
-    
+
     openSettings: () => {
         set({ isSettingsOpen: true });
         // Fetch latest settings when opening
         get().fetchSettings();
     },
-    
+
     closeSettings: () => {
         set({ isSettingsOpen: false });
     },
-    
+
     setActiveTab: (tab) => {
         set({ activeTab: tab });
     },
-    
+
     fetchSettings: async () => {
         set({ isLoading: true, error: null });
         try {
@@ -238,17 +266,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 : FALLBACK_PYTHON_ALLOWED_IMPORTS;
             console.log('[SettingsStore] Fetched settings:', settings);
             set({ settings: mergedSettings, pythonAllowedImports: allowedImports, isLoading: false });
-            
+
             // Sync MCP servers after fetching settings
             try {
                 console.log('[SettingsStore] Syncing MCP servers...');
                 const results = await invoke<{ server_id: string; success: boolean; error: string | null }[]>('sync_mcp_servers');
                 console.log('[SettingsStore] MCP server sync results:', results);
-                
+
                 // Update server statuses based on sync results
                 const newStatuses: Record<string, McpServerStatus> = {};
                 for (const result of results) {
-                    newStatuses[result.server_id] = { 
+                    newStatuses[result.server_id] = {
                         connected: result.success,
                         error: result.error || undefined,
                     };
@@ -261,7 +289,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             }
         } catch (e: any) {
             console.error('[SettingsStore] Failed to fetch settings:', e);
-            set({ 
+            set({
                 error: `Failed to load settings: ${e.message || e}`,
                 isLoading: false,
                 // Provide defaults on error
@@ -279,29 +307,36 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     tool_use_examples_max: 2,
                     compact_prompt_enabled: false,
                     compact_prompt_max_tools: 4,
+                    database_toolbox: {
+                        enabled: false,
+                        sources: [],
+                        port: 5000,
+                    },
+                    search_schemas_enabled: false,
+                    execute_sql_enabled: false,
                 },
                 pythonAllowedImports: FALLBACK_PYTHON_ALLOWED_IMPORTS,
             });
         }
     },
-    
+
     updateSystemPrompt: async (prompt: string) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
-        
+
         // Optimistic update
-        set({ 
+        set({
             settings: { ...currentSettings, system_prompt: prompt },
-            error: null 
+            error: null
         });
-        
+
         try {
             await invoke('update_system_prompt', { prompt });
             console.log('[SettingsStore] System prompt updated');
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update system prompt:', e);
             // Revert on error
-            set({ 
+            set({
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`
             });
@@ -333,11 +368,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             });
         }
     },
-    
+
     updateToolSystemPrompt: async (serverId: string, toolName: string, prompt: string) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
-        
+
         const key = `${serverId}::${toolName}`;
         const newPrompts = { ...currentSettings.tool_system_prompts };
         if (prompt.trim()) {
@@ -345,49 +380,49 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         } else {
             delete newPrompts[key];
         }
-        
+
         // Optimistic update
-        set({ 
+        set({
             settings: { ...currentSettings, tool_system_prompts: newPrompts },
-            error: null 
+            error: null
         });
-        
+
         try {
             await invoke('update_tool_system_prompt', { serverId, toolName, prompt });
             console.log('[SettingsStore] Tool system prompt updated:', key);
             get().bumpPromptRefresh();
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update tool system prompt:', e);
-            set({ 
+            set({
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`
             });
         }
     },
-    
+
     updateCodeExecutionEnabled: async (enabled: boolean) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
-        
+
         // Optimistic update
-        set({ 
+        set({
             settings: { ...currentSettings, python_execution_enabled: enabled },
-            error: null 
+            error: null
         });
-        
+
         try {
             await invoke('update_python_execution_enabled', { enabled });
             console.log('[SettingsStore] Code execution enabled updated:', enabled);
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update code execution enabled:', e);
             // Revert on error
-            set({ 
+            set({
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`
             });
         }
     },
-    
+
     updateToolSearchEnabled: async (enabled: boolean) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
@@ -498,7 +533,64 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             });
         }
     },
-    
+
+    updateSearchSchemasEnabled: async (enabled: boolean) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        set({
+            settings: { ...currentSettings, search_schemas_enabled: enabled },
+            error: null
+        });
+        try {
+            await invoke('update_search_schemas_enabled', { enabled });
+            console.log('[SettingsStore] search_schemas_enabled updated:', enabled);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update search_schemas_enabled:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+
+    updateExecuteSqlEnabled: async (enabled: boolean) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        set({
+            settings: { ...currentSettings, execute_sql_enabled: enabled },
+            error: null
+        });
+        try {
+            await invoke('update_execute_sql_enabled', { enabled });
+            console.log('[SettingsStore] execute_sql_enabled updated:', enabled);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update execute_sql_enabled:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+
+    updateDatabaseToolboxConfig: async (config: DatabaseToolboxConfig) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        set({
+            settings: { ...currentSettings, database_toolbox: config },
+            error: null
+        });
+        try {
+            await invoke('update_database_toolbox_config', { config });
+            console.log('[SettingsStore] database_toolbox config updated');
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update database_toolbox config:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+
     addMcpServer: async (config: McpServerConfig) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
@@ -511,14 +603,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             defer_tools: isTestServer ? false : (config.defer_tools ?? true),
             python_name: pythonName,
         };
-        
+
         // Optimistic update
         const newSettings = {
             ...currentSettings,
             mcp_servers: [...currentSettings.mcp_servers, newConfig],
         };
         set({ settings: newSettings, error: null });
-        
+
         try {
             await invoke('add_mcp_server', { config: newConfig });
             console.log('[SettingsStore] MCP server added:', newConfig.id);
@@ -526,13 +618,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         } catch (e: any) {
             console.error('[SettingsStore] Failed to add MCP server:', e);
             // Revert on error
-            set({ 
+            set({
                 settings: currentSettings,
                 error: `Failed to add server: ${e.message || e}`
             });
         }
     },
-    
+
     updateMcpServer: async (config: McpServerConfig) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
@@ -545,21 +637,21 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             defer_tools: isTestServer ? false : (config.defer_tools ?? true),
             python_name: pythonName,
         };
-        
+
         // Optimistic update
         const newSettings = {
             ...currentSettings,
-            mcp_servers: currentSettings.mcp_servers.map(s => 
+            mcp_servers: currentSettings.mcp_servers.map(s =>
                 s.id === config.id ? newConfig : s
             ),
         };
         set({ settings: newSettings, error: null });
-        
+
         try {
             // Backend will sync servers automatically after update
             await invoke('update_mcp_server', { config: newConfig });
             console.log('[SettingsStore] MCP server updated:', newConfig.id);
-            
+
             // Update connection status
             const isConnected = newConfig.enabled;
             set(state => ({
@@ -590,29 +682,29 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update MCP server:', e);
             // Revert on error
-            set({ 
+            set({
                 settings: currentSettings,
                 error: `Failed to update server: ${e.message || e}`
             });
         }
     },
-    
+
     removeMcpServer: async (serverId: string) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
-        
+
         // Optimistic update
         const newSettings = {
             ...currentSettings,
             mcp_servers: currentSettings.mcp_servers.filter(s => s.id !== serverId),
         };
         set({ settings: newSettings, error: null });
-        
+
         try {
             await invoke('remove_mcp_server', { serverId });
             console.log('[SettingsStore] MCP server removed:', serverId);
             get().bumpPromptRefresh();
-            
+
             // Clean up status
             const newStatuses = { ...get().serverStatuses };
             delete newStatuses[serverId];
@@ -620,13 +712,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         } catch (e: any) {
             console.error('[SettingsStore] Failed to remove MCP server:', e);
             // Revert on error
-            set({ 
+            set({
                 settings: currentSettings,
                 error: `Failed to remove server: ${e.message || e}`
             });
         }
     },
-    
+
     connectServer: async (serverId: string) => {
         // Update status to connecting
         set(state => ({
@@ -635,7 +727,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 [serverId]: { connected: false, error: undefined }
             }
         }));
-        
+
         try {
             await invoke('connect_mcp_server', { serverId });
             set(state => ({
@@ -655,7 +747,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             }));
         }
     },
-    
+
     disconnectServer: async (serverId: string) => {
         try {
             await invoke('disconnect_mcp_server', { serverId });
@@ -670,7 +762,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             console.error('[SettingsStore] Failed to disconnect MCP server:', e);
         }
     },
-    
+
     testConnection: async (serverId: string) => {
         try {
             const result = await invoke<boolean>('test_mcp_connection', { serverId });

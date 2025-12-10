@@ -6,10 +6,12 @@ pub mod tool_adapters;
 pub mod tool_registry;
 pub mod tools;
 
+use actors::database_toolbox_actor::{DatabaseToolboxActor, DatabaseToolboxMsg};
 use actors::foundry_actor::ModelGatewayActor;
 use actors::mcp_host_actor::{McpToolRouterActor, McpTool, McpToolResult};
 use actors::python_actor::{PythonMsg, PythonSandboxActor};
 use actors::rag_actor::RagRetrievalActor;
+use actors::schema_vector_actor::{SchemaVectorStoreActor, SchemaVectorMsg};
 use actors::vector_actor::ChatVectorStoreActor;
 use clap::Parser;
 use fastembed::TextEmbedding;
@@ -65,6 +67,8 @@ struct ActorHandles {
     rag_tx: mpsc::Sender<RagMsg>,
     mcp_host_tx: mpsc::Sender<McpHostMsg>,
     python_tx: mpsc::Sender<PythonMsg>,
+    database_toolbox_tx: mpsc::Sender<DatabaseToolboxMsg>,
+    schema_tx: mpsc::Sender<SchemaVectorMsg>,
 }
 
 // Shared tool registry state
@@ -282,9 +286,9 @@ struct LaunchConfigState {
 const MAX_TOOL_ITERATIONS: usize = 20;
 const PYTHON_EXECUTION_TOOL_TYPE: &str = "python_execution_20251206";
 
-/// Check if a tool call is for a built-in tool (python_execution or tool_search)
+/// Check if a tool call is for a built-in tool (python_execution, tool_search, or database tools)
 fn is_builtin_tool(tool_name: &str) -> bool {
-    tool_name == "python_execution" || tool_name == "tool_search"
+    matches!(tool_name, "python_execution" | "tool_search" | "search_schemas" | "execute_sql")
 }
 
 /// Build a consistent key for tool-specific settings
@@ -1253,6 +1257,8 @@ async fn run_agentic_loop(
     mcp_host_tx: mpsc::Sender<McpHostMsg>,
     vector_tx: mpsc::Sender<VectorMsg>,
     python_tx: mpsc::Sender<PythonMsg>,
+    schema_tx: mpsc::Sender<SchemaVectorMsg>,
+    database_toolbox_tx: mpsc::Sender<DatabaseToolboxMsg>,
     tool_registry: SharedToolRegistry,
     embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
     pending_approvals: PendingApprovals,
@@ -1776,6 +1782,107 @@ async fn run_agentic_loop(
                                     e
                                 );
                                 let _ = std::io::stdout().flush();
+                                (e, true)
+                            }
+                        }
+                    }
+                    "search_schemas" => {
+                        println!("[AgenticLoop] ⏳ Executing built-in: search_schemas");
+                        let _ = std::io::stdout().flush();
+                        let exec_start = std::time::Instant::now();
+
+                        // Parse input
+                        let input: tools::SchemaSearchInput = 
+                            serde_json::from_value(resolved_call.arguments.clone())
+                                .unwrap_or_else(|e| {
+                                    println!("[AgenticLoop] ⚠️ Failed to parse search_schemas args: {}, using defaults", e);
+                                    tools::SchemaSearchInput {
+                                        query: resolved_call.arguments
+                                            .get("query")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        max_tables: 5,
+                                        max_columns_per_table: 5,
+                                        min_relevance: 0.3,
+                                    }
+                                });
+
+                        let executor = tools::SchemaSearchExecutor::new(
+                            schema_tx.clone(),
+                            embedding_model.clone(),
+                        );
+
+                        match executor.execute(input).await {
+                            Ok(output) => {
+                                let elapsed = exec_start.elapsed();
+                                println!(
+                                    "[AgenticLoop] ✅ search_schemas completed in {:.2}s: {} tables found",
+                                    elapsed.as_secs_f64(),
+                                    output.tables.len()
+                                );
+                                let result = serde_json::to_string_pretty(&output)
+                                    .unwrap_or_else(|_| output.summary.clone());
+                                (result, false)
+                            }
+                            Err(e) => {
+                                let elapsed = exec_start.elapsed();
+                                println!(
+                                    "[AgenticLoop] ❌ search_schemas failed in {:.2}s: {}",
+                                    elapsed.as_secs_f64(),
+                                    e
+                                );
+                                (e, true)
+                            }
+                        }
+                    }
+                    "execute_sql" => {
+                        println!("[AgenticLoop] ⏳ Executing built-in: execute_sql");
+                        let _ = std::io::stdout().flush();
+                        let exec_start = std::time::Instant::now();
+
+                        // Parse input
+                        let input: tools::ExecuteSqlInput = 
+                            serde_json::from_value(resolved_call.arguments.clone())
+                                .unwrap_or_else(|e| {
+                                    println!("[AgenticLoop] ⚠️ Failed to parse execute_sql args: {}, using defaults", e);
+                                    tools::ExecuteSqlInput {
+                                        source_id: resolved_call.arguments
+                                            .get("source_id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        sql: resolved_call.arguments
+                                            .get("sql")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        parameters: vec![],
+                                        max_rows: 100,
+                                    }
+                                });
+
+                        let executor = tools::ExecuteSqlExecutor::new(database_toolbox_tx.clone());
+
+                        match executor.execute(input).await {
+                            Ok(output) => {
+                                let elapsed = exec_start.elapsed();
+                                println!(
+                                    "[AgenticLoop] ✅ execute_sql completed in {:.2}s: {} rows",
+                                    elapsed.as_secs_f64(),
+                                    output.row_count
+                                );
+                                let result = serde_json::to_string_pretty(&output)
+                                    .unwrap_or_else(|_| format!("{} rows returned", output.row_count));
+                                (result, !output.success)
+                            }
+                            Err(e) => {
+                                let elapsed = exec_start.elapsed();
+                                println!(
+                                    "[AgenticLoop] ❌ execute_sql failed in {:.2}s: {}",
+                                    elapsed.as_secs_f64(),
+                                    e
+                                );
                                 (e, true)
                             }
                         }
@@ -3327,6 +3434,8 @@ async fn chat(
     let mcp_host_tx = handles.mcp_host_tx.clone();
     let vector_tx = handles.vector_tx.clone();
     let python_tx = handles.python_tx.clone();
+    let schema_tx = handles.schema_tx.clone();
+    let database_toolbox_tx = handles.database_toolbox_tx.clone();
     let pending_approvals = approval_state.pending.clone();
     let tool_registry = tool_registry_state.registry.clone();
     let embedding_model = embedding_state.model.clone();
@@ -3347,6 +3456,8 @@ async fn chat(
             mcp_host_tx,
             vector_tx,
             python_tx,
+            schema_tx,
+            database_toolbox_tx,
             tool_registry,
             embedding_model,
             pending_approvals,
@@ -3747,6 +3858,42 @@ async fn update_tool_search_enabled(
     guard.tool_search_enabled = enabled;
     settings::save_settings(&guard).await?;
     println!("[Settings] tool_search_enabled updated to: {}", enabled);
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_search_schemas_enabled(
+    enabled: bool,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.search_schemas_enabled = enabled;
+    settings::save_settings(&guard).await?;
+    println!("[Settings] search_schemas_enabled updated to: {}", enabled);
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_execute_sql_enabled(
+    enabled: bool,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.execute_sql_enabled = enabled;
+    settings::save_settings(&guard).await?;
+    println!("[Settings] execute_sql_enabled updated to: {}", enabled);
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_database_toolbox_config(
+    config: settings::DatabaseToolboxConfig,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.database_toolbox = config;
+    settings::save_settings(&guard).await?;
+    println!("[Settings] database_toolbox config updated");
     Ok(())
 }
 
@@ -4344,6 +4491,8 @@ pub fn run() {
             let (rag_tx, rag_rx) = mpsc::channel(32);
             let (mcp_host_tx, mcp_host_rx) = mpsc::channel(32);
             let (python_tx, python_rx) = mpsc::channel(32);
+            let (database_toolbox_tx, database_toolbox_rx) = mpsc::channel(32);
+            let (schema_tx, schema_rx) = mpsc::channel(32);
             let python_mcp_host_tx = mcp_host_tx.clone();
 
             // Store handles in state
@@ -4353,6 +4502,8 @@ pub fn run() {
                 rag_tx,
                 mcp_host_tx,
                 python_tx,
+                database_toolbox_tx: database_toolbox_tx.clone(),
+                schema_tx: schema_tx.clone(),
             });
 
             // Initialize shared embedding model state
@@ -4497,6 +4648,25 @@ pub fn run() {
                 }
             });
 
+            // Spawn Database Toolbox Actor
+            let database_toolbox_state = Arc::new(RwLock::new(
+                actors::database_toolbox_actor::DatabaseToolboxState::default(),
+            ));
+            let db_state_clone = database_toolbox_state.clone();
+            tauri::async_runtime::spawn(async move {
+                println!("Starting Database Toolbox Actor...");
+                let actor = DatabaseToolboxActor::new(database_toolbox_rx, db_state_clone);
+                actor.run().await;
+            });
+
+            // Spawn Schema Vector Store Actor
+            tauri::async_runtime::spawn(async move {
+                println!("Starting Schema Vector Store Actor...");
+                let _ = tokio::fs::create_dir_all("./data").await;
+                let actor = SchemaVectorStoreActor::new(schema_rx, "./data/lancedb").await;
+                actor.run().await;
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -4538,6 +4708,9 @@ pub fn run() {
             update_tool_call_formats,
             update_python_execution_enabled,
             update_tool_search_enabled,
+            update_search_schemas_enabled,
+            update_execute_sql_enabled,
+            update_database_toolbox_config,
             // MCP commands
             sync_mcp_servers,
             connect_mcp_server,

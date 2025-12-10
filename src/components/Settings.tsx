@@ -1,37 +1,37 @@
-import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName } from '../store/settings-store';
+import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName, type DatabaseSourceConfig } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw } from 'lucide-react';
 import { invoke } from '../lib/api';
 import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
 
 // Tag input component for args - auto-splits on spaces
-function TagInput({ 
-    tags, 
-    onChange, 
-    placeholder 
-}: { 
-    tags: string[]; 
+function TagInput({
+    tags,
+    onChange,
+    placeholder
+}: {
+    tags: string[];
     onChange: (tags: string[]) => void;
     placeholder?: string;
 }) {
     const [input, setInput] = useState('');
-    
+
     const addTags = useCallback(() => {
         const trimmed = input.trim();
         if (!trimmed) {
             setInput('');
             return;
         }
-        
+
         // Split on spaces, but preserve quoted strings
         const parts: string[] = [];
         let current = '';
         let inQuote = false;
         let quoteChar = '';
-        
+
         for (let i = 0; i < trimmed.length; i++) {
             const char = trimmed[i];
-            
+
             if ((char === '"' || char === "'") && !inQuote) {
                 inQuote = true;
                 quoteChar = char;
@@ -50,7 +50,7 @@ function TagInput({
         if (current) {
             parts.push(current);
         }
-        
+
         // Filter out duplicates and empty strings
         const newParts = parts.filter(p => p && !tags.includes(p));
         if (newParts.length > 0) {
@@ -58,7 +58,7 @@ function TagInput({
         }
         setInput('');
     }, [input, tags, onChange]);
-    
+
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter' || e.key === ',') {
             e.preventDefault();
@@ -68,7 +68,7 @@ function TagInput({
             onChange(newTags);
         }
     };
-    
+
     const handlePaste = (e: React.ClipboardEvent) => {
         e.preventDefault();
         const pasted = e.clipboardData.getData('text');
@@ -78,16 +78,16 @@ function TagInput({
         setTimeout(() => {
             const trimmed = (input + pasted).trim();
             if (!trimmed) return;
-            
+
             // Split on spaces, but preserve quoted strings
             const parts: string[] = [];
             let current = '';
             let inQuote = false;
             let quoteChar = '';
-            
+
             for (let i = 0; i < trimmed.length; i++) {
                 const char = trimmed[i];
-                
+
                 if ((char === '"' || char === "'") && !inQuote) {
                     inQuote = true;
                     quoteChar = char;
@@ -106,7 +106,7 @@ function TagInput({
             if (current) {
                 parts.push(current);
             }
-            
+
             // Filter out duplicates and empty strings
             const newParts = parts.filter(p => p && !tags.includes(p));
             if (newParts.length > 0) {
@@ -115,22 +115,22 @@ function TagInput({
             setInput('');
         }, 0);
     };
-    
+
     const removeTag = (index: number) => {
         const newTags = tags.filter((_, i) => i !== index);
         onChange(newTags);
     };
-    
+
     return (
         <div className="space-y-1">
             <div className="flex flex-wrap gap-1.5 p-2 bg-white border border-gray-200 rounded-lg min-h-[40px] focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400">
                 {tags.map((tag, i) => (
-                    <span 
-                        key={i} 
+                    <span
+                        key={i}
                         className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded-md font-mono"
                     >
                         {tag}
-                        <button 
+                        <button
                             onClick={() => removeTag(i)}
                             className="hover:text-blue-600"
                         >
@@ -157,16 +157,16 @@ function TagInput({
 }
 
 // Key-value input for environment variables
-function EnvVarInput({ 
-    env, 
-    onChange 
-}: { 
-    env: Record<string, string>; 
+function EnvVarInput({
+    env,
+    onChange
+}: {
+    env: Record<string, string>;
     onChange: (env: Record<string, string>) => void;
 }) {
     const [newKey, setNewKey] = useState('');
     const [newValue, setNewValue] = useState('');
-    
+
     const addVar = () => {
         if (newKey.trim()) {
             onChange({ ...env, [newKey.trim()]: newValue });
@@ -174,13 +174,13 @@ function EnvVarInput({
             setNewValue('');
         }
     };
-    
+
     const removeVar = (key: string) => {
         const newEnv = { ...env };
         delete newEnv[key];
         onChange(newEnv);
     };
-    
+
     return (
         <div className="space-y-2">
             {Object.entries(env).map(([key, value]) => (
@@ -188,7 +188,7 @@ function EnvVarInput({
                     <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">{key}</span>
                     <span className="text-gray-400">=</span>
                     <span className="text-xs font-mono flex-1 truncate">{value}</span>
-                    <button 
+                    <button
                         onClick={() => removeVar(key)}
                         className="text-gray-400 hover:text-red-500"
                     >
@@ -272,16 +272,16 @@ function extractToolParameters(inputSchema?: Record<string, unknown>): ToolParam
 }
 
 // Single MCP Server configuration card
-function McpServerCard({ 
-    config, 
-    onSave, 
+function McpServerCard({
+    config,
+    onSave,
     onRemove,
     initialTools,
     toolPrompts,
     onSaveToolPrompt,
     onDirtyChange,
     registerSaveHandler
-}: { 
+}: {
     config: McpServerConfig;
     onSave: (config: McpServerConfig) => Promise<void>;
     onRemove: () => void;
@@ -299,7 +299,7 @@ function McpServerCard({
     const configIdRef = useRef(config.id);
     const { serverStatuses } = useSettingsStore();
     const status = serverStatuses[config.id];
-    
+
     // Test connection state
     const [isTesting, setIsTesting] = useState(false);
     const [testResult, setTestResult] = useState<TestResult | null>(null);
@@ -307,7 +307,7 @@ function McpServerCard({
     const [loadingTools, setLoadingTools] = useState(false);
     const [toolsError, setToolsError] = useState<string | null>(null);
     const [toolDrafts, setToolDrafts] = useState<Record<string, string>>({});
-    
+
     // Seed tools from any cached status data so we show parameters immediately
     useEffect(() => {
         if (initialTools && initialTools.length > 0) {
@@ -321,7 +321,7 @@ function McpServerCard({
         // Only sync if the config id matches (same server) or it's a new server
         const configJson = JSON.stringify(config);
         const localJson = JSON.stringify(localConfig);
-        
+
         // If external config changed and we're not dirty, or if it's a different server
         if (config.id !== configIdRef.current) {
             // Different server - reset everything
@@ -333,7 +333,7 @@ function McpServerCard({
             setLocalConfig(structuredClone(config));
         }
     }, [config, isDirty, localConfig]);
-    
+
     // Sync tool prompt drafts with latest store state
     useEffect(() => {
         setToolDrafts(toolPrompts);
@@ -343,7 +343,7 @@ function McpServerCard({
     useEffect(() => {
         onDirtyChange?.(config.id, isDirty);
     }, [config.id, isDirty, onDirtyChange]);
-    
+
     const updateField = useCallback(<K extends keyof McpServerConfig>(field: K, value: McpServerConfig[K]) => {
         setLocalConfig(prev => {
             const newConfig = { ...prev, [field]: value };
@@ -351,7 +351,7 @@ function McpServerCard({
         });
         setIsDirty(true);
     }, []);
-    
+
     const updateTransport = useCallback((type: 'stdio' | 'sse', url?: string) => {
         if (type === 'stdio') {
             updateField('transport', { type: 'stdio' });
@@ -359,11 +359,11 @@ function McpServerCard({
             updateField('transport', { type: 'sse', url: url || '' });
         }
     }, [updateField]);
-    
+
     const handleSave = useCallback(async () => {
         await onSave(localConfig);
         setIsDirty(false);
-        
+
         // Only test the connection if the server is enabled
         if (localConfig.enabled) {
             setIsTesting(true);
@@ -390,7 +390,7 @@ function McpServerCard({
             registerSaveHandler(config.id, handleSave);
         }
     }, [config.id, handleSave, registerSaveHandler]);
-    
+
     // Manual test without saving
     const handleTest = useCallback(async () => {
         setIsTesting(true);
@@ -422,12 +422,12 @@ function McpServerCard({
             setToolsError(e.message || String(e));
         }
     }, [isTestServer]);
-    
+
     // Load tools for prompt editing when expanded and enabled
     useEffect(() => {
         if (!expanded || !localConfig.enabled) return;
         if (tools.length > 0 && !toolsError) return;
-        
+
         setLoadingTools(true);
         setToolsError(null);
         invoke<McpTool[]>('list_mcp_tools', { serverId: localConfig.id })
@@ -435,17 +435,17 @@ function McpServerCard({
             .catch((e: any) => setToolsError(e.message || String(e)))
             .finally(() => setLoadingTools(false));
     }, [expanded, localConfig.enabled, localConfig.id, tools.length, toolsError]);
-    
+
     // Toggle enabled state and auto-save immediately
     const handleToggleEnabled = useCallback(async () => {
         const previousConfig = localConfig;
         const newEnabled = !localConfig.enabled;
         const newConfig = { ...localConfig, enabled: newEnabled };
-        
+
         // Update local state immediately
         setLocalConfig(newConfig);
         // Don't mark as dirty since we're saving immediately
-        
+
         // Save to backend
         try {
             await onSave(newConfig);
@@ -454,7 +454,7 @@ function McpServerCard({
             setLocalConfig(previousConfig);
             return;
         }
-        
+
         // Test connection if enabling
         if (newEnabled) {
             setIsTesting(true);
@@ -473,43 +473,40 @@ function McpServerCard({
             setTools([]);
         }
     }, [localConfig, onSave]);
-    
+
     const toolPromptKey = useCallback((toolName: string) => `${localConfig.id}::${toolName}`, [localConfig.id]);
-    
+
     const handleToolPromptChange = useCallback((toolName: string, value: string) => {
         const key = toolPromptKey(toolName);
         setToolDrafts(prev => ({ ...prev, [key]: value }));
     }, [toolPromptKey]);
-    
+
     const handleToolPromptSave = useCallback(async (toolName: string, value: string) => {
         await onSaveToolPrompt(localConfig.id, toolName, value);
     }, [localConfig.id, onSaveToolPrompt]);
-    
+
     return (
         <div className={`border rounded-xl bg-white overflow-hidden ${isDirty ? 'border-amber-300' : 'border-gray-200'}`}>
             {/* Header */}
-            <div 
+            <div
                 className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50"
                 onClick={() => setExpanded(!expanded)}
             >
                 {/* Status indicator */}
-                <div className={`w-2.5 h-2.5 rounded-full ${
-                    status?.connected ? 'bg-green-500' : 
+                <div className={`w-2.5 h-2.5 rounded-full ${status?.connected ? 'bg-green-500' :
                     status?.error ? 'bg-red-500' : 'bg-gray-300'
-                }`} />
-                
+                    }`} />
+
                 {/* Enable toggle - auto-saves on change */}
                 <button
                     onClick={(e) => { e.stopPropagation(); handleToggleEnabled(); }}
-                    className={`relative w-10 h-5 rounded-full transition-colors ${
-                        localConfig.enabled ? 'bg-blue-500' : 'bg-gray-300'
-                    }`}
+                    className={`relative w-10 h-5 rounded-full transition-colors ${localConfig.enabled ? 'bg-blue-500' : 'bg-gray-300'
+                        }`}
                 >
-                    <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-                        localConfig.enabled ? 'translate-x-5' : ''
-                    }`} />
+                    <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localConfig.enabled ? 'translate-x-5' : ''
+                        }`} />
                 </button>
-                
+
                 {/* Name */}
                 <div className="flex-1 flex items-center gap-2">
                     <span className="font-medium text-gray-900 truncate">{localConfig.name || 'Unnamed MCP server'}</span>
@@ -517,16 +514,16 @@ function McpServerCard({
                         <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">Built-in</span>
                     )}
                 </div>
-                
+
                 {/* Unsaved indicator */}
                 {isDirty && (
                     <span className="text-xs text-amber-600 font-medium">Unsaved</span>
                 )}
-                
+
                 {/* Expand/collapse */}
                 {expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
             </div>
-            
+
             {/* Expanded details */}
             {expanded && (
                 <div className="px-4 pb-4 pt-2 border-t border-gray-100 space-y-4">
@@ -541,34 +538,32 @@ function McpServerCard({
                             className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
                         />
                     </div>
-                    
+
                     {/* Transport type */}
                     <div>
                         <label className="block text-xs font-medium text-gray-600 mb-1.5">Transport</label>
                         <div className="flex gap-2">
                             <button
                                 onClick={() => updateTransport('stdio')}
-                                className={`px-3 py-1.5 text-xs rounded-lg border ${
-                                    localConfig.transport.type === 'stdio'
-                                        ? 'bg-blue-50 border-blue-300 text-blue-700'
-                                        : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
-                                }`}
+                                className={`px-3 py-1.5 text-xs rounded-lg border ${localConfig.transport.type === 'stdio'
+                                    ? 'bg-blue-50 border-blue-300 text-blue-700'
+                                    : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                                    }`}
                             >
                                 Stdio (subprocess)
                             </button>
                             <button
                                 onClick={() => updateTransport('sse', (localConfig.transport as any).url || '')}
-                                className={`px-3 py-1.5 text-xs rounded-lg border ${
-                                    localConfig.transport.type === 'sse'
-                                        ? 'bg-blue-50 border-blue-300 text-blue-700'
-                                        : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
-                                }`}
+                                className={`px-3 py-1.5 text-xs rounded-lg border ${localConfig.transport.type === 'sse'
+                                    ? 'bg-blue-50 border-blue-300 text-blue-700'
+                                    : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                                    }`}
                             >
                                 SSE (HTTP)
                             </button>
                         </div>
                     </div>
-                    
+
                     {/* Stdio-specific fields */}
                     {localConfig.transport.type === 'stdio' && (
                         <>
@@ -582,7 +577,7 @@ function McpServerCard({
                                     className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
                                 />
                             </div>
-                            
+
                             <div>
                                 <label className="block text-xs font-medium text-gray-600 mb-1.5">Arguments</label>
                                 <TagInput
@@ -591,7 +586,7 @@ function McpServerCard({
                                     placeholder="Press Enter to add arguments"
                                 />
                             </div>
-                            
+
                             <div>
                                 <label className="block text-xs font-medium text-gray-600 mb-1.5">Environment Variables</label>
                                 <EnvVarInput
@@ -601,7 +596,7 @@ function McpServerCard({
                             </div>
                         </>
                     )}
-                    
+
                     {/* SSE-specific fields */}
                     {localConfig.transport.type === 'sse' && (
                         <div>
@@ -615,7 +610,7 @@ function McpServerCard({
                             />
                         </div>
                     )}
-                    
+
                     {/* Auto-approve toggle */}
                     <div className="flex items-center justify-between py-2">
                         <div>
@@ -624,16 +619,14 @@ function McpServerCard({
                         </div>
                         <button
                             onClick={() => updateField('auto_approve_tools', !localConfig.auto_approve_tools)}
-                            className={`relative w-10 h-5 rounded-full transition-colors ${
-                                localConfig.auto_approve_tools ? 'bg-blue-500' : 'bg-gray-300'
-                            }`}
+                            className={`relative w-10 h-5 rounded-full transition-colors ${localConfig.auto_approve_tools ? 'bg-blue-500' : 'bg-gray-300'
+                                }`}
                         >
-                            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-                                localConfig.auto_approve_tools ? 'translate-x-5' : ''
-                            }`} />
+                            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localConfig.auto_approve_tools ? 'translate-x-5' : ''
+                                }`} />
                         </button>
                     </div>
-                    
+
                     {/* Tool system prompts */}
                     <div className="space-y-2">
                         <div className="flex items-center justify-between">
@@ -718,7 +711,7 @@ function McpServerCard({
                             </div>
                         )}
                     </div>
-                    
+
                     {/* Status message from sync */}
                     {status?.error && !testResult && (
                         <div className="text-xs text-red-700 bg-red-50 px-3 py-2 rounded-lg max-h-48 overflow-y-auto">
@@ -727,7 +720,7 @@ function McpServerCard({
                             </pre>
                         </div>
                     )}
-                    
+
                     {/* Test result display */}
                     {testResult && (
                         <div className={`rounded-lg p-3 ${testResult.success ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}>
@@ -768,7 +761,7 @@ function McpServerCard({
                             )}
                         </div>
                     )}
-                    
+
                     {/* Testing indicator */}
                     {isTesting && (
                         <div className="flex items-center gap-2 text-xs text-blue-600 bg-blue-50 px-3 py-2 rounded-lg">
@@ -776,7 +769,7 @@ function McpServerCard({
                             Testing connection...
                         </div>
                     )}
-                    
+
                     {/* Actions */}
                     <div className="flex justify-between pt-2 border-t border-gray-100">
                         <button
@@ -844,14 +837,14 @@ function SystemPromptTab({
     const [layers, setLayers] = useState<SystemPromptLayers | null>(null);
     const [layersError, setLayersError] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
-    
+
     useEffect(() => {
         if (settings?.system_prompt) {
             setLocalPrompt(settings.system_prompt);
             setHasChanges(false);
         }
     }, [settings?.system_prompt]);
-    
+
     const fetchLayers = useCallback(() => {
         setLoadingPreview(true);
         setLayersError(null);
@@ -867,24 +860,24 @@ function SystemPromptTab({
             })
             .finally(() => setLoadingPreview(false));
     }, []);
-    
+
     // Keep layers in sync with saved settings
     useEffect(() => {
         fetchLayers();
     }, [fetchLayers, settings?.mcp_servers, settings?.python_execution_enabled, settings?.system_prompt]);
-    
+
     // Refresh when prompt refresh tick changes (e.g., MCP config saved)
     useEffect(() => {
         fetchLayers();
     }, [fetchLayers, promptRefreshTick]);
-    
+
     // Fetch preview when toggling view
     useEffect(() => {
         if (showPreview) {
             fetchLayers();
         }
     }, [showPreview, fetchLayers]);
-    
+
     const handleSave = async () => {
         setIsSaving(true);
         onSavingChange?.(true);
@@ -897,17 +890,17 @@ function SystemPromptTab({
             onSavingChange?.(false);
         }
     };
-    
+
     const handleChange = (value: string) => {
         setLocalPrompt(value);
         setHasChanges(value !== settings?.system_prompt);
     };
-    
+
     const handleReset = () => {
         setLocalPrompt(DEFAULT_SYSTEM_PROMPT);
         setHasChanges(DEFAULT_SYSTEM_PROMPT !== settings?.system_prompt);
     };
-    
+
     useEffect(() => {
         onDirtyChange?.(hasChanges);
     }, [hasChanges, onDirtyChange]);
@@ -919,13 +912,13 @@ function SystemPromptTab({
     useEffect(() => {
         onRegisterSave?.(handleSave);
     }, [handleSave, onRegisterSave]);
-    
+
     // Check if current prompt matches default
     const isDefault = localPrompt === DEFAULT_SYSTEM_PROMPT;
-    
+
     // Count enabled MCP servers
     const enabledServers = settings?.mcp_servers?.filter(s => s.enabled).length || 0;
-    
+
     return (
         <div className="space-y-4">
             <div>
@@ -946,7 +939,7 @@ function SystemPromptTab({
                     This is the base prompt. MCP tool descriptions are appended automatically based on enabled servers.
                 </p>
             </div>
-            
+
             {/* Tool prompt breakdown */}
             <div className="border border-gray-200 rounded-xl overflow-hidden">
                 <div className="flex items-center justify-between px-4 py-3 bg-gray-50">
@@ -983,7 +976,7 @@ function SystemPromptTab({
                     )}
                 </div>
             </div>
-            
+
             {/* Preview toggle */}
             <div className="border border-gray-200 rounded-xl overflow-hidden">
                 <button
@@ -1001,7 +994,7 @@ function SystemPromptTab({
                     </span>
                     {showPreview ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                 </button>
-                
+
                 {showPreview && (
                     <div className="p-4 bg-white border-t border-gray-200">
                         {loadingPreview ? (
@@ -1019,13 +1012,13 @@ function SystemPromptTab({
                     </div>
                 )}
             </div>
-            
+
             {error && (
                 <div className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
                     {error}
                 </div>
             )}
-            
+
             <div className="flex justify-between items-center">
                 <button
                     onClick={handleReset}
@@ -1190,6 +1183,8 @@ function BuiltinsTab({
         updateCompactPromptEnabled,
         updateCompactPromptMaxTools,
         updateToolSystemPrompt,
+        updateSearchSchemasEnabled,
+        updateExecuteSqlEnabled,
         pythonAllowedImports,
     } = useSettingsStore();
     const codeExecutionEnabled = settings?.python_execution_enabled ?? false;
@@ -1482,15 +1477,13 @@ function BuiltinsTab({
                         <div className="flex items-center gap-3">
                             <button
                                 onClick={handleToggleCodeExecution}
-                                className={`relative w-10 h-5 rounded-full transition-colors ${
-                                    localCodeExecutionEnabled ? 'bg-blue-500' : 'bg-gray-300'
-                                }`}
+                                className={`relative w-10 h-5 rounded-full transition-colors ${localCodeExecutionEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                                    }`}
                                 title="Toggle python_execution"
                             >
                                 <div
-                                    className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-                                        localCodeExecutionEnabled ? 'translate-x-5' : ''
-                                    }`}
+                                    className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localCodeExecutionEnabled ? 'translate-x-5' : ''
+                                        }`}
                                 />
                             </button>
                             <div>
@@ -1535,15 +1528,13 @@ function BuiltinsTab({
                         <div className="flex items-center gap-3">
                             <button
                                 onClick={handleToggleToolSearch}
-                                className={`relative w-10 h-5 rounded-full transition-colors ${
-                                    localToolSearchEnabled ? 'bg-blue-500' : 'bg-gray-300'
-                                }`}
+                                className={`relative w-10 h-5 rounded-full transition-colors ${localToolSearchEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                                    }`}
                                 title="Toggle deferred mode"
                             >
                                 <div
-                                    className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-                                        localToolSearchEnabled ? 'translate-x-5' : ''
-                                    }`}
+                                    className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localToolSearchEnabled ? 'translate-x-5' : ''
+                                        }`}
                                 />
                             </button>
                             <div>
@@ -1601,15 +1592,13 @@ function BuiltinsTab({
                                 </div>
                                 <button
                                     onClick={() => setLocalToolExamplesEnabled((prev) => !prev)}
-                                    className={`relative w-9 h-5 rounded-full transition-colors ${
-                                        localToolExamplesEnabled ? 'bg-blue-500' : 'bg-gray-300'
-                                    }`}
+                                    className={`relative w-9 h-5 rounded-full transition-colors ${localToolExamplesEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                                        }`}
                                     title="Toggle tool input_examples in prompts"
                                 >
                                     <div
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-                                            localToolExamplesEnabled ? 'translate-x-4' : ''
-                                        }`}
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localToolExamplesEnabled ? 'translate-x-4' : ''
+                                            }`}
                                     />
                                 </button>
                             </div>
@@ -1644,15 +1633,13 @@ function BuiltinsTab({
                         </div>
                         <button
                             onClick={() => setLocalCompactPromptEnabled((prev) => !prev)}
-                            className={`relative w-10 h-5 rounded-full transition-colors ${
-                                localCompactPromptEnabled ? 'bg-blue-500' : 'bg-gray-300'
-                            }`}
+                            className={`relative w-10 h-5 rounded-full transition-colors ${localCompactPromptEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                                }`}
                             title="Toggle compact prompt mode"
                         >
                             <div
-                                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-                                    localCompactPromptEnabled ? 'translate-x-5' : ''
-                                }`}
+                                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localCompactPromptEnabled ? 'translate-x-5' : ''
+                                    }`}
                             />
                         </button>
                     </div>
@@ -1671,6 +1658,64 @@ function BuiltinsTab({
                             disabled={!localCompactPromptEnabled}
                         />
                     </div>
+                </div>
+            </div>
+
+            {/* Database built-ins section */}
+            <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-4 w-full">
+                <div className="flex items-center gap-2 mb-2">
+                    <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+                    </svg>
+                    <span className="text-sm font-semibold text-gray-900">Database Tools</span>
+                    <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">builtin</span>
+                </div>
+                <p className="text-xs text-gray-500 -mt-2">
+                    Query databases via Google MCP Database Toolbox. Requires Toolbox to be running.
+                </p>
+
+                {/* search_schemas toggle */}
+                <div className="flex items-start justify-between gap-3">
+                    <div>
+                        <div className="text-sm font-medium text-gray-900">search_schemas</div>
+                        <p className="text-xs text-gray-500">Search database schemas by semantic similarity.</p>
+                    </div>
+                    <button
+                        onClick={async () => {
+                            const next = !(settings?.search_schemas_enabled ?? false);
+                            await updateSearchSchemasEnabled(next);
+                        }}
+                        className={`relative w-10 h-5 rounded-full transition-colors ${(settings?.search_schemas_enabled ?? false) ? 'bg-blue-500' : 'bg-gray-300'
+                            }`}
+                        title="Toggle search_schemas"
+                    >
+                        <div
+                            className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${(settings?.search_schemas_enabled ?? false) ? 'translate-x-5' : ''
+                                }`}
+                        />
+                    </button>
+                </div>
+
+                {/* execute_sql toggle */}
+                <div className="flex items-start justify-between gap-3">
+                    <div>
+                        <div className="text-sm font-medium text-gray-900">execute_sql</div>
+                        <p className="text-xs text-gray-500">Execute SQL queries on configured databases.</p>
+                    </div>
+                    <button
+                        onClick={async () => {
+                            const next = !(settings?.execute_sql_enabled ?? false);
+                            await updateExecuteSqlEnabled(next);
+                        }}
+                        className={`relative w-10 h-5 rounded-full transition-colors ${(settings?.execute_sql_enabled ?? false) ? 'bg-blue-500' : 'bg-gray-300'
+                            }`}
+                        title="Toggle execute_sql"
+                    >
+                        <div
+                            className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${(settings?.execute_sql_enabled ?? false) ? 'translate-x-5' : ''
+                                }`}
+                        />
+                    </button>
                 </div>
             </div>
         </div>
@@ -1767,7 +1812,7 @@ function ToolsTab({
     useEffect(() => {
         onRegisterSave?.(handleSaveAll);
     }, [handleSaveAll, onRegisterSave]);
-    
+
     return (
         <div className="space-y-6">
             <div className="space-y-3">
@@ -1784,13 +1829,13 @@ function ToolsTab({
                         Add Server
                     </button>
                 </div>
-                
+
                 {error && (
                     <div className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
                         {error}
                     </div>
                 )}
-                
+
                 <div className="space-y-3">
                     {servers.length === 0 ? (
                         <div className="text-center py-8 text-gray-500 border border-dashed border-gray-200 rounded-xl">
@@ -1822,6 +1867,195 @@ function ToolsTab({
 }
 
 // Main Settings Modal
+// Databases Tab - manage database sources and toolbox config
+function DatabasesTab({
+    onDirtyChange,
+    onRegisterSave,
+    onSavingChange,
+}: {
+    onDirtyChange?: (dirty: boolean) => void;
+    onRegisterSave?: (handler: () => Promise<void>) => void;
+    onSavingChange?: (saving: boolean) => void;
+}) {
+    const { settings, updateDatabaseToolboxConfig } = useSettingsStore();
+    const [toolboxConfig, setToolboxConfig] = useState(settings?.database_toolbox || {
+        enabled: true,
+        sources: [],
+        port: 5000
+    });
+
+    // Simple deep erase of internal properties for checking dirty state if needed
+    // For now simplistic dirty check
+    const isDirty = JSON.stringify(settings?.database_toolbox) !== JSON.stringify(toolboxConfig);
+
+    useEffect(() => {
+        onDirtyChange?.(isDirty);
+    }, [isDirty, onDirtyChange]);
+
+    const handleSave = useCallback(async () => {
+        onSavingChange?.(true);
+        try {
+            await updateDatabaseToolboxConfig(toolboxConfig);
+        } finally {
+            onSavingChange?.(false);
+        }
+    }, [toolboxConfig, updateDatabaseToolboxConfig, onSavingChange]);
+
+    useEffect(() => {
+        onRegisterSave?.(handleSave);
+    }, [handleSave, onRegisterSave]);
+
+    // Handle adding a new BigQuery source
+    const addBigQuerySource = () => {
+        const newSource: DatabaseSourceConfig = {
+            id: `bq-${Date.now()}`,
+            name: 'New BigQuery Source',
+            kind: 'bigquery',
+            enabled: true,
+            project_id: '',
+        };
+        setToolboxConfig(prev => ({
+            ...prev,
+            sources: [...prev.sources, newSource]
+        }));
+    };
+
+    const updateSource = (index: number, updates: Partial<DatabaseSourceConfig>) => {
+        setToolboxConfig(prev => {
+            const newSources = [...prev.sources];
+            newSources[index] = { ...newSources[index], ...updates };
+            return { ...prev, sources: newSources };
+        });
+    };
+
+    const removeSource = (index: number) => {
+        setToolboxConfig(prev => {
+            const newSources = [...prev.sources];
+            newSources.splice(index, 1);
+            return { ...prev, sources: newSources };
+        });
+    };
+
+    return (
+        <div className="space-y-6">
+            <div>
+                <h3 className="text-lg font-medium text-gray-900">Database Sources</h3>
+                <p className="text-sm text-gray-500">Configure database connections for the Toolbox.</p>
+            </div>
+
+            <div className="space-y-4">
+                {toolboxConfig.sources.map((source, idx) => (
+                    <div key={source.id} className="border border-gray-200 rounded-lg p-4 space-y-3">
+                        <div className="flex justify-between items-start">
+                            <div className="flex items-center gap-2">
+                                <span className="text-xs font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded uppercase">
+                                    {source.kind}
+                                </span>
+                                <input
+                                    type="text"
+                                    value={source.name}
+                                    onChange={(e) => updateSource(idx, { name: e.target.value })}
+                                    className="font-medium text-gray-900 border-b border-transparent hover:border-gray-300 focus:border-blue-500 focus:outline-none px-1"
+                                />
+                            </div>
+                            <button onClick={() => removeSource(idx)} className="text-gray-400 hover:text-red-500">
+                                <Trash2 size={16} />
+                            </button>
+                        </div>
+
+                        {source.kind === 'bigquery' && (
+                            <div className="grid grid-cols-1 gap-4">
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        Project ID
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={source.project_id || ''}
+                                        onChange={(e) => updateSource(idx, { project_id: e.target.value })}
+                                        placeholder="gcp-project-id"
+                                        className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                                    />
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="flex items-center gap-2 mt-2">
+                            <label className="flex items-center gap-2 text-sm text-gray-600">
+                                <input
+                                    type="checkbox"
+                                    checked={source.enabled}
+                                    onChange={(e) => updateSource(idx, { enabled: e.target.checked })}
+                                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                />
+                                Enabled
+                            </label>
+                        </div>
+                    </div>
+                ))}
+
+                {toolboxConfig.sources.length === 0 && (
+                    <div className="text-center py-8 bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                        <p className="text-sm text-gray-500">No database sources configured.</p>
+                    </div>
+                )}
+
+                <div className="flex gap-2">
+                    <button
+                        onClick={addBigQuerySource}
+                        className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100"
+                    >
+                        <Plus size={16} />
+                        Add BigQuery Source
+                    </button>
+                </div>
+            </div>
+
+            <div className="pt-4 border-t border-gray-200">
+                <h4 className="text-sm font-medium text-gray-900 mb-2">Toolbox Configuration</h4>
+                <div className="grid grid-cols-2 gap-4">
+                    <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Toolbox Port
+                        </label>
+                        <input
+                            type="number"
+                            value={toolboxConfig.port}
+                            onChange={(e) => setToolboxConfig(prev => ({ ...prev, port: parseInt(e.target.value) || 5000 }))}
+                            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                        />
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// Schemas Tab - view and manage cached schemas
+function SchemasTab({
+    onDirtyChange: _onDirtyChange,
+    onRegisterSave: _onRegisterSave,
+    onSavingChange: _onSavingChange,
+}: {
+    onDirtyChange?: (dirty: boolean) => void;
+    onRegisterSave?: (handler: () => Promise<void>) => void;
+    onSavingChange?: (saving: boolean) => void;
+}) {
+    // Placeholder for now
+    return (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+            <div className="w-16 h-16 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center mb-4">
+                <Code2 size={32} />
+            </div>
+            <h3 className="text-lg font-medium text-gray-900">Schema Management</h3>
+            <p className="text-sm text-gray-500 max-w-sm mt-2">
+                Schema caching and management features will be available here.
+                Enable the "search_schemas" built-in tool to start caching schemas from your configured databases.
+            </p>
+        </div>
+    );
+}
+
 export function SettingsModal() {
     const { isSettingsOpen, closeSettings, activeTab, setActiveTab, isLoading } = useSettingsStore();
     const [systemDirty, setSystemDirty] = useState(false);
@@ -1837,6 +2071,14 @@ export function SettingsModal() {
     const [builtinsSaving, setBuiltinsSaving] = useState(false);
     const builtinsSaveHandlerRef = useRef<(() => Promise<void>) | null>(null);
     const builtinsResetHandlerRef = useRef<(() => void) | null>(null);
+    const [databasesDirty, setDatabasesDirty] = useState(false);
+    const [databasesSaving, setDatabasesSaving] = useState(false);
+    const databasesSaveHandlerRef = useRef<(() => Promise<void>) | null>(null);
+    const [schemasDirty, setSchemasDirty] = useState(false);
+    const [schemasSaving, setSchemasSaving] = useState(false);
+    const schemasSaveHandlerRef = useRef<(() => Promise<void>) | null>(null);
+
+    const { settings } = useSettingsStore();
 
     const handleRegisterSystemSave = useCallback((handler: () => Promise<void>) => {
         systemSaveHandlerRef.current = handler;
@@ -1874,6 +2116,22 @@ export function SettingsModal() {
         setBuiltinsSaving(saving);
     }, []);
 
+    const handleRegisterDatabasesSave = useCallback((handler: () => Promise<void>) => {
+        databasesSaveHandlerRef.current = handler;
+    }, []);
+
+    const handleDatabasesSavingChange = useCallback((saving: boolean) => {
+        setDatabasesSaving(saving);
+    }, []);
+
+    const handleRegisterSchemasSave = useCallback((handler: () => Promise<void>) => {
+        schemasSaveHandlerRef.current = handler;
+    }, []);
+
+    const handleSchemasSavingChange = useCallback((saving: boolean) => {
+        setSchemasSaving(saving);
+    }, []);
+
     const handleHeaderReset = useCallback(() => {
         if (activeTab === 'builtins') {
             builtinsResetHandlerRef.current?.();
@@ -1890,43 +2148,59 @@ export function SettingsModal() {
             handler = interfacesSaveHandlerRef.current;
         } else if (activeTab === 'builtins') {
             handler = builtinsSaveHandlerRef.current;
+        } else if (activeTab === 'databases') {
+            handler = databasesSaveHandlerRef.current;
+        } else if (activeTab === 'schemas') {
+            handler = schemasSaveHandlerRef.current;
         }
         if (!handler) return;
         await handler();
     }, [activeTab]);
-    
+
     if (!isSettingsOpen) return null;
-    
+
     const isCurrentTabDirty =
         activeTab === 'system-prompt'
             ? systemDirty
             : activeTab === 'tools'
-            ? toolsDirty
-            : activeTab === 'interfaces'
-            ? interfacesDirty
-            : activeTab === 'builtins'
-            ? builtinsDirty
-            : false;
+                ? toolsDirty
+                : activeTab === 'interfaces'
+                    ? interfacesDirty
+                    : activeTab === 'builtins'
+                        ? builtinsDirty
+                        : activeTab === 'databases'
+                            ? databasesDirty
+                            : activeTab === 'schemas'
+                                ? schemasDirty
+                                : false;
 
     const isCurrentTabSaving =
         activeTab === 'system-prompt'
             ? systemSaving
             : activeTab === 'tools'
-            ? toolsSaving
-            : activeTab === 'interfaces'
-            ? interfacesSaving
-            : activeTab === 'builtins'
-            ? builtinsSaving
-            : false;
+                ? toolsSaving
+                : activeTab === 'interfaces'
+                    ? interfacesSaving
+                    : activeTab === 'builtins'
+                        ? builtinsSaving
+                        : activeTab === 'databases'
+                            ? databasesSaving
+                            : activeTab === 'schemas'
+                                ? schemasSaving
+                                : false;
+
+    // Conditions for showing database tabs
+    const showDatabasesTab = settings?.search_schemas_enabled || settings?.execute_sql_enabled;
+    const showSchemasTab = (settings?.database_toolbox?.sources?.length ?? 0) > 0;
 
     return (
         <div id="settings-modal" className="settings-modal fixed inset-0 z-50 flex items-center justify-center">
             {/* Backdrop */}
-            <div 
+            <div
                 className="settings-backdrop absolute inset-0 bg-black/40 backdrop-blur-sm"
                 onClick={closeSettings}
             />
-            
+
             {/* Modal */}
             <div className="settings-surface relative w-full max-w-2xl max-h-[85vh] bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col m-4">
                 {/* Header */}
@@ -1961,55 +2235,75 @@ export function SettingsModal() {
                         </button>
                     </div>
                 </div>
-                
+
                 {/* Tabs */}
-                <div className="settings-tablist flex border-b border-gray-100">
+                <div className="settings-tablist flex border-b border-gray-100 overflow-x-auto">
                     <button
                         onClick={() => setActiveTab('system-prompt')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-                            activeTab === 'system-prompt'
-                                ? 'border-blue-500 text-blue-600'
-                                : 'border-transparent text-gray-500 hover:text-gray-700'
-                        }`}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'system-prompt'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
                     >
                         <MessageSquare size={16} />
                         System Prompt
                     </button>
                     <button
                         onClick={() => setActiveTab('tools')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-                            activeTab === 'tools'
-                                ? 'border-blue-500 text-blue-600'
-                                : 'border-transparent text-gray-500 hover:text-gray-700'
-                        }`}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'tools'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
                     >
                         <Wrench size={16} />
                         Tools
                     </button>
                     <button
                         onClick={() => setActiveTab('interfaces')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-                            activeTab === 'interfaces'
-                                ? 'border-blue-500 text-blue-600'
-                                : 'border-transparent text-gray-500 hover:text-gray-700'
-                        }`}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'interfaces'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
                     >
                         <Wrench size={16} />
                         Interfaces
                     </button>
                     <button
                         onClick={() => setActiveTab('builtins')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-                            activeTab === 'builtins'
-                                ? 'border-blue-500 text-blue-600'
-                                : 'border-transparent text-gray-500 hover:text-gray-700'
-                        }`}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'builtins'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
                     >
                         <Code2 size={16} />
                         Built-ins
                     </button>
+                    {showDatabasesTab && (
+                        <button
+                            onClick={() => setActiveTab('databases')}
+                            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'databases'
+                                ? 'border-blue-500 text-blue-600'
+                                : 'border-transparent text-gray-500 hover:text-gray-700'
+                                }`}
+                        >
+                            <Server size={16} />
+                            Databases
+                        </button>
+                    )}
+                    {showSchemasTab && (
+                        <button
+                            onClick={() => setActiveTab('schemas')}
+                            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'schemas'
+                                ? 'border-blue-500 text-blue-600'
+                                : 'border-transparent text-gray-500 hover:text-gray-700'
+                                }`}
+                        >
+                            <Code2 size={16} />
+                            Schemas
+                        </button>
+                    )}
                 </div>
-                
+
                 {/* Content */}
                 <div className="settings-content flex-1 overflow-y-auto p-6">
                     {isLoading ? (
@@ -2045,6 +2339,20 @@ export function SettingsModal() {
                                     onRegisterSave={handleRegisterBuiltinsSave}
                                     onSavingChange={handleBuiltinsSavingChange}
                                     onRegisterReset={handleRegisterBuiltinsReset}
+                                />
+                            )}
+                            {activeTab === 'databases' && (
+                                <DatabasesTab
+                                    onDirtyChange={setDatabasesDirty}
+                                    onRegisterSave={handleRegisterDatabasesSave}
+                                    onSavingChange={handleDatabasesSavingChange}
+                                />
+                            )}
+                            {activeTab === 'schemas' && (
+                                <SchemasTab
+                                    onDirtyChange={setSchemasDirty}
+                                    onRegisterSave={handleRegisterSchemasSave}
+                                    onSavingChange={handleSchemasSavingChange}
                                 />
                             )}
                         </>

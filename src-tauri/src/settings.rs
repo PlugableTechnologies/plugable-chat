@@ -215,6 +215,161 @@ impl Default for Transport {
     }
 }
 
+// ============ Database Toolbox Configuration ============
+
+/// Supported database kinds for schema discovery and SQL execution.
+/// Each kind maps to specific Google MCP Database Toolbox tools.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportedDatabaseKind {
+    /// BigQuery: uses bigquery-list-dataset-ids, bigquery-list-table-ids, bigquery-execute-sql
+    Bigquery,
+    /// PostgreSQL: uses postgres-sql, INFORMATION_SCHEMA queries
+    Postgres,
+    /// MySQL: uses mysql-sql, INFORMATION_SCHEMA queries
+    Mysql,
+    /// SQLite: uses sqlite-sql, sqlite_master queries
+    Sqlite,
+    /// Spanner: uses spanner-list-databases, spanner-sql
+    Spanner,
+}
+
+impl SupportedDatabaseKind {
+    /// Get the MCP Toolbox execute tool name for this database kind
+    pub fn execute_tool_name(&self) -> &'static str {
+        match self {
+            SupportedDatabaseKind::Bigquery => "bigquery-execute-sql",
+            SupportedDatabaseKind::Postgres => "postgres-sql",
+            SupportedDatabaseKind::Mysql => "mysql-sql",
+            SupportedDatabaseKind::Sqlite => "sqlite-sql",
+            SupportedDatabaseKind::Spanner => "spanner-sql",
+        }
+    }
+
+    /// Get the SQL dialect name for this database kind
+    pub fn sql_dialect(&self) -> &'static str {
+        match self {
+            SupportedDatabaseKind::Bigquery => "StandardSQL",
+            SupportedDatabaseKind::Postgres => "PostgreSQL",
+            SupportedDatabaseKind::Mysql => "MySQL",
+            SupportedDatabaseKind::Sqlite => "SQLite",
+            SupportedDatabaseKind::Spanner => "GoogleSQL",
+        }
+    }
+
+    /// Get the display name for this database kind
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            SupportedDatabaseKind::Bigquery => "BigQuery",
+            SupportedDatabaseKind::Postgres => "PostgreSQL",
+            SupportedDatabaseKind::Mysql => "MySQL",
+            SupportedDatabaseKind::Sqlite => "SQLite",
+            SupportedDatabaseKind::Spanner => "Spanner",
+        }
+    }
+}
+
+/// Configuration for a single database source in MCP Toolbox.
+/// The actual connection credentials are in tools.yaml, not stored here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseSourceConfig {
+    /// Unique ID matching the source name in tools.yaml
+    pub id: String,
+    /// Human-readable display name
+    pub name: String,
+    /// Database kind (determines enumeration and query tools)
+    pub kind: SupportedDatabaseKind,
+    /// Whether this source is enabled for schema discovery
+    pub enabled: bool,
+    /// For BigQuery: the project ID to enumerate datasets from
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+impl DatabaseSourceConfig {
+    pub fn new(id: String, name: String, kind: SupportedDatabaseKind) -> Self {
+        Self {
+            id,
+            name,
+            kind,
+            enabled: false,
+            project_id: None,
+        }
+    }
+}
+
+fn default_toolbox_port() -> u16 {
+    5000
+}
+
+/// Configuration for Google MCP Database Toolbox integration.
+/// Manages the Toolbox process and tracks configured database sources.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseToolboxConfig {
+    /// Whether the Database Toolbox integration is enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to the toolbox binary (optional, auto-discovered if not set)
+    #[serde(default)]
+    pub toolbox_path: Option<String>,
+    /// Path to the tools.yaml configuration file
+    #[serde(default)]
+    pub tools_yaml_path: Option<String>,
+    /// Configured database sources (synced from tools.yaml)
+    #[serde(default)]
+    pub sources: Vec<DatabaseSourceConfig>,
+    /// Port for the Toolbox SSE server
+    #[serde(default = "default_toolbox_port")]
+    pub port: u16,
+}
+
+impl Default for DatabaseToolboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            toolbox_path: None,
+            tools_yaml_path: None,
+            sources: Vec::new(),
+            port: default_toolbox_port(),
+        }
+    }
+}
+
+/// Schema for a cached table, used for embedding and search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedTableSchema {
+    /// Fully-qualified table name (e.g., project.dataset.table for BigQuery)
+    pub fully_qualified_name: String,
+    /// Source ID this table belongs to
+    pub source_id: String,
+    /// Database kind (for SQL dialect)
+    pub kind: SupportedDatabaseKind,
+    /// Column schemas
+    pub columns: Vec<CachedColumnSchema>,
+    /// Primary key column names
+    #[serde(default)]
+    pub primary_keys: Vec<String>,
+    /// Partition column names (BigQuery, Spanner)
+    #[serde(default)]
+    pub partition_columns: Vec<String>,
+    /// Cluster column names (BigQuery)
+    #[serde(default)]
+    pub cluster_columns: Vec<String>,
+    /// Optional description
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Schema for a cached column.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedColumnSchema {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// Configuration for a single MCP server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
@@ -339,6 +494,17 @@ pub struct AppSettings {
     /// Maximum tools to surface in prompts when compact mode is on
     #[serde(default = "default_compact_prompt_max_tools")]
     pub compact_prompt_max_tools: usize,
+    /// Configuration for Google MCP Database Toolbox integration
+    #[serde(default)]
+    pub database_toolbox: DatabaseToolboxConfig,
+    /// Whether the search_schemas built-in tool is enabled (disabled by default).
+    /// When enabled, models can search for relevant database tables using embeddings.
+    #[serde(default)]
+    pub search_schemas_enabled: bool,
+    /// Whether the execute_sql built-in tool is enabled (disabled by default).
+    /// When enabled, models can execute SQL queries via configured database sources.
+    #[serde(default)]
+    pub execute_sql_enabled: bool,
 }
 
 fn default_system_prompt() -> String {
@@ -453,6 +619,9 @@ impl Default for AppSettings {
             tool_use_examples_max: default_tool_use_examples_max(),
             compact_prompt_enabled: false,
             compact_prompt_max_tools: default_compact_prompt_max_tools(),
+            database_toolbox: DatabaseToolboxConfig::default(),
+            search_schemas_enabled: false,
+            execute_sql_enabled: false,
         }
     }
 }
@@ -770,5 +939,82 @@ mod tests {
         // Code mode available -> keep primary
         let resolved2 = cfg2.resolve_primary_for_prompt(true);
         assert_eq!(resolved2, ToolCallFormatName::CodeMode);
+    }
+
+    // ============ Database Toolbox Configuration Tests ============
+
+    #[test]
+    fn test_supported_database_kind_methods() {
+        assert_eq!(SupportedDatabaseKind::Bigquery.execute_tool_name(), "bigquery-execute-sql");
+        assert_eq!(SupportedDatabaseKind::Postgres.execute_tool_name(), "postgres-sql");
+        assert_eq!(SupportedDatabaseKind::Mysql.execute_tool_name(), "mysql-sql");
+        assert_eq!(SupportedDatabaseKind::Sqlite.execute_tool_name(), "sqlite-sql");
+        assert_eq!(SupportedDatabaseKind::Spanner.execute_tool_name(), "spanner-sql");
+
+        assert_eq!(SupportedDatabaseKind::Bigquery.sql_dialect(), "StandardSQL");
+        assert_eq!(SupportedDatabaseKind::Postgres.sql_dialect(), "PostgreSQL");
+
+        assert_eq!(SupportedDatabaseKind::Bigquery.display_name(), "BigQuery");
+        assert_eq!(SupportedDatabaseKind::Postgres.display_name(), "PostgreSQL");
+    }
+
+    #[test]
+    fn test_database_source_config_new() {
+        let source = DatabaseSourceConfig::new(
+            "my-pg".to_string(),
+            "My PostgreSQL".to_string(),
+            SupportedDatabaseKind::Postgres,
+        );
+        assert_eq!(source.id, "my-pg");
+        assert_eq!(source.name, "My PostgreSQL");
+        assert_eq!(source.kind, SupportedDatabaseKind::Postgres);
+        assert!(!source.enabled);
+        assert!(source.project_id.is_none());
+    }
+
+    #[test]
+    fn test_database_toolbox_config_default() {
+        let config = DatabaseToolboxConfig::default();
+        assert!(!config.enabled);
+        assert!(config.toolbox_path.is_none());
+        assert!(config.tools_yaml_path.is_none());
+        assert!(config.sources.is_empty());
+        assert_eq!(config.port, 5000);
+    }
+
+    #[test]
+    fn test_database_toolbox_config_serde_roundtrip() {
+        let config = DatabaseToolboxConfig {
+            enabled: true,
+            toolbox_path: Some("/usr/local/bin/toolbox".to_string()),
+            tools_yaml_path: Some("/path/to/tools.yaml".to_string()),
+            sources: vec![
+                DatabaseSourceConfig {
+                    id: "bq-prod".to_string(),
+                    name: "BigQuery Production".to_string(),
+                    kind: SupportedDatabaseKind::Bigquery,
+                    enabled: true,
+                    project_id: Some("my-project".to_string()),
+                },
+            ],
+            port: 8080,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DatabaseToolboxConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(config.enabled, parsed.enabled);
+        assert_eq!(config.toolbox_path, parsed.toolbox_path);
+        assert_eq!(config.sources.len(), parsed.sources.len());
+        assert_eq!(config.sources[0].kind, parsed.sources[0].kind);
+        assert_eq!(config.port, parsed.port);
+    }
+
+    #[test]
+    fn test_app_settings_includes_database_toolbox() {
+        let settings = AppSettings::default();
+        assert!(!settings.database_toolbox.enabled);
+        assert!(!settings.search_schemas_enabled);
+        assert!(!settings.execute_sql_enabled);
     }
 }

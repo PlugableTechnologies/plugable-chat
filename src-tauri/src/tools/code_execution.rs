@@ -690,6 +690,7 @@ mod tests {
                 },
                 "required": ["city"]
             }),
+            input_examples: Vec::new(),
             tool_type: None,
             allowed_callers: Some(vec!["python_execution_20251206".to_string()]),
             defer_loading: false,
