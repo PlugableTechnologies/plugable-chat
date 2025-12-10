@@ -160,6 +160,11 @@ Key log prefixes to watch:
 - "No tool calls detected" → Model output doesn't match any parser format
 - Logs appear to hang → Check `std::io::stdout().flush()` is called after prints
 
+### Tool Call Formats: enabled vs primary
+- Enabled formats control parsing/execution. If Code Mode is enabled (and python execution is allowed), Python blocks will execute even when another format is primary.
+- Primary only affects what we advertise in the system prompt. It does not disable other enabled formats.
+- To get Python execution, ensure Code Mode is enabled; setting it primary just changes prompting.
+
 ### TODOs
 - Re-enable native tool payloads for Phi/Hermes once Foundry JSON schema validation accepts OpenAI tool definitions; currently disabled and using Hermes/text-based prompts to avoid 500s.
 

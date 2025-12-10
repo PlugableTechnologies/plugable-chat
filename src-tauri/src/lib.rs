@@ -2753,9 +2753,9 @@ async fn chat(
         && python_execution_enabled
         && python_tool_calling_enabled
         && tool_filter.builtin_allowed("python_execution");
+    // Primary affects prompting only; execution should honor any enabled format.
     let primary_format_for_prompt = format_config.resolve_primary_for_prompt(code_mode_possible);
-    let python_tool_mode =
-        code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
+    let python_tool_mode = code_mode_possible;
     let allow_tool_search_for_python =
         python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
     let non_code_formats_enabled = format_config.any_non_code();
@@ -2763,6 +2763,16 @@ async fn chat(
         non_code_formats_enabled && primary_format_for_prompt != ToolCallFormatName::CodeMode;
     let legacy_tool_search_enabled =
         legacy_tool_calls_enabled && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
+
+    println!(
+        "[chat] tool_call_formats: primary={:?}, enabled={:?}, python_execution_enabled={}, python_tool_calling_enabled={}, python_tool_mode={}, code_mode_possible={}",
+        format_config.primary,
+        format_config.enabled,
+        python_execution_enabled,
+        python_tool_calling_enabled,
+        python_tool_mode,
+        code_mode_possible
+    );
 
     let mut openai_tools: Option<Vec<OpenAITool>> = if legacy_tool_calls_enabled {
         Some(Vec::new())

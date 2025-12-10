@@ -301,6 +301,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         try {
             await invoke('update_tool_call_formats', { config: normalized });
             console.log('[SettingsStore] Tool call formats updated', normalized);
+            // Re-fetch to ensure local state stays in sync with backend normalization/persistence
+            await get().fetchSettings();
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update tool call formats:', e);
             set({
