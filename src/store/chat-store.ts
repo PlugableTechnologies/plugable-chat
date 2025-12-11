@@ -180,6 +180,8 @@ interface ChatState {
     setChatInputValue: (s: string) => void;
     assistantStreamingActive: boolean;
     setAssistantStreamingActive: (loading: boolean) => void;
+    lastStreamActivityTs: number | null;
+    setLastStreamActivityTs: (ts: number) => void;
     stopActiveChatGeneration: () => Promise<void>;
     chatGenerationCounter: number;
 
@@ -500,6 +502,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     assistantStreamingActive: false,
     setAssistantStreamingActive: (assistantStreamingActive) =>
         set({ assistantStreamingActive }),
+    lastStreamActivityTs: null,
+    setLastStreamActivityTs: (ts) => set({ lastStreamActivityTs: ts }),
     chatGenerationCounter: 0,
     stopActiveChatGeneration: async () => {
         console.log('[ChatStore] 🛑 STOP BUTTON PRESSED by user');
@@ -512,6 +516,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             assistantStreamingActive: false, 
             chatGenerationCounter: state.chatGenerationCounter + 1,
             streamingChatId: null,
+            lastStreamActivityTs: Date.now(),
         }));
         
         try {
@@ -735,6 +740,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 startTime: Date.now(),
             },
             statusBarDismissed: false,
+            lastStreamActivityTs: Date.now(),
         });
 
         try {
@@ -1118,6 +1124,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     if (!state.assistantStreamingActive) {
                         return state;
                     }
+                    const now = Date.now();
                     
                     // Check if we're streaming to a different chat than currently displayed
                     const targetChatId = state.streamingChatId;
@@ -1132,9 +1139,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                                 ...lastMsg,
                                 content: lastMsg.content + event.payload
                             };
-                            return { streamingMessages: newStreamingMessages };
+                            return { streamingMessages: newStreamingMessages, lastStreamActivityTs: now };
                         }
-                        return state;
+                        return { ...state, lastStreamActivityTs: now };
                     }
                     
                     // Normal case: streaming to current chat
@@ -1146,9 +1153,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                             ...lastMsg,
                             content: lastMsg.content + event.payload
                         };
-                        return { chatMessages: newMessages };
+                        return { chatMessages: newMessages, lastStreamActivityTs: now };
                     }
-                    return state;
+                    return { ...state, lastStreamActivityTs: now };
                 });
             });
 
@@ -1160,6 +1167,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     streamingChatId: null,
                     streamingMessages: [],
                     operationStatus: null,
+                    lastStreamActivityTs: Date.now(),
                 });
             });
             
@@ -1272,6 +1280,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         startTime: state.operationStatus?.startTime || Date.now(),
                     },
                     statusBarDismissed: false,
+                    lastStreamActivityTs: Date.now(),
                 }));
 
                 if (typeof queueMicrotask === 'function') {
@@ -1293,6 +1302,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                             ...state.toolExecution,
                             lastHeartbeatTs: Date.now(),
                         },
+                        lastStreamActivityTs: Date.now(),
                     };
                 });
             });
@@ -1352,6 +1362,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                                 isError: event.payload.is_error,
                             },
                         },
+                        lastStreamActivityTs: Date.now(),
                     };
                 });
             });
@@ -1366,6 +1377,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         hadToolCalls: event.payload.had_tool_calls,
                     },
                     pendingToolApproval: null, // Clear any pending approval
+                    lastStreamActivityTs: Date.now(),
                 }));
             });
 

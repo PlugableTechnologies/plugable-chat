@@ -1498,6 +1498,41 @@ export function ChatArea() {
         };
     }, []);
 
+    // Watchdog: if streaming/tool execution has no activity for a while, refresh listeners
+    useEffect(() => {
+        const STALL_THRESHOLD_MS = 8000;
+        const RESET_COOLDOWN_MS = 4000;
+        let lastResetTs = 0;
+
+        const timer = setInterval(() => {
+            const state = useChatStore.getState();
+            if (!state.assistantStreamingActive && !state.toolExecution.currentTool) {
+                return;
+            }
+            const lastActivity = state.lastStreamActivityTs;
+            if (!lastActivity) {
+                return;
+            }
+            const now = Date.now();
+            const isStalled = now - lastActivity > STALL_THRESHOLD_MS;
+            const cooledDown = now - lastResetTs > RESET_COOLDOWN_MS;
+            if (isStalled && cooledDown) {
+                lastResetTs = now;
+                console.warn('[ChatArea] Detected stalled streaming/tool heartbeat. Refreshing listeners.');
+                state.cleanupListeners();
+                state.setupListeners();
+                state.setLastStreamActivityTs(now);
+                state.setOperationStatus({
+                    type: 'streaming',
+                    message: 'Reconnecting to backend...',
+                    startTime: state.operationStatus?.startTime || Date.now(),
+                });
+            }
+        }, 2000);
+
+        return () => clearInterval(timer);
+    }, []);
+
     // Auto-resize textarea (ChatGPT-style: starts compact, grows as you type)
     useEffect(() => {
         if (textareaRef.current) {
@@ -1608,6 +1643,7 @@ export function ChatArea() {
         clearRelevanceSearch(); // Clear relevance results when sending
         if (textareaRef.current) textareaRef.current.style.height = 'auto';
         setAssistantStreamingActive(true);
+        storeState.setLastStreamActivityTs(Date.now());
         
         // Track which chat we're streaming to (for cross-chat switching)
         storeState.setStreamingChatId(chatId);
