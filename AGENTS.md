@@ -7,6 +7,9 @@
 - **State Management**: Zustand
 - **Package Manager**: Use **npm only**. Do not introduce or run pnpm/yarn/bun; keep dependency installs and scripts on npm to match existing setup.
 
+## Release Monitoring
+- Monitor upstream Foundry Local releases for features (e.g., tool calling) we should mirror in Plugable Chat. Check the changelog regularly: https://github.com/microsoft/Foundry-Local/releases
+
 ### Grep-Friendly Identifier Naming
 - **Directive**: Prefer descriptive, tag-like names for all identifiers (functions, variables, types, props). Each segment should be greppable to find all related code paths.
 - **Backend examples (Rust)**: `VectorActor` ➜ `ChatVectorStoreActor`; `perform_search` ➜ `search_chats_by_embedding`; `vector` ➜ `embedding_vector`; channels like `tx` ➜ `chat_vector_request_tx`.
