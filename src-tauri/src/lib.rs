@@ -24,8 +24,7 @@ use protocol::{
     parse_tool_calls, CachedModel, ChatMessage, FoundryMsg, McpHostMsg, ModelFamily, ModelInfo,
     OpenAITool, ParsedToolCall, RagChunk, RagIndexResult, RagMsg, RemoveFileResult,
     ToolCallsPendingEvent, ToolExecutingEvent, ToolFormat, ToolHeartbeatEvent, ToolLoopFinishedEvent,
-    ToolResultEvent,
-    VectorMsg,
+    ToolResultEvent, ToolSchema, VectorMsg,
 };
 use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
 use serde::de::DeserializeOwned;
@@ -3053,6 +3052,20 @@ struct AutoDiscoveryContext {
     discovered_tool_schemas: Vec<(String, Vec<McpTool>)>,
 }
 
+fn tool_schema_to_mcp_tool(schema: &ToolSchema) -> McpTool {
+    McpTool {
+        name: schema.name.clone(),
+        description: schema.description.clone(),
+        input_schema: Some(schema.parameters.clone()),
+        input_examples: if schema.input_examples.is_empty() {
+            None
+        } else {
+            Some(schema.input_examples.clone())
+        },
+        allowed_callers: schema.allowed_callers.clone(),
+    }
+}
+
 fn map_tool_search_hits_to_schemas(
     hits: &[ToolSearchResult],
     filtered_tool_descriptions: &[(String, Vec<McpTool>)],
@@ -3535,14 +3548,26 @@ async fn chat(
         auto_discovery.schema_search_output.as_ref(),
     );
 
+    // Visible tools: always include enabled built-ins; defer MCP tools to tool_search unless materialized.
+    let builtin_tools: Vec<(String, Vec<McpTool>)> = {
+        let registry = tool_registry_state.registry.read().await;
+        registry
+            .get_internal_tools()
+            .iter()
+            .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
+            .collect()
+    };
+
     let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
+        let mut list = builtin_tools;
         if !auto_discovery.discovered_tool_schemas.is_empty() {
-            auto_discovery.discovered_tool_schemas.clone()
-        } else {
-            Vec::new()
+            list.extend(auto_discovery.discovered_tool_schemas.clone());
         }
+        list
     } else {
-        filtered_tool_descriptions.clone()
+        let mut list = builtin_tools;
+        list.extend(filtered_tool_descriptions.clone());
+        list
     };
 
     // Include visible tools in legacy/native tool calling payloads
@@ -5226,14 +5251,25 @@ async fn get_system_prompt_preview(
         auto_discovery.schema_search_output.as_ref(),
     );
 
+    let builtin_tools: Vec<(String, Vec<McpTool>)> = {
+        let registry = tool_registry_state.registry.read().await;
+        registry
+            .get_internal_tools()
+            .iter()
+            .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
+            .collect()
+    };
+
     let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
+        let mut list = builtin_tools;
         if !auto_discovery.discovered_tool_schemas.is_empty() {
-            auto_discovery.discovered_tool_schemas.clone()
-        } else {
-            Vec::new()
+            list.extend(auto_discovery.discovered_tool_schemas.clone());
         }
+        list
     } else {
-        filtered_tool_descriptions.clone()
+        let mut list = builtin_tools;
+        list.extend(filtered_tool_descriptions.clone());
+        list
     };
 
     // Check if there are any attached documents
@@ -5291,6 +5327,7 @@ async fn get_system_prompt_layers(
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
     launch_config: State<'_, LaunchConfigState>,
+    tool_registry_state: State<'_, ToolRegistryState>,
 ) -> Result<SystemPromptLayers, String> {
     // Get current settings
     let settings = settings_state.settings.read().await;
@@ -5356,10 +5393,22 @@ async fn get_system_prompt_layers(
     let allow_tool_search_for_python =
         python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
 
+    let builtin_tools: Vec<(String, Vec<McpTool>)> = {
+        let registry = tool_registry_state.registry.read().await;
+        registry
+            .get_internal_tools()
+            .iter()
+            .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
+            .collect()
+    };
+
     let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
-        Vec::new()
+        // Defer MCP tools; always include built-ins.
+        builtin_tools
     } else {
-        filtered_tool_descriptions.clone()
+        let mut list = builtin_tools;
+        list.extend(filtered_tool_descriptions.clone());
+        list
     };
 
     // Check if there are any attached documents

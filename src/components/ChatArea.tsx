@@ -1500,7 +1500,8 @@ export function ChatArea() {
 
     // Watchdog: if streaming/tool execution has no activity for a while, refresh listeners
     useEffect(() => {
-        const STALL_THRESHOLD_MS = 8000;
+        const SOFT_STALL_MS = 8000;   // try reconnect
+        const HARD_STALL_MS = 15000;  // also unblock UI
         const RESET_COOLDOWN_MS = 4000;
         let lastResetTs = 0;
 
@@ -1514,9 +1515,11 @@ export function ChatArea() {
                 return;
             }
             const now = Date.now();
-            const isStalled = now - lastActivity > STALL_THRESHOLD_MS;
+            const stalledFor = now - lastActivity;
+            const isSoftStalled = stalledFor > SOFT_STALL_MS;
+            const isHardStalled = stalledFor > HARD_STALL_MS;
             const cooledDown = now - lastResetTs > RESET_COOLDOWN_MS;
-            if (isStalled && cooledDown) {
+            if (isSoftStalled && cooledDown) {
                 lastResetTs = now;
                 console.warn('[ChatArea] Detected stalled streaming/tool heartbeat. Refreshing listeners.');
                 state.cleanupListeners();
@@ -1527,6 +1530,12 @@ export function ChatArea() {
                     message: 'Reconnecting to backend...',
                     startTime: state.operationStatus?.startTime || Date.now(),
                 });
+            }
+            if (isHardStalled) {
+                console.warn('[ChatArea] Hard stall detected. Unblocking UI and clearing streaming state.');
+                state.setAssistantStreamingActive(false);
+                state.setStreamingChatId(null);
+                state.setOperationStatus(null);
             }
         }, 2000);
 
