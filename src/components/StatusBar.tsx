@@ -87,8 +87,9 @@ const getOperationIcon = (status: OperationStatus) => {
 };
 
 export function StatusBar() {
-    const { operationStatus, statusBarDismissed, dismissStatusBar } = useChatStore();
+    const { operationStatus, statusBarDismissed, dismissStatusBar, heartbeatWarningStart, heartbeatWarningMessage } = useChatStore();
     const [elapsed, setElapsed] = useState(0);
+    const [heartbeatElapsed, setHeartbeatElapsed] = useState(0);
     
     // Update elapsed time every second
     useEffect(() => {
@@ -107,80 +108,119 @@ export function StatusBar() {
     }, [operationStatus]);
     
     // Don't render if no operation or dismissed
-    if (!operationStatus || statusBarDismissed) {
+    useEffect(() => {
+        if (!heartbeatWarningStart) {
+            setHeartbeatElapsed(0);
+            return;
+        }
+        const updateElapsed = () => {
+            setHeartbeatElapsed(Math.floor((Date.now() - heartbeatWarningStart) / 1000));
+        };
+        updateElapsed();
+        const interval = setInterval(updateElapsed, 1000);
+        return () => clearInterval(interval);
+    }, [heartbeatWarningStart]);
+
+    if (statusBarDismissed) {
         return null;
     }
-    
-    const colors = getStatusBarColors(operationStatus);
-    const icon = getOperationIcon(operationStatus);
-    
+
+    const heartbeatActive = !!heartbeatWarningStart;
+    const colors = operationStatus ? getStatusBarColors(operationStatus) : null;
+    const icon = operationStatus ? getOperationIcon(operationStatus) : null;
+
     return (
-        <div className={`status-bar flex items-center justify-between px-4 py-2 ${colors.bg} border-b ${colors.border} transition-all`}>
-            <div className="flex items-center gap-3 flex-1 min-w-0">
-                {/* Icon/spinner */}
-                <div className={`flex-shrink-0 ${colors.icon}`}>
-                    {operationStatus.completed ? (
-                        <span className="text-lg">{icon}</span>
-                    ) : (
-                        <div className="flex items-center">
-                            <span className="text-lg mr-1">{icon}</span>
-                            <div className="flex gap-0.5">
-                                <div className={`w-1 h-1 ${colors.progress} rounded-full animate-pulse`} />
-                                <div className={`w-1 h-1 ${colors.progress} rounded-full animate-pulse`} style={{ animationDelay: '200ms' }} />
-                                <div className={`w-1 h-1 ${colors.progress} rounded-full animate-pulse`} style={{ animationDelay: '400ms' }} />
-                            </div>
-                        </div>
-                    )}
-                </div>
-                
-                {/* Message */}
-                <div className={`flex-1 min-w-0 ${colors.text}`}>
-                    <span className="text-sm font-medium truncate">
-                        {operationStatus.message}
-                    </span>
-                    
-                    {/* Progress info for downloads */}
-                    {operationStatus.type === 'downloading' && operationStatus.currentFile && !operationStatus.completed && (
-                        <span className="ml-2 text-xs opacity-75">
-                            ({operationStatus.currentFile})
+        <>
+            {heartbeatActive && (
+                <div className="heartbeat-warning-bar flex items-center justify-between px-4 py-2 bg-red-50 border-b border-red-300 text-red-800">
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <span className="text-lg">🚨</span>
+                        <span className="text-sm font-medium truncate">
+                            {heartbeatWarningMessage || 'Backend unresponsive'}
                         </span>
-                    )}
+                        <div className="flex-shrink-0 text-xs text-red-700 opacity-80 font-mono">
+                            {formatElapsedTime(heartbeatElapsed)}
+                        </div>
+                    </div>
+                    <button
+                        onClick={dismissStatusBar}
+                        className="flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors text-red-600"
+                        aria-label="Dismiss heartbeat warning"
+                    >
+                        <X size={16} />
+                    </button>
                 </div>
-                
-                {/* Progress bar for downloads */}
-                {operationStatus.type === 'downloading' && operationStatus.progress !== undefined && !operationStatus.completed && (
-                    <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden flex-shrink-0">
-                        <div 
-                            className={`h-full ${colors.progress} transition-all duration-300`}
-                            style={{ width: `${operationStatus.progress}%` }}
-                        />
+            )}
+
+            {operationStatus && (
+                <div className={`status-bar flex items-center justify-between px-4 py-2 ${colors!.bg} border-b ${colors!.border} transition-all`}>
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                        {/* Icon/spinner */}
+                        <div className={`flex-shrink-0 ${colors!.icon}`}>
+                            {operationStatus.completed ? (
+                                <span className="text-lg">{icon}</span>
+                            ) : (
+                                <div className="flex items-center">
+                                    <span className="text-lg mr-1">{icon}</span>
+                                    <div className="flex gap-0.5">
+                                        <div className={`w-1 h-1 ${colors!.progress} rounded-full animate-pulse`} />
+                                        <div className={`w-1 h-1 ${colors!.progress} rounded-full animate-pulse`} style={{ animationDelay: '200ms' }} />
+                                        <div className={`w-1 h-1 ${colors!.progress} rounded-full animate-pulse`} style={{ animationDelay: '400ms' }} />
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        
+                        {/* Message */}
+                        <div className={`flex-1 min-w-0 ${colors!.text}`}>
+                            <span className="text-sm font-medium truncate">
+                                {operationStatus.message}
+                            </span>
+                            
+                            {/* Progress info for downloads */}
+                            {operationStatus.type === 'downloading' && operationStatus.currentFile && !operationStatus.completed && (
+                                <span className="ml-2 text-xs opacity-75">
+                                    ({operationStatus.currentFile})
+                                </span>
+                            )}
+                        </div>
+                        
+                        {/* Progress bar for downloads */}
+                        {operationStatus.type === 'downloading' && operationStatus.progress !== undefined && !operationStatus.completed && (
+                            <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden flex-shrink-0">
+                                <div 
+                                    className={`h-full ${colors!.progress} transition-all duration-300`}
+                                    style={{ width: `${operationStatus.progress}%` }}
+                                />
+                            </div>
+                        )}
+                        
+                        {/* Elapsed time */}
+                        {!operationStatus.completed && (
+                            <div className={`flex-shrink-0 text-xs ${colors!.text} opacity-75 font-mono`}>
+                                {formatElapsedTime(elapsed)}
+                            </div>
+                        )}
+                        
+                        {/* Completed indicator */}
+                        {operationStatus.completed && (
+                            <span className={`flex-shrink-0 text-xs font-medium ${colors!.text} px-2 py-0.5 rounded-full bg-green-100`}>
+                                Complete
+                            </span>
+                        )}
                     </div>
-                )}
-                
-                {/* Elapsed time */}
-                {!operationStatus.completed && (
-                    <div className={`flex-shrink-0 text-xs ${colors.text} opacity-75 font-mono`}>
-                        {formatElapsedTime(elapsed)}
-                    </div>
-                )}
-                
-                {/* Completed indicator */}
-                {operationStatus.completed && (
-                    <span className={`flex-shrink-0 text-xs font-medium ${colors.text} px-2 py-0.5 rounded-full bg-green-100`}>
-                        Complete
-                    </span>
-                )}
-            </div>
-            
-            {/* Dismiss button */}
-            <button
-                onClick={dismissStatusBar}
-                className={`status-dismiss-button flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors ${colors.icon}`}
-                aria-label="Dismiss status"
-            >
-                <X size={16} />
-            </button>
-        </div>
+                    
+                    {/* Dismiss button */}
+                    <button
+                        onClick={dismissStatusBar}
+                        className={`status-dismiss-button flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors ${colors!.icon}`}
+                        aria-label="Dismiss status"
+                    >
+                        <X size={16} />
+                    </button>
+                </div>
+            )}
+        </>
     );
 }
 

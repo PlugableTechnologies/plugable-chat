@@ -194,6 +194,10 @@ interface ChatState {
     setOperationStatus: (status: OperationStatus | null) => void;
     dismissStatusBar: () => void;
     showStatusBar: () => void;
+    // Heartbeat warning (frontend cannot reach backend)
+    heartbeatWarningStart: number | null;
+    heartbeatWarningMessage: string | null;
+    setHeartbeatWarning: (startTime: number | null, message?: string | null) => void;
 
     // Per-chat streaming tracking (streaming continues to original chat on switch)
     streamingChatId: string | null;
@@ -318,6 +322,9 @@ let modelFetchPromise: Promise<void> | null = null;
 let modelFetchRetryTimer: ReturnType<typeof setTimeout> | null = null;
 const MODEL_FETCH_MAX_RETRIES = 3;
 const MODEL_FETCH_INITIAL_DELAY_MS = 1000;
+let tokenLogChatId: string | null = null;
+let tokenLogRecorded = false;
+const DEBUG_LOG_ENDPOINT = 'http://127.0.0.1:7242/ingest/ed1dd551-d0f1-4880-9a65-c463a4dc7c0d';
 
 // Relevance search debounce/cancellation state
 let relevanceSearchTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -569,6 +576,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     setOperationStatus: (status) => set({ operationStatus: status, statusBarDismissed: false }),
     dismissStatusBar: () => set({ statusBarDismissed: true }),
     showStatusBar: () => set({ statusBarDismissed: false }),
+    heartbeatWarningStart: null,
+    heartbeatWarningMessage: null,
+    setHeartbeatWarning: (startTime, message) => set({
+        heartbeatWarningStart: startTime,
+        heartbeatWarningMessage: message ?? (startTime ? 'Backend unresponsive' : null),
+        statusBarDismissed: false,
+    }),
 
     // Per-chat streaming tracking
     streamingChatId: null,
@@ -1120,6 +1134,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         try {
             const tokenListener = await listen<string>('chat-token', (event) => {
+                const snapshot = get();
+                const targetChatId = snapshot.streamingChatId || snapshot.currentChatId;
+                if (targetChatId && (!tokenLogRecorded || tokenLogChatId !== targetChatId)) {
+                    tokenLogRecorded = true;
+                    tokenLogChatId = targetChatId;
+                    // #region agent log
+                    fetch(DEBUG_LOG_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H1',location:'chat-store.ts:1122',message:'first_token_for_stream',data:{chatId:targetChatId,assistantStreamingActive:snapshot.assistantStreamingActive,generationCounter:snapshot.chatGenerationCounter},timestamp:Date.now()})}).catch(()=>{});
+                    // #endregion
+                }
                 set((state) => {
                     // Ignore tokens if generation was stopped
                     if (!state.assistantStreamingActive) {
@@ -1161,6 +1184,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
 
             const finishedListener = await listen('chat-finished', () => {
+                const snapshot = get();
+                tokenLogRecorded = false;
+                tokenLogChatId = null;
+                // #region agent log
+                fetch(DEBUG_LOG_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H1',location:'chat-store.ts:1163',message:'chat_finished_event',data:{streamingChatId:snapshot.streamingChatId,assistantStreamingActive:snapshot.assistantStreamingActive,toolCurrent:snapshot.toolExecution.currentTool ? {server:snapshot.toolExecution.currentTool.server,tool:snapshot.toolExecution.currentTool.tool} : null,pendingToolApproval:!!snapshot.pendingToolApproval,lastStreamActivityTs:snapshot.lastStreamActivityTs},timestamp:Date.now()})}).catch(()=>{});
+                // #endregion
                 // If we were streaming to a different chat, the messages are in streamingMessages
                 // They should have been saved to LanceDB by the backend, so we don't need to do anything special
                 set({ 
@@ -1294,6 +1323,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     : toolName === 'tool_search'
                     ? 'Searching for tools...'
                     : `Executing ${toolName}...`;
+                // #region agent log
+                fetch(DEBUG_LOG_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H2',location:'chat-store.ts:1291',message:'tool_executing',data:{server,tool:toolName,argumentKeys:Object.keys(payloadArgs || {}),streamingChatId:get().streamingChatId,assistantStreamingActive:get().assistantStreamingActive},timestamp:Date.now()})}).catch(()=>{});
+                // #endregion
                 const scheduleUpdate = () => set((state) => ({
                     toolExecution: {
                         ...state.toolExecution,
@@ -1340,6 +1372,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
             const toolResultListener = await listen<ToolResultEvent>('tool-result', (event) => {
                 console.log(`[ChatStore] Tool result: ${event.payload.server}::${event.payload.tool}, error=${event.payload.is_error}`);
+                // #region agent log
+                fetch(DEBUG_LOG_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H2',location:'chat-store.ts:1341',message:'tool_result',data:{server:event.payload.server,tool:event.payload.tool,isError:event.payload.is_error},timestamp:Date.now()})}).catch(()=>{});
+                // #endregion
                 set((state) => {
                     // Calculate duration if we have a start time
                     const startTime = state.toolExecution.currentTool?.startTime;

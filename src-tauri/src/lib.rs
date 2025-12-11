@@ -39,6 +39,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, oneshot};
@@ -122,6 +123,25 @@ struct SystemPromptEvent {
 // Tracks the latest turn progress for reconnect/replay
 struct TurnTrackerState {
     progress: Arc<RwLock<TurnProgress>>,
+}
+
+#[derive(Clone)]
+struct HeartbeatState {
+    last_frontend_beat: Arc<RwLock<Option<Instant>>>,
+    logged_unresponsive: Arc<RwLock<bool>>,
+    logged_never_seen: Arc<RwLock<bool>>,
+    start_instant: Instant,
+}
+
+impl Default for HeartbeatState {
+    fn default() -> Self {
+        Self {
+            last_frontend_beat: Arc::new(RwLock::new(None)),
+            logged_unresponsive: Arc::new(RwLock::new(false)),
+            logged_never_seen: Arc::new(RwLock::new(false)),
+            start_instant: Instant::now(),
+        }
+    }
 }
 
 /// Global toggle for verbose logging, enabled when LOG_VERBOSE (or PLUGABLE_LOG_VERBOSE)
@@ -5731,6 +5751,20 @@ fn get_launch_overrides(
     })
 }
 
+/// Simple heartbeat endpoint called by the frontend once per second.
+/// Resets the "frontend alive" timer; backend will log if beats stop arriving.
+#[tauri::command]
+async fn heartbeat_ping(heartbeat_state: State<'_, HeartbeatState>) -> Result<(), String> {
+    let mut last = heartbeat_state.last_frontend_beat.write().await;
+    *last = Some(Instant::now());
+
+    // Clear any previous unresponsive flag so a new gap will log once.
+    let mut logged = heartbeat_state.logged_unresponsive.write().await;
+    *logged = false;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let cli_args = CliArgs::try_parse().unwrap_or_else(|e| {
@@ -5860,6 +5894,55 @@ pub fn run() {
                 progress: Arc::new(RwLock::new(TurnProgress::default())),
             };
             app.manage(turn_tracker_state);
+
+            // Track frontend heartbeat (1s cadence) for backend-side logging
+            let heartbeat_state = HeartbeatState::default();
+            app.manage(heartbeat_state.clone());
+            const FRONTEND_HEARTBEAT_TIMEOUT_MS: u64 = 4000;
+            tauri::async_runtime::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    ticker.tick().await;
+                    let now = Instant::now();
+                    let last_opt = {
+                        let guard = heartbeat_state.last_frontend_beat.read().await;
+                        *guard
+                    };
+
+                    if let Some(last) = last_opt {
+                        let gap = now.saturating_duration_since(last);
+                        if gap.as_millis() as u64 >= FRONTEND_HEARTBEAT_TIMEOUT_MS {
+                            let mut logged_guard = heartbeat_state.logged_unresponsive.write().await;
+                            if !*logged_guard {
+                                println!(
+                                    "[Heartbeat] Frontend heartbeat missing for {} ms",
+                                    gap.as_millis()
+                                );
+                                *logged_guard = true;
+                            }
+                        } else {
+                            // Recovered; allow future gaps to log again
+                            let mut logged_guard = heartbeat_state.logged_unresponsive.write().await;
+                            if *logged_guard {
+                                *logged_guard = false;
+                            }
+                        }
+                    } else {
+                        // No heartbeat seen yet since app start
+                        let gap = now.saturating_duration_since(heartbeat_state.start_instant);
+                        if gap.as_millis() as u64 >= FRONTEND_HEARTBEAT_TIMEOUT_MS {
+                            let mut logged_never_guard = heartbeat_state.logged_never_seen.write().await;
+                            if !*logged_never_guard {
+                                println!(
+                                    "[Heartbeat] No frontend heartbeat received yet ({} ms since start)",
+                                    gap.as_millis()
+                                );
+                                *logged_never_guard = true;
+                            }
+                        }
+                    }
+                }
+            });
 
             let app_handle = app.handle();
             // Spawn Vector Actor
@@ -6021,7 +6104,8 @@ pub fn run() {
             approve_tool_call,
             reject_tool_call,
             get_pending_tool_approvals,
-            get_launch_overrides
+            get_launch_overrides,
+            heartbeat_ping
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -230,6 +230,66 @@ function App() {
     useSettingsStore.getState().fetchSettings();
   }, []);
 
+  // Lightweight backend heartbeat (1s). Shows a warning bar if backend is unresponsive.
+  useEffect(() => {
+    const HEARTBEAT_INTERVAL_MS = 1000;
+    const HEARTBEAT_TIMEOUT_MS = 1500;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const failureStartRef: { current: number | null } = { current: null };
+
+    const sendHeartbeat = async () => {
+      if (cancelled) return;
+      const startedAt = Date.now();
+
+      const heartbeatPromise = new Promise<void>((resolve, reject) => {
+        const timeoutId = setTimeout(() => reject(new Error('heartbeat-timeout')), HEARTBEAT_TIMEOUT_MS);
+        invoke('heartbeat_ping')
+          .then(() => {
+            clearTimeout(timeoutId);
+            resolve();
+          })
+          .catch((err) => {
+            clearTimeout(timeoutId);
+            reject(err);
+          });
+      });
+
+      try {
+        await heartbeatPromise;
+        if (failureStartRef.current !== null) {
+          const recoveredMs = Date.now() - failureStartRef.current;
+          console.warn(`[Heartbeat] Backend recovered after ${recoveredMs}ms`);
+        }
+        failureStartRef.current = null;
+        const store = useChatStore.getState();
+        if (store.heartbeatWarningStart !== null) {
+          store.setHeartbeatWarning(null, null);
+        }
+      } catch (_err) {
+        const store = useChatStore.getState();
+        if (failureStartRef.current === null) {
+          failureStartRef.current = startedAt;
+        }
+        const elapsedMs = Date.now() - failureStartRef.current;
+        store.setHeartbeatWarning(
+          failureStartRef.current,
+          `Backend unresponsive for ${Math.round(elapsedMs / 1000)}s`
+        );
+      } finally {
+        if (!cancelled) {
+          timer = setTimeout(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+        }
+      }
+    };
+
+    sendHeartbeat();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
   // Global event listeners (persist across component remounts)
   useEffect(() => {
     const store = useChatStore.getState();
@@ -307,6 +367,9 @@ function App() {
       const cooledDown = now - lastResetTs > RESET_COOLDOWN_MS;
       if (isSoftStalled && cooledDown) {
         lastResetTs = now;
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ed1dd551-d0f1-4880-9a65-c463a4dc7c0d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H1',location:'App.tsx:306',message:'soft_stall_detected',data:{stalledFor,lastActivity},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         console.warn("[App] Detected stalled streaming/tool heartbeat. Refreshing listeners.");
         state.cleanupListeners();
         state.setupListeners();
@@ -318,6 +381,9 @@ function App() {
         });
       }
       if (isHardStalled) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ed1dd551-d0f1-4880-9a65-c463a4dc7c0d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H1',location:'App.tsx:320',message:'hard_stall_detected',data:{stalledFor,lastActivity},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         console.warn("[App] Hard stall detected. Reconciling with backend and unblocking UI.");
         reconcileFromBackend();
       }

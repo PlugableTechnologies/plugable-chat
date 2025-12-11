@@ -1011,6 +1011,9 @@ const wrapUndelimitedLatex = (content: string): string => {
 
 // Helper to wrap raw \boxed{} in math delimiters to ensure they render
 const preprocessLaTeX = (content: string) => {
+    const startTimeMs = Date.now();
+    const shouldLogLatex = content.length > 4000;
+    const boxedCount = shouldLogLatex ? (content.match(/\\boxed\{/g)?.length || 0) : 0;
     // First strip OpenAI tokens
     let processed = stripOpenAITokens(content);
     
@@ -1127,6 +1130,12 @@ const preprocessLaTeX = (content: string) => {
 
         result += processed[i];
         i++;
+    }
+    const durationMs = Date.now() - startTimeMs;
+    if (shouldLogLatex) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ed1dd551-d0f1-4880-9a65-c463a4dc7c0d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H3',location:'ChatArea.tsx:1013',message:'preprocess_latex_heavy',data:{inputLength:content.length,processedLength:processed.length,boxedCount,durationMs},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
     }
     return result;
 };
@@ -1585,6 +1594,10 @@ export function ChatArea() {
             score: summaryScore,
             pinned: summaryPinned
         });
+
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ed1dd551-d0f1-4880-9a65-c463a4dc7c0d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H1',location:'ChatArea.tsx:1555',message:'handle_send_start',data:{chatId,isNewChat,promptLength:trimmedText.length,ragChunkCount:storeState.ragChunkCount,model:storeState.currentModel,generationCounter:storeState.chatGenerationCounter},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
 
         // Add user message (show original text to user)
         appendChatMessage({
