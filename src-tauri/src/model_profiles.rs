@@ -109,6 +109,7 @@ impl ModelProfile {
         messages.push(ChatMessage {
             role: "system".to_string(),
             content: system_content,
+            system_prompt: None,
         });
 
         // Add history (skip existing system messages)
@@ -225,6 +226,7 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
         messages.push(ChatMessage {
             role: "system".to_string(),
             content: system_content,
+            system_prompt: None,
         });
 
         for msg in history {
@@ -300,6 +302,7 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
         messages.push(ChatMessage {
             role: "system".to_string(),
             content: system_content,
+            system_prompt: None,
         });
 
         for msg in history {
@@ -374,6 +377,7 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
         messages.push(ChatMessage {
             role: "system".to_string(),
             content: system_content,
+            system_prompt: None,
         });
 
         for msg in history {

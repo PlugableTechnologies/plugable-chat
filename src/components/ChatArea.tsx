@@ -1136,6 +1136,7 @@ type AssistantMessageProps = {
     isLastMessage: boolean;
     thinkingStartTime: number | null;
     toolProcessingStartTime: number | null;
+    previousSystemPromptText?: string | null;
 };
 
 const AssistantMessage = memo(function AssistantMessage({
@@ -1143,6 +1144,7 @@ const AssistantMessage = memo(function AssistantMessage({
     isLastMessage,
     thinkingStartTime,
     toolProcessingStartTime,
+    previousSystemPromptText,
 }: AssistantMessageProps) {
     const toolCalls = message.toolCalls || [];
     const parsedParts = useMemo(() => parseMessageContent(message.content), [message.content]);
@@ -1213,6 +1215,12 @@ const AssistantMessage = memo(function AssistantMessage({
     );
     const pythonOutputToShow = latestPythonStdout || latestCodeExecutionStdout || '';
     const fallbackAnswer = !hasVisibleText ? latestNonPythonToolResult || '' : '';
+    const showSystemPromptAccordion = useMemo(() => {
+        const prompt = message.systemPromptText;
+        if (!prompt || !prompt.trim()) return false;
+        return prompt !== previousSystemPromptText;
+    }, [message.systemPromptText, previousSystemPromptText]);
+    const systemPromptLength = message.systemPromptText?.length || 0;
     const renderedParts = useMemo(() => {
         let toolCallIndex = 0;
         const nodes: JSX.Element[] = [];
@@ -1330,6 +1338,46 @@ const AssistantMessage = memo(function AssistantMessage({
 
     return (
         <>
+            {showSystemPromptAccordion && message.systemPromptText && (
+                <details className="system-prompt-accordion group/system-prompt my-3 border border-blue-200 rounded-xl overflow-hidden bg-blue-50/70">
+                    <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-blue-100/60 transition-colors select-none">
+                        <span className="text-blue-600 text-lg">🛈</span>
+                        <span className="font-semibold text-blue-900 text-sm">System prompt</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-blue-200 text-blue-800">
+                            {systemPromptLength} chars
+                        </span>
+                        <span className="ml-auto text-xs text-blue-400 group-open/system-prompt:rotate-180 transition-transform">▼</span>
+                    </summary>
+                    <div className="border-t border-blue-200 px-4 py-3 bg-white">
+                        <div className="flex justify-end mb-2">
+                            <button
+                                onClick={() => message.systemPromptText && navigator.clipboard?.writeText(message.systemPromptText)}
+                                className="text-xs px-2 py-1 rounded border border-blue-200 text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors"
+                            >
+                                Copy
+                            </button>
+                        </div>
+                        <div className="prose prose-slate max-w-none text-sm text-gray-900">
+                            <ReactMarkdown
+                                remarkPlugins={[remarkGfm, remarkMath]}
+                                rehypePlugins={[
+                                    rehypeRaw,
+                                    [
+                                        rehypeKatex,
+                                        {
+                                            throwOnError: false,
+                                            errorColor: '#666666',
+                                            strict: false,
+                                        },
+                                    ],
+                                ]}
+                            >
+                                {message.systemPromptText}
+                            </ReactMarkdown>
+                        </div>
+                    </div>
+                </details>
+            )}
             {message.ragChunks && message.ragChunks.length > 0 && (
                 <RagContextBlock chunks={message.ragChunks} />
             )}
@@ -1576,7 +1624,7 @@ export function ChatArea() {
             id: (Date.now() + 1).toString(),
             role: 'assistant',
             content: '',
-            timestamp: Date.now()
+            timestamp: Date.now(),
         });
 
         try {
@@ -1621,7 +1669,30 @@ export function ChatArea() {
                 setRagStartTime(null);
             }
 
-            const history = chatMessages.map((m) => ({ role: m.role, content: m.content }));
+            // Fetch the exact system prompt that will be sent for this turn
+            let systemPromptPreview: string | null = null;
+            try {
+                systemPromptPreview = await invoke<string>('get_system_prompt_preview', { user_prompt: messageToSend });
+            } catch (e) {
+                console.error('[ChatArea] Failed to fetch system prompt preview:', e);
+            }
+
+            if (systemPromptPreview) {
+                useChatStore.setState((state) => {
+                    const newMessages = [...state.chatMessages];
+                    const lastIdx = newMessages.length - 1;
+                    if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+                        newMessages[lastIdx] = { ...newMessages[lastIdx], systemPromptText: systemPromptPreview };
+                    }
+                    return { chatMessages: newMessages };
+                });
+            }
+
+            const history = chatMessages.map((m) => ({
+                role: m.role,
+                content: m.content,
+                system_prompt: m.systemPromptText,
+            }));
             // Call backend - streaming will trigger events
             const returnedChatId = await invoke<string>('chat', {
                 chatId,
@@ -1690,32 +1761,40 @@ export function ChatArea() {
                     </div>
                 ) : (
                     <div className="chat-thread w-full max-w-none space-y-6 py-0">
-                        {chatMessages.map(m => (
-                            <div key={m.id} className={`chat-message-row flex w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                <div
-                                    className={`
+                        {chatMessages.map((m, idx) => {
+                            const previousAssistantSystemPrompt =
+                                chatMessages
+                                    .slice(0, idx)
+                                    .reverse()
+                                    .find((prev) => prev.role === 'assistant' && prev.systemPromptText)?.systemPromptText || null;
+                            return (
+                                <div key={m.id} className={`chat-message-row flex w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                    <div
+                                        className={`
                                     chat-bubble relative w-full max-w-none rounded-2xl px-5 py-3.5 text-[15px] leading-7
                                     ${m.role === 'user'
-                                            ? 'chat-bubble-user bg-gray-100 text-gray-900'
-                                            : 'chat-bubble-assistant bg-gray-50 text-gray-900'
-                                        }
+                                                ? 'chat-bubble-user bg-gray-100 text-gray-900'
+                                                : 'chat-bubble-assistant bg-gray-50 text-gray-900'
+                                            }
                                 `}
-                                >
-                                    <div className="chat-message-content prose prose-slate max-w-none break-words text-gray-900">
-                                        {m.role === 'assistant' ? (
-                                            <AssistantMessage
-                                                message={m}
-                                                isLastMessage={m.role === 'assistant' && chatMessages[chatMessages.length - 1]?.id === m.id}
-                                                thinkingStartTime={thinkingStartTime}
-                                                toolProcessingStartTime={toolProcessingStartTime}
-                                            />
-                                        ) : (
-                                            <div className="whitespace-pre-wrap">{m.content}</div>
-                                        )}
+                                    >
+                                        <div className="chat-message-content prose prose-slate max-w-none break-words text-gray-900">
+                                            {m.role === 'assistant' ? (
+                                                <AssistantMessage
+                                                    message={m}
+                                                    isLastMessage={m.role === 'assistant' && chatMessages[chatMessages.length - 1]?.id === m.id}
+                                                    thinkingStartTime={thinkingStartTime}
+                                                    toolProcessingStartTime={toolProcessingStartTime}
+                                                    previousSystemPromptText={previousAssistantSystemPrompt}
+                                                />
+                                            ) : (
+                                                <div className="whitespace-pre-wrap">{m.content}</div>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                        ))}
+                            );
+                        })}
                         {assistantStreamingActive && chatMessages[chatMessages.length - 1]?.role !== 'assistant' && (
                             <div className="flex w-full justify-start">
                                 <div className="bg-gray-50 rounded-2xl px-6 py-4">

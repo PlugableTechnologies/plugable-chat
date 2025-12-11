@@ -490,6 +490,7 @@ impl ModelGatewayActor {
                                 crate::protocol::ChatMessage {
                                     role: "system".to_string(),
                                     content: "You are a helpful AI assistant.".to_string(),
+                                    system_prompt: None,
                                 },
                             );
                         } else {

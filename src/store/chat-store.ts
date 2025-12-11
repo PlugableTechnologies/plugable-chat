@@ -92,6 +92,8 @@ export interface Message {
     role: 'user' | 'assistant';
     content: string;
     timestamp: number;
+    /** System prompt string used for this assistant turn */
+    systemPromptText?: string;
     /** Tool calls made during this assistant message */
     toolCalls?: ToolCallRecord[];
     /** Code execution blocks during this assistant message */
@@ -976,7 +978,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 const processedMessages = messages.map((m: any, idx: number) => ({
                     ...m,
                     id: m.id || `${Date.now()}-${idx}`,
-                    timestamp: m.timestamp || Date.now()
+                    timestamp: m.timestamp || Date.now(),
+                    systemPromptText: m.system_prompt || m.systemPromptText,
                 }));
                 set({ chatMessages: processedMessages, currentChatId: id, backendError: null });
             } else {

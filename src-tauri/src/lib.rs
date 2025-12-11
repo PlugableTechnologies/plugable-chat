@@ -46,8 +46,9 @@ use tool_adapters::{detect_python_code, format_tool_result, parse_tool_calls_for
 use tool_registry::{create_shared_registry, SharedToolRegistry, ToolSearchResult};
 use tools::code_execution::{CodeExecutionExecutor, CodeExecutionInput, CodeExecutionOutput};
 use tools::tool_search::{
-    precompute_tool_search_embeddings, ToolSearchExecutor, ToolSearchInput,
+    precompute_tool_search_embeddings, ToolSearchExecutor, ToolSearchInput, ToolSearchOutput,
 };
+use tools::schema_search::SchemaSearchOutput;
 use rustpython_parser::{ast, Parse};
 use uuid::Uuid;
 
@@ -1297,6 +1298,7 @@ async fn run_agentic_loop(
     primary_format: ToolCallFormatName,
     allow_tool_search_for_python: bool,
     tool_search_max_results: usize,
+    turn_system_prompt: String,
 ) {
     // Resolve model profile from model name
     let profile = resolve_profile(&model_name);
@@ -1346,9 +1348,19 @@ async fn run_agentic_loop(
         // Send chat request to Foundry
         println!("[AgenticLoop] 📤 Sending chat request to Foundry...");
         let _ = std::io::stdout().flush();
+        // Strip any local-only metadata (like system_prompt) before sending to Foundry
+        let model_messages: Vec<ChatMessage> = full_history
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+                system_prompt: None,
+            })
+            .collect();
+
         if let Err(e) = foundry_tx
             .send(FoundryMsg::Chat {
-                chat_history_messages: full_history.clone(),
+                chat_history_messages: model_messages,
                 reasoning_effort: reasoning_effort.clone(),
                 native_tool_specs: openai_tools.clone(),
                 respond_to: tx,
@@ -1451,6 +1463,7 @@ async fn run_agentic_loop(
                 full_history.push(ChatMessage {
                     role: "assistant".to_string(),
                     content: response,
+                    system_prompt: Some(turn_system_prompt.clone()),
                 });
                 break;
             }
@@ -1468,6 +1481,7 @@ async fn run_agentic_loop(
             full_history.push(ChatMessage {
                 role: "assistant".to_string(),
                 content: assistant_response,
+                system_prompt: Some(turn_system_prompt.clone()),
             });
             break;
         }
@@ -1479,6 +1493,7 @@ async fn run_agentic_loop(
         full_history.push(ChatMessage {
             role: "assistant".to_string(),
             content: assistant_response.clone(),
+            system_prompt: Some(turn_system_prompt.clone()),
         });
 
         // Process each tool call
@@ -2034,6 +2049,7 @@ async fn run_agentic_loop(
         full_history.push(ChatMessage {
             role: "user".to_string(),
             content: combined_results,
+            system_prompt: None,
         });
 
         iteration += 1;
@@ -3030,6 +3046,251 @@ async fn cancel_generation(
     Ok(())
 }
 
+#[derive(Default)]
+struct AutoDiscoveryContext {
+    tool_search_output: Option<ToolSearchOutput>,
+    schema_search_output: Option<SchemaSearchOutput>,
+    discovered_tool_schemas: Vec<(String, Vec<McpTool>)>,
+}
+
+fn map_tool_search_hits_to_schemas(
+    hits: &[ToolSearchResult],
+    filtered_tool_descriptions: &[(String, Vec<McpTool>)],
+) -> Vec<(String, Vec<McpTool>)> {
+    let mut per_server: HashMap<String, Vec<McpTool>> = HashMap::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for hit in hits {
+        let matching_server = filtered_tool_descriptions
+            .iter()
+            .find(|(server_id, _)| server_id == &hit.server_id);
+
+        if let Some((_, tools)) = matching_server {
+            if let Some(schema) = tools.iter().find(|tool| tool.name == hit.name) {
+                let key = format!("{}::{}", hit.server_id, hit.name);
+                if seen.insert(key) {
+                    per_server
+                        .entry(hit.server_id.clone())
+                        .or_default()
+                        .push(schema.clone());
+                }
+            } else {
+                println!(
+                    "[Chat] Tool search hit '{}' not found in filtered schemas for server {}",
+                    hit.name, hit.server_id
+                );
+            }
+        } else {
+            println!(
+                "[Chat] Tool search hit for unknown server {} (tool {})",
+                hit.server_id, hit.name
+            );
+        }
+    }
+
+    let mut grouped: Vec<(String, Vec<McpTool>)> = per_server
+        .into_iter()
+        .map(|(server, tools)| (server, tools))
+        .collect();
+    grouped.sort_by(|a, b| a.0.cmp(&b.0));
+    grouped
+}
+
+fn render_auto_context_sections(
+    tool_search_output: Option<&ToolSearchOutput>,
+    schema_search_output: Option<&SchemaSearchOutput>,
+) -> Vec<String> {
+    let mut sections: Vec<String> = Vec::new();
+
+    if let Some(output) = tool_search_output {
+        if !output.tools.is_empty() {
+            let mut body = String::from("Auto-discovered MCP tools for this prompt:");
+            for tool in &output.tools {
+                let desc = tool.description.as_deref().unwrap_or("").trim();
+                let mut line = format!(
+                    "\n- {}::{} (score {:.2})",
+                    tool.server_id, tool.name, tool.score
+                );
+                if !desc.is_empty() {
+                    line.push_str(&format!(" — {}", desc));
+                }
+                body.push_str(&line);
+            }
+            sections.push(format!("### Auto tool search\n{}", body));
+        }
+    }
+
+    if let Some(output) = schema_search_output {
+        if !output.tables.is_empty() {
+            let mut body = String::from("Auto-discovered database tables for this prompt:");
+            for table in &output.tables {
+                let mut line = format!(
+                    "\n- {} [{} | {}] (score {:.2})",
+                    table.table_name, table.sql_dialect, table.source_id, table.relevance
+                );
+                if let Some(desc) = table.description.as_deref() {
+                    if !desc.trim().is_empty() {
+                        line.push_str(&format!(" — {}", desc.trim()));
+                    }
+                }
+                if !table.relevant_columns.is_empty() {
+                    let cols: Vec<String> = table
+                        .relevant_columns
+                        .iter()
+                        .map(|c| format!("{} ({})", c.name, c.data_type))
+                        .collect();
+                    line.push_str(&format!("\n  cols: {}", cols.join(", ")));
+                }
+                body.push_str(&line);
+            }
+            sections.push(format!("### Auto schema search\n{}", body));
+        }
+    }
+
+    sections
+}
+
+async fn auto_tool_search_for_prompt(
+    prompt: &str,
+    tool_search_enabled: bool,
+    tool_search_max_results: usize,
+    has_mcp_tools: bool,
+    filtered_tool_descriptions: &[(String, Vec<McpTool>)],
+    registry: SharedToolRegistry,
+    embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+    materialize: bool,
+) -> (Option<ToolSearchOutput>, Vec<(String, Vec<McpTool>)>) {
+    if !tool_search_enabled || !has_mcp_tools {
+        return (None, Vec::new());
+    }
+
+    if prompt.trim().is_empty() {
+        println!("[Chat] Auto tool_search skipped: empty user prompt");
+        return (None, Vec::new());
+    }
+
+    let executor = ToolSearchExecutor::new(registry, embedding_model);
+    let search_input = ToolSearchInput {
+        queries: vec![prompt.to_string()],
+        top_k: tool_search_max_results,
+    };
+
+    match executor.execute(search_input).await {
+        Ok(output) => {
+            if materialize {
+                executor.materialize_results(&output.tools).await;
+            }
+            println!(
+                "[Chat] Auto tool_search discovered {} tools before first turn",
+                output.tools.len()
+            );
+            let schemas = map_tool_search_hits_to_schemas(&output.tools, filtered_tool_descriptions);
+            (Some(output), schemas)
+        }
+        Err(e) => {
+            println!(
+                "[Chat] Auto tool_search failed (continuing without discoveries): {}",
+                e
+            );
+            (None, Vec::new())
+        }
+    }
+}
+
+async fn auto_schema_search_for_prompt(
+    prompt: &str,
+    search_schemas_enabled: bool,
+    toolbox_config: &DatabaseToolboxConfig,
+    schema_tx: mpsc::Sender<SchemaVectorMsg>,
+    embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+) -> Option<SchemaSearchOutput> {
+    if !search_schemas_enabled {
+        return None;
+    }
+
+    let has_enabled_sources = toolbox_config.enabled
+        && toolbox_config
+            .sources
+            .iter()
+            .any(|source| source.enabled);
+
+    if !has_enabled_sources {
+        println!("[Chat] Auto schema_search skipped: no enabled database sources");
+        return None;
+    }
+
+    if prompt.trim().is_empty() {
+        println!("[Chat] Auto schema_search skipped: empty user prompt");
+        return None;
+    }
+
+    let executor = tools::SchemaSearchExecutor::new(schema_tx, embedding_model);
+    let input = tools::SchemaSearchInput {
+        query: prompt.to_string(),
+        max_tables: 5,
+        max_columns_per_table: 5,
+        min_relevance: 0.3,
+    };
+
+    match executor.execute(input).await {
+        Ok(output) => {
+            println!(
+                "[Chat] Auto schema_search completed: {} table(s) matched",
+                output.tables.len()
+            );
+            Some(output)
+        }
+        Err(e) => {
+            println!(
+                "[Chat] Auto schema_search failed (continuing without schema context): {}",
+                e
+            );
+            None
+        }
+    }
+}
+
+async fn perform_auto_discovery_for_prompt(
+    prompt: &str,
+    tool_search_enabled: bool,
+    tool_search_max_results: usize,
+    has_mcp_tools: bool,
+    search_schemas_enabled: bool,
+    toolbox_config: &DatabaseToolboxConfig,
+    filtered_tool_descriptions: &[(String, Vec<McpTool>)],
+    registry: SharedToolRegistry,
+    embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+    schema_tx: mpsc::Sender<SchemaVectorMsg>,
+    materialize_tools: bool,
+) -> AutoDiscoveryContext {
+    let (tool_search_output, discovered_tool_schemas) = auto_tool_search_for_prompt(
+        prompt,
+        tool_search_enabled,
+        tool_search_max_results,
+        has_mcp_tools,
+        filtered_tool_descriptions,
+        registry.clone(),
+        embedding_model.clone(),
+        materialize_tools,
+    )
+    .await;
+
+    let schema_search_output = auto_schema_search_for_prompt(
+        prompt,
+        search_schemas_enabled,
+        toolbox_config,
+        schema_tx,
+        embedding_model,
+    )
+    .await;
+
+    AutoDiscoveryContext {
+        tool_search_output,
+        schema_search_output,
+        discovered_tool_schemas,
+    }
+}
+
 #[tauri::command]
 async fn chat(
     chat_id: Option<String>,
@@ -3091,6 +3352,7 @@ async fn chat(
     let configured_system_prompt = settings.system_prompt.clone();
     let mut server_configs = settings.mcp_servers.clone();
     let tool_search_enabled = settings.tool_search_enabled;
+    let search_schemas_enabled = settings.search_schemas_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
@@ -3098,6 +3360,7 @@ async fn chat(
     let tool_use_examples_max = settings.tool_use_examples_max;
     let compact_prompt_enabled = settings.compact_prompt_enabled;
     let compact_prompt_max_tools = settings.compact_prompt_max_tools;
+    let database_toolbox_config = settings.database_toolbox.clone();
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
     let tool_system_prompts = settings.tool_system_prompts.clone();
@@ -3152,9 +3415,6 @@ async fn chat(
     let has_mcp_tools = filtered_tool_descriptions
         .iter()
         .any(|(_, tools)| !tools.is_empty());
-
-    // Always use the configured system prompt (which should explain tool capabilities)
-    let base_system_prompt = configured_system_prompt;
 
     // Build the tools list:
     // 1. Include python_execution if enabled in settings
@@ -3254,60 +3514,35 @@ async fn chat(
         }
     }
 
-    // When tool_search is enabled, run it proactively with the user prompt to
-    // surface an initial set of tools before the first model call.
-    if tool_search_enabled && !message.trim().is_empty() {
-        let executor = ToolSearchExecutor::new(
-            tool_registry_state.registry.clone(),
-            embedding_state.model.clone(),
-        );
-        let search_input = ToolSearchInput {
-            queries: vec![message.clone()],
-            top_k: tool_search_max_results,
-        };
-        match executor.execute(search_input).await {
-            Ok(output) => {
-                executor.materialize_results(&output.tools).await;
-                println!(
-                    "[Chat] Auto tool_search discovered {} tools before first turn",
-                    output.tools.len()
-                );
-            }
-            Err(e) => {
-                println!(
-                    "[Chat] Auto tool_search failed (continuing without discoveries): {}",
-                    e
-                );
-            }
-        }
-    } else if tool_search_enabled {
-        println!("[Chat] Auto tool_search skipped: empty user prompt");
-    }
+    // Run auto-discovery (tool search + schema search) for this user prompt
+    let auto_discovery = perform_auto_discovery_for_prompt(
+        &message,
+        tool_search_enabled,
+        tool_search_max_results,
+        has_mcp_tools,
+        search_schemas_enabled,
+        &database_toolbox_config,
+        &filtered_tool_descriptions,
+        tool_registry_state.registry.clone(),
+        embedding_state.model.clone(),
+        handles.schema_tx.clone(),
+        true,
+    )
+    .await;
 
-    // Determine which MCP tools are visible after any materialization
-    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = {
-        let registry = tool_registry_state.registry.read().await;
-        let has_materialized = registry.stats().materialized_tools > 0;
+    let auto_context_sections = render_auto_context_sections(
+        auto_discovery.tool_search_output.as_ref(),
+        auto_discovery.schema_search_output.as_ref(),
+    );
 
-        if tool_search_enabled && !has_materialized {
-            Vec::new()
+    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
+        if !auto_discovery.discovered_tool_schemas.is_empty() {
+            auto_discovery.discovered_tool_schemas.clone()
         } else {
-            filtered_tool_descriptions
-                .iter()
-                .filter_map(|(server_id, tools)| {
-                    let visible_tools: Vec<McpTool> = tools
-                        .iter()
-                        .cloned()
-                        .filter(|tool| registry.is_tool_visible(server_id, &tool.name))
-                        .collect();
-                    if visible_tools.is_empty() {
-                        None
-                    } else {
-                        Some((server_id.clone(), visible_tools))
-                    }
-                })
-                .collect()
+            Vec::new()
         }
+    } else {
+        filtered_tool_descriptions.clone()
     };
 
     // Include visible tools in legacy/native tool calling payloads
@@ -3352,6 +3587,15 @@ async fn chat(
             filtered_tool_descriptions.len()
         );
     }
+
+    let base_system_prompt = if auto_context_sections.is_empty() {
+        configured_system_prompt.clone()
+    } else {
+        let mut composed = configured_system_prompt.clone();
+        composed.push_str("\n\n## Auto-discovered context\n");
+        composed.push_str(&auto_context_sections.join("\n\n"));
+        composed
+    };
 
     // Check if there are any attached documents (RAG indexed files)
     let has_attachments = {
@@ -3453,7 +3697,8 @@ async fn chat(
     if !system_prompt.is_empty() {
         full_history.push(ChatMessage {
             role: "system".to_string(),
-            content: system_prompt,
+            content: system_prompt.clone(),
+            system_prompt: None,
         });
     }
 
@@ -3468,6 +3713,7 @@ async fn chat(
     full_history.push(ChatMessage {
         role: "user".to_string(),
         content: message.clone(),
+        system_prompt: None,
     });
 
     // Get current model info for model-specific handling
@@ -3510,6 +3756,7 @@ async fn chat(
     let primary_format_task = primary_format_for_prompt;
     let allow_tool_search_for_python_task = allow_tool_search_for_python;
     let tool_search_max_results_task = tool_search_max_results;
+    let turn_system_prompt_task = system_prompt.clone();
 
     // Spawn the agentic loop task
     tauri::async_runtime::spawn(async move {
@@ -3539,6 +3786,7 @@ async fn chat(
             primary_format_task,
             allow_tool_search_for_python_task,
             tool_search_max_results_task,
+            turn_system_prompt_task,
         )
         .await;
     });
@@ -4887,18 +5135,24 @@ async fn get_system_prompt_preview(
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
     launch_config: State<'_, LaunchConfigState>,
+    tool_registry_state: State<'_, ToolRegistryState>,
+    embedding_state: State<'_, EmbeddingModelState>,
+    user_prompt: Option<String>,
 ) -> Result<String, String> {
     // Get current settings
     let settings = settings_state.settings.read().await;
     let base_prompt = settings.system_prompt.clone();
     let mut server_configs = settings.mcp_servers.clone();
     let tool_search_enabled = settings.tool_search_enabled;
+    let search_schemas_enabled = settings.search_schemas_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let tool_search_max_results = settings.tool_search_max_results.max(1);
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
     let compact_prompt_enabled = settings.compact_prompt_enabled;
     let compact_prompt_max_tools = settings.compact_prompt_max_tools;
+    let database_toolbox_config = settings.database_toolbox.clone();
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
     let tool_prompts = settings.tool_system_prompts.clone();
@@ -4951,9 +5205,33 @@ async fn get_system_prompt_preview(
         code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
     let allow_tool_search_for_python =
         python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
+    let prompt_for_discovery = user_prompt.unwrap_or_default();
+    let auto_discovery = perform_auto_discovery_for_prompt(
+        &prompt_for_discovery,
+        tool_search_enabled,
+        tool_search_max_results,
+        has_mcp_tools,
+        search_schemas_enabled,
+        &database_toolbox_config,
+        &filtered_tool_descriptions,
+        tool_registry_state.registry.clone(),
+        embedding_state.model.clone(),
+        handles.schema_tx.clone(),
+        false,
+    )
+    .await;
+
+    let auto_context_sections = render_auto_context_sections(
+        auto_discovery.tool_search_output.as_ref(),
+        auto_discovery.schema_search_output.as_ref(),
+    );
 
     let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
-        Vec::new()
+        if !auto_discovery.discovered_tool_schemas.is_empty() {
+            auto_discovery.discovered_tool_schemas.clone()
+        } else {
+            Vec::new()
+        }
     } else {
         filtered_tool_descriptions.clone()
     };
@@ -4980,9 +5258,18 @@ async fn get_system_prompt_preview(
         compact_max_tools: compact_prompt_max_tools.max(1),
     };
 
+    let base_prompt_with_context = if auto_context_sections.is_empty() {
+        base_prompt.clone()
+    } else {
+        let mut composed = base_prompt.clone();
+        composed.push_str("\n\n## Auto-discovered context\n");
+        composed.push_str(&auto_context_sections.join("\n\n"));
+        composed
+    };
+
     // Build the full system prompt
     let preview = build_system_prompt(
-        &base_prompt,
+        &base_prompt_with_context,
         &visible_tool_descriptions,
         &server_configs,
         has_attachments,

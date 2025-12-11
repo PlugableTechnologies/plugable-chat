@@ -822,6 +822,8 @@ pub struct ChatSummary {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 pub enum VectorMsg {
