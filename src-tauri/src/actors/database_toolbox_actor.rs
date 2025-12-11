@@ -6,18 +6,16 @@
 //! - Routing schema discovery and SQL execution requests through MCP
 //! - Caching discovered schemas for embedding
 
+use crate::protocol::McpHostMsg;
 use crate::settings::{
     CachedColumnSchema, CachedTableSchema, DatabaseSourceConfig, DatabaseToolboxConfig,
-    SupportedDatabaseKind,
+    McpServerConfig, SupportedDatabaseKind,
 };
+use crate::actors::mcp_host_actor::McpTool;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 /// Messages for the Database Toolbox Actor
@@ -71,7 +69,6 @@ pub enum DatabaseToolboxMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolboxStatus {
     pub running: bool,
-    pub port: Option<u16>,
     pub connected_sources: Vec<String>,
     pub error: Option<String>,
 }
@@ -80,7 +77,6 @@ impl Default for ToolboxStatus {
     fn default() -> Self {
         Self {
             running: false,
-            port: None,
             connected_sources: Vec::new(),
             error: None,
         }
@@ -119,21 +115,25 @@ impl Default for DatabaseToolboxState {
 pub struct DatabaseToolboxActor {
     rx: mpsc::Receiver<DatabaseToolboxMsg>,
     state: SharedDatabaseToolboxState,
-    toolbox_process: Option<Child>,
-    http_client: reqwest::Client,
+    mcp_host_tx: mpsc::Sender<McpHostMsg>,
 }
 
 impl DatabaseToolboxActor {
+    fn sanitize_identifier(&self, value: &str) -> String {
+        let trimmed = value.trim();
+        trimmed.trim_matches('"').trim_matches('\'').to_string()
+    }
+
     /// Create a new Database Toolbox Actor
-    pub fn new(rx: mpsc::Receiver<DatabaseToolboxMsg>, state: SharedDatabaseToolboxState) -> Self {
+    pub fn new(
+        rx: mpsc::Receiver<DatabaseToolboxMsg>,
+        state: SharedDatabaseToolboxState,
+        mcp_host_tx: mpsc::Sender<McpHostMsg>,
+    ) -> Self {
         Self {
             rx,
             state,
-            toolbox_process: None,
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("Failed to create HTTP client"),
+            mcp_host_tx,
         }
     }
 
@@ -195,81 +195,60 @@ impl DatabaseToolboxActor {
         }
 
         // Cleanup on shutdown
-        if self.toolbox_process.is_some() {
-            let _ = self.stop_toolbox().await;
-        }
+        let _ = self.stop_toolbox().await;
 
         println!("[DatabaseToolboxActor] Stopped");
     }
 
-    /// Start the Toolbox process
+    /// Start (sync) MCP database servers
     async fn start_toolbox(&mut self, config: DatabaseToolboxConfig) -> Result<(), String> {
-        // Check if already running
-        if self.toolbox_process.is_some() {
-            return Err("Toolbox is already running".to_string());
+        let source_labels: std::collections::HashMap<String, String> = config
+            .sources
+            .iter()
+            .map(|src| (src.id.clone(), src.name.clone()))
+            .collect();
+
+        // Sync enabled servers via the MCP host actor
+        let mcp_configs: Vec<McpServerConfig> = config
+            .sources
+            .iter()
+            .cloned()
+            .map(|src| self.source_to_mcp_config(&src))
+            .collect();
+
+        let (tx, rx) = oneshot::channel();
+        self.mcp_host_tx
+            .send(McpHostMsg::SyncEnabledServers {
+                configs: mcp_configs,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|e| format!("Failed to sync MCP database servers: {}", e))?;
+
+        let results = rx
+            .await
+            .map_err(|_| "MCP host unavailable while syncing database servers".to_string())?;
+
+        // Surface any connection errors immediately so the caller can show them
+        let failed: Vec<String> = results
+            .into_iter()
+            .filter_map(|(id, res)| match res {
+                Ok(_) => None,
+                Err(err) => {
+                    let label = source_labels
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| id.clone());
+                    Some(format!("{} ({}): {}", label, id, err))
+                }
+            })
+            .collect();
+        if !failed.is_empty() {
+            return Err(format!(
+                "Failed to connect database MCP servers: {}",
+                failed.join("; ")
+            ));
         }
-
-        // Validate config
-        let toolbox_path = config
-            .toolbox_path
-            .as_ref()
-            .ok_or("Toolbox binary path not configured")?;
-
-        let tools_yaml_path = config
-            .tools_yaml_path
-            .as_ref()
-            .ok_or("tools.yaml path not configured")?;
-
-        println!(
-            "[DatabaseToolboxActor] Starting Toolbox: {} --tools-file {} --port {}",
-            toolbox_path, tools_yaml_path, config.port
-        );
-
-        // Spawn the Toolbox process
-        let mut cmd = Command::new(toolbox_path);
-        cmd.arg("--tools-file")
-            .arg(tools_yaml_path)
-            .arg("--port")
-            .arg(config.port.to_string())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to spawn Toolbox process: {}", e))?;
-
-        // Wait briefly for startup and check for early failure
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // Process already exited
-                let stderr = if let Some(stderr) = child.stderr.take() {
-                    let mut reader = BufReader::new(stderr).lines();
-                    let mut output = String::new();
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        output.push_str(&line);
-                        output.push('\n');
-                    }
-                    output
-                } else {
-                    String::new()
-                };
-                return Err(format!(
-                    "Toolbox exited immediately with status {}: {}",
-                    status, stderr
-                ));
-            }
-            Ok(None) => {
-                // Process is still running, good
-            }
-            Err(e) => {
-                return Err(format!("Failed to check Toolbox status: {}", e));
-            }
-        }
-
-        self.toolbox_process = Some(child);
 
         // Update state
         {
@@ -277,58 +256,242 @@ impl DatabaseToolboxActor {
             state.config = Some(config.clone());
             state.status = ToolboxStatus {
                 running: true,
-                port: Some(config.port),
-                connected_sources: config.sources.iter().map(|s| s.id.clone()).collect(),
+                connected_sources: config
+                    .sources
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .map(|s| s.id.clone())
+                    .collect(),
                 error: None,
             };
         }
 
-        println!("[DatabaseToolboxActor] Toolbox started on port {}", config.port);
+        println!("[DatabaseToolboxActor] Database MCP servers synced");
         Ok(())
     }
 
-    /// Stop the Toolbox process
-    async fn stop_toolbox(&mut self) -> Result<(), String> {
-        if let Some(mut child) = self.toolbox_process.take() {
-            println!("[DatabaseToolboxActor] Stopping Toolbox...");
-            child
-                .kill()
-                .await
-                .map_err(|e| format!("Failed to kill Toolbox process: {}", e))?;
+    fn source_to_mcp_config(&self, source: &DatabaseSourceConfig) -> McpServerConfig {
+        let mut env = source.env.clone();
 
-            // Update state
-            {
-                let mut state = self.state.write().await;
-                state.status = ToolboxStatus::default();
+        // BigQuery requires BIGQUERY_PROJECT; derive it from project_id when not provided
+        if source.kind == SupportedDatabaseKind::Bigquery {
+            if let Some(project_id) = source.project_id.as_ref() {
+                if !project_id.trim().is_empty() && !env.contains_key("BIGQUERY_PROJECT") {
+                    env.insert("BIGQUERY_PROJECT".to_string(), project_id.trim().to_string());
+                }
+            }
+        }
+
+        McpServerConfig {
+            id: source.id.clone(),
+            name: source.name.clone(),
+            enabled: source.enabled,
+            transport: source.transport.clone(),
+            command: source.command.clone(),
+            args: source.args.clone(),
+            env,
+            auto_approve_tools: source.auto_approve_tools,
+            defer_tools: source.defer_tools,
+            python_name: None,
+        }
+    }
+
+    async fn call_mcp_tool_value(
+        &self,
+        server_id: &str,
+        tool_name: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        let (tx, rx) = oneshot::channel();
+        self.mcp_host_tx
+            .send(McpHostMsg::ExecuteTool {
+                server_id: server_id.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments: params,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|e| format!("Failed to send MCP ExecuteTool: {}", e))?;
+
+        let result = rx
+            .await
+            .map_err(|_| "MCP host unavailable during ExecuteTool".to_string())??;
+
+        if result.is_error {
+            let err_msg = result
+                .content
+                .first()
+                .and_then(|c| c.text.clone())
+                .unwrap_or_else(|| "MCP tool returned an error".to_string());
+            return Err(err_msg);
+        }
+
+        if let Some(first) = result.content.first() {
+            // If there are multiple text items, treat them as an array of strings
+            if result.content.len() > 1 && result.content.iter().all(|c| c.text.is_some()) {
+                let items: Vec<Value> = result
+                    .content
+                    .iter()
+                    .filter_map(|c| c.text.as_ref().map(|t| Value::String(t.clone())))
+                    .collect();
+                return Ok(Value::Array(items));
             }
 
-            println!("[DatabaseToolboxActor] Toolbox stopped");
+            if let Some(data) = &first.data {
+                if let Ok(val) = serde_json::from_str::<Value>(data) {
+                    return Ok(val);
+                }
+                return Ok(Value::String(data.clone()));
+            }
+            if let Some(text) = &first.text {
+                if let Ok(val) = serde_json::from_str::<Value>(text) {
+                    return Ok(val);
+                }
+                return Ok(Value::String(text.clone()));
+            }
         }
-        Ok(())
+
+        Err("MCP tool returned no usable content".to_string())
     }
 
-    /// Get the base URL for the Toolbox API
-    fn get_base_url(&self, state: &DatabaseToolboxState) -> Result<String, String> {
-        let port = state
-            .status
-            .port
-            .ok_or("Toolbox not running")?;
-        Ok(format!("http://localhost:{}", port))
+    async fn call_mcp_tool_value_checked(
+        &self,
+        server_id: &str,
+        label: &str,
+        candidates: &[&str],
+        params: Value,
+    ) -> Result<Value, String> {
+        let tools = self.get_tool_catalog(server_id).await?;
+        let available: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+
+        // Pick the first candidate that exists
+        let tool = candidates
+            .iter()
+            .find_map(|cand| tools.iter().find(|t| t.name == *cand))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "{}: required tool not found. Tried [{}]. Available: [{}]",
+                    label,
+                    candidates.join(", "),
+                    available.join(", ")
+                )
+            })?;
+
+        // Validate parameters against tool schema
+        let (required_params, property_keys) = Self::extract_schema_requirements(tool.input_schema.as_ref());
+        let args_obj = params
+            .as_object()
+            .ok_or_else(|| format!("{}: arguments must be an object", label))?;
+
+        let provided_keys: Vec<String> = args_obj.keys().cloned().collect();
+        let missing: Vec<String> = required_params
+            .iter()
+            .filter(|r| !args_obj.contains_key(*r))
+            .cloned()
+            .collect();
+
+        let extra: Vec<String> = if property_keys.is_empty() {
+            Vec::new()
+        } else {
+            provided_keys
+                .iter()
+                .filter(|k| !property_keys.contains(k))
+                .cloned()
+                .collect()
+        };
+
+        if !missing.is_empty() {
+            return Err(format!(
+                "{}: parameter mismatch for tool '{}'. Missing: [{}]. Extra: [{}]. Required: [{}]. Provided: [{}]. Available tools: [{}]",
+                label,
+                tool.name,
+                missing.join(", "),
+                extra.join(", "),
+                required_params.join(", "),
+                provided_keys.join(", "),
+                available.join(", ")
+            ));
+        }
+
+        if !extra.is_empty() {
+            println!(
+                "[DatabaseToolboxActor] {}: tool '{}' extra params ignored: [{}] (required: [{}])",
+                label,
+                tool.name,
+                extra.join(", "),
+                required_params.join(", ")
+            );
+        }
+
+        self.call_mcp_tool_value(server_id, &tool.name, params).await
+    }
+
+    async fn get_tool_catalog(&self, server_id: &str) -> Result<Vec<McpTool>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.mcp_host_tx
+            .send(McpHostMsg::ListTools {
+                server_id: server_id.to_string(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|e| format!("Failed to request tool list: {}", e))?;
+
+        rx.await
+            .map_err(|_| "MCP host unavailable while listing tools".to_string())?
+    }
+
+    fn extract_schema_requirements(schema: Option<&Value>) -> (Vec<String>, Vec<String>) {
+        let mut required = Vec::new();
+        let mut properties = Vec::new();
+        if let Some(Value::Object(map)) = schema {
+            if let Some(Value::Array(reqs)) = map.get("required") {
+                for r in reqs {
+                    if let Some(s) = r.as_str() {
+                        required.push(s.to_string());
+                    }
+                }
+            }
+            if let Some(Value::Object(props)) = map.get("properties") {
+                properties.extend(props.keys().cloned());
+            }
+        }
+        (required, properties)
+    }
+
+    /// Stop all database MCP servers (disconnect)
+    async fn stop_toolbox(&mut self) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.mcp_host_tx
+            .send(McpHostMsg::SyncEnabledServers {
+                configs: vec![],
+                respond_to: tx,
+            })
+            .await
+            .map_err(|e| format!("Failed to send stop message: {}", e))?;
+        let _ = rx
+            .await
+            .map_err(|_| "MCP host unavailable while stopping database servers".to_string())?;
+
+        {
+            let mut state = self.state.write().await;
+            state.status = ToolboxStatus::default();
+        }
+        println!("[DatabaseToolboxActor] Database MCP servers disconnected");
+        Ok(())
     }
 
     /// Enumerate schemas/datasets for a source
     async fn enumerate_schemas(&self, source_id: &str) -> Result<Vec<String>, String> {
-        let (source, base_url) = {
+        let source = {
             let state = self.state.read().await;
             let config = state.config.as_ref().ok_or("Toolbox not configured")?;
-            let source = config
+            config
                 .sources
                 .iter()
                 .find(|s| s.id == source_id)
                 .ok_or_else(|| format!("Source not found: {}", source_id))?
-                .clone();
-            let base_url = self.get_base_url(&state)?;
-            (source, base_url)
+                .clone()
         };
 
         // Call the appropriate enumeration tool based on database kind
@@ -340,19 +503,27 @@ impl DatabaseToolboxActor {
                     .ok_or("BigQuery source requires project_id")?;
 
                 let response = self
-                    .call_mcp_tool(
-                        &base_url,
-                        "bigquery-list-dataset-ids",
+                    .call_mcp_tool_value_checked(
+                        &source.id,
+                        "list datasets",
+                        &[
+                            "list_dataset_ids",
+                            "bigquery-list-datasets",
+                            "bigquery-list-dataset-ids",
+                        ],
                         json!({ "project_id": project_id }),
                     )
                     .await?;
 
                 // Parse response to extract dataset IDs
-                self.parse_list_response(response)
+                let datasets = self.parse_list_response(response)?;
+                Ok(datasets
+                    .into_iter()
+                    .map(|d| self.sanitize_identifier(&d))
+                    .collect())
             }
             SupportedDatabaseKind::Postgres | SupportedDatabaseKind::Mysql => {
                 // Use INFORMATION_SCHEMA query
-                let tool_name = source.kind.execute_tool_name();
                 let query = match source.kind {
                     SupportedDatabaseKind::Postgres => {
                         "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog', 'information_schema')"
@@ -364,7 +535,12 @@ impl DatabaseToolboxActor {
                 };
 
                 let response = self
-                    .call_mcp_tool(&base_url, tool_name, json!({ "sql": query }))
+                    .call_mcp_tool_value_checked(
+                        &source.id,
+                        "list schemas",
+                        &[source.kind.execute_tool_name()],
+                        json!({ "sql": query }),
+                    )
                     .await?;
 
                 self.parse_sql_column_response(response, "schema_name")
@@ -376,7 +552,12 @@ impl DatabaseToolboxActor {
             SupportedDatabaseKind::Spanner => {
                 // Spanner: list databases in instance
                 let response = self
-                    .call_mcp_tool(&base_url, "spanner-list-databases", json!({}))
+                    .call_mcp_tool_value_checked(
+                        &source.id,
+                        "list databases",
+                        &["spanner-list-databases"],
+                        json!({}),
+                    )
                     .await?;
 
                 self.parse_list_response(response)
@@ -390,17 +571,15 @@ impl DatabaseToolboxActor {
         source_id: &str,
         dataset_or_schema: &str,
     ) -> Result<Vec<String>, String> {
-        let (source, base_url) = {
+        let source = {
             let state = self.state.read().await;
             let config = state.config.as_ref().ok_or("Toolbox not configured")?;
-            let source = config
+            config
                 .sources
                 .iter()
                 .find(|s| s.id == source_id)
                 .ok_or_else(|| format!("Source not found: {}", source_id))?
-                .clone();
-            let base_url = self.get_base_url(&state)?;
-            (source, base_url)
+                .clone()
         };
 
         match source.kind {
@@ -409,19 +588,30 @@ impl DatabaseToolboxActor {
                     .project_id
                     .as_ref()
                     .ok_or("BigQuery source requires project_id")?;
+                let dataset_clean = self.sanitize_identifier(dataset_or_schema);
 
                 let response = self
-                    .call_mcp_tool(
-                        &base_url,
-                        "bigquery-list-table-ids",
+                    .call_mcp_tool_value_checked(
+                        &source.id,
+                        "list tables",
+                        &[
+                            "list_table_ids",
+                            "bigquery-list-table-ids",
+                            "bigquery-list-tables",
+                        ],
                         json!({
-                            "project_id": project_id,
-                            "dataset_id": dataset_or_schema
+                            // According to MCP docs, list_table_ids expects `dataset` (required) and `project` (optional)
+                            "dataset": dataset_clean,
+                            "project": project_id,
                         }),
                     )
                     .await?;
 
-                self.parse_list_response(response)
+                let tables = self.parse_list_response(response)?;
+                Ok(tables
+                    .into_iter()
+                    .map(|t| self.sanitize_identifier(&t))
+                    .collect())
             }
             SupportedDatabaseKind::Postgres => {
                 let query = format!(
@@ -429,9 +619,10 @@ impl DatabaseToolboxActor {
                     dataset_or_schema.replace("'", "''")
                 );
                 let response = self
-                    .call_mcp_tool(
-                        &base_url,
-                        "postgres-sql",
+                    .call_mcp_tool_value_checked(
+                        &source.id,
+                        "list tables",
+                        &["postgres-sql"],
                         json!({ "sql": query }),
                     )
                     .await?;
@@ -444,15 +635,20 @@ impl DatabaseToolboxActor {
                     dataset_or_schema.replace("'", "''")
                 );
                 let response = self
-                    .call_mcp_tool(&base_url, "mysql-sql", json!({ "sql": query }))
+                    .call_mcp_tool_value_checked(
+                        &source.id,
+                        "list tables",
+                        &["mysql-sql"],
+                        json!({ "sql": query }),
+                    )
                     .await?;
 
                 self.parse_sql_column_response(response, "table_name")
             }
             SupportedDatabaseKind::Sqlite => {
                 let response = self
-                    .call_mcp_tool(
-                        &base_url,
+                    .call_mcp_tool_value(
+                        &source.id,
                         "sqlite-sql",
                         json!({ "sql": "SELECT name FROM sqlite_master WHERE type='table'" }),
                     )
@@ -462,7 +658,7 @@ impl DatabaseToolboxActor {
             }
             SupportedDatabaseKind::Spanner => {
                 let response = self
-                    .call_mcp_tool(&base_url, "spanner-list-tables", json!({}))
+                    .call_mcp_tool_value(&source.id, "spanner-list-tables", json!({}))
                     .await?;
 
                 self.parse_list_response(response)
@@ -485,8 +681,6 @@ impl DatabaseToolboxActor {
             .find(|s| s.id == source_id)
             .ok_or_else(|| format!("Source not found: {}", source_id))?
             .clone();
-
-        let base_url = self.get_base_url(&state)?;
         drop(state);
 
         match source.kind {
@@ -497,20 +691,30 @@ impl DatabaseToolboxActor {
                 }
                 
                 let (project, dataset, table) = if parts.len() == 3 {
-                    (parts[0].to_string(), parts[1].to_string(), parts[2].to_string())
+                    (
+                        self.sanitize_identifier(parts[0]),
+                        self.sanitize_identifier(parts[1]),
+                        self.sanitize_identifier(parts[2]),
+                    )
                 } else {
                     let project = source.project_id.ok_or("BigQuery source requires project_id")?;
-                    (project, parts[0].to_string(), parts[1].to_string())
+                    (
+                        project,
+                        self.sanitize_identifier(parts[0]),
+                        self.sanitize_identifier(parts[1]),
+                    )
                 };
 
                 let response = self
-                    .call_mcp_tool(
-                        &base_url,
-                        "bigquery-get-table-info",
+                    .call_mcp_tool_value_checked(
+                        &source.id,
+                        "get table info",
+                        &["get_table_info", "bigquery-get-table-info"],
                         json!({
-                            "project_id": project,
-                            "dataset_id": dataset,
-                            "table_id": table
+                            // Per toolbox docs: required dataset/table, optional project
+                            "dataset": dataset,
+                            "table": table,
+                            "project": project,
                         }),
                     )
                     .await?;
@@ -519,7 +723,7 @@ impl DatabaseToolboxActor {
             }
             _ => {
                 // For other databases, use INFORMATION_SCHEMA
-                self.get_table_info_via_information_schema(&source, &base_url, fully_qualified_table)
+                self.get_table_info_via_information_schema(&source, fully_qualified_table)
                     .await
             }
         }
@@ -529,11 +733,9 @@ impl DatabaseToolboxActor {
     async fn get_table_info_via_information_schema(
         &self,
         source: &DatabaseSourceConfig,
-        base_url: &str,
         fully_qualified_table: &str,
     ) -> Result<CachedTableSchema, String> {
         let (schema_name, table_name) = self.parse_table_name(source.kind, fully_qualified_table)?;
-        let tool_name = source.kind.execute_tool_name();
 
         // Query column information
         let column_query = match source.kind {
@@ -550,7 +752,12 @@ impl DatabaseToolboxActor {
         };
 
         let response = self
-            .call_mcp_tool(base_url, tool_name, json!({ "sql": column_query }))
+            .call_mcp_tool_value_checked(
+                &source.id,
+                "describe table",
+                &[source.kind.execute_tool_name()],
+                json!({ "sql": column_query }),
+            )
             .await?;
 
         let columns = self.parse_column_info(source.kind, &response)?;
@@ -559,6 +766,7 @@ impl DatabaseToolboxActor {
             fully_qualified_name: fully_qualified_table.to_string(),
             source_id: source.id.clone(),
             kind: source.kind,
+            enabled: true,
             columns,
             primary_keys: Vec::new(), // Would need additional query for PKs
             partition_columns: Vec::new(),
@@ -574,21 +782,30 @@ impl DatabaseToolboxActor {
         sql: &str,
         _parameters: &[Value],
     ) -> Result<SqlExecutionResult, String> {
-        let state = self.state.read().await;
-        let config = state.config.as_ref().ok_or("Toolbox not configured")?;
+        let source = {
+            let state = self.state.read().await;
+            let config = state.config.as_ref().ok_or("Toolbox not configured")?;
+            config
+                .sources
+                .iter()
+                .find(|s| s.id == source_id)
+                .cloned()
+                .ok_or_else(|| format!("Source not found: {}", source_id))?
+        };
 
-        let source = config
-            .sources
-            .iter()
-            .find(|s| s.id == source_id)
-            .ok_or_else(|| format!("Source not found: {}", source_id))?;
-
-        let base_url = self.get_base_url(&state)?;
-        let tool_name = source.kind.execute_tool_name();
-        drop(state);
+        let execute_candidates: Vec<&str> = if source.kind == SupportedDatabaseKind::Bigquery {
+            vec!["execute_sql", "bigquery-execute-sql"]
+        } else {
+            vec![source.kind.execute_tool_name()]
+        };
 
         let response = self
-            .call_mcp_tool(&base_url, tool_name, json!({ "sql": sql }))
+            .call_mcp_tool_value_checked(
+                &source.id,
+                "execute sql",
+                &execute_candidates,
+                json!({ "sql": sql }),
+            )
             .await?;
 
         self.parse_sql_execution_result(&response)
@@ -596,10 +813,6 @@ impl DatabaseToolboxActor {
 
     /// Test connection to a source
     async fn test_connection(&self, source: &DatabaseSourceConfig) -> Result<(), String> {
-        let state = self.state.read().await;
-        let base_url = self.get_base_url(&state)?;
-        drop(state);
-
         // Simple test query
         let test_query = match source.kind {
             SupportedDatabaseKind::Postgres => "SELECT 1 AS test",
@@ -609,47 +822,21 @@ impl DatabaseToolboxActor {
             SupportedDatabaseKind::Spanner => "SELECT 1 AS test",
         };
 
-        let tool_name = source.kind.execute_tool_name();
-        self.call_mcp_tool(&base_url, tool_name, json!({ "sql": test_query }))
-            .await?;
+        let test_candidates: Vec<&str> = if source.kind == SupportedDatabaseKind::Bigquery {
+            vec!["execute_sql", "bigquery-execute-sql"]
+        } else {
+            vec![source.kind.execute_tool_name()]
+        };
+
+        self.call_mcp_tool_value_checked(
+            &source.id,
+            "test connection",
+            &test_candidates,
+            json!({ "sql": test_query }),
+        )
+        .await?;
 
         Ok(())
-    }
-
-    /// Call an MCP tool via the Toolbox HTTP API
-    async fn call_mcp_tool(
-        &self,
-        base_url: &str,
-        tool_name: &str,
-        params: Value,
-    ) -> Result<Value, String> {
-        let url = format!("{}/api/tool/{}", base_url, tool_name);
-
-        println!("[DatabaseToolboxActor] Calling tool: {} with params: {}", tool_name, params);
-
-        let response = self
-            .http_client
-            .post(&url)
-            .json(&params)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(format!("Tool call failed ({}): {}", status, body));
-        }
-
-        let result: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-        Ok(result)
     }
 
     // ========== Response Parsing Helpers ==========
@@ -765,6 +952,7 @@ impl DatabaseToolboxActor {
             fully_qualified_name,
             source_id: source_id.to_string(),
             kind,
+            enabled: true,
             columns,
             primary_keys: Vec::new(), // BigQuery doesn't have traditional PKs
             partition_columns,
@@ -881,7 +1069,6 @@ mod tests {
     fn test_toolbox_status_default() {
         let status = ToolboxStatus::default();
         assert!(!status.running);
-        assert!(status.port.is_none());
         assert!(status.connected_sources.is_empty());
         assert!(status.error.is_none());
     }

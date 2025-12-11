@@ -38,16 +38,21 @@ export interface DatabaseSourceConfig {
     name: string;
     kind: SupportedDatabaseKind;
     enabled: boolean;
-    project_id?: string; // For BigQuery
+    transport: Transport;
+    command: string | null;
+    args: string[];
+    env: Record<string, string>;
+    auto_approve_tools: boolean;
+    defer_tools: boolean;
+    project_id?: string; // Optional for BigQuery or other sources
+    dataset_allowlist?: string; // Comma-separated dataset list (BigQuery only)
+    table_allowlist?: string; // Comma-separated table list (BigQuery only)
 }
 
 // Database Toolbox configuration
 export interface DatabaseToolboxConfig {
     enabled: boolean;
-    toolbox_path?: string;
-    tools_yaml_path?: string;
     sources: DatabaseSourceConfig[];
-    port: number;
 }
 
 // Application settings
@@ -250,6 +255,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     python_name: server.python_name ?? toPythonIdentifier(name || server.id),
                 };
             });
+            const normalizedDbSources: DatabaseSourceConfig[] = (settings.database_toolbox?.sources || []).map((source) => ({
+                ...source,
+                transport: source.transport ?? { type: 'stdio' },
+                command: source.command ?? null,
+                args: source.args ?? [],
+                env: source.env ?? {},
+                auto_approve_tools: source.auto_approve_tools ?? false,
+                defer_tools: source.defer_tools ?? true,
+                dataset_allowlist: source.dataset_allowlist ?? '',
+                table_allowlist: source.table_allowlist ?? '',
+            }));
             const mergedSettings: AppSettings = {
                 ...settings,
                 mcp_servers: normalizedServers,
@@ -260,6 +276,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 tool_use_examples_max: settings.tool_use_examples_max ?? 2,
                 compact_prompt_enabled: settings.compact_prompt_enabled ?? false,
                 compact_prompt_max_tools: settings.compact_prompt_max_tools ?? 4,
+                database_toolbox: {
+                    enabled: settings.database_toolbox?.enabled ?? false,
+                    sources: normalizedDbSources,
+                },
             };
             const allowedImports = (allowedImportsRaw && allowedImportsRaw.length > 0)
                 ? allowedImportsRaw
@@ -310,7 +330,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     database_toolbox: {
                         enabled: false,
                         sources: [],
-                        port: 5000,
                     },
                     search_schemas_enabled: false,
                     execute_sql_enabled: false,
@@ -584,10 +603,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             console.log('[SettingsStore] database_toolbox config updated');
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update database_toolbox config:', e);
+            const message = `Failed to save: ${e?.message || e}`;
             set({
-                settings: currentSettings,
-                error: `Failed to save: ${e.message || e}`
+                settings: get().settings,
+                error: message,
             });
+            throw new Error(message);
         }
     },
 

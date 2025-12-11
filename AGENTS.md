@@ -180,6 +180,38 @@ Key log prefixes to watch:
 ### TODOs
 - Re-enable native tool payloads for Phi/Hermes once Foundry JSON schema validation accepts OpenAI tool definitions; currently disabled and using Hermes/text-based prompts to avoid 500s.
 
+## Cursor for SQL (Database Toolbox)
+
+The "Cursor for SQL" feature enables the agent to interact with SQL databases through a dedicated sidecar process, Google's **MCP Toolbox for Databases**. Our actor (`DatabaseToolboxActor`) manages the lifecycle of the toolbox process and exposes its capabilities as tools to the agent.
+
+### Architecture
+- **Process Management**: The `DatabaseToolboxActor` spawns and manages a separate binary (Google's "toolbox" binary) that handles actual database connections.
+- **Communication**: The actor communicates with the Toolbox via standard MCP HTTP/SSE or stdio.
+- **Tools**: The actor exposes capabilities as MCP tools, which are then wrapped by built-in tools (`execute_sql`, `search_schemas`) for the agent to use.
+
+### Capabilities
+1.  **Schema Discovery**:
+    -   **Search**: `search_schemas` tool allows semantic search over table schemas using embeddings.
+    -   **Enumeration**: Can list schemas/datasets and tables for a given source.
+    -   **Details**: Retrieves detailed table information including columns, types, and descriptions.
+2.  **SQL Execution**:
+    -   **Querying**: `execute_sql` tool executes SQL queries against configured sources.
+    -   **Safety**: Queries are executed with read-only permissions where possible (enforced by the database user configuration).
+3.  **Connection Management**:
+    -   **Testing**: Can test connections to configured sources.
+
+### Supported Databases
+The Toolbox supports the following databases (defined in `SupportedDatabaseKind`):
+-   **BigQuery** (`bigquery`)
+-   **PostgreSQL** (`postgres`)
+-   **MySQL** (`mysql`)
+-   **SQLite** (`sqlite`)
+-   **Google Cloud Spanner** (`spanner`)
+
+### Caching
+-   **Table Schemas**: Discovered table schemas are cached on disk to reduce latency and database load.
+-   **Embeddings**: Schema embeddings are generated and cached on disk to enable fast semantic search via `search_schemas`.
+
 ## Python Sandbox Configuration Sync
 
 The Python code execution sandbox has allowed/disallowed modules and builtins defined in **multiple locations** that must be kept in sync:

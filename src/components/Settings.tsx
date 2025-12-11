@@ -1,6 +1,6 @@
-import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName, type DatabaseSourceConfig } from '../store/settings-store';
+import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName, type DatabaseSourceConfig, type SupportedDatabaseKind, type DatabaseToolboxConfig } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw } from 'lucide-react';
+import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw, RefreshCw, AlertCircle } from 'lucide-react';
 import { invoke } from '../lib/api';
 import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
 
@@ -1878,11 +1878,13 @@ function DatabasesTab({
     onSavingChange?: (saving: boolean) => void;
 }) {
     const { settings, updateDatabaseToolboxConfig } = useSettingsStore();
+    const DEFAULT_TOOLBOX_COMMAND = '/opt/homebrew/bin/toolbox';
+    const DEFAULT_BIGQUERY_ARGS = ['--stdio', '--prebuilt', 'bigquery'];
     const [toolboxConfig, setToolboxConfig] = useState(settings?.database_toolbox || {
-        enabled: true,
+        enabled: false,
         sources: [],
-        port: 5000
     });
+    const [saveError, setSaveError] = useState<string | null>(null);
 
     // Simple deep erase of internal properties for checking dirty state if needed
     // For now simplistic dirty check
@@ -1894,8 +1896,62 @@ function DatabasesTab({
 
     const handleSave = useCallback(async () => {
         onSavingChange?.(true);
+        setSaveError(null);
+        const validationErrors: string[] = [];
+        const sanitizedSources = toolboxConfig.sources.map((src) => {
+            const trimmedCommand = src.command?.trim() || '';
+            const trimmedProject = src.project_id?.trim() || '';
+            const commandWithDefault =
+                src.transport.type === 'stdio' && !trimmedCommand
+                    ? DEFAULT_TOOLBOX_COMMAND
+                    : trimmedCommand;
+
+            const argsWithDefault =
+                (src.args || []).filter(Boolean).length === 0 && src.kind === 'bigquery'
+                    ? DEFAULT_BIGQUERY_ARGS
+                    : (src.args || []).filter(Boolean);
+
+            const requiresCommand = src.enabled && src.transport.type === 'stdio';
+            const requiresProject =
+                src.enabled &&
+                src.kind === 'bigquery' &&
+                !(trimmedProject || src.env?.BIGQUERY_PROJECT?.trim());
+
+            if (requiresCommand && !commandWithDefault) {
+                validationErrors.push(
+                    `${src.name || src.id}: command is required for stdio transport.`
+                );
+            }
+            if (requiresProject) {
+                validationErrors.push(
+                    `${src.name || src.id}: set Project ID or BIGQUERY_PROJECT env for BigQuery.`
+                );
+            }
+
+            return {
+                ...src,
+                command: commandWithDefault || null,
+                args: argsWithDefault,
+                project_id: trimmedProject || undefined,
+            };
+        });
+
+        if (validationErrors.length > 0) {
+            setSaveError(validationErrors.join(' '));
+            onSavingChange?.(false);
+            return;
+        }
+
+        const sanitizedConfig: DatabaseToolboxConfig = {
+            ...toolboxConfig,
+            sources: sanitizedSources,
+        };
         try {
-            await updateDatabaseToolboxConfig(toolboxConfig);
+            setToolboxConfig(sanitizedConfig);
+            await updateDatabaseToolboxConfig(sanitizedConfig);
+        } catch (err: any) {
+            const message = err?.message || String(err);
+            setSaveError(message);
         } finally {
             onSavingChange?.(false);
         }
@@ -1905,13 +1961,19 @@ function DatabasesTab({
         onRegisterSave?.(handleSave);
     }, [handleSave, onRegisterSave]);
 
-    // Handle adding a new BigQuery source
-    const addBigQuerySource = () => {
+    // Handle adding a new database source
+    const addSource = (kind: SupportedDatabaseKind) => {
         const newSource: DatabaseSourceConfig = {
-            id: `bq-${Date.now()}`,
-            name: 'New BigQuery Source',
-            kind: 'bigquery',
+            id: `db-${Date.now()}`,
+            name: `New ${kind} Source`,
+            kind,
             enabled: true,
+            transport: { type: 'stdio' },
+            command: null,
+            args: [],
+            env: {},
+            auto_approve_tools: false,
+            defer_tools: true,
             project_id: '',
         };
         setToolboxConfig(prev => ({
@@ -1940,12 +2002,39 @@ function DatabasesTab({
         <div className="space-y-6">
             <div>
                 <h3 className="text-lg font-medium text-gray-900">Database Sources</h3>
-                <p className="text-sm text-gray-500">Configure database connections for the Toolbox.</p>
+                <p className="text-sm text-gray-500">Configure database MCP servers (stdio or SSE).</p>
+            </div>
+
+            {saveError && (
+                <div className="database-config-error-alert flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    <AlertCircle size={16} />
+                    <div className="flex-1">
+                        <div className="font-semibold text-red-800">Schema refresh failed</div>
+                        <p className="text-xs text-red-700">
+                            Fix the MCP database configuration here and try again. Details: {saveError}
+                        </p>
+                    </div>
+                </div>
+            )}
+
+            <div className="database-toolbox-toggle flex items-start gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3">
+                <input
+                    type="checkbox"
+                    className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    checked={toolboxConfig.enabled}
+                    onChange={(e) => setToolboxConfig(prev => ({ ...prev, enabled: e.target.checked }))}
+                />
+                <div>
+                    <div className="text-sm font-medium text-gray-900">Enable Database Toolbox</div>
+                    <div className="text-xs text-gray-500">
+                        Required for schema refresh and SQL execution via the MCP toolbox.
+                    </div>
+                </div>
             </div>
 
             <div className="space-y-4">
                 {toolboxConfig.sources.map((source, idx) => (
-                    <div key={source.id} className="border border-gray-200 rounded-lg p-4 space-y-3">
+                    <div key={source.id} className="database-source-card border border-gray-200 rounded-lg p-4 space-y-3 bg-white">
                         <div className="flex justify-between items-start">
                             <div className="flex items-center gap-2">
                                 <span className="text-xs font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded uppercase">
@@ -1957,14 +2046,125 @@ function DatabasesTab({
                                     onChange={(e) => updateSource(idx, { name: e.target.value })}
                                     className="font-medium text-gray-900 border-b border-transparent hover:border-gray-300 focus:border-blue-500 focus:outline-none px-1"
                                 />
+                                <select
+                                    value={source.kind}
+                                    onChange={(e) => updateSource(idx, { kind: e.target.value as SupportedDatabaseKind })}
+                                    className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 bg-white"
+                                >
+                                    <option value="bigquery">BigQuery</option>
+                                    <option value="postgres">PostgreSQL</option>
+                                    <option value="mysql">MySQL</option>
+                                    <option value="sqlite">SQLite</option>
+                                    <option value="spanner">Spanner</option>
+                                </select>
                             </div>
-                            <button onClick={() => removeSource(idx)} className="text-gray-400 hover:text-red-500">
-                                <Trash2 size={16} />
-                            </button>
+                            <div className="flex items-center gap-3">
+                                <label className="flex items-center gap-2 text-sm text-gray-600">
+                                    <input
+                                        type="checkbox"
+                                        checked={source.enabled}
+                                        onChange={(e) => updateSource(idx, { enabled: e.target.checked })}
+                                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                    />
+                                    Enabled
+                                </label>
+                                <button onClick={() => removeSource(idx)} className="text-gray-400 hover:text-red-500">
+                                    <Trash2 size={16} />
+                                </button>
+                            </div>
                         </div>
 
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-xs font-medium text-gray-700 mb-1.5">Transport</label>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => updateSource(idx, { transport: { type: 'stdio' } })}
+                                        className={`px-3 py-1.5 text-xs rounded-lg border ${source.transport.type === 'stdio'
+                                            ? 'bg-blue-50 border-blue-300 text-blue-700'
+                                            : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                                            }`}
+                                    >
+                                        Stdio (subprocess)
+                                    </button>
+                                    <button
+                                        onClick={() => updateSource(idx, { transport: { type: 'sse', url: (source.transport as any).url || '' } })}
+                                        className={`px-3 py-1.5 text-xs rounded-lg border ${source.transport.type === 'sse'
+                                            ? 'bg-blue-50 border-blue-300 text-blue-700'
+                                            : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                                            }`}
+                                    >
+                                        SSE (HTTP)
+                                    </button>
+                                </div>
+                            </div>
+
+                            {source.transport.type === 'sse' && (
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-700 mb-1.5">Server URL</label>
+                                    <input
+                                        type="text"
+                                        value={(source.transport as any).url || ''}
+                                        onChange={(e) => updateSource(idx, { transport: { type: 'sse', url: e.target.value } })}
+                                        placeholder="http://localhost:3000/sse"
+                                        className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                                    />
+                                </div>
+                            )}
+                        </div>
+
+                            {source.kind === 'bigquery' && (
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-700 mb-1.5">Dataset allowlist (CSV, optional)</label>
+                                    <input
+                                        type="text"
+                                        value={source.dataset_allowlist || ''}
+                                        onChange={(e) => updateSource(idx, { dataset_allowlist: e.target.value })}
+                                        placeholder="dataset_a,dataset_b"
+                                        className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                                    />
+                                    <p className="text-[11px] text-gray-500 mt-1">
+                                        If set, only these datasets are cached. Leave blank to enumerate all.
+                                    </p>
+                                </div>
+                            )}
+
+                        {source.transport.type === 'stdio' && (
+                            <>
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-700 mb-1.5">Command</label>
+                                    <input
+                                        type="text"
+                                        value={source.command || ''}
+                                        onChange={(e) => updateSource(idx, { command: e.target.value })}
+                                        placeholder="/opt/homebrew/bin/toolbox"
+                                        className={`w-full text-sm rounded-md shadow-sm focus:ring-1 ${
+                                            source.enabled && source.transport.type === 'stdio' && !(source.command?.trim())
+                                                ? 'border-red-300 focus:border-red-500 focus:ring-red-500'
+                                                : 'border-gray-300 focus:border-blue-500 focus:ring-blue-500'
+                                        }`}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-700 mb-1.5">Arguments</label>
+                                    <TagInput
+                                        tags={source.args}
+                                        onChange={(args) => updateSource(idx, { args })}
+                                        placeholder="--stdio --prebuilt bigquery"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-700 mb-1.5">Environment Variables</label>
+                                    <EnvVarInput
+                                        env={source.env}
+                                        onChange={(env) => updateSource(idx, { env })}
+                                    />
+                                </div>
+                            </>
+                        )}
+
                         {source.kind === 'bigquery' && (
-                            <div className="grid grid-cols-1 gap-4">
+                            <div className="space-y-3">
                                 <div>
                                     <label className="block text-xs font-medium text-gray-700 mb-1">
                                         Project ID
@@ -1977,18 +2177,50 @@ function DatabasesTab({
                                         className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
                                     />
                                 </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        Dataset allowlist (CSV, optional)
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={source.dataset_allowlist || ''}
+                                        onChange={(e) => updateSource(idx, { dataset_allowlist: e.target.value })}
+                                        placeholder="dataset_a,dataset_b"
+                                        className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                                    />
+                                    <p className="text-[11px] text-gray-500 mt-1">
+                                        If set, only these datasets are cached. Leave blank to enumerate all.
+                                    </p>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        Table allowlist (CSV, optional)
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={source.table_allowlist || ''}
+                                        onChange={(e) => updateSource(idx, { table_allowlist: e.target.value })}
+                                        placeholder="table_a,table_b"
+                                        className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                                    />
+                                    <p className="text-[11px] text-gray-500 mt-1">
+                                        If set, only these tables are cached within allowed datasets. Leave blank to include all tables.
+                                    </p>
+                                </div>
                             </div>
                         )}
 
                         <div className="flex items-center gap-2 mt-2">
                             <label className="flex items-center gap-2 text-sm text-gray-600">
-                                <input
-                                    type="checkbox"
-                                    checked={source.enabled}
-                                    onChange={(e) => updateSource(idx, { enabled: e.target.checked })}
-                                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                                />
-                                Enabled
+                                <span className="text-sm font-medium text-gray-700">Auto-approve tool calls</span>
+                                <button
+                                    onClick={() => updateSource(idx, { auto_approve_tools: !source.auto_approve_tools })}
+                                    className={`relative w-10 h-5 rounded-full transition-colors ${source.auto_approve_tools ? 'bg-blue-500' : 'bg-gray-300'
+                                        }`}
+                                >
+                                    <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${source.auto_approve_tools ? 'translate-x-5' : ''
+                                        }`} />
+                                </button>
                             </label>
                         </div>
                     </div>
@@ -2000,58 +2232,312 @@ function DatabasesTab({
                     </div>
                 )}
 
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                     <button
-                        onClick={addBigQuerySource}
+                        onClick={() => addSource('bigquery')}
                         className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100"
                     >
                         <Plus size={16} />
-                        Add BigQuery Source
+                        Add BigQuery
                     </button>
-                </div>
-            </div>
-
-            <div className="pt-4 border-t border-gray-200">
-                <h4 className="text-sm font-medium text-gray-900 mb-2">Toolbox Configuration</h4>
-                <div className="grid grid-cols-2 gap-4">
-                    <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Toolbox Port
-                        </label>
-                        <input
-                            type="number"
-                            value={toolboxConfig.port}
-                            onChange={(e) => setToolboxConfig(prev => ({ ...prev, port: parseInt(e.target.value) || 5000 }))}
-                            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                        />
-                    </div>
+                    <button
+                        onClick={() => addSource('postgres')}
+                        className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100"
+                    >
+                        <Plus size={16} />
+                        Add PostgreSQL
+                    </button>
+                    <button
+                        onClick={() => addSource('mysql')}
+                        className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100"
+                    >
+                        <Plus size={16} />
+                        Add MySQL
+                    </button>
+                    <button
+                        onClick={() => addSource('sqlite')}
+                        className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100"
+                    >
+                        <Plus size={16} />
+                        Add SQLite
+                    </button>
+                    <button
+                        onClick={() => addSource('spanner')}
+                        className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100"
+                    >
+                        <Plus size={16} />
+                        Add Spanner
+                    </button>
                 </div>
             </div>
         </div>
     );
 }
 
+type SchemaTableStatus = {
+    source_id: string;
+    source_name: string;
+    table_fq_name: string;
+    enabled: boolean;
+    column_count: number;
+    description?: string | null;
+};
+
+type SchemaSourceStatus = {
+    source_id: string;
+    source_name: string;
+    database_kind: SupportedDatabaseKind;
+    tables: SchemaTableStatus[];
+};
+
 // Schemas Tab - view and manage cached schemas
 function SchemasTab({
-    onDirtyChange: _onDirtyChange,
-    onRegisterSave: _onRegisterSave,
-    onSavingChange: _onSavingChange,
+    onDirtyChange,
+    onRegisterSave,
+    onSavingChange,
 }: {
     onDirtyChange?: (dirty: boolean) => void;
     onRegisterSave?: (handler: () => Promise<void>) => void;
     onSavingChange?: (saving: boolean) => void;
 }) {
-    // Placeholder for now
+    const { settings } = useSettingsStore();
+    const [sources, setSources] = useState<SchemaSourceStatus[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [lastRefreshed, setLastRefreshed] = useState<number | null>(null);
+    const [pendingTables, setPendingTables] = useState<Record<string, boolean>>({});
+
+    const enabledSourcesKey = (settings?.database_toolbox?.sources || [])
+        .filter((s) => s.enabled)
+        .map((s) => s.id)
+        .sort()
+        .join(',');
+
+    useEffect(() => {
+        onDirtyChange?.(false);
+    }, [onDirtyChange]);
+
+    useEffect(() => {
+        onSavingChange?.(loading);
+    }, [loading, onSavingChange]);
+
+    const refreshSchemas = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            const result = await invoke<SchemaSourceStatus[]>('refresh_database_schemas');
+            setSources(result || []);
+            setLastRefreshed(Date.now());
+        } catch (err: any) {
+            const message = err?.message || String(err);
+            setError(message);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!enabledSourcesKey) {
+            setSources([]);
+            return;
+        }
+        refreshSchemas();
+    }, [enabledSourcesKey, refreshSchemas]);
+
+    useEffect(() => {
+        onRegisterSave?.(refreshSchemas);
+    }, [onRegisterSave, refreshSchemas]);
+
+    const toggleTable = useCallback(async (sourceId: string, tableName: string, nextEnabled: boolean) => {
+        const key = `${sourceId}::${tableName}`;
+        setError(null);
+        setPendingTables(prev => ({ ...prev, [key]: true }));
+        setSources(prev =>
+            prev.map(src =>
+                src.source_id === sourceId
+                    ? {
+                        ...src,
+                        tables: src.tables.map(tbl =>
+                            tbl.table_fq_name === tableName ? { ...tbl, enabled: nextEnabled } : tbl
+                        ),
+                    }
+                    : src
+            )
+        );
+
+        try {
+            const updated = await invoke<SchemaTableStatus>('set_schema_table_enabled', {
+                source_id: sourceId,
+                table_fq_name: tableName,
+                enabled: nextEnabled,
+            });
+
+            setSources(prev =>
+                prev.map(src =>
+                    src.source_id === sourceId
+                        ? {
+                            ...src,
+                            tables: src.tables.map(tbl =>
+                                tbl.table_fq_name === tableName
+                                    ? {
+                                        ...tbl,
+                                        enabled: updated.enabled,
+                                        column_count: updated.column_count,
+                                        description: updated.description ?? tbl.description,
+                                    }
+                                    : tbl
+                            ),
+                        }
+                        : src
+                )
+            );
+        } catch (err: any) {
+            setError(err?.message || String(err));
+            setSources(prev =>
+                prev.map(src =>
+                    src.source_id === sourceId
+                        ? {
+                            ...src,
+                            tables: src.tables.map(tbl =>
+                                tbl.table_fq_name === tableName ? { ...tbl, enabled: !nextEnabled } : tbl
+                            ),
+                        }
+                        : src
+                )
+            );
+        } finally {
+            setPendingTables(prev => {
+                const next = { ...prev };
+                delete next[key];
+                return next;
+            });
+        }
+    }, []);
+
+    const totalTables = sources.reduce((acc, src) => acc + (src.tables?.length || 0), 0);
+    const hasEnabledSources = Boolean(enabledSourcesKey);
+
     return (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-            <div className="w-16 h-16 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center mb-4">
-                <Code2 size={32} />
+        <div className="schemas-tab-panel space-y-6">
+            <div className="flex items-start justify-between gap-3">
+                <div>
+                    <h3 className="text-lg font-medium text-gray-900">Schema cache</h3>
+                    <p className="text-sm text-gray-500">
+                        We enumerate enabled databases, embed their tables, and let you disable tables from search.
+                    </p>
+                    {lastRefreshed && (
+                        <p className="text-xs text-gray-400 mt-1">
+                            Last refreshed {new Date(lastRefreshed).toLocaleTimeString()}
+                        </p>
+                    )}
+                </div>
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={refreshSchemas}
+                        disabled={loading || !hasEnabledSources}
+                        className="schema-refresh-button inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                        Refresh schemas
+                    </button>
+                </div>
             </div>
-            <h3 className="text-lg font-medium text-gray-900">Schema Management</h3>
-            <p className="text-sm text-gray-500 max-w-sm mt-2">
-                Schema caching and management features will be available here.
-                Enable the "search_schemas" built-in tool to start caching schemas from your configured databases.
-            </p>
+
+            {error && (
+                <div className="schema-error-alert flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    <AlertCircle size={16} />
+                    <span>{error}</span>
+                </div>
+            )}
+
+            {!hasEnabledSources && (
+                <div className="schema-empty rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-sm text-gray-600">
+                    Enable at least one database source in the Databases tab, then refresh to cache its schemas.
+                </div>
+            )}
+
+            {loading && (
+                <div className="schema-loading flex items-center gap-2 text-sm text-gray-600">
+                    <Loader2 size={16} className="animate-spin" />
+                    <span>Caching and embedding schemas...</span>
+                </div>
+            )}
+
+            {!loading && hasEnabledSources && sources.length === 0 && (
+                <div className="schema-empty-state rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-sm text-gray-600">
+                    No schemas cached yet. Click "Refresh schemas" to enumerate and embed your databases.
+                </div>
+            )}
+
+            {sources.length > 0 && (
+                <div className="schema-summary text-xs text-gray-500">
+                    Tracking {sources.length} source{sources.length === 1 ? '' : 's'} · {totalTables} table{totalTables === 1 ? '' : 's'}
+                </div>
+            )}
+
+            <div className="schema-source-list space-y-4">
+                {sources.map((source) => (
+                    <div key={source.source_id} className="schema-source-card border border-gray-200 rounded-xl p-4 space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                            <div>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-900">{source.source_name}</span>
+                                    <span className="text-xs font-medium bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full">
+                                        {source.database_kind}
+                                    </span>
+                                </div>
+                                <div className="text-xs text-gray-500 mt-1">
+                                    {source.source_id} · {source.tables.length} table{source.tables.length === 1 ? '' : 's'}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="schema-table-list space-y-2">
+                            {source.tables.length === 0 && (
+                                <div className="schema-table-empty text-xs text-gray-500 bg-gray-50 border border-dashed border-gray-200 rounded-lg px-3 py-2">
+                                    No tables found for this source.
+                                </div>
+                            )}
+                            {source.tables.map((table) => {
+                                const key = `${source.source_id}::${table.table_fq_name}`;
+                                return (
+                                    <div
+                                        key={key}
+                                        className="schema-table-row flex items-start justify-between gap-3 rounded-lg border border-gray-100 bg-white px-3 py-2"
+                                    >
+                                        <div className="flex items-start gap-3">
+                                            <input
+                                                type="checkbox"
+                                                className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                                checked={table.enabled}
+                                                disabled={pendingTables[key]}
+                                                onChange={() => toggleTable(source.source_id, table.table_fq_name, !table.enabled)}
+                                            />
+                                            <div>
+                                                <div className="text-sm font-medium text-gray-900">{table.table_fq_name}</div>
+                                                <div className="text-xs text-gray-500 flex flex-wrap gap-2">
+                                                    <span>{table.column_count} column{table.column_count === 1 ? '' : 's'}</span>
+                                                    {table.description && (
+                                                        <span className="truncate max-w-[360px]">{table.description}</span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <span
+                                            className={`schema-table-chip text-xs font-medium px-2 py-1 rounded-full ${table.enabled
+                                                ? 'bg-green-50 text-green-700 border border-green-100'
+                                                : 'bg-gray-100 text-gray-600 border border-gray-200'
+                                                }`}
+                                        >
+                                            {table.enabled ? 'Enabled' : 'Disabled'}
+                                        </span>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                ))}
+            </div>
         </div>
     );
 }
@@ -2191,7 +2677,7 @@ export function SettingsModal() {
 
     // Conditions for showing database tabs
     const showDatabasesTab = settings?.search_schemas_enabled || settings?.execute_sql_enabled;
-    const showSchemasTab = (settings?.database_toolbox?.sources?.length ?? 0) > 0;
+    const showSchemasTab = (settings?.database_toolbox?.sources ?? []).some(source => source.enabled);
 
     return (
         <div id="settings-modal" className="settings-modal fixed inset-0 z-50 flex items-center justify-center">
@@ -2237,7 +2723,7 @@ export function SettingsModal() {
                 </div>
 
                 {/* Tabs */}
-                <div className="settings-tablist flex border-b border-gray-100 overflow-x-auto">
+                <div className="settings-tablist flex items-center border-b border-gray-100 overflow-x-auto min-h-[56px] pb-2">
                     <button
                         onClick={() => setActiveTab('system-prompt')}
                         className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'system-prompt'

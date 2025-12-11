@@ -269,11 +269,11 @@ impl SupportedDatabaseKind {
     }
 }
 
-/// Configuration for a single database source in MCP Toolbox.
-/// The actual connection credentials are in tools.yaml, not stored here.
+/// Configuration for a single database MCP server (one per database connection).
+/// Auth/credentials live in the MCP toolbox config; we only store launch params.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseSourceConfig {
-    /// Unique ID matching the source name in tools.yaml
+    /// Unique ID for this database server
     pub id: String,
     /// Human-readable display name
     pub name: String,
@@ -281,9 +281,33 @@ pub struct DatabaseSourceConfig {
     pub kind: SupportedDatabaseKind,
     /// Whether this source is enabled for schema discovery
     pub enabled: bool,
-    /// For BigQuery: the project ID to enumerate datasets from
+    /// Transport for MCP (stdio or SSE)
+    #[serde(default)]
+    pub transport: Transport,
+    /// Command/binary to launch the MCP toolbox
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Command arguments
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Auto-approve tool calls from this server
+    #[serde(default)]
+    pub auto_approve_tools: bool,
+    /// Whether to defer tool exposure (align with MCP servers)
+    #[serde(default = "default_defer_tools")]
+    pub defer_tools: bool,
+    /// Optional project id for BigQuery and similar
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Optional comma-separated allowlist of datasets (BigQuery only). Empty => all datasets.
+    #[serde(default)]
+    pub dataset_allowlist: Option<String>,
+    /// Optional comma-separated allowlist of tables (BigQuery only). Empty => all tables.
+    #[serde(default)]
+    pub table_allowlist: Option<String>,
 }
 
 impl DatabaseSourceConfig {
@@ -293,44 +317,36 @@ impl DatabaseSourceConfig {
             name,
             kind,
             enabled: false,
+            transport: Transport::Stdio,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            auto_approve_tools: false,
+            defer_tools: true,
             project_id: None,
+            dataset_allowlist: None,
+            table_allowlist: None,
         }
     }
 }
 
-fn default_toolbox_port() -> u16 {
-    5000
-}
-
 /// Configuration for Google MCP Database Toolbox integration.
-/// Manages the Toolbox process and tracks configured database sources.
+/// Manages MCP server configs for databases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseToolboxConfig {
     /// Whether the Database Toolbox integration is enabled
     #[serde(default)]
     pub enabled: bool,
-    /// Path to the toolbox binary (optional, auto-discovered if not set)
-    #[serde(default)]
-    pub toolbox_path: Option<String>,
-    /// Path to the tools.yaml configuration file
-    #[serde(default)]
-    pub tools_yaml_path: Option<String>,
-    /// Configured database sources (synced from tools.yaml)
+    /// Configured database MCP servers
     #[serde(default)]
     pub sources: Vec<DatabaseSourceConfig>,
-    /// Port for the Toolbox SSE server
-    #[serde(default = "default_toolbox_port")]
-    pub port: u16,
 }
 
 impl Default for DatabaseToolboxConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            toolbox_path: None,
-            tools_yaml_path: None,
             sources: Vec::new(),
-            port: default_toolbox_port(),
         }
     }
 }
@@ -344,6 +360,9 @@ pub struct CachedTableSchema {
     pub source_id: String,
     /// Database kind (for SQL dialect)
     pub kind: SupportedDatabaseKind,
+    /// Whether this table should be used for search/SQL
+    #[serde(default = "default_schema_enabled")]
+    pub enabled: bool,
     /// Column schemas
     pub columns: Vec<CachedColumnSchema>,
     /// Primary key column names
@@ -358,6 +377,10 @@ pub struct CachedTableSchema {
     /// Optional description
     #[serde(default)]
     pub description: Option<String>,
+}
+
+fn default_schema_enabled() -> bool {
+    true
 }
 
 /// Schema for a cached column.
@@ -976,38 +999,37 @@ mod tests {
     fn test_database_toolbox_config_default() {
         let config = DatabaseToolboxConfig::default();
         assert!(!config.enabled);
-        assert!(config.toolbox_path.is_none());
-        assert!(config.tools_yaml_path.is_none());
         assert!(config.sources.is_empty());
-        assert_eq!(config.port, 5000);
     }
 
     #[test]
     fn test_database_toolbox_config_serde_roundtrip() {
         let config = DatabaseToolboxConfig {
             enabled: true,
-            toolbox_path: Some("/usr/local/bin/toolbox".to_string()),
-            tools_yaml_path: Some("/path/to/tools.yaml".to_string()),
             sources: vec![
                 DatabaseSourceConfig {
                     id: "bq-prod".to_string(),
                     name: "BigQuery Production".to_string(),
                     kind: SupportedDatabaseKind::Bigquery,
                     enabled: true,
+                    transport: Transport::Stdio,
+                    command: Some("/opt/homebrew/bin/toolbox".to_string()),
+                    args: vec!["--stdio".to_string(), "--prebuilt".to_string(), "bigquery".to_string()],
+                    env: HashMap::new(),
+                    auto_approve_tools: false,
+                    defer_tools: true,
                     project_id: Some("my-project".to_string()),
                 },
             ],
-            port: 8080,
         };
 
         let json = serde_json::to_string(&config).unwrap();
         let parsed: DatabaseToolboxConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(config.enabled, parsed.enabled);
-        assert_eq!(config.toolbox_path, parsed.toolbox_path);
         assert_eq!(config.sources.len(), parsed.sources.len());
         assert_eq!(config.sources[0].kind, parsed.sources[0].kind);
-        assert_eq!(config.port, parsed.port);
+        assert_eq!(config.sources[0].command, parsed.sources[0].command);
     }
 
     #[test]

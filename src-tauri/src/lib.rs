@@ -6,7 +6,7 @@ pub mod tool_adapters;
 pub mod tool_registry;
 pub mod tools;
 
-use actors::database_toolbox_actor::{DatabaseToolboxActor, DatabaseToolboxMsg};
+use actors::database_toolbox_actor::{DatabaseToolboxActor, DatabaseToolboxMsg, ToolboxStatus};
 use actors::foundry_actor::ModelGatewayActor;
 use actors::mcp_host_actor::{McpToolRouterActor, McpTool, McpToolResult};
 use actors::python_actor::{PythonMsg, PythonSandboxActor};
@@ -31,8 +31,9 @@ use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use settings::{
-    enforce_python_name, ensure_default_servers, AppSettings, McpServerConfig,
-    ToolCallFormatConfig, ToolCallFormatName,
+    enforce_python_name, ensure_default_servers, AppSettings, CachedColumnSchema,
+    CachedTableSchema, DatabaseSourceConfig, DatabaseToolboxConfig, McpServerConfig,
+    SupportedDatabaseKind, ToolCallFormatConfig, ToolCallFormatName,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -3889,12 +3890,734 @@ async fn update_execute_sql_enabled(
 async fn update_database_toolbox_config(
     config: settings::DatabaseToolboxConfig,
     settings_state: State<'_, SettingsState>,
+    handles: State<'_, ActorHandles>,
+    embedding_state: State<'_, EmbeddingModelState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
-    guard.database_toolbox = config;
+    guard.database_toolbox = config.clone();
     settings::save_settings(&guard).await?;
     println!("[Settings] database_toolbox config updated");
+    drop(guard);
+
+    let refresh_summary =
+        refresh_database_schemas_for_config(&handles, &embedding_state, &config).await?;
+
+    if !refresh_summary.errors.is_empty() {
+        let joined = refresh_summary.errors.join("; ");
+        println!(
+            "[Settings] Schema refresh completed with errors after config save: {}",
+            &joined
+        );
+        return Err(format!(
+            "Schema refresh failed after saving database settings: {}. Fix the MCP database configuration here and try again.",
+            joined
+        ));
+    }
+
     Ok(())
+}
+
+// ============ Database Schema Cache Commands ============
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SchemaTableStatus {
+    source_id: String,
+    source_name: String,
+    table_fq_name: String,
+    enabled: bool,
+    column_count: usize,
+    description: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SchemaSourceStatus {
+    source_id: String,
+    source_name: String,
+    database_kind: SupportedDatabaseKind,
+    tables: Vec<SchemaTableStatus>,
+}
+
+#[derive(Debug, Clone)]
+struct SchemaRefreshSummary {
+    sources: Vec<SchemaSourceStatus>,
+    errors: Vec<String>,
+}
+
+async fn refresh_database_schemas_for_config(
+    handles: &State<'_, ActorHandles>,
+    embedding_state: &State<'_, EmbeddingModelState>,
+    toolbox_config: &settings::DatabaseToolboxConfig,
+) -> Result<SchemaRefreshSummary, String> {
+    let sources: Vec<DatabaseSourceConfig> = toolbox_config
+        .sources
+        .iter()
+        .cloned()
+        .filter(|s| s.enabled)
+        .collect();
+
+    if sources.is_empty() {
+        return Ok(SchemaRefreshSummary {
+            sources: Vec::new(),
+            errors: Vec::new(),
+        });
+    }
+
+    let model_guard = embedding_state.model.read().await;
+    let embedding_model = model_guard
+        .clone()
+        .ok_or_else(|| "Embedding model not initialized".to_string())?;
+    drop(model_guard);
+
+    ensure_toolbox_running(&handles.database_toolbox_tx, toolbox_config).await?;
+
+    let mut refreshed_sources = Vec::new();
+    let mut errors = Vec::new();
+
+    for source in sources {
+        match refresh_schema_cache_for_source(handles, &source, embedding_model.clone()).await {
+            Ok(status) => refreshed_sources.push(status),
+            Err(err) => {
+                let msg = format!("{} ({}): {}", source.name, source.id, err);
+                println!(
+                    "[SchemaRefresh] Failed to refresh source {} ({}): {}",
+                    source.name, source.id, err
+                );
+                errors.push(msg);
+            }
+        }
+    }
+
+    Ok(SchemaRefreshSummary {
+        sources: refreshed_sources,
+        errors,
+    })
+}
+
+#[tauri::command]
+async fn refresh_database_schemas(
+    handles: State<'_, ActorHandles>,
+    settings_state: State<'_, SettingsState>,
+    embedding_state: State<'_, EmbeddingModelState>,
+) -> Result<Vec<SchemaSourceStatus>, String> {
+    let settings_guard = settings_state.settings.read().await;
+    let toolbox_config = settings_guard.database_toolbox.clone();
+    drop(settings_guard);
+
+    let summary =
+        refresh_database_schemas_for_config(&handles, &embedding_state, &toolbox_config).await?;
+
+    if !summary.errors.is_empty() {
+        println!(
+            "[SchemaRefresh] Completed with errors: {}",
+            summary.errors.join("; ")
+        );
+    }
+
+    Ok(summary.sources)
+}
+
+#[tauri::command]
+async fn set_schema_table_enabled(
+    handles: State<'_, ActorHandles>,
+    settings_state: State<'_, SettingsState>,
+    embedding_state: State<'_, EmbeddingModelState>,
+    source_id: String,
+    table_fq_name: String,
+    enabled: bool,
+) -> Result<SchemaTableStatus, String> {
+    let settings_guard = settings_state.settings.read().await;
+    let toolbox_config = settings_guard.database_toolbox.clone();
+    let source = settings_guard
+        .database_toolbox
+        .sources
+        .iter()
+        .find(|s| s.id == source_id)
+        .cloned()
+        .ok_or_else(|| format!("Source not found: {}", source_id))?;
+    let source_name = source.name.clone();
+    drop(settings_guard);
+
+    // Try to flip the enabled flag on the cached record
+    let toggle_result = {
+        let (tx, rx) = oneshot::channel();
+        handles
+            .schema_tx
+            .send(SchemaVectorMsg::SetTableEnabled {
+                table_fq_name: table_fq_name.clone(),
+                enabled,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        rx.await
+            .map_err(|_| "Schema vector actor unavailable".to_string())?
+    };
+
+    let table_schema = match toggle_result {
+        Ok(schema) => schema,
+        Err(err) => {
+            if !enabled {
+                return Err(err);
+            }
+
+            // If enabling a table that is not cached yet, fetch and cache it now
+            println!(
+                "[SchemaRefresh] Table {} not cached yet, fetching fresh schema: {}",
+                table_fq_name, err
+            );
+
+            let model_guard = embedding_state.model.read().await;
+            let embedding_model = model_guard
+                .clone()
+                .ok_or_else(|| "Embedding model not initialized".to_string())?;
+            drop(model_guard);
+
+            ensure_toolbox_running(&handles.database_toolbox_tx, &toolbox_config).await?;
+
+            let table_schema =
+                fetch_table_schema(&handles.database_toolbox_tx, &source.id, &table_fq_name)
+                    .await?;
+            let mut schema_with_flag = table_schema.clone();
+            schema_with_flag.enabled = true;
+            let primary_set: std::collections::HashSet<String> =
+                schema_with_flag.primary_keys.iter().cloned().collect();
+            let partition_set: std::collections::HashSet<String> =
+                schema_with_flag.partition_columns.iter().cloned().collect();
+            let cluster_set: std::collections::HashSet<String> =
+                schema_with_flag.cluster_columns.iter().cloned().collect();
+            let (table_embedding, column_embeddings) =
+                embed_table_and_columns(embedding_model.clone(), &schema_with_flag).await?;
+            cache_table_and_columns(
+                &handles.schema_tx,
+                schema_with_flag.clone(),
+                table_embedding,
+                column_embeddings,
+                &primary_set,
+                &partition_set,
+                &cluster_set,
+            )
+            .await?;
+            schema_with_flag
+        }
+    };
+
+    Ok(SchemaTableStatus {
+        source_id: source.id,
+        source_name,
+        table_fq_name: table_schema.fully_qualified_name,
+        enabled: table_schema.enabled,
+        column_count: table_schema.columns.len(),
+        description: table_schema.description,
+    })
+}
+
+async fn refresh_schema_cache_for_source(
+    handles: &State<'_, ActorHandles>,
+    source: &DatabaseSourceConfig,
+    embedding_model: Arc<TextEmbedding>,
+) -> Result<SchemaSourceStatus, String> {
+    println!(
+        "[SchemaRefresh] Refreshing source '{}' ({})",
+        source.name, source.id
+    );
+
+    // Preserve existing enabled flags if present
+    let previous_map = load_cached_enabled_flags(&handles.schema_tx, &source.id).await?;
+
+    // Remove stale entries so we only keep current enumeration
+    let _ = clear_source_cache(&handles.schema_tx, &source.id).await;
+
+    let mut datasets = enumerate_source_schemas(&handles.database_toolbox_tx, &source.id).await?;
+    // Apply BigQuery dataset allowlist if provided
+    if source.kind == SupportedDatabaseKind::Bigquery {
+        if let Some(allow_raw) = source.dataset_allowlist.as_ref() {
+            let allow: Vec<String> = allow_raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !allow.is_empty() {
+                let allow_set: std::collections::HashSet<String> = allow.into_iter().collect();
+                datasets.retain(|d| allow_set.contains(d));
+                println!(
+                    "[SchemaRefresh] Applying dataset allowlist for source {}: {} datasets retained",
+                    source.id,
+                    datasets.len()
+                );
+            }
+        }
+    }
+    let mut tables_status = Vec::new();
+
+    for dataset in datasets {
+        let dataset_clean = dataset.trim().to_string();
+        if dataset_clean
+            .chars()
+            .last()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
+            println!(
+                "[SchemaRefresh] Skipping dataset '{}' because it ends with a numeric suffix",
+                dataset_clean
+            );
+            continue;
+        }
+
+        let mut tables = match enumerate_tables_for_schema(
+            &handles.database_toolbox_tx,
+            &source.id,
+            &dataset_clean,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(err) => {
+                println!(
+                    "[SchemaRefresh] Failed to enumerate tables for {}: {}",
+                    dataset_clean, err
+                );
+                continue;
+            }
+        };
+
+        // Apply BigQuery table allowlist if provided
+        if source.kind == SupportedDatabaseKind::Bigquery {
+            if let Some(allow_raw) = source.table_allowlist.as_ref() {
+                let allow: Vec<String> = allow_raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !allow.is_empty() {
+                    let allow_set: std::collections::HashSet<String> = allow.into_iter().collect();
+                    tables.retain(|t| allow_set.contains(t));
+                    println!(
+                        "[SchemaRefresh] Applying table allowlist for source {} dataset {}: {} tables retained",
+                        source.id,
+                        dataset_clean,
+                        tables.len()
+                    );
+                }
+            }
+        }
+
+        if tables.len() > 5 {
+            println!(
+                "[SchemaRefresh] Truncating tables list for dataset '{}' from {} to 5 entries",
+                dataset_clean,
+                tables.len()
+            );
+            tables.truncate(5);
+        }
+
+        for table_name in tables {
+            let table_clean = table_name.trim().to_string();
+            if table_clean
+                .chars()
+                .last()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+            {
+                println!(
+                    "[SchemaRefresh] Skipping table '{}' in dataset '{}' because it ends with a numeric suffix",
+                    table_clean,
+                    dataset_clean
+                );
+                continue;
+            }
+
+            let fq_name = build_fully_qualified_table_name(source, &dataset_clean, &table_name);
+            let enabled = previous_map.get(&fq_name).copied().unwrap_or(true);
+
+            match fetch_table_schema(&handles.database_toolbox_tx, &source.id, &fq_name).await {
+                Ok(mut table_schema) => {
+                    table_schema.enabled = enabled;
+                    // Annotate join-worthy columns for chunk key purposes
+                    let partition_set: std::collections::HashSet<String> =
+                        table_schema.partition_columns.iter().cloned().collect();
+                    let cluster_set: std::collections::HashSet<String> =
+                        table_schema.cluster_columns.iter().cloned().collect();
+                    let primary_set: std::collections::HashSet<String> =
+                        table_schema.primary_keys.iter().cloned().collect();
+
+                    let (table_embedding, column_embeddings) =
+                        match embed_table_and_columns(embedding_model.clone(), &table_schema).await
+                        {
+                            Ok(res) => res,
+                            Err(err) => {
+                                println!(
+                                    "[SchemaRefresh] Failed to embed table {}: {}",
+                                    fq_name, err
+                                );
+                                continue;
+                            }
+                        };
+
+                    if let Err(err) = cache_table_and_columns(
+                        &handles.schema_tx,
+                        table_schema.clone(),
+                        table_embedding,
+                        column_embeddings,
+                        &primary_set,
+                        &partition_set,
+                        &cluster_set,
+                    )
+                    .await
+                    {
+                        println!(
+                            "[SchemaRefresh] Failed to cache table {}: {}",
+                            fq_name, err
+                        );
+                        continue;
+                    }
+
+                    tables_status.push(SchemaTableStatus {
+                        source_id: source.id.clone(),
+                        source_name: source.name.clone(),
+                        table_fq_name: fq_name.clone(),
+                        enabled,
+                        column_count: table_schema.columns.len(),
+                        description: table_schema.description.clone(),
+                    });
+                }
+                Err(err) => {
+                    println!(
+                        "[SchemaRefresh] Failed to cache table {}: {}",
+                        fq_name, err
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(SchemaSourceStatus {
+        source_id: source.id.clone(),
+        source_name: source.name.clone(),
+        database_kind: source.kind,
+        tables: tables_status,
+    })
+}
+
+async fn ensure_toolbox_running(
+    toolbox_tx: &mpsc::Sender<DatabaseToolboxMsg>,
+    config: &DatabaseToolboxConfig,
+) -> Result<(), String> {
+    if !config.enabled {
+        println!(
+            "[SchemaRefresh] Database toolbox is disabled in settings; attempting to start anyway"
+        );
+    }
+
+    let (status_tx, status_rx) = oneshot::channel();
+    toolbox_tx
+        .send(DatabaseToolboxMsg::GetStatus {
+            reply_to: status_tx,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let status: ToolboxStatus = status_rx
+        .await
+        .map_err(|_| "Database toolbox actor unavailable".to_string())?;
+
+    if status.running {
+        return Ok(());
+    }
+
+    let (tx, rx) = oneshot::channel();
+    toolbox_tx
+        .send(DatabaseToolboxMsg::Start {
+            config: config.clone(),
+            reply_to: tx,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let start_result = rx
+        .await
+        .map_err(|_| "Database toolbox actor unavailable".to_string())?;
+
+    match start_result {
+        Ok(()) => Ok(()),
+        Err(msg) if msg.contains("already running") => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+async fn enumerate_source_schemas(
+    toolbox_tx: &mpsc::Sender<DatabaseToolboxMsg>,
+    source_id: &str,
+) -> Result<Vec<String>, String> {
+    let (tx, rx) = oneshot::channel();
+    toolbox_tx
+        .send(DatabaseToolboxMsg::EnumerateSchemas {
+            source_id: source_id.to_string(),
+            reply_to: tx,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Database toolbox actor unavailable".to_string())?
+}
+
+async fn enumerate_tables_for_schema(
+    toolbox_tx: &mpsc::Sender<DatabaseToolboxMsg>,
+    source_id: &str,
+    dataset_or_schema: &str,
+) -> Result<Vec<String>, String> {
+    let (tx, rx) = oneshot::channel();
+    toolbox_tx
+        .send(DatabaseToolboxMsg::EnumerateTables {
+            source_id: source_id.to_string(),
+            dataset_or_schema: dataset_or_schema.to_string(),
+            reply_to: tx,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Database toolbox actor unavailable".to_string())?
+}
+
+async fn fetch_table_schema(
+    toolbox_tx: &mpsc::Sender<DatabaseToolboxMsg>,
+    source_id: &str,
+    table_fq_name: &str,
+) -> Result<CachedTableSchema, String> {
+    let (tx, rx) = oneshot::channel();
+    toolbox_tx
+        .send(DatabaseToolboxMsg::GetTableInfo {
+            source_id: source_id.to_string(),
+            fully_qualified_table: table_fq_name.to_string(),
+            reply_to: tx,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Database toolbox actor unavailable".to_string())?
+}
+
+fn build_fully_qualified_table_name(
+    source: &DatabaseSourceConfig,
+    dataset_or_schema: &str,
+    table_name: &str,
+) -> String {
+    match source.kind {
+        SupportedDatabaseKind::Bigquery | SupportedDatabaseKind::Spanner => {
+            if let Some(project_id) = &source.project_id {
+                format!("{}.{}.{}", project_id, dataset_or_schema, table_name)
+            } else {
+                format!("{}.{}", dataset_or_schema, table_name)
+            }
+        }
+        _ => format!("{}.{}", dataset_or_schema, table_name),
+    }
+}
+
+fn split_parent_and_table(fq_name: &str) -> (String, String) {
+    let parts: Vec<&str> = fq_name.split('.').collect();
+    if parts.len() < 2 {
+        return ("".to_string(), fq_name.to_string());
+    }
+    let table = parts.last().unwrap().to_string();
+    let parent = parts[..parts.len() - 1].join(".");
+    (parent, table)
+}
+
+fn build_table_embedding_text(schema: &CachedTableSchema) -> String {
+    let column_summaries: Vec<String> = schema
+        .columns
+        .iter()
+        .map(|c| format!("{} {}{}", c.name, c.data_type, if c.nullable { " nullable" } else { "" }))
+        .collect();
+
+    let primary = if schema.primary_keys.is_empty() {
+        "none".to_string()
+    } else {
+        schema.primary_keys.join(", ")
+    };
+
+    let partitions = if schema.partition_columns.is_empty() {
+        "none".to_string()
+    } else {
+        schema.partition_columns.join(", ")
+    };
+
+    let clusters = if schema.cluster_columns.is_empty() {
+        "none".to_string()
+    } else {
+        schema.cluster_columns.join(", ")
+    };
+
+    format!(
+        "table {} ({}) columns [{}]; primary keys: {}; partitions: {}; clusters: {}; description: {}",
+        schema.fully_qualified_name,
+        schema.kind.display_name(),
+        column_summaries.join("; "),
+        primary,
+        partitions,
+        clusters,
+        schema
+            .description
+            .clone()
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn build_column_embedding_text(table_name: &str, column: &CachedColumnSchema) -> String {
+    format!(
+        "column {}.{} type {} {}; description: {}",
+        table_name,
+        column.name,
+        column.data_type,
+        if column.nullable { "nullable" } else { "not null" },
+        column
+            .description
+            .clone()
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+async fn embed_table_and_columns(
+    model: Arc<TextEmbedding>,
+    schema: &CachedTableSchema,
+) -> Result<(Vec<f32>, Vec<Vec<f32>>), String> {
+    let table_text = build_table_embedding_text(schema);
+    let column_texts: Vec<String> = schema
+        .columns
+        .iter()
+        .map(|c| build_column_embedding_text(&schema.fully_qualified_name, c))
+        .collect();
+
+    let mut to_embed = Vec::with_capacity(1 + column_texts.len());
+    to_embed.push(table_text);
+    to_embed.extend(column_texts);
+
+    let model_clone = model.clone();
+    let embeddings = tokio::task::spawn_blocking(move || model_clone.embed(to_embed, None))
+        .await
+        .map_err(|e| format!("Embedding task panicked: {}", e))?
+        .map_err(|e| format!("Failed to embed schema: {}", e))?;
+
+    let mut iter = embeddings.into_iter();
+    let table_embedding = iter
+        .next()
+        .ok_or_else(|| "No table embedding returned".to_string())?;
+    let column_embeddings: Vec<Vec<f32>> = iter.collect();
+
+    Ok((table_embedding, column_embeddings))
+}
+
+async fn cache_table_and_columns(
+    schema_tx: &mpsc::Sender<SchemaVectorMsg>,
+    schema: CachedTableSchema,
+    table_embedding: Vec<f32>,
+    column_embeddings: Vec<Vec<f32>>,
+    primary_keys: &std::collections::HashSet<String>,
+    partition_keys: &std::collections::HashSet<String>,
+    cluster_keys: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    if schema.columns.len() != column_embeddings.len() {
+        println!(
+            "[SchemaRefresh] Column embedding count mismatch for {} (columns={}, embeddings={})",
+            schema.fully_qualified_name,
+            schema.columns.len(),
+            column_embeddings.len()
+        );
+    }
+
+    let (tx, rx) = oneshot::channel();
+    schema_tx
+        .send(SchemaVectorMsg::CacheTableSchema {
+            schema: schema.clone(),
+            table_embedding,
+            respond_to: tx,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Schema vector actor unavailable".to_string())?
+        .map_err(|e| format!("Failed to cache table: {}", e))?;
+
+    // Build base chunk key: table only (to reduce duplication); disambiguation relies on table_fq_name elsewhere
+    let (_, table_name) = split_parent_and_table(&schema.fully_qualified_name);
+    let base_chunk = table_name;
+
+    for (column, embedding) in schema.columns.iter().zip(column_embeddings.into_iter()) {
+        let is_join = primary_keys.contains(&column.name)
+            || partition_keys.contains(&column.name)
+            || cluster_keys.contains(&column.name);
+        let chunk_key = if is_join {
+            format!("{}:join", base_chunk)
+        } else {
+            base_chunk.clone()
+        };
+
+        let (col_tx, col_rx) = oneshot::channel();
+        schema_tx
+            .send(SchemaVectorMsg::CacheColumnSchema {
+                table_fq_name: schema.fully_qualified_name.clone(),
+                source_id: schema.source_id.clone(),
+                column: column.clone(),
+                column_embedding: embedding,
+                chunk_key,
+                respond_to: col_tx,
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        col_rx
+            .await
+            .map_err(|_| "Schema vector actor unavailable".to_string())?
+            .map_err(|e| format!("Failed to cache column: {}", e))?;
+    }
+
+    Ok(())
+}
+
+async fn clear_source_cache(
+    schema_tx: &mpsc::Sender<SchemaVectorMsg>,
+    source_id: &str,
+) -> Result<(), String> {
+    let (tx, rx) = oneshot::channel();
+    schema_tx
+        .send(SchemaVectorMsg::ClearSource {
+            source_id: source_id.to_string(),
+            respond_to: tx,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Schema vector actor unavailable".to_string())?
+}
+
+async fn load_cached_enabled_flags(
+    schema_tx: &mpsc::Sender<SchemaVectorMsg>,
+    source_id: &str,
+) -> Result<HashMap<String, bool>, String> {
+    let (tx, rx) = oneshot::channel();
+    schema_tx
+        .send(SchemaVectorMsg::GetTablesForSource {
+            source_id: source_id.to_string(),
+            respond_to: tx,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let tables = rx
+        .await
+        .map_err(|_| "Schema vector actor unavailable".to_string())?;
+
+    let mut map = HashMap::new();
+    for table in tables {
+        map.insert(table.fully_qualified_name.clone(), table.enabled);
+    }
+    Ok(map)
 }
 
 // ============ MCP Commands ============
@@ -4494,13 +5217,15 @@ pub fn run() {
             let (database_toolbox_tx, database_toolbox_rx) = mpsc::channel(32);
             let (schema_tx, schema_rx) = mpsc::channel(32);
             let python_mcp_host_tx = mcp_host_tx.clone();
+            let mcp_host_tx_for_db = mcp_host_tx.clone();
+            let mcp_host_tx_for_handles = mcp_host_tx.clone();
 
             // Store handles in state
             app.manage(ActorHandles {
                 vector_tx,
                 foundry_tx,
                 rag_tx,
-                mcp_host_tx,
+                mcp_host_tx: mcp_host_tx_for_handles,
                 python_tx,
                 database_toolbox_tx: database_toolbox_tx.clone(),
                 schema_tx: schema_tx.clone(),
@@ -4655,7 +5380,11 @@ pub fn run() {
             let db_state_clone = database_toolbox_state.clone();
             tauri::async_runtime::spawn(async move {
                 println!("Starting Database Toolbox Actor...");
-                let actor = DatabaseToolboxActor::new(database_toolbox_rx, db_state_clone);
+                let actor = DatabaseToolboxActor::new(
+                    database_toolbox_rx,
+                    db_state_clone,
+                    mcp_host_tx_for_db,
+                );
                 actor.run().await;
             });
 
@@ -4711,6 +5440,8 @@ pub fn run() {
             update_search_schemas_enabled,
             update_execute_sql_enabled,
             update_database_toolbox_config,
+            refresh_database_schemas,
+            set_schema_table_enabled,
             // MCP commands
             sync_mcp_servers,
             connect_mcp_server,

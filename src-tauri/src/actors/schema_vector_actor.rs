@@ -38,6 +38,7 @@ pub enum SchemaVectorMsg {
         source_id: String,
         column: CachedColumnSchema,
         column_embedding: Vec<f32>,
+        chunk_key: String,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
     /// Search for relevant tables by embedding
@@ -58,6 +59,12 @@ pub enum SchemaVectorMsg {
     GetTablesForSource {
         source_id: String,
         respond_to: oneshot::Sender<Vec<CachedTableSchema>>,
+    },
+    /// Enable or disable a specific table
+    SetTableEnabled {
+        table_fq_name: String,
+        enabled: bool,
+        respond_to: oneshot::Sender<Result<CachedTableSchema, String>>,
     },
     /// Clear all schemas for a source
     ClearSource {
@@ -143,6 +150,7 @@ impl SchemaVectorStoreActor {
                         source_id,
                         column,
                         column_embedding,
+                        chunk_key,
                         respond_to,
                     } => {
                         let result = upsert_column_schema(
@@ -151,6 +159,7 @@ impl SchemaVectorStoreActor {
                             &source_id,
                             &column,
                             column_embedding,
+                            &chunk_key,
                         )
                         .await;
                         let _ = respond_to.send(result);
@@ -187,6 +196,15 @@ impl SchemaVectorStoreActor {
                         let results = get_tables_for_source(&tables_table, &source_id).await;
                         let _ = respond_to.send(results);
                     }
+                    SchemaVectorMsg::SetTableEnabled {
+                        table_fq_name,
+                        enabled,
+                        respond_to,
+                    } => {
+                        let result =
+                            set_table_enabled(&tables_table, &table_fq_name, enabled).await;
+                        let _ = respond_to.send(result);
+                    }
                     SchemaVectorMsg::ClearSource {
                         source_id,
                         respond_to,
@@ -218,6 +236,7 @@ fn tables_table_schema() -> Arc<Schema> {
         Field::new("key_columns", DataType::Utf8, false), // JSON array
         Field::new("partition_columns", DataType::Utf8, false), // JSON array
         Field::new("cluster_columns", DataType::Utf8, false), // JSON array
+        Field::new("enabled", DataType::Boolean, false),
         Field::new("columns_json", DataType::Utf8, false), // Full column data
         Field::new(
             "vector",
@@ -239,6 +258,7 @@ fn columns_table_schema() -> Arc<Schema> {
         Field::new("data_type", DataType::Utf8, false),
         Field::new("nullable", DataType::Boolean, false),
         Field::new("description", DataType::Utf8, true),
+        Field::new("chunk_key", DataType::Utf8, false),
         Field::new(
             "vector",
             DataType::FixedSizeList(
@@ -337,6 +357,7 @@ async fn upsert_table_schema(
     let cluster_cols_array = StringArray::from(vec![
         serde_json::to_string(&schema.cluster_columns).unwrap_or_default()
     ]);
+    let enabled_array = BooleanArray::from(vec![schema.enabled]);
     let columns_json_array =
         StringArray::from(vec![serde_json::to_string(&schema.columns).unwrap_or_default()]);
 
@@ -362,6 +383,7 @@ async fn upsert_table_schema(
             Arc::new(key_cols_array),
             Arc::new(partition_cols_array),
             Arc::new(cluster_cols_array),
+            Arc::new(enabled_array),
             Arc::new(columns_json_array),
             Arc::new(vector_array),
         ],
@@ -394,6 +416,7 @@ async fn upsert_column_schema(
     source_id: &str,
     column: &CachedColumnSchema,
     embedding: Vec<f32>,
+    chunk_key: &str,
 ) -> Result<(), String> {
     let column_schema = columns_table_schema();
     let column_id = format!("{}::{}", table_fq_name, column.name);
@@ -405,6 +428,7 @@ async fn upsert_column_schema(
     let type_array = StringArray::from(vec![column.data_type.clone()]);
     let nullable_array = BooleanArray::from(vec![column.nullable]);
     let desc_array = StringArray::from(vec![column.description.clone().unwrap_or_default()]);
+    let chunk_array = StringArray::from(vec![chunk_key.to_string()]);
 
     let vector_values = Float32Array::from(embedding);
     let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
@@ -428,6 +452,7 @@ async fn upsert_column_schema(
             Arc::new(type_array),
             Arc::new(nullable_array),
             Arc::new(desc_array),
+            Arc::new(chunk_array),
             Arc::new(vector_array),
         ],
     )
@@ -457,7 +482,7 @@ async fn search_tables(
     limit: usize,
     min_score: f32,
 ) -> Vec<SchemaSearchResult> {
-    let query = match table.query().nearest_to(query_embedding) {
+    let mut query_builder = match table.query().nearest_to(query_embedding) {
         Ok(q) => q,
         Err(e) => {
             println!("[SchemaVectorActor] Failed to create vector query: {}", e);
@@ -465,8 +490,10 @@ async fn search_tables(
         }
     };
 
+    query_builder = query_builder.only_if("enabled = true");
+
     let mut results = vec![];
-    let mut stream = match query.limit(limit).execute().await {
+    let mut stream = match query_builder.limit(limit).execute().await {
         Ok(s) => s,
         Err(e) => {
             println!("[SchemaVectorActor] Failed to execute query: {}", e);
@@ -501,6 +528,9 @@ async fn search_tables(
         let cluster_cols = batch
             .column_by_name("cluster_columns")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let _enabled_col = batch
+            .column_by_name("enabled")
+            .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
         let distances = batch
             .column_by_name("_distance")
             .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
@@ -617,6 +647,111 @@ async fn search_columns(
     results
 }
 
+async fn set_table_enabled(
+    tables: &Table,
+    table_fq_name: &str,
+    enabled: bool,
+) -> Result<CachedTableSchema, String> {
+    let query = tables
+        .query()
+        .only_if(format!("table_fq_name = '{}'", table_fq_name));
+
+    let mut stream = query
+        .execute()
+        .await
+        .map_err(|e| format!("Failed to fetch table for toggle: {}", e))?;
+
+    let batch = match stream.next().await {
+        Some(Ok(batch)) => batch,
+        _ => return Err(format!("Table not found in cache: {}", table_fq_name)),
+    };
+
+    let fq_names = batch
+        .column_by_name("table_fq_name")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let source_ids = batch
+        .column_by_name("source_id")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let kinds = batch
+        .column_by_name("database_kind")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let descriptions = batch
+        .column_by_name("description")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let columns_json = batch
+        .column_by_name("columns_json")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let key_cols = batch
+        .column_by_name("key_columns")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let partition_cols = batch
+        .column_by_name("partition_columns")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let cluster_cols = batch
+        .column_by_name("cluster_columns")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let _enabled_col = batch
+        .column_by_name("enabled")
+        .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
+
+    let vector_col = batch
+        .column_by_name("vector")
+        .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>())
+        .ok_or("Missing vector column for table cache")?;
+
+    if batch.num_rows() == 0 {
+        return Err(format!("Table not found in cache: {}", table_fq_name));
+    }
+
+    let kind_str = kinds
+        .and_then(|k| Some(k.value(0)))
+        .ok_or("Missing database kind")?;
+    let database_kind = match kind_str {
+        "bigquery" => SupportedDatabaseKind::Bigquery,
+        "postgres" => SupportedDatabaseKind::Postgres,
+        "mysql" => SupportedDatabaseKind::Mysql,
+        "sqlite" => SupportedDatabaseKind::Sqlite,
+        "spanner" => SupportedDatabaseKind::Spanner,
+        _ => return Err(format!("Unsupported database kind: {}", kind_str)),
+    };
+
+    let vector_values = vector_col.value(0);
+    let values = vector_values
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or("Invalid vector column type")?;
+    let embedding: Vec<f32> = (0..values.len()).map(|i| values.value(i)).collect();
+
+    let schema = CachedTableSchema {
+        fully_qualified_name: fq_names
+            .and_then(|c| Some(c.value(0).to_string()))
+            .ok_or("Missing table name")?,
+        source_id: source_ids
+            .and_then(|c| Some(c.value(0).to_string()))
+            .ok_or("Missing source id")?,
+        kind: database_kind,
+        enabled,
+        columns: columns_json
+            .and_then(|c| serde_json::from_str(c.value(0)).ok())
+            .unwrap_or_default(),
+        primary_keys: key_cols
+            .and_then(|c| serde_json::from_str(c.value(0)).ok())
+            .unwrap_or_default(),
+        partition_columns: partition_cols
+            .and_then(|c| serde_json::from_str(c.value(0)).ok())
+            .unwrap_or_default(),
+        cluster_columns: cluster_cols
+            .and_then(|c| serde_json::from_str(c.value(0)).ok())
+            .unwrap_or_default(),
+        description: descriptions
+            .and_then(|d| Some(d.value(0).to_string()))
+            .filter(|s| !s.is_empty()),
+    };
+
+    upsert_table_schema(tables, &schema, embedding).await?;
+    Ok(schema)
+}
+
 async fn get_tables_for_source(table: &Table, source_id: &str) -> Vec<CachedTableSchema> {
     let query = table
         .query()
@@ -659,6 +794,9 @@ async fn get_tables_for_source(table: &Table, source_id: &str) -> Vec<CachedTabl
         let cluster_cols = batch
             .column_by_name("cluster_columns")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let enabled_col = batch
+            .column_by_name("enabled")
+            .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
 
         if let (Some(fq), Some(src), Some(k), Some(cols)) = (fq_names, source_ids, kinds, columns_json) {
             for i in 0..batch.num_rows() {
@@ -689,6 +827,7 @@ async fn get_tables_for_source(table: &Table, source_id: &str) -> Vec<CachedTabl
                         .and_then(|c| serde_json::from_str(c.value(i)).ok())
                         .unwrap_or_default(),
                     description: descriptions.map(|d| d.value(i).to_string()).filter(|s| !s.is_empty()),
+                    enabled: enabled_col.map(|c| c.value(i)).unwrap_or(true),
                 });
             }
         }
