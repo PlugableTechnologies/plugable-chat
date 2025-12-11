@@ -3,6 +3,7 @@ use crate::protocol::{
     CachedModel, ChatMessage, FoundryMsg, ModelFamily, ModelInfo, OpenAITool, ParsedToolCall,
     ReasoningFormat, ToolFormat,
 };
+use crate::settings::ChatFormatName;
 use crate::tool_adapters::parse_combined_tool_name;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use serde_json::{json, Value};
@@ -118,12 +119,21 @@ fn build_chat_request_body(
     supports_reasoning: bool,
     supports_reasoning_effort: bool,
     reasoning_effort: &str,
+    use_responses_api: bool,
 ) -> Value {
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": true,
-    });
+    let mut body = if use_responses_api {
+        json!({
+            "model": model,
+            "input": map_messages_to_responses_input(messages),
+            "stream": true,
+        })
+    } else {
+        json!({
+            "model": model,
+            "messages": messages,
+            "stream": true,
+        })
+    };
 
     // Note: EP (execution provider) parameter is not passed to completions
     // as it didn't work reliably. Foundry will auto-select the best EP.
@@ -132,7 +142,8 @@ fn build_chat_request_body(
     match family {
         ModelFamily::GptOss => {
             // GPT-OSS models: standard OpenAI-compatible parameters
-            body["max_tokens"] = json!(16384);
+            body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
+                json!(16384);
             body["temperature"] = json!(0.7);
 
             if use_native_tools {
@@ -148,11 +159,13 @@ fn build_chat_request_body(
                     "[FoundryActor] Phi model with reasoning, using effort: {}",
                     reasoning_effort
                 );
-                body["max_tokens"] = json!(8192);
+                body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
+                    json!(8192);
                 body["reasoning_effort"] = json!(reasoning_effort);
                 // Note: Reasoning models typically don't use tools in the same request
             } else {
-                body["max_tokens"] = json!(16384);
+                body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
+                    json!(16384);
                 if use_native_tools {
                     if let Some(tool_list) = tools {
                         body["tools"] = json!(tool_list);
@@ -162,7 +175,8 @@ fn build_chat_request_body(
         }
         ModelFamily::Gemma => {
             // Gemma models: support temperature and top_k
-            body["max_tokens"] = json!(8192);
+            body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
+                json!(8192);
             body["temperature"] = json!(0.7);
             // Gemma supports top_k which is useful for controlling randomness
             body["top_k"] = json!(40);
@@ -176,7 +190,8 @@ fn build_chat_request_body(
         }
         ModelFamily::Granite => {
             // IBM Granite models: support repetition_penalty
-            body["max_tokens"] = json!(8192);
+            body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
+                json!(8192);
             body["temperature"] = json!(0.7);
             // Granite models benefit from repetition penalty
             body["repetition_penalty"] = json!(1.05);
@@ -195,10 +210,12 @@ fn build_chat_request_body(
         ModelFamily::Generic => {
             // Generic/unknown models: use safe defaults
             if supports_reasoning && supports_reasoning_effort {
-                body["max_tokens"] = json!(8192);
+                body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
+                    json!(8192);
                 body["reasoning_effort"] = json!(reasoning_effort);
             } else {
-                body["max_tokens"] = json!(16384);
+                body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
+                    json!(16384);
                 if use_native_tools {
                     if let Some(tool_list) = tools {
                         body["tools"] = json!(tool_list);
@@ -209,6 +226,136 @@ fn build_chat_request_body(
     }
 
     body
+}
+
+/// Convert OpenAI chat messages into Responses API input blocks (text-only)
+fn map_messages_to_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|msg| {
+            json!({
+                "role": msg.role,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": msg.content
+                    }
+                ]
+            })
+        })
+        .collect()
+}
+
+/// Extract streamed text from either Chat Completions or Responses API payloads.
+fn extract_stream_text(json: &Value, use_responses_api: bool) -> Option<String> {
+    // Chat Completions delta string form
+    if let Some(content) = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("content"))
+    {
+        if let Some(text) = content.as_str() {
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        } else if let Some(parts) = content.as_array() {
+            let mut buf = String::new();
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    buf.push_str(text);
+                } else if let Some(text) = part.as_str() {
+                    buf.push_str(text);
+                }
+            }
+            if !buf.is_empty() {
+                return Some(buf);
+            }
+        }
+    }
+
+    if use_responses_api {
+        // Responses API event shapes (best-effort)
+        let candidates = [
+            json.get("output_text_delta")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            json.pointer("/delta/output_text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            json.pointer("/response/output_text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        ];
+
+        for cand in candidates {
+            if let Some(text) = cand {
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+
+        if let Some(delta_obj) = json.get("delta") {
+            if let Some(text) = delta_obj
+                .get("output_text_delta")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                return Some(text.to_string());
+            }
+
+            if let Some(output_arr) = delta_obj.get("output").and_then(|v| v.as_array()) {
+                let mut buf = String::new();
+                for entry in output_arr {
+                    if let Some(content_arr) = entry.get("content").and_then(|c| c.as_array()) {
+                        for part in content_arr {
+                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                buf.push_str(text);
+                            }
+                        }
+                    }
+                }
+                if !buf.is_empty() {
+                    return Some(buf);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_messages_to_responses_input_wraps_text() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi there".to_string(),
+            system_prompt: None,
+        }];
+        let input = map_messages_to_responses_input(&messages);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["text"], "hi there");
+    }
+
+    #[test]
+    fn extract_stream_text_handles_chat_delta_string() {
+        let payload = json!({"choices":[{"delta":{"content":"hello"}}]});
+        let extracted = extract_stream_text(&payload, false);
+        assert_eq!(extracted.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn extract_stream_text_handles_responses_delta() {
+        let payload = json!({"type":"response.output_text.delta","output_text_delta":"hello-resp"});
+        let extracted = extract_stream_text(&payload, true);
+        assert_eq!(extracted.as_deref(), Some("hello-resp"));
+    }
 }
 
 /// Result of parsing `foundry service status` output
@@ -245,6 +392,12 @@ impl ModelGatewayActor {
             registered_eps: Vec::new(),
             valid_eps: Vec::new(),
         }
+    }
+
+    fn model_supports_responses(model_id: &str) -> bool {
+        let lower = model_id.to_lowercase();
+        // Heuristic: gpt-oss models expose /v1/responses in Foundry Local (see model card)
+        lower.contains("gpt-oss")
     }
 
     pub async fn run(mut self) {
@@ -377,6 +530,8 @@ impl ModelGatewayActor {
                     chat_history_messages,
                     reasoning_effort,
                     native_tool_specs,
+                    chat_format_default,
+                    chat_format_overrides,
                     respond_to,
                     mut stream_cancel_rx,
                 } => {
@@ -417,7 +572,30 @@ impl ModelGatewayActor {
                             .clone()
                             .unwrap_or_else(|| "Phi-4-generic-gpu:1".to_string());
 
-                        let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
+                let desired_chat_format = chat_format_overrides
+                    .get(&model)
+                    .copied()
+                    .unwrap_or(chat_format_default);
+                        let supports_responses = Self::model_supports_responses(&model);
+                        let effective_chat_format = if desired_chat_format == ChatFormatName::OpenaiResponses
+                            && !supports_responses
+                        {
+                            println!(
+                                "[FoundryActor] Model {} does not advertise Responses API; falling back to chat completions",
+                                model
+                            );
+                            ChatFormatName::OpenaiCompletions
+                        } else {
+                            desired_chat_format
+                        };
+                        let use_responses_api =
+                            matches!(effective_chat_format, ChatFormatName::OpenaiResponses);
+
+                        let url = if use_responses_api {
+                            format!("http://127.0.0.1:{}/v1/responses", port)
+                        } else {
+                            format!("http://127.0.0.1:{}/v1/chat/completions", port)
+                        };
                         let verbose_logging = is_verbose_logging_enabled();
 
                         // Log incoming messages for debugging
@@ -594,7 +772,11 @@ impl ModelGatewayActor {
                         for attempt in 1..=MAX_RETRIES {
                             // Rebuild URL in case port changed after restart
                             let current_url = if let Some(p) = self.port {
-                                format!("http://127.0.0.1:{}/v1/chat/completions", p)
+                                if use_responses_api {
+                                    format!("http://127.0.0.1:{}/v1/responses", p)
+                                } else {
+                                    format!("http://127.0.0.1:{}/v1/chat/completions", p)
+                                }
                             } else {
                                 url.clone()
                             };
@@ -609,6 +791,7 @@ impl ModelGatewayActor {
                                 model_supports_reasoning,
                                 supports_reasoning_effort,
                                 &reasoning_effort,
+                                use_responses_api,
                             );
 
                             // Temporary debug: log request body when native tools are included
@@ -733,28 +916,29 @@ impl ModelGatewayActor {
                                                                             break 'stream_loop;
                                                                         }
                                                                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                                                            // Stream content tokens (includes tool calls in <tool_call> format)
-                                                                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                                                                if !content.is_empty() {
-                                                                                    token_count += 1;
-                                                                                    last_token_time = std::time::Instant::now();
-                                                                                    let _ = respond_to_clone.send(content.to_string());
+                                                                        if let Some(content) =
+                                                                            extract_stream_text(&json, use_responses_api)
+                                                                        {
+                                                                            if !content.is_empty() {
+                                                                                token_count += 1;
+                                                                                last_token_time = std::time::Instant::now();
+                                                                                let _ = respond_to_clone.send(content);
 
-                                                                                    // Log progress every 5 seconds (verbose only)
-                                                                                    if verbose_logging
-                                                                                        && last_progress_log.elapsed()
-                                                                                            >= Duration::from_secs(5)
-                                                                                    {
-                                                                                        let elapsed = stream_start.elapsed();
-                                                                                        println!("[FoundryActor] 📊 Streaming: {} tokens so far ({:.2}s elapsed, {:.1} tok/s)",
-                                                                                            token_count,
-                                                                                            elapsed.as_secs_f64(),
-                                                                                            token_count as f64 / elapsed.as_secs_f64());
-                                                                                        let _ = std::io::stdout().flush();
-                                                                                        last_progress_log = std::time::Instant::now();
-                                                                                    }
+                                                                                // Log progress every 5 seconds (verbose only)
+                                                                                if verbose_logging
+                                                                                    && last_progress_log.elapsed()
+                                                                                        >= Duration::from_secs(5)
+                                                                                {
+                                                                                    let elapsed = stream_start.elapsed();
+                                                                                    println!("[FoundryActor] 📊 Streaming: {} tokens so far ({:.2}s elapsed, {:.1} tok/s)",
+                                                                                        token_count,
+                                                                                        elapsed.as_secs_f64(),
+                                                                                        token_count as f64 / elapsed.as_secs_f64());
+                                                                                    let _ = std::io::stdout().flush();
+                                                                                    last_progress_log = std::time::Instant::now();
                                                                                 }
                                                                             }
+                                                                        }
 
                                                                             // Accumulate native OpenAI tool calls (delta.tool_calls)
                                                                             if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {

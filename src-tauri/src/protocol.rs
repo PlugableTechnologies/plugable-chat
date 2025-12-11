@@ -2,8 +2,10 @@ use fastembed::TextEmbedding;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use crate::settings::ChatFormatName;
 
 // ============ Tool Schema with Code Mode Extensions ============
 
@@ -880,6 +882,9 @@ pub enum FoundryMsg {
         reasoning_effort: String,
         /// Optional OpenAI-format tools for native tool calling
         native_tool_specs: Option<Vec<OpenAITool>>,
+        /// Chat API format selection (per-model overrides resolved in actor)
+        chat_format_default: ChatFormatName,
+        chat_format_overrides: HashMap<String, ChatFormatName>,
         respond_to: tokio::sync::mpsc::UnboundedSender<String>,
         /// Cancellation signal - when true, abort the stream
         stream_cancel_rx: tokio::sync::watch::Receiver<bool>,

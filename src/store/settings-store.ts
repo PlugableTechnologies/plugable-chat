@@ -121,6 +121,7 @@ interface SettingsState {
     fetchSettings: () => Promise<void>;
     updateSystemPrompt: (prompt: string) => Promise<void>;
     updateToolCallFormats: (config: ToolCallFormatConfig) => Promise<void>;
+    updateChatFormat: (modelId: string, format: ChatFormatName) => Promise<void>;
     updateCodeExecutionEnabled: (enabled: boolean) => Promise<void>;
     updateToolSearchEnabled: (enabled: boolean) => Promise<void>;
     updateToolSearchMaxResults: (maxResults: number) => Promise<void>;
@@ -275,6 +276,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 ...settings,
                 mcp_servers: normalizedServers,
                 tool_call_formats: normalizedFormats,
+                chat_format_default: settings.chat_format_default ?? 'openai_completions',
+                chat_format_overrides: settings.chat_format_overrides ?? {},
                 tool_search_enabled: settings.tool_search_enabled ?? false,
                 tool_search_max_results: settings.tool_search_max_results ?? 3,
                 tool_use_examples_enabled: settings.tool_use_examples_enabled ?? false,
@@ -321,6 +324,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 settings: {
                     system_prompt: DEFAULT_SYSTEM_PROMPT,
                     mcp_servers: [],
+                    chat_format_default: 'openai_completions',
+                    chat_format_overrides: {},
                     tool_call_formats: DEFAULT_TOOL_CALL_FORMATS,
                     tool_system_prompts: {},
                     tool_search_max_results: 3,
@@ -386,6 +391,34 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             await get().fetchSettings();
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update tool call formats:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`,
+            });
+        }
+    },
+
+    updateChatFormat: async (modelId: string, format: ChatFormatName) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+
+        const overrides = { ...(currentSettings.chat_format_overrides || {}) };
+        if (format === currentSettings.chat_format_default) {
+            delete overrides[modelId];
+        } else {
+            overrides[modelId] = format;
+        }
+
+        const nextSettings = { ...currentSettings, chat_format_overrides: overrides };
+
+        // Optimistic update
+        set({ settings: nextSettings, error: null });
+
+        try {
+            await invoke('update_chat_format', { modelId, format });
+            console.log('[SettingsStore] Chat format updated', { modelId, format });
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update chat format:', e);
             set({
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`,

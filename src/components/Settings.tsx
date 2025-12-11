@@ -1,8 +1,9 @@
-import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName, type DatabaseSourceConfig, type SupportedDatabaseKind, type DatabaseToolboxConfig } from '../store/settings-store';
+import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName, type DatabaseSourceConfig, type SupportedDatabaseKind, type DatabaseToolboxConfig, type ChatFormatName } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw, RefreshCw, AlertCircle } from 'lucide-react';
 import { invoke } from '../lib/api';
 import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
+import { useChatStore } from '../store/chat-store';
 
 // Tag input component for args - auto-splits on spaces
 function TagInput({
@@ -1045,7 +1046,9 @@ function InterfacesTab({
     onRegisterSave?: (handler: () => Promise<void>) => void;
     onSavingChange?: (saving: boolean) => void;
 }) {
-    const { settings, updateToolCallFormats } = useSettingsStore();
+    const { settings, updateToolCallFormats, updateChatFormat } = useSettingsStore();
+    const currentModel = useChatStore((state) => state.currentModel);
+    const availableModels = useChatStore((state) => state.availableModels);
     const formatConfig = settings?.tool_call_formats || DEFAULT_TOOL_CALL_FORMATS;
     const formatOptions: { id: ToolCallFormatName; label: string; description: string }[] = [
         { id: 'code_mode', label: 'Code Mode (Python)', description: 'Model returns a single Python program executed in the sandbox (primary default).' },
@@ -1054,9 +1057,21 @@ function InterfacesTab({
         { id: 'pythonic', label: 'Pythonic call', description: 'tool_name(arg1="value", arg2=123)' },
         { id: 'pure_json', label: 'Pure JSON', description: '{"tool": "name", "args": {...}} or array' },
     ];
+    const chatFormatOptions: { id: ChatFormatName; label: string; description: string }[] = [
+        { id: 'openai_completions', label: 'OpenAI Chat Completions', description: 'POST /v1/chat/completions (messages array).' },
+        { id: 'openai_responses', label: 'OpenAI Responses', description: 'POST /v1/responses (input blocks). Requires endpoint/model support.' },
+    ];
+
+    const chatFormatDefault = settings?.chat_format_default ?? 'openai_completions';
+    const chatFormatOverrides = settings?.chat_format_overrides ?? {};
+    const currentModelChatFormat: ChatFormatName = currentModel
+        ? chatFormatOverrides[currentModel] ?? chatFormatDefault
+        : chatFormatDefault;
 
     const [localFormats, setLocalFormats] = useState<ToolCallFormatConfig>(formatConfig);
     const [baselineFormats, setBaselineFormats] = useState<ToolCallFormatConfig>(formatConfig);
+    const [localChatFormat, setLocalChatFormat] = useState<ChatFormatName>(currentModelChatFormat);
+    const [baselineChatFormat, setBaselineChatFormat] = useState<ChatFormatName>(currentModelChatFormat);
     const [isSaving, setIsSaving] = useState(false);
 
     useEffect(() => {
@@ -1070,7 +1085,20 @@ function InterfacesTab({
         }
     }, [formatConfig, localFormats, baselineFormats]);
 
-    const hasChanges = JSON.stringify(localFormats) !== JSON.stringify(baselineFormats);
+    useEffect(() => {
+        const next = currentModelChatFormat;
+        // If the local matches baseline, keep in sync with latest data
+        if (localChatFormat === baselineChatFormat) {
+            setLocalChatFormat(next);
+            setBaselineChatFormat(next);
+        } else {
+            setBaselineChatFormat(next);
+        }
+    }, [baselineChatFormat, chatFormatDefault, chatFormatOverrides, currentModel, currentModelChatFormat, localChatFormat]);
+
+    const hasChanges =
+        JSON.stringify(localFormats) !== JSON.stringify(baselineFormats) ||
+        (currentModel ? localChatFormat !== baselineChatFormat : false);
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -1106,11 +1134,24 @@ function InterfacesTab({
         try {
             await updateToolCallFormats(localFormats);
             setBaselineFormats(localFormats);
+            if (currentModel && localChatFormat !== baselineChatFormat) {
+                await updateChatFormat(currentModel, localChatFormat);
+                setBaselineChatFormat(localChatFormat);
+            }
         } finally {
             setIsSaving(false);
             onSavingChange?.(false);
         }
-    }, [localFormats, onSavingChange, settings, updateToolCallFormats]);
+    }, [
+        baselineChatFormat,
+        currentModel,
+        localChatFormat,
+        localFormats,
+        onSavingChange,
+        settings,
+        updateChatFormat,
+        updateToolCallFormats,
+    ]);
 
     useEffect(() => {
         onRegisterSave?.(handleSave);
@@ -1155,6 +1196,65 @@ function InterfacesTab({
                             </div>
                         );
                     })}
+                </div>
+            </div>
+
+            <div className="pt-1 space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                    <div>
+                        <h3 className="text-sm font-medium text-gray-700">Chat format (per model)</h3>
+                        <p className="text-xs text-gray-500">
+                            Default: <span className="font-mono">{chatFormatDefault}</span>. Overrides apply to the active model only.
+                        </p>
+                    </div>
+                    <div className="text-xs text-gray-500 text-right">
+                        {currentModel ? (
+                            <>
+                                <div className="font-medium text-gray-800">{currentModel}</div>
+                                <div>{chatFormatOverrides[currentModel] ? 'Override applied' : 'Using default'}</div>
+                            </>
+                        ) : (
+                            <div>Load a model to set per-model chat format.</div>
+                        )}
+                        {availableModels.length > 0 && (
+                            <div className="mt-1 text-[11px] text-gray-400">Available: {availableModels.join(', ')}</div>
+                        )}
+                    </div>
+                </div>
+                <div className="border border-gray-200 rounded-xl bg-white overflow-hidden w-full">
+                    <div className="divide-y divide-gray-100">
+                        {chatFormatOptions.map((option) => {
+                            const isSelected = localChatFormat === option.id;
+                            return (
+                                <label
+                                    key={option.id}
+                                    className={`flex items-center justify-between px-4 py-3 gap-3 cursor-pointer ${
+                                        currentModel ? 'opacity-100' : 'opacity-60'
+                                    }`}
+                                >
+                                    <div className="flex items-start gap-3">
+                                        <input
+                                            type="radio"
+                                            name="chat-format"
+                                            disabled={!currentModel}
+                                            checked={isSelected}
+                                            onChange={() => setLocalChatFormat(option.id)}
+                                            className="mt-1 h-4 w-4 text-blue-600 border-gray-300"
+                                        />
+                                        <div>
+                                            <div className="text-sm font-medium text-gray-900">{option.label}</div>
+                                            <p className="text-xs text-gray-500 font-mono">{option.description}</p>
+                                        </div>
+                                    </div>
+                                    {option.id === 'openai_responses' && (
+                                        <span className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 px-2 py-1 rounded-full">
+                                            Requires endpoint support (e.g., gpt-oss-20b)
+                                        </span>
+                                    )}
+                                </label>
+                            );
+                        })}
+                    </div>
                 </div>
             </div>
         </div>

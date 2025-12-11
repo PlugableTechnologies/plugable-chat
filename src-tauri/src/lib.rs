@@ -1365,6 +1365,8 @@ async fn run_agentic_loop(
     tool_search_max_results: usize,
     turn_system_prompt: String,
     turn_progress: Arc<RwLock<TurnProgress>>,
+    chat_format_default: ChatFormatName,
+    chat_format_overrides: std::collections::HashMap<String, ChatFormatName>,
 ) {
     // Resolve model profile from model name
     let profile = resolve_profile(&model_name);
@@ -1430,6 +1432,8 @@ async fn run_agentic_loop(
                 chat_history_messages: model_messages,
                 reasoning_effort: reasoning_effort.clone(),
                 native_tool_specs: openai_tools.clone(),
+                chat_format_default,
+                chat_format_overrides: chat_format_overrides.clone(),
                 respond_to: tx,
                 stream_cancel_rx: cancel_rx.clone(),
             })
@@ -3500,6 +3504,8 @@ async fn chat(
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
     let tool_system_prompts = settings.tool_system_prompts.clone();
+    let chat_format_default = settings.chat_format_default;
+    let chat_format_overrides = settings.chat_format_overrides.clone();
     drop(settings);
 
     // Ensure registry reflects persisted database tool toggles before building prompts
@@ -3941,6 +3947,8 @@ async fn chat(
     let tool_search_max_results_task = tool_search_max_results;
     let turn_system_prompt_task = system_prompt.clone();
     let turn_progress = turn_tracker.progress.clone();
+    let chat_format_default_task = chat_format_default;
+    let chat_format_overrides_task = chat_format_overrides.clone();
 
     // Spawn the agentic loop task
     tauri::async_runtime::spawn(async move {
@@ -3972,6 +3980,8 @@ async fn chat(
             tool_search_max_results_task,
             turn_system_prompt_task,
             turn_progress,
+            chat_format_default_task,
+            chat_format_overrides_task,
         )
         .await;
     });
