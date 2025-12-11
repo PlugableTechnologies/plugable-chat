@@ -38,7 +38,7 @@ use settings::{
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, oneshot};
@@ -98,6 +98,24 @@ struct CancellationState {
     cancel_signal: Arc<RwLock<Option<tokio::sync::watch::Sender<bool>>>>,
     /// Current generation ID for matching
     current_generation_id: Arc<RwLock<u32>>,
+}
+
+/// Global toggle for verbose logging, enabled when LOG_VERBOSE (or PLUGABLE_LOG_VERBOSE)
+/// is set to a truthy value such as 1/true/yes/on/debug.
+pub fn is_verbose_logging_enabled() -> bool {
+    static VERBOSE_LOGS_ENABLED: OnceLock<bool> = OnceLock::new();
+
+    *VERBOSE_LOGS_ENABLED.get_or_init(|| {
+        std::env::var("LOG_VERBOSE")
+            .or_else(|_| std::env::var("PLUGABLE_LOG_VERBOSE"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "debug"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// CLI arguments for plugable-chat
@@ -1269,6 +1287,7 @@ async fn run_agentic_loop(
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
     server_configs: Vec<McpServerConfig>,
     chat_id: String,
+    generation_id: u32,
     title: String,
     original_message: String,
     mut openai_tools: Option<Vec<OpenAITool>>,
@@ -1291,6 +1310,8 @@ async fn run_agentic_loop(
     // Format: "tool_name::error_message"
     let mut last_error_signature: Option<String> = None;
     let mut tools_disabled_due_to_repeated_error = false;
+
+    let verbose_logging = is_verbose_logging_enabled();
 
     println!(
         "[AgenticLoop] Starting with model_family={:?}, tool_format={:?}, python_tool_mode={}, primary_format={:?}, tool_search_in_python={}",
@@ -1373,9 +1394,16 @@ async fn run_agentic_loop(
                             assistant_response.push_str(&token);
                             let _ = app_handle.emit("chat-token", token);
 
-                            // Log progress every 5 seconds
-                            if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
-                                println!("[AgenticLoop] 📊 Receiving: {} tokens, {} chars so far", token_count, assistant_response.len());
+                            // Log progress every 5 seconds (verbose only)
+                            if verbose_logging
+                                && last_progress_log.elapsed()
+                                    >= std::time::Duration::from_secs(5)
+                            {
+                                println!(
+                                    "[AgenticLoop] 📊 Receiving: {} tokens, {} chars so far",
+                                    token_count,
+                                    assistant_response.len()
+                                );
                                 let _ = std::io::stdout().flush();
                                 last_progress_log = std::time::Instant::now();
                             }
@@ -2026,6 +2054,17 @@ async fn run_agentic_loop(
         "[AgenticLoop] Loop complete after {} iterations, had_tool_calls={}, tools_disabled={}",
         iteration, had_tool_calls, tools_disabled_due_to_repeated_error
     );
+    println!("[chat] -------------------- TURN COMPLETE --------------------");
+    println!(
+        "[chat] Turn summary | id={} | gen={} | iterations={} | tool_calls={} | response_chars={} | tools_disabled_due_to_repeat_error={}",
+        chat_id,
+        generation_id,
+        iteration,
+        had_tool_calls,
+        final_response.len(),
+        tools_disabled_due_to_repeated_error
+    );
+    let _ = std::io::stdout().flush();
 
     // Save the chat
     let messages_json = serde_json::to_string(&full_history).unwrap_or_default();
@@ -3014,27 +3053,36 @@ async fn chat(
 
     // Log incoming chat request
     let msg_preview: String = message.chars().take(128).collect();
-    println!(
-        "\n[chat] 💬 New chat request: \"{}{}\"",
-        msg_preview,
-        if message.len() > 128 { "..." } else { "" }
-    );
-    println!("[chat] chat_id={}, history_len={}", chat_id, history.len());
-    let _ = std::io::stdout().flush();
+    let msg_suffix = if message.len() > 128 { "..." } else { "" };
 
     // Set up cancellation signal for this generation
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    {
+    let generation_id = {
         // Increment generation ID and store the cancel signal
         let mut gen_id = cancellation_state.current_generation_id.write().await;
         *gen_id = gen_id.wrapping_add(1);
+        let current_generation = *gen_id;
         *cancellation_state.cancel_signal.write().await = Some(cancel_tx);
-        println!(
-            "[chat] Starting generation {} with cancellation support",
-            *gen_id
-        );
-        let _ = std::io::stdout().flush();
-    }
+        current_generation
+    };
+
+    println!("\n[chat] =============================================================");
+    println!(
+        "[chat] 💬 New chat | id={} | gen={} | history_len={} | user_chars={} | preview=\"{}{}\"",
+        chat_id,
+        generation_id,
+        history.len(),
+        message.len(),
+        msg_preview,
+        msg_suffix
+    );
+    println!(
+        "[chat] Cancellation channel ready for generation {}",
+        generation_id
+    );
+    let _ = std::io::stdout().flush();
+
+    let verbose_logging = is_verbose_logging_enabled();
 
     let tool_filter = launch_config.tool_filter.clone();
 
@@ -3381,10 +3429,22 @@ async fn chat(
         tool_count,
         auto_approve_servers
     );
-    println!(
-        "[Chat] --- SYSTEM PROMPT BEGIN ---\n{}\n[Chat] --- SYSTEM PROMPT END ---",
-        system_prompt
-    );
+    if verbose_logging {
+        println!(
+            "[Chat] --- SYSTEM PROMPT BEGIN ---\n{}\n[Chat] --- SYSTEM PROMPT END ---",
+            system_prompt
+        );
+    } else {
+        let preview: String = system_prompt.chars().take(240).collect();
+        let truncated = system_prompt.len() > preview.len();
+        println!(
+            "[Chat] System prompt preview ({} chars): \"{}{}\"",
+            preview.len(),
+            preview,
+            if truncated { "..." } else { "" }
+        );
+        println!("[Chat] Set LOG_VERBOSE=1 to log the full system prompt");
+    }
 
     // Build full history with system prompt at the beginning
     let mut full_history = Vec::new();
@@ -3441,6 +3501,7 @@ async fn chat(
     let tool_registry = tool_registry_state.registry.clone();
     let embedding_model = embedding_state.model.clone();
     let chat_id_task = chat_id.clone();
+    let generation_id_task = generation_id;
     let title_task = title.clone();
     let message_task = message.clone();
     let openai_tools_task = openai_tools;
@@ -3468,6 +3529,7 @@ async fn chat(
             cancel_rx,
             server_configs,
             chat_id_task,
+            generation_id_task,
             title_task,
             message_task,
             openai_tools_task,

@@ -1,3 +1,4 @@
+use crate::is_verbose_logging_enabled;
 use crate::protocol::{
     CachedModel, ChatMessage, FoundryMsg, ModelFamily, ModelInfo, OpenAITool, ParsedToolCall,
     ReasoningFormat, ToolFormat,
@@ -417,21 +418,59 @@ impl ModelGatewayActor {
                             .unwrap_or_else(|| "Phi-4-generic-gpu:1".to_string());
 
                         let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
+                        let verbose_logging = is_verbose_logging_enabled();
 
                         // Log incoming messages for debugging
                         println!(
-                            "\n[FoundryActor] Received {} messages:",
-                            chat_history_messages.len()
+                            "\n[FoundryActor] Received {} message(s){}",
+                            chat_history_messages.len(),
+                            if verbose_logging {
+                                ":"
+                            } else {
+                                " (details suppressed; set LOG_VERBOSE=1 for previews)"
+                            }
                         );
-                        for (i, msg) in chat_history_messages.iter().enumerate() {
-                            let preview: String = msg.content.chars().take(100).collect();
+                        if verbose_logging {
+                            for (i, msg) in chat_history_messages.iter().enumerate() {
+                                let preview: String = msg.content.chars().take(100).collect();
+                                println!(
+                                    "  [{}] role={}, len={}, preview: {}...",
+                                    i,
+                                    msg.role,
+                                    msg.content.len(),
+                                    preview
+                                );
+                            }
+                        } else {
+                            let system_count = chat_history_messages
+                                .iter()
+                                .filter(|m| m.role == "system")
+                                .count();
+                            let user_count = chat_history_messages
+                                .iter()
+                                .filter(|m| m.role == "user")
+                                .count();
+                            let assistant_count = chat_history_messages
+                                .iter()
+                                .filter(|m| m.role == "assistant")
+                                .count();
                             println!(
-                                "  [{}] role={}, len={}, preview: {}...",
-                                i,
-                                msg.role,
-                                msg.content.len(),
-                                preview
+                                "[FoundryActor] Message roles | system={} | user={} | assistant={}",
+                                system_count, user_count, assistant_count
                             );
+                            if let Some(last_user) =
+                                chat_history_messages.iter().rev().find(|m| m.role == "user")
+                            {
+                                let preview: String =
+                                    last_user.content.chars().take(120).collect();
+                                let truncated = last_user.content.len() > preview.len();
+                                println!(
+                                    "[FoundryActor] Latest user message (len={}): \"{}{}\"",
+                                    last_user.content.len(),
+                                    preview,
+                                    if truncated { "..." } else { "" }
+                                );
+                            }
                         }
 
                         // For reasoning models, ensure we have a system message that instructs
@@ -460,18 +499,24 @@ impl ModelGatewayActor {
                                     "[FoundryActor] Using system message ({} chars)",
                                     sys_msg.content.len()
                                 );
-                                // Only log first 200 chars to reduce verbosity
-                                let sys_preview: String =
-                                    sys_msg.content.chars().take(200).collect();
-                                let truncated = if sys_msg.content.len() > 200 {
-                                    "..."
+                                if verbose_logging {
+                                    // Only log first 200 chars to reduce verbosity
+                                    let sys_preview: String =
+                                        sys_msg.content.chars().take(200).collect();
+                                    let truncated = if sys_msg.content.len() > 200 {
+                                        "..."
+                                    } else {
+                                        ""
+                                    };
+                                    println!(
+                                        "[FoundryActor] System prompt preview: {}{}",
+                                        sys_preview, truncated
+                                    );
                                 } else {
-                                    ""
-                                };
-                                println!(
-                                    "[FoundryActor] System prompt preview: {}{}",
-                                    sys_preview, truncated
-                                );
+                                    println!(
+                                        "[FoundryActor] System prompt preview suppressed (set LOG_VERBOSE=1 to view)"
+                                    );
+                                }
                             }
                         }
 
@@ -707,8 +752,11 @@ impl ModelGatewayActor {
                                                                                     last_token_time = std::time::Instant::now();
                                                                                     let _ = respond_to_clone.send(content.to_string());
 
-                                                                                    // Log progress every 5 seconds
-                                                                                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
+                                                                                    // Log progress every 5 seconds (verbose only)
+                                                                                    if verbose_logging
+                                                                                        && last_progress_log.elapsed()
+                                                                                            >= Duration::from_secs(5)
+                                                                                    {
                                                                                         let elapsed = stream_start.elapsed();
                                                                                         println!("[FoundryActor] 📊 Streaming: {} tokens so far ({:.2}s elapsed, {:.1} tok/s)",
                                                                                             token_count,
