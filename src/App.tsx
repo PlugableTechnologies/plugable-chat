@@ -230,6 +230,102 @@ function App() {
     useSettingsStore.getState().fetchSettings();
   }, []);
 
+  // Global event listeners (persist across component remounts)
+  useEffect(() => {
+    const store = useChatStore.getState();
+    store.setupListeners();
+    return () => {
+      store.cleanupListeners();
+    };
+  }, []);
+
+  // Heartbeat/stall detection with auto-resubscribe and backend reconciliation
+  useEffect(() => {
+    const SOFT_STALL_MS = 8000;
+    const HARD_STALL_MS = 15000;
+    const RESET_COOLDOWN_MS = 4000;
+    let lastResetTs = 0;
+
+    type TurnStatus = {
+      active: boolean;
+      chat_id: string | null;
+      generation_id: number;
+      last_token_index: number;
+      assistant_response: string;
+      finished: boolean;
+      had_tool_calls: boolean;
+      timestamp_ms: number;
+    };
+
+    const reconcileFromBackend = async () => {
+      try {
+        const status = await invoke<TurnStatus>("get_turn_status");
+        const now = Date.now();
+        useChatStore.setState((state) => {
+          const newMessages = [...state.chatMessages];
+          const lastIdx = newMessages.length - 1;
+          if (lastIdx >= 0 && newMessages[lastIdx].role === "assistant") {
+            newMessages[lastIdx] = {
+              ...newMessages[lastIdx],
+              content: status.assistant_response || newMessages[lastIdx].content,
+            };
+          } else if (status.assistant_response) {
+            newMessages.push({
+              id: `${Date.now()}`,
+              role: "assistant",
+              content: status.assistant_response,
+              timestamp: Date.now(),
+            });
+          }
+          return {
+            chatMessages: newMessages,
+            assistantStreamingActive: status.active && !status.finished,
+            streamingChatId: status.chat_id,
+            operationStatus: status.finished ? null : state.operationStatus,
+            lastStreamActivityTs: now,
+          };
+        });
+      } catch (e) {
+        console.warn("[App] Turn status reconciliation failed", e);
+      }
+    };
+
+    const timer = setInterval(() => {
+      const state = useChatStore.getState();
+      const streaming = state.assistantStreamingActive || !!state.toolExecution.currentTool;
+      if (!streaming) {
+        return;
+      }
+      const lastActivity = state.lastStreamActivityTs;
+      if (!lastActivity) {
+        return;
+      }
+      const now = Date.now();
+      const stalledFor = now - lastActivity;
+      const isSoftStalled = stalledFor > SOFT_STALL_MS;
+      const isHardStalled = stalledFor > HARD_STALL_MS;
+      const cooledDown = now - lastResetTs > RESET_COOLDOWN_MS;
+      if (isSoftStalled && cooledDown) {
+        lastResetTs = now;
+        console.warn("[App] Detected stalled streaming/tool heartbeat. Refreshing listeners.");
+        state.cleanupListeners();
+        state.setupListeners();
+        state.setLastStreamActivityTs(now);
+        state.setOperationStatus({
+          type: "streaming",
+          message: "Reconnecting to backend...",
+          startTime: state.operationStatus?.startTime || Date.now(),
+        });
+      }
+      if (isHardStalled) {
+        console.warn("[App] Hard stall detected. Reconciling with backend and unblocking UI.");
+        reconcileFromBackend();
+      }
+    }, 2000);
+
+    return () => clearInterval(timer);
+  }, []);
+
   // Set up keyboard shortcut: Ctrl+Shift+L
   useEffect(() => {
     const handleKeyPress = (event: KeyboardEvent) => {

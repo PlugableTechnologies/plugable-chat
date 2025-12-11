@@ -28,6 +28,7 @@ use protocol::{
 };
 use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::json;
 use settings::{
     enforce_python_name, ensure_default_servers, AppSettings, CachedColumnSchema,
@@ -98,6 +99,22 @@ struct CancellationState {
     cancel_signal: Arc<RwLock<Option<tokio::sync::watch::Sender<bool>>>>,
     /// Current generation ID for matching
     current_generation_id: Arc<RwLock<u32>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct TurnProgress {
+    chat_id: Option<String>,
+    generation_id: u32,
+    assistant_response: String,
+    last_token_index: usize,
+    finished: bool,
+    had_tool_calls: bool,
+    timestamp_ms: u128,
+}
+
+// Tracks the latest turn progress for reconnect/replay
+struct TurnTrackerState {
+    progress: Arc<RwLock<TurnProgress>>,
 }
 
 /// Global toggle for verbose logging, enabled when LOG_VERBOSE (or PLUGABLE_LOG_VERBOSE)
@@ -1298,6 +1315,7 @@ async fn run_agentic_loop(
     allow_tool_search_for_python: bool,
     tool_search_max_results: usize,
     turn_system_prompt: String,
+    turn_progress: Arc<RwLock<TurnProgress>>,
 ) {
     // Resolve model profile from model name
     let profile = resolve_profile(&model_name);
@@ -1306,6 +1324,7 @@ async fn run_agentic_loop(
     let mut iteration = 0;
     let mut had_tool_calls = false;
     let mut final_response = String::new();
+    let mut last_token_count: usize;
 
     // Track repeated errors to detect when model is stuck
     // Format: "tool_name::error_message"
@@ -1404,6 +1423,15 @@ async fn run_agentic_loop(
                             token_count += 1;
                             assistant_response.push_str(&token);
                             let _ = app_handle.emit("chat-token", token);
+                            {
+                                let mut progress = turn_progress.write().await;
+                                progress.assistant_response = assistant_response.clone();
+                                progress.last_token_index = token_count;
+                                progress.timestamp_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(progress.timestamp_ms);
+                            }
 
                             // Log progress every 5 seconds (verbose only)
                             if verbose_logging
@@ -1436,6 +1464,7 @@ async fn run_agentic_loop(
         }
 
         let iteration_elapsed = iteration_start.elapsed();
+        last_token_count = token_count;
         println!(
             "[AgenticLoop] ✅ Response complete: {} tokens, {} chars in {:.2}s",
             token_count,
@@ -1990,6 +2019,15 @@ async fn run_agentic_loop(
                 },
             );
 
+            {
+                let mut progress = turn_progress.write().await;
+                progress.had_tool_calls = true;
+                progress.timestamp_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(progress.timestamp_ms);
+            }
+
             // Stop heartbeat after tool completion
             let _ = heartbeat_stop_tx.send(());
 
@@ -2064,6 +2102,19 @@ async fn run_agentic_loop(
         },
     );
     let _ = app_handle.emit("chat-finished", ());
+
+    {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let mut progress = turn_progress.write().await;
+        progress.assistant_response = final_response.clone();
+        progress.last_token_index = last_token_count;
+        progress.finished = true;
+        progress.had_tool_calls = had_tool_calls;
+        progress.timestamp_ms = now_ms;
+    }
 
     println!(
         "[AgenticLoop] Loop complete after {} iterations, had_tool_calls={}, tools_disabled={}",
@@ -3045,6 +3096,14 @@ async fn cancel_generation(
     Ok(())
 }
 
+#[tauri::command]
+async fn get_turn_status(
+    turn_tracker: State<'_, TurnTrackerState>,
+) -> Result<TurnProgress, String> {
+    let progress = turn_tracker.progress.read().await;
+    Ok(progress.clone())
+}
+
 #[derive(Default)]
 struct AutoDiscoveryContext {
     tool_search_output: Option<ToolSearchOutput>,
@@ -3217,6 +3276,8 @@ async fn auto_schema_search_for_prompt(
     schema_tx: mpsc::Sender<SchemaVectorMsg>,
     embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
 ) -> Option<SchemaSearchOutput> {
+    // Use a generous cap so we don't silently drop discovered tables
+    const AUTO_SCHEMA_SEARCH_MAX_TABLES: usize = 50;
     if !search_schemas_enabled {
         return None;
     }
@@ -3240,7 +3301,7 @@ async fn auto_schema_search_for_prompt(
     let executor = tools::SchemaSearchExecutor::new(schema_tx, embedding_model);
     let input = tools::SchemaSearchInput {
         query: prompt.to_string(),
-        max_tables: 5,
+        max_tables: AUTO_SCHEMA_SEARCH_MAX_TABLES,
         max_columns_per_table: 5,
         min_relevance: 0.3,
     };
@@ -3318,6 +3379,7 @@ async fn chat(
     embedding_state: State<'_, EmbeddingModelState>,
     launch_config: State<'_, LaunchConfigState>,
     cancellation_state: State<'_, CancellationState>,
+    turn_tracker: State<'_, TurnTrackerState>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
     use std::io::Write;
@@ -3378,6 +3440,24 @@ async fn chat(
     format_config.normalize();
     let tool_system_prompts = settings.tool_system_prompts.clone();
     drop(settings);
+
+    // Initialize turn tracker for this generation
+    {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let mut progress = turn_tracker.progress.write().await;
+        *progress = TurnProgress {
+            chat_id: Some(chat_id.clone()),
+            generation_id,
+            assistant_response: String::new(),
+            last_token_index: 0,
+            finished: false,
+            had_tool_calls: false,
+            timestamp_ms: now_ms,
+        };
+    }
 
     // Apply global tool_search flag to server defer settings
     if tool_search_enabled {
@@ -3782,6 +3862,7 @@ async fn chat(
     let allow_tool_search_for_python_task = allow_tool_search_for_python;
     let tool_search_max_results_task = tool_search_max_results;
     let turn_system_prompt_task = system_prompt.clone();
+    let turn_progress = turn_tracker.progress.clone();
 
     // Spawn the agentic loop task
     tauri::async_runtime::spawn(async move {
@@ -3812,6 +3893,7 @@ async fn chat(
             allow_tool_search_for_python_task,
             tool_search_max_results_task,
             turn_system_prompt_task,
+            turn_progress,
         )
         .await;
     });
@@ -4536,15 +4618,6 @@ async fn refresh_schema_cache_for_source(
                     );
                 }
             }
-        }
-
-        if tables.len() > 5 {
-            println!(
-                "[SchemaRefresh] Truncating tables list for dataset '{}' from {} to 5 entries",
-                dataset_clean,
-                tables.len()
-            );
-            tables.truncate(5);
         }
 
         for table_name in tables {
@@ -5697,6 +5770,12 @@ pub fn run() {
             };
             app.manage(cancellation_state);
 
+            // Track turn progress for reconnect/replay
+            let turn_tracker_state = TurnTrackerState {
+                progress: Arc::new(RwLock::new(TurnProgress::default())),
+            };
+            app.manage(turn_tracker_state);
+
             let app_handle = app.handle();
             // Spawn Vector Actor
             tauri::async_runtime::spawn(async move {
@@ -5814,6 +5893,7 @@ pub fn run() {
             get_loaded_models,
             reload_foundry,
             cancel_generation,
+            get_turn_status,
             // RAG commands
             select_files,
             select_folder,

@@ -1487,61 +1487,6 @@ export function ChatArea() {
         }
     }, [chatMessages, assistantStreamingActive, isFollowMode]);
 
-    // Setup Streaming Listeners
-    useEffect(() => {
-        // Initialize listeners via the store
-        useChatStore.getState().setupListeners();
-
-        // Ideally we keep them alive, but if we want to be strict about cleanup:
-        return () => {
-            useChatStore.getState().cleanupListeners();
-        };
-    }, []);
-
-    // Watchdog: if streaming/tool execution has no activity for a while, refresh listeners
-    useEffect(() => {
-        const SOFT_STALL_MS = 8000;   // try reconnect
-        const HARD_STALL_MS = 15000;  // also unblock UI
-        const RESET_COOLDOWN_MS = 4000;
-        let lastResetTs = 0;
-
-        const timer = setInterval(() => {
-            const state = useChatStore.getState();
-            if (!state.assistantStreamingActive && !state.toolExecution.currentTool) {
-                return;
-            }
-            const lastActivity = state.lastStreamActivityTs;
-            if (!lastActivity) {
-                return;
-            }
-            const now = Date.now();
-            const stalledFor = now - lastActivity;
-            const isSoftStalled = stalledFor > SOFT_STALL_MS;
-            const isHardStalled = stalledFor > HARD_STALL_MS;
-            const cooledDown = now - lastResetTs > RESET_COOLDOWN_MS;
-            if (isSoftStalled && cooledDown) {
-                lastResetTs = now;
-                console.warn('[ChatArea] Detected stalled streaming/tool heartbeat. Refreshing listeners.');
-                state.cleanupListeners();
-                state.setupListeners();
-                state.setLastStreamActivityTs(now);
-                state.setOperationStatus({
-                    type: 'streaming',
-                    message: 'Reconnecting to backend...',
-                    startTime: state.operationStatus?.startTime || Date.now(),
-                });
-            }
-            if (isHardStalled) {
-                console.warn('[ChatArea] Hard stall detected. Unblocking UI and clearing streaming state.');
-                state.setAssistantStreamingActive(false);
-                state.setStreamingChatId(null);
-                state.setOperationStatus(null);
-            }
-        }, 2000);
-
-        return () => clearInterval(timer);
-    }, []);
-
     // Auto-resize textarea (ChatGPT-style: starts compact, grows as you type)
     useEffect(() => {
         if (textareaRef.current) {
