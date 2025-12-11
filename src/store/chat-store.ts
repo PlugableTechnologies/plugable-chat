@@ -311,6 +311,7 @@ let unlistenServiceStartStarted: (() => void) | undefined;
 let unlistenServiceStartComplete: (() => void) | undefined;
 let unlistenServiceRestartStarted: (() => void) | undefined;
 let unlistenServiceRestartComplete: (() => void) | undefined;
+let unlistenSystemPrompt: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
 let modelFetchPromise: Promise<void> | null = null;
@@ -1171,6 +1172,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 });
             });
             
+            const systemPromptListener = await listen<{ chat_id?: string; generation_id?: number; prompt: string }>('system-prompt', (event) => {
+                set((state) => {
+                    const prompt = event.payload?.prompt;
+                    if (!prompt) return state;
+
+                    const payloadChatId = event.payload?.chat_id;
+                    const streamingTarget = state.streamingChatId;
+                    const streamingMatches = streamingTarget && payloadChatId && streamingTarget === payloadChatId;
+
+                    const applyPrompt = (messages: Message[]) => {
+                        if (!messages.length) return messages;
+                        const last = messages[messages.length - 1];
+                        if (last.role !== 'assistant') return messages;
+                        const updated = [...messages];
+                        updated[updated.length - 1] = { ...last, systemPromptText: prompt };
+                        return updated;
+                    };
+
+                    if (streamingMatches && state.streamingMessages.length > 0) {
+                        return { streamingMessages: applyPrompt(state.streamingMessages) };
+                    }
+
+                    if (!payloadChatId || payloadChatId === state.currentChatId) {
+                        return { chatMessages: applyPrompt(state.chatMessages) };
+                    }
+
+                    return state;
+                });
+            });
+            
             // Model download progress listener
             const downloadProgressListener = await listen<{ file: string; progress: number }>('model-download-progress', (event) => {
                 console.log(`[ChatStore] Download progress: ${event.payload.file} - ${event.payload.progress}%`);
@@ -1499,6 +1530,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 toolExecutingListener();
                 toolResultListener();
                 toolLoopFinishedListener();
+                systemPromptListener();
                 downloadProgressListener();
                 loadCompleteListener();
                 serviceStopStartedListener();
@@ -1520,6 +1552,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenToolHeartbeat = toolHeartbeatListener;
             unlistenToolResult = toolResultListener;
             unlistenToolLoopFinished = toolLoopFinishedListener;
+            unlistenSystemPrompt = systemPromptListener;
             unlistenChatSaved = chatSavedListener;
             unlistenSidebarUpdate = sidebarUpdateListener;
             unlistenDownloadProgress = downloadProgressListener;
@@ -1585,6 +1618,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenToolLoopFinished) {
             unlistenToolLoopFinished();
             unlistenToolLoopFinished = undefined;
+        }
+        if (unlistenSystemPrompt) {
+            unlistenSystemPrompt();
+            unlistenSystemPrompt = undefined;
         }
         if (unlistenDownloadProgress) {
             unlistenDownloadProgress();

@@ -500,24 +500,11 @@ impl ModelGatewayActor {
                                     "[FoundryActor] Using system message ({} chars)",
                                     sys_msg.content.len()
                                 );
-                                if verbose_logging {
-                                    // Only log first 200 chars to reduce verbosity
-                                    let sys_preview: String =
-                                        sys_msg.content.chars().take(200).collect();
-                                    let truncated = if sys_msg.content.len() > 200 {
-                                        "..."
-                                    } else {
-                                        ""
-                                    };
-                                    println!(
-                                        "[FoundryActor] System prompt preview: {}{}",
-                                        sys_preview, truncated
-                                    );
-                                } else {
-                                    println!(
-                                        "[FoundryActor] System prompt preview suppressed (set LOG_VERBOSE=1 to view)"
-                                    );
-                                }
+                                // Always log the full system prompt for debugging, independent of verbosity.
+                                println!(
+                                    "[FoundryActor] --- SYSTEM PROMPT BEGIN ---\n{}\n[FoundryActor] --- SYSTEM PROMPT END ---",
+                                    sys_msg.content
+                                );
                             }
                         }
 

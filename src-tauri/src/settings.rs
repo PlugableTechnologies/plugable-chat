@@ -1019,6 +1019,8 @@ mod tests {
                     auto_approve_tools: false,
                     defer_tools: true,
                     project_id: Some("my-project".to_string()),
+                    dataset_allowlist: None,
+                    table_allowlist: None,
                 },
             ],
         };

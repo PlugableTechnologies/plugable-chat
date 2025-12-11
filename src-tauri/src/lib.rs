@@ -112,6 +112,13 @@ struct TurnProgress {
     timestamp_ms: u128,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct SystemPromptEvent {
+    chat_id: String,
+    generation_id: u32,
+    prompt: String,
+}
+
 // Tracks the latest turn progress for reconnect/replay
 struct TurnTrackerState {
     progress: Arc<RwLock<TurnProgress>>,
@@ -355,6 +362,45 @@ fn parse_tool_call_format(name: &str) -> Option<ToolCallFormatName> {
         "pure_json" => Some(ToolCallFormatName::PureJson),
         "code_mode" => Some(ToolCallFormatName::CodeMode),
         _ => None,
+    }
+}
+
+/// Keep the shared registry's database built-ins in sync with current settings.
+async fn sync_registry_database_tools(
+    registry: &SharedToolRegistry,
+    search_schemas_enabled: bool,
+    execute_sql_enabled: bool,
+) {
+    let mut guard = registry.write().await;
+    guard.set_search_schemas_enabled(search_schemas_enabled);
+    guard.set_execute_sql_enabled(execute_sql_enabled);
+}
+
+/// Ensure execute_sql is enabled (registry + persisted settings) after schema search.
+async fn auto_enable_execute_sql(
+    registry: &SharedToolRegistry,
+    settings_state: &State<'_, SettingsState>,
+    reason: &str,
+) {
+    {
+        let mut guard = registry.write().await;
+        guard.set_execute_sql_enabled(true);
+    }
+
+    let mut settings_guard = settings_state.settings.write().await;
+    if !settings_guard.execute_sql_enabled {
+        settings_guard.execute_sql_enabled = true;
+        if let Err(e) = settings::save_settings(&settings_guard).await {
+            println!(
+                "[Chat] Failed to persist execute_sql_enabled ({}): {}",
+                reason, e
+            );
+        } else {
+            println!(
+                "[Chat] execute_sql_enabled auto-enabled after {}",
+                reason
+            );
+        }
     }
 }
 
@@ -1171,19 +1217,6 @@ fn extract_python_program(response: &str) -> Option<Vec<String>> {
         }
     }
 
-    if let Ok(re) = regex::Regex::new(r"(?s)```(?:python|py)?\s*(.*?)\s*```") {
-        if let Some(cap) = re.captures(trimmed) {
-            let body = cap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
-            if !body.is_empty() {
-                return Some(
-                    body.lines()
-                        .map(|l| l.trim_end_matches('\r').to_string())
-                        .collect(),
-                );
-            }
-        }
-    }
-
     // Fallback: only accept inline snippets that clearly look like Python.
     // Do NOT treat arbitrary multi-line text as code.
     let looks_like_inline_python = regex::Regex::new(r"(?m)^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*.+")
@@ -1254,10 +1287,6 @@ pub(crate) fn detect_agentic_action(
                         arguments: json!({ "code": code_lines }),
                         raw: "[python_program]".to_string(),
                     }],
-                };
-            } else {
-                return AgenticAction::Final {
-                    response: assistant_response.to_string(),
                 };
             }
         }
@@ -2007,6 +2036,17 @@ async fn run_agentic_loop(
                     }
                 }
             };
+
+            // After any schema search, automatically surface execute_sql for follow-up
+            if resolved_call.tool == "search_schemas" {
+                {
+                    let mut registry = tool_registry.write().await;
+                    registry.set_execute_sql_enabled(true);
+                }
+                println!(
+                    "[AgenticLoop] execute_sql enabled after search_schemas tool call (runtime only)"
+                );
+            }
 
             // Emit result event
             let _ = app_handle.emit(
@@ -3418,7 +3458,7 @@ async fn chat(
     );
     let _ = std::io::stdout().flush();
 
-    let verbose_logging = is_verbose_logging_enabled();
+    let _verbose_logging = is_verbose_logging_enabled();
 
     let tool_filter = launch_config.tool_filter.clone();
 
@@ -3428,6 +3468,7 @@ async fn chat(
     let mut server_configs = settings.mcp_servers.clone();
     let tool_search_enabled = settings.tool_search_enabled;
     let search_schemas_enabled = settings.search_schemas_enabled;
+    let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
@@ -3440,6 +3481,14 @@ async fn chat(
     format_config.normalize();
     let tool_system_prompts = settings.tool_system_prompts.clone();
     drop(settings);
+
+    // Ensure registry reflects persisted database tool toggles before building prompts
+    sync_registry_database_tools(
+        &tool_registry_state.registry,
+        search_schemas_enabled,
+        execute_sql_enabled,
+    )
+    .await;
 
     // Initialize turn tracker for this generation
     {
@@ -3628,6 +3677,16 @@ async fn chat(
         auto_discovery.schema_search_output.as_ref(),
     );
 
+    // If we already performed schema search for this prompt, surface execute_sql immediately
+    if auto_discovery.schema_search_output.is_some() {
+        auto_enable_execute_sql(
+            &tool_registry_state.registry,
+            &settings_state,
+            "auto schema_search",
+        )
+        .await;
+    }
+
     // Visible tools: always include enabled built-ins; defer MCP tools to tool_search unless materialized.
     let builtin_tools: Vec<(String, Vec<McpTool>)> = {
         let registry = tool_registry_state.registry.read().await;
@@ -3778,22 +3837,21 @@ async fn chat(
         tool_count,
         auto_approve_servers
     );
-    if verbose_logging {
-        println!(
-            "[Chat] --- SYSTEM PROMPT BEGIN ---\n{}\n[Chat] --- SYSTEM PROMPT END ---",
-            system_prompt
-        );
-    } else {
-        let preview: String = system_prompt.chars().take(240).collect();
-        let truncated = system_prompt.len() > preview.len();
-        println!(
-            "[Chat] System prompt preview ({} chars): \"{}{}\"",
-            preview.len(),
-            preview,
-            if truncated { "..." } else { "" }
-        );
-        println!("[Chat] Set LOG_VERBOSE=1 to log the full system prompt");
-    }
+    // Always log the full system prompt to aid debugging, regardless of verbosity.
+    println!(
+        "[Chat] --- SYSTEM PROMPT BEGIN ---\n{}\n[Chat] --- SYSTEM PROMPT END ---",
+        system_prompt
+    );
+
+    // Emit the exact system prompt for UI visibility (matches what the model receives)
+    let _ = app_handle.emit(
+        "system-prompt",
+        SystemPromptEvent {
+            chat_id: chat_id.clone(),
+            generation_id,
+            prompt: system_prompt.clone(),
+        },
+    );
 
     // Build full history with system prompt at the beginning
     let mut full_history = Vec::new();
@@ -4283,10 +4341,15 @@ async fn update_tool_search_enabled(
 async fn update_search_schemas_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
+    tool_registry_state: State<'_, ToolRegistryState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
     guard.search_schemas_enabled = enabled;
     settings::save_settings(&guard).await?;
+    {
+        let mut registry = tool_registry_state.registry.write().await;
+        registry.set_search_schemas_enabled(enabled);
+    }
     println!("[Settings] search_schemas_enabled updated to: {}", enabled);
     Ok(())
 }
@@ -4295,10 +4358,15 @@ async fn update_search_schemas_enabled(
 async fn update_execute_sql_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
+    tool_registry_state: State<'_, ToolRegistryState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
     guard.execute_sql_enabled = enabled;
     settings::save_settings(&guard).await?;
+    {
+        let mut registry = tool_registry_state.registry.write().await;
+        registry.set_execute_sql_enabled(enabled);
+    }
     println!("[Settings] execute_sql_enabled updated to: {}", enabled);
     Ok(())
 }
@@ -5243,6 +5311,7 @@ async fn get_system_prompt_preview(
     let mut server_configs = settings.mcp_servers.clone();
     let tool_search_enabled = settings.tool_search_enabled;
     let search_schemas_enabled = settings.search_schemas_enabled;
+    let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
@@ -5256,6 +5325,13 @@ async fn get_system_prompt_preview(
     let tool_prompts = settings.tool_system_prompts.clone();
     drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
+
+    sync_registry_database_tools(
+        &tool_registry_state.registry,
+        search_schemas_enabled,
+        execute_sql_enabled,
+    )
+    .await;
 
     if tool_search_enabled {
         for config in &mut server_configs {
@@ -5407,6 +5483,8 @@ async fn get_system_prompt_layers(
     let base_prompt = settings.system_prompt.clone();
     let mut server_configs = settings.mcp_servers.clone();
     let tool_search_enabled = settings.tool_search_enabled;
+    let search_schemas_enabled = settings.search_schemas_enabled;
+    let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
@@ -5418,6 +5496,13 @@ async fn get_system_prompt_layers(
     let tool_prompts = settings.tool_system_prompts.clone();
     drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
+
+    sync_registry_database_tools(
+        &tool_registry_state.registry,
+        search_schemas_enabled,
+        execute_sql_enabled,
+    )
+    .await;
 
     if tool_search_enabled {
         for config in &mut server_configs {
