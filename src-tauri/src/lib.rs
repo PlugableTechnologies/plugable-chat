@@ -4555,6 +4555,65 @@ async fn refresh_database_schemas(
 }
 
 #[tauri::command]
+async fn get_cached_database_schemas(
+    handles: State<'_, ActorHandles>,
+    settings_state: State<'_, SettingsState>,
+) -> Result<Vec<SchemaSourceStatus>, String> {
+    let settings_guard = settings_state.settings.read().await;
+    let sources: Vec<DatabaseSourceConfig> = settings_guard
+        .database_toolbox
+        .sources
+        .iter()
+        .cloned()
+        .filter(|s| s.enabled)
+        .collect();
+    drop(settings_guard);
+
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut cached_sources = Vec::new();
+
+    for source in sources {
+        let (tx, rx) = oneshot::channel();
+        handles
+            .schema_tx
+            .send(SchemaVectorMsg::GetTablesForSource {
+                source_id: source.id.clone(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let cached_tables = rx
+            .await
+            .map_err(|_| "Schema vector actor unavailable".to_string())?;
+
+        let table_statuses = cached_tables
+            .into_iter()
+            .map(|table| SchemaTableStatus {
+                source_id: source.id.clone(),
+                source_name: source.name.clone(),
+                table_fq_name: table.fully_qualified_name,
+                enabled: table.enabled,
+                column_count: table.columns.len(),
+                description: table.description,
+            })
+            .collect();
+
+        cached_sources.push(SchemaSourceStatus {
+            source_id: source.id.clone(),
+            source_name: source.name.clone(),
+            database_kind: source.kind,
+            tables: table_statuses,
+        });
+    }
+
+    Ok(cached_sources)
+}
+
+#[tauri::command]
 async fn set_schema_table_enabled(
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
@@ -6120,6 +6179,7 @@ pub fn run() {
             update_search_schemas_enabled,
             update_execute_sql_enabled,
             update_database_toolbox_config,
+            get_cached_database_schemas,
             refresh_database_schemas,
             set_schema_table_enabled,
             // MCP commands

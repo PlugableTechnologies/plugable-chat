@@ -2403,6 +2403,7 @@ function SchemasTab({
     const { settings } = useSettingsStore();
     const [sources, setSources] = useState<SchemaSourceStatus[]>([]);
     const [loading, setLoading] = useState(false);
+    const [initializingSchemas, setInitializingSchemas] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [lastRefreshed, setLastRefreshed] = useState<number | null>(null);
     const [pendingTables, setPendingTables] = useState<Record<string, boolean>>({});
@@ -2418,8 +2419,8 @@ function SchemasTab({
     }, [onDirtyChange]);
 
     useEffect(() => {
-        onSavingChange?.(loading);
-    }, [loading, onSavingChange]);
+        onSavingChange?.(loading || initializingSchemas);
+    }, [initializingSchemas, loading, onSavingChange]);
 
     const refreshSchemas = useCallback(async () => {
         setLoading(true);
@@ -2436,13 +2437,35 @@ function SchemasTab({
         }
     }, []);
 
-    useEffect(() => {
+    const loadCachedSchemas = useCallback(async () => {
         if (!enabledSourcesKey) {
             setSources([]);
+            setLastRefreshed(null);
             return;
         }
-        refreshSchemas();
+
+        setInitializingSchemas(true);
+        setError(null);
+        try {
+            const cached = await invoke<SchemaSourceStatus[]>('get_cached_database_schemas');
+            const cachedSources = cached || [];
+            setSources(cachedSources);
+
+            const hasCachedTables = cachedSources.some(src => src.tables.length > 0);
+            if (!hasCachedTables) {
+                await refreshSchemas();
+            }
+        } catch (err: any) {
+            const message = err?.message || String(err);
+            setError(message);
+        } finally {
+            setInitializingSchemas(false);
+        }
     }, [enabledSourcesKey, refreshSchemas]);
+
+    useEffect(() => {
+        loadCachedSchemas();
+    }, [loadCachedSchemas]);
 
     useEffect(() => {
         onRegisterSave?.(refreshSchemas);
@@ -2516,6 +2539,7 @@ function SchemasTab({
 
     const totalTables = sources.reduce((acc, src) => acc + (src.tables?.length || 0), 0);
     const hasEnabledSources = Boolean(enabledSourcesKey);
+    const isLoadingSchemas = loading || initializingSchemas;
 
     return (
         <div className="schemas-tab-panel space-y-6">
@@ -2534,10 +2558,10 @@ function SchemasTab({
                 <div className="flex items-center gap-2">
                     <button
                         onClick={refreshSchemas}
-                        disabled={loading || !hasEnabledSources}
+                        disabled={isLoadingSchemas || !hasEnabledSources}
                         className="schema-refresh-button inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                        {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                        {isLoadingSchemas ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
                         Refresh schemas
                     </button>
                 </div>
@@ -2556,14 +2580,14 @@ function SchemasTab({
                 </div>
             )}
 
-            {loading && (
+            {isLoadingSchemas && (
                 <div className="schema-loading flex items-center gap-2 text-sm text-gray-600">
                     <Loader2 size={16} className="animate-spin" />
-                    <span>Caching and embedding schemas...</span>
+                    <span>{loading ? 'Refreshing schemas (this can take a while)...' : 'Loading cached schemas...'}</span>
                 </div>
             )}
 
-            {!loading && hasEnabledSources && sources.length === 0 && (
+            {!isLoadingSchemas && hasEnabledSources && sources.length === 0 && (
                 <div className="schema-empty-state rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-sm text-gray-600">
                     No schemas cached yet. Click "Refresh schemas" to enumerate and embed your databases.
                 </div>
