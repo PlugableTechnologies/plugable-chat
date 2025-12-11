@@ -28,6 +28,29 @@ impl ToolCallFormatName {
     }
 }
 
+// ============ Chat Formats ============
+
+/// Chat API format selection per model/profile.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatFormatName {
+    OpenaiCompletions,
+    OpenaiResponses,
+}
+
+impl ChatFormatName {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChatFormatName::OpenaiCompletions => "openai_completions",
+            ChatFormatName::OpenaiResponses => "openai_responses",
+        }
+    }
+}
+
+fn default_chat_format() -> ChatFormatName {
+    ChatFormatName::OpenaiCompletions
+}
+
 /// Configuration for which formats are enabled and which one is primary (prompted).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolCallFormatConfig {
@@ -480,6 +503,12 @@ pub struct AppSettings {
     pub system_prompt: String,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Default chat format when no per-model override is present
+    #[serde(default = "default_chat_format")]
+    pub chat_format_default: ChatFormatName,
+    /// Optional per-model chat format overrides keyed by model id
+    #[serde(default)]
+    pub chat_format_overrides: HashMap<String, ChatFormatName>,
     /// Tool calling format configuration (enabled formats + primary)
     #[serde(default)]
     pub tool_call_formats: ToolCallFormatConfig,
@@ -631,6 +660,8 @@ impl Default for AppSettings {
         Self {
             system_prompt: default_system_prompt(),
             mcp_servers: vec![default_mcp_test_server()],
+            chat_format_default: default_chat_format(),
+            chat_format_overrides: HashMap::new(),
             tool_call_formats: ToolCallFormatConfig::default(),
             tool_system_prompts: HashMap::new(),
             tool_search_max_results: default_tool_search_max_results(),
@@ -768,6 +799,8 @@ mod tests {
             default_compact_prompt_max_tools()
         );
         assert_eq!(settings.tool_call_formats, ToolCallFormatConfig::default());
+        assert_eq!(settings.chat_format_default, default_chat_format());
+        assert!(settings.chat_format_overrides.is_empty());
     }
 
     #[test]
@@ -793,6 +826,8 @@ mod tests {
         assert_eq!(settings.mcp_servers.len(), parsed.mcp_servers.len());
         assert_eq!(settings.mcp_servers[0].id, parsed.mcp_servers[0].id);
         assert_eq!(settings.tool_call_formats, parsed.tool_call_formats);
+        assert_eq!(settings.chat_format_default, parsed.chat_format_default);
+        assert_eq!(settings.chat_format_overrides, parsed.chat_format_overrides);
     }
 
     #[test]

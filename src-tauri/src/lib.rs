@@ -32,7 +32,7 @@ use serde::Serialize;
 use serde_json::json;
 use settings::{
     enforce_python_name, ensure_default_servers, AppSettings, CachedColumnSchema,
-    CachedTableSchema, DatabaseSourceConfig, DatabaseToolboxConfig, McpServerConfig,
+    CachedTableSchema, ChatFormatName, DatabaseSourceConfig, DatabaseToolboxConfig, McpServerConfig,
     SupportedDatabaseKind, ToolCallFormatConfig, ToolCallFormatName,
 };
 use std::collections::{HashMap, HashSet};
@@ -4331,6 +4331,29 @@ async fn update_tool_call_formats(
 }
 
 #[tauri::command]
+async fn update_chat_format(
+    model_id: String,
+    format: ChatFormatName,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+
+    // Store override only when different from default to keep config small
+    if format == guard.chat_format_default {
+        guard.chat_format_overrides.remove(&model_id);
+    } else {
+        guard.chat_format_overrides.insert(model_id.clone(), format);
+    }
+
+    settings::save_settings(&guard).await?;
+    println!(
+        "[Settings] chat_format updated: model_id={} format={:?}",
+        model_id, format
+    );
+    Ok(())
+}
+
+#[tauri::command]
 async fn update_python_execution_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
@@ -6081,6 +6104,7 @@ pub fn run() {
             update_system_prompt,
             update_tool_system_prompt,
             update_tool_call_formats,
+            update_chat_format,
             update_python_execution_enabled,
             update_tool_search_enabled,
             update_search_schemas_enabled,

@@ -29,6 +29,9 @@ export interface ToolCallFormatConfig {
     primary: ToolCallFormatName;
 }
 
+// Chat formats (per-model)
+export type ChatFormatName = 'openai_completions' | 'openai_responses';
+
 // Database source kinds (must match Rust SupportedDatabaseKind)
 export type SupportedDatabaseKind = 'bigquery' | 'postgres' | 'mysql' | 'sqlite' | 'spanner';
 
@@ -59,6 +62,8 @@ export interface DatabaseToolboxConfig {
 export interface AppSettings {
     system_prompt: string;
     mcp_servers: McpServerConfig[];
+    chat_format_default: ChatFormatName;
+    chat_format_overrides: Record<string, ChatFormatName>;
     tool_call_formats: ToolCallFormatConfig;
     tool_system_prompts: Record<string, string>;
     tool_search_max_results: number;
