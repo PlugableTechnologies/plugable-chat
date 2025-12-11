@@ -2824,58 +2824,6 @@ export function SettingsModal() {
 
                 {/* Tabs */}
                 <div className="settings-tablist flex items-center border-b border-gray-100 overflow-x-auto min-h-[56px] pb-2">
-                    <button
-                        onClick={() => setActiveTab('system-prompt')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'system-prompt'
-                            ? 'border-blue-500 text-blue-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700'
-                            }`}
-                    >
-                        <MessageSquare size={16} />
-                        System Prompt
-                    </button>
-                    <button
-                        onClick={() => setActiveTab('tools')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'tools'
-                            ? 'border-blue-500 text-blue-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700'
-                            }`}
-                    >
-                        <Wrench size={16} />
-                        Tools
-                    </button>
-                    <button
-                        onClick={() => setActiveTab('interfaces')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'interfaces'
-                            ? 'border-blue-500 text-blue-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700'
-                            }`}
-                    >
-                        <Wrench size={16} />
-                        Interfaces
-                    </button>
-                    <button
-                        onClick={() => setActiveTab('builtins')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'builtins'
-                            ? 'border-blue-500 text-blue-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700'
-                            }`}
-                    >
-                        <Code2 size={16} />
-                        Built-ins
-                    </button>
-                    {showDatabasesTab && (
-                        <button
-                            onClick={() => setActiveTab('databases')}
-                            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'databases'
-                                ? 'border-blue-500 text-blue-600'
-                                : 'border-transparent text-gray-500 hover:text-gray-700'
-                                }`}
-                        >
-                            <Server size={16} />
-                            Databases
-                        </button>
-                    )}
                     {showSchemasTab && (
                         <button
                             onClick={() => setActiveTab('schemas')}
@@ -2888,6 +2836,58 @@ export function SettingsModal() {
                             Schemas
                         </button>
                     )}
+                    {showDatabasesTab && (
+                        <button
+                            onClick={() => setActiveTab('databases')}
+                            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'databases'
+                                ? 'border-blue-500 text-blue-600'
+                                : 'border-transparent text-gray-500 hover:text-gray-700'
+                                }`}
+                        >
+                            <Server size={16} />
+                            Databases
+                        </button>
+                    )}
+                    <button
+                        onClick={() => setActiveTab('builtins')}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'builtins'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <Code2 size={16} />
+                        Built-ins
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('tools')}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'tools'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <Wrench size={16} />
+                        Tools
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('system-prompt')}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'system-prompt'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <MessageSquare size={16} />
+                        System Prompt
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('interfaces')}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'interfaces'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <Wrench size={16} />
+                        Interfaces
+                    </button>
                 </div>
 
                 {/* Content */}
