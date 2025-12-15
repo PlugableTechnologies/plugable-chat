@@ -86,7 +86,8 @@ pub fn parse_tool_calls_for_model_profile(
             ToolCallFormatName::Mistral => parse_tagged_tool_calls(response),
             ToolCallFormatName::Pythonic => parse_pythonic_tool_calls(response),
             ToolCallFormatName::PureJson => parse_pure_json_tool_calls(response),
-            ToolCallFormatName::CodeMode => Vec::new(), // handled via python_execution path
+            // Native and CodeMode are handled via structured response or python_execution
+            ToolCallFormatName::Native | ToolCallFormatName::CodeMode => Vec::new(),
         };
         if !calls.is_empty() {
             return calls;

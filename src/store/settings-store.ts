@@ -22,7 +22,7 @@ export interface McpServerConfig {
 }
 
 // Shared tool-calling format names (must match Rust)
-export type ToolCallFormatName = 'hermes' | 'mistral' | 'pythonic' | 'pure_json' | 'code_mode';
+export type ToolCallFormatName = 'native' | 'hermes' | 'mistral' | 'pythonic' | 'pure_json' | 'code_mode';
 
 export interface ToolCallFormatConfig {
     enabled: ToolCallFormatName[];
@@ -70,7 +70,6 @@ export interface AppSettings {
     tool_search_enabled: boolean;
     python_execution_enabled: boolean;
     python_tool_calling_enabled: boolean;
-    native_tool_calling_enabled: boolean;
     legacy_tool_call_format_enabled: boolean;
     tool_use_examples_enabled: boolean;
     tool_use_examples_max: number;
@@ -151,8 +150,8 @@ interface SettingsState {
 export const DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant. Be direct and concise in your responses. When you don't know something, say so rather than guessing.";
 
 export const DEFAULT_TOOL_CALL_FORMATS: ToolCallFormatConfig = {
-    enabled: ['hermes', 'code_mode'],
-    primary: 'code_mode',
+    enabled: ['native', 'hermes', 'code_mode'],
+    primary: 'native',
 };
 
 function normalizeToolCallFormats(config: ToolCallFormatConfig): ToolCallFormatConfig {
@@ -334,7 +333,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     tool_search_enabled: false,
                     python_execution_enabled: false,
                     python_tool_calling_enabled: true,
-                    native_tool_calling_enabled: true,
                     legacy_tool_call_format_enabled: false,
                     tool_use_examples_enabled: false,
                     tool_use_examples_max: 2,
@@ -487,17 +485,45 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         const currentSettings = get().settings;
         if (!currentSettings) return;
 
+        // Compute new format config with native enabled/disabled
+        const currentFormats = currentSettings.tool_call_formats;
+        let newEnabled = [...currentFormats.enabled];
+        let newPrimary = currentFormats.primary;
+
+        if (enabled) {
+            // Add native if not already present
+            if (!newEnabled.includes('native')) {
+                newEnabled = ['native', ...newEnabled];
+            }
+            // Set native as primary
+            newPrimary = 'native';
+        } else {
+            // Remove native from enabled
+            newEnabled = newEnabled.filter(f => f !== 'native');
+            // If native was primary, fall back to first available
+            if (newPrimary === 'native') {
+                newPrimary = newEnabled[0] || 'hermes';
+            }
+        }
+
+        const newFormats: ToolCallFormatConfig = {
+            enabled: newEnabled,
+            primary: newPrimary,
+        };
+
         // Optimistic update
         set({
-            settings: { ...currentSettings, native_tool_calling_enabled: enabled },
+            settings: { ...currentSettings, tool_call_formats: newFormats },
             error: null
         });
 
         try {
             await invoke('update_native_tool_calling_enabled', { enabled });
-            console.log('[SettingsStore] Native tool calling enabled updated:', enabled);
+            console.log('[SettingsStore] Native tool calling updated:', enabled);
+            // Re-fetch to sync with backend
+            await get().fetchSettings();
         } catch (e: any) {
-            console.error('[SettingsStore] Failed to update native tool calling enabled:', e);
+            console.error('[SettingsStore] Failed to update native tool calling:', e);
             // Revert on error
             set({
                 settings: currentSettings,

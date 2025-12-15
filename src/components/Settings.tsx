@@ -1046,12 +1046,13 @@ function InterfacesTab({
     onRegisterSave?: (handler: () => Promise<void>) => void;
     onSavingChange?: (saving: boolean) => void;
 }) {
-    const { settings, updateToolCallFormats, updateChatFormat, updateNativeToolCallingEnabled } = useSettingsStore();
+    const { settings, updateToolCallFormats, updateChatFormat } = useSettingsStore();
     const currentModel = useChatStore((state) => state.currentModel);
     const availableModels = useChatStore((state) => state.availableModels);
     const formatConfig = settings?.tool_call_formats || DEFAULT_TOOL_CALL_FORMATS;
     const formatOptions: { id: ToolCallFormatName; label: string; description: string }[] = [
-        { id: 'code_mode', label: 'Code Mode (Python)', description: 'Model returns a single Python program executed in the sandbox (primary default).' },
+        { id: 'native', label: 'Native (OpenAI API)', description: 'Use the model\'s native tool calling via the `tools` API parameter (recommended for supported models).' },
+        { id: 'code_mode', label: 'Code Mode (Python)', description: 'Model returns a single Python program executed in the sandbox.' },
         { id: 'hermes', label: 'Hermes (tag-delimited)', description: '<tool_call>{"name": "...", "arguments": {...}}</tool_call>' },
         { id: 'mistral', label: 'Mistral (bracket)', description: '[TOOL_CALLS] [{"name": "...", "arguments": {...}}]' },
         { id: 'pythonic', label: 'Pythonic call', description: 'tool_name(arg1="value", arg2=123)' },
@@ -1067,14 +1068,10 @@ function InterfacesTab({
     const currentModelChatFormat: ChatFormatName = currentModel
         ? chatFormatOverrides[currentModel] ?? chatFormatDefault
         : chatFormatDefault;
-    const nativeToolCallingEnabled = settings?.native_tool_calling_enabled ?? true;
-
     const [localFormats, setLocalFormats] = useState<ToolCallFormatConfig>(formatConfig);
     const [baselineFormats, setBaselineFormats] = useState<ToolCallFormatConfig>(formatConfig);
     const [localChatFormat, setLocalChatFormat] = useState<ChatFormatName>(currentModelChatFormat);
     const [baselineChatFormat, setBaselineChatFormat] = useState<ChatFormatName>(currentModelChatFormat);
-    const [localNativeToolCallingEnabled, setLocalNativeToolCallingEnabled] = useState(nativeToolCallingEnabled);
-    const [baselineNativeToolCallingEnabled, setBaselineNativeToolCallingEnabled] = useState(nativeToolCallingEnabled);
     const [isSaving, setIsSaving] = useState(false);
 
     useEffect(() => {
@@ -1099,20 +1096,12 @@ function InterfacesTab({
         }
     }, [baselineChatFormat, chatFormatDefault, chatFormatOverrides, currentModel, currentModelChatFormat, localChatFormat]);
 
-    useEffect(() => {
-        const next = nativeToolCallingEnabled;
-        if (localNativeToolCallingEnabled === baselineNativeToolCallingEnabled) {
-            setLocalNativeToolCallingEnabled(next);
-            setBaselineNativeToolCallingEnabled(next);
-        } else {
-            setBaselineNativeToolCallingEnabled(next);
-        }
-    }, [nativeToolCallingEnabled, localNativeToolCallingEnabled, baselineNativeToolCallingEnabled]);
+    // Native tool calling state is now derived from localFormats.enabled.includes('native')
+    // No need for separate sync effect
 
     const hasChanges =
         JSON.stringify(localFormats) !== JSON.stringify(baselineFormats) ||
-        (currentModel ? localChatFormat !== baselineChatFormat : false) ||
-        localNativeToolCallingEnabled !== baselineNativeToolCallingEnabled;
+        (currentModel ? localChatFormat !== baselineChatFormat : false);
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -1146,15 +1135,12 @@ function InterfacesTab({
         setIsSaving(true);
         onSavingChange?.(true);
         try {
+            // Save tool call formats (includes Native format toggle)
             await updateToolCallFormats(localFormats);
             setBaselineFormats(localFormats);
             if (currentModel && localChatFormat !== baselineChatFormat) {
                 await updateChatFormat(currentModel, localChatFormat);
                 setBaselineChatFormat(localChatFormat);
-            }
-            if (localNativeToolCallingEnabled !== baselineNativeToolCallingEnabled) {
-                await updateNativeToolCallingEnabled(localNativeToolCallingEnabled);
-                setBaselineNativeToolCallingEnabled(localNativeToolCallingEnabled);
             }
         } finally {
             setIsSaving(false);
@@ -1162,15 +1148,12 @@ function InterfacesTab({
         }
     }, [
         baselineChatFormat,
-        baselineNativeToolCallingEnabled,
         currentModel,
         localChatFormat,
         localFormats,
-        localNativeToolCallingEnabled,
         onSavingChange,
         settings,
         updateChatFormat,
-        updateNativeToolCallingEnabled,
         updateToolCallFormats,
     ]);
 
@@ -1279,35 +1262,6 @@ function InterfacesTab({
                 </div>
             </div>
 
-            <div className="pt-1 space-y-2">
-                <div>
-                    <h3 className="text-sm font-medium text-gray-700">Native Tool Calling</h3>
-                    <p className="text-xs text-gray-500">Use model's native tool calling when available (vs. text-based prompting)</p>
-                </div>
-                <div className="border border-gray-200 rounded-xl bg-white p-4 w-full">
-                    <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                            <button
-                                onClick={() => setLocalNativeToolCallingEnabled((prev) => !prev)}
-                                className={`relative w-10 h-5 rounded-full transition-colors ${localNativeToolCallingEnabled ? 'bg-blue-500' : 'bg-gray-300'
-                                    }`}
-                                title="Toggle native tool calling"
-                            >
-                                <div
-                                    className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localNativeToolCallingEnabled ? 'translate-x-5' : ''
-                                        }`}
-                                />
-                            </button>
-                            <div>
-                                <div className="text-sm font-medium text-gray-900">Enable Native Tool Calling</div>
-                                <p className="text-xs text-gray-500 mt-0.5">
-                                    When enabled, tools are sent in the request body and parsed from structured responses. When disabled, falls back to text-based tool calling via prompts.
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
         </div>
     );
 }

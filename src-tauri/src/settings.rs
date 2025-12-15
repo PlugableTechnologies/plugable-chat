@@ -9,22 +9,42 @@ use tokio::fs;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallFormatName {
+    /// Native OpenAI-style tool calling via the `tools` API parameter.
+    /// Model must support native tool calling for this to work.
+    Native,
+    /// Text-based: `<tool_call>{"name": "...", "arguments": {...}}</tool_call>`
     Hermes,
+    /// Text-based: `[TOOL_CALLS] [{"name": "...", "arguments": {...}}]`
     Mistral,
+    /// Text-based: `tool_name(arg1="value", arg2=123)`
     Pythonic,
+    /// Text-based: Raw JSON object
     PureJson,
+    /// Python execution mode: tools called via python_execution sandbox
     CodeMode,
 }
 
 impl ToolCallFormatName {
     pub fn as_str(&self) -> &'static str {
         match self {
+            ToolCallFormatName::Native => "native",
             ToolCallFormatName::Hermes => "hermes",
             ToolCallFormatName::Mistral => "mistral",
             ToolCallFormatName::Pythonic => "pythonic",
             ToolCallFormatName::PureJson => "pure_json",
             ToolCallFormatName::CodeMode => "code_mode",
         }
+    }
+
+    /// Returns true if this format uses text-based prompting (not API-level or code-based)
+    pub fn is_text_based(&self) -> bool {
+        matches!(
+            self,
+            ToolCallFormatName::Hermes
+                | ToolCallFormatName::Mistral
+                | ToolCallFormatName::Pythonic
+                | ToolCallFormatName::PureJson
+        )
     }
 }
 
@@ -61,11 +81,15 @@ pub struct ToolCallFormatConfig {
 }
 
 fn default_enabled_formats() -> Vec<ToolCallFormatName> {
-    vec![ToolCallFormatName::Hermes, ToolCallFormatName::CodeMode]
+    vec![
+        ToolCallFormatName::Native,
+        ToolCallFormatName::Hermes,
+        ToolCallFormatName::CodeMode,
+    ]
 }
 
 fn default_primary_format() -> ToolCallFormatName {
-    ToolCallFormatName::CodeMode
+    ToolCallFormatName::Native
 }
 
 impl Default for ToolCallFormatConfig {
@@ -99,24 +123,64 @@ impl ToolCallFormatConfig {
         self.enabled.contains(&format)
     }
 
+    /// Returns true if any text-based format (Hermes, Mistral, Pythonic, PureJson) is enabled
+    pub fn any_text_based(&self) -> bool {
+        self.enabled.iter().any(|f| f.is_text_based())
+    }
+
+    /// Returns true if any format other than CodeMode is enabled (Native or text-based)
     pub fn any_non_code(&self) -> bool {
         self.enabled
             .iter()
             .any(|f| *f != ToolCallFormatName::CodeMode)
     }
 
-    /// Choose a primary that is actually usable. If code mode is primary but not available,
-    /// fall back to the first enabled non-code format.
-    pub fn resolve_primary_for_prompt(&self, code_mode_available: bool) -> ToolCallFormatName {
-        if self.primary == ToolCallFormatName::CodeMode && !code_mode_available {
-            self.enabled
-                .iter()
-                .copied()
-                .find(|f| *f != ToolCallFormatName::CodeMode)
-                .unwrap_or(ToolCallFormatName::CodeMode)
-        } else {
-            self.primary
+    /// Returns true if native tool calling is enabled
+    pub fn native_enabled(&self) -> bool {
+        self.enabled.contains(&ToolCallFormatName::Native)
+    }
+
+    /// Returns true if native is the primary format
+    pub fn native_is_primary(&self) -> bool {
+        self.primary == ToolCallFormatName::Native
+    }
+
+    /// Choose a primary that is actually usable.
+    /// - If code mode is primary but not available, fall back
+    /// - If native is primary but model doesn't support it, fall back
+    /// The `code_mode_available` and `native_available` flags indicate runtime availability.
+    pub fn resolve_primary_for_prompt(
+        &self,
+        code_mode_available: bool,
+        native_available: bool,
+    ) -> ToolCallFormatName {
+        let primary = self.primary;
+
+        // Check if primary is available
+        let primary_available = match primary {
+            ToolCallFormatName::CodeMode => code_mode_available,
+            ToolCallFormatName::Native => native_available,
+            _ => true, // Text-based formats are always available
+        };
+
+        if primary_available {
+            return primary;
         }
+
+        // Primary not available, find first available enabled format
+        for format in &self.enabled {
+            let available = match format {
+                ToolCallFormatName::CodeMode => code_mode_available,
+                ToolCallFormatName::Native => native_available,
+                _ => true,
+            };
+            if available && *format != primary {
+                return *format;
+            }
+        }
+
+        // Nothing available, return primary anyway (will likely fail gracefully)
+        primary
     }
 }
 
@@ -557,11 +621,9 @@ pub struct AppSettings {
     /// When enabled, models can execute SQL queries via configured database sources.
     #[serde(default)]
     pub execute_sql_enabled: bool,
-    /// Whether to use native tool calling (OpenAI-compatible) when the model supports it.
-    /// When enabled, tools are sent in the request body and parsed from structured responses.
-    /// When disabled, falls back to text-based tool calling via prompts.
-    #[serde(default = "default_native_tool_calling_enabled")]
-    pub native_tool_calling_enabled: bool,
+    // NOTE: native_tool_calling_enabled has been removed.
+    // Native tool calling is now controlled via tool_call_formats (Native format).
+    // Old configs with this field will be migrated on load.
 }
 
 fn default_system_prompt() -> String {
@@ -582,10 +644,6 @@ fn default_tool_use_examples_max() -> usize {
 
 fn default_compact_prompt_max_tools() -> usize {
     4
-}
-
-fn default_native_tool_calling_enabled() -> bool {
-    true
 }
 
 fn find_workspace_root() -> Option<PathBuf> {
@@ -685,7 +743,6 @@ impl Default for AppSettings {
             database_toolbox: DatabaseToolboxConfig::default(),
             search_schemas_enabled: false,
             execute_sql_enabled: false,
-            native_tool_calling_enabled: default_native_tool_calling_enabled(),
         }
     }
 }
@@ -1001,12 +1058,25 @@ mod tests {
             primary: ToolCallFormatName::CodeMode,
         };
         cfg2.normalize();
-        let resolved = cfg2.resolve_primary_for_prompt(false);
+        let resolved = cfg2.resolve_primary_for_prompt(false, true);
         assert_eq!(resolved, ToolCallFormatName::Mistral);
 
         // Code mode available -> keep primary
-        let resolved2 = cfg2.resolve_primary_for_prompt(true);
+        let resolved2 = cfg2.resolve_primary_for_prompt(true, true);
         assert_eq!(resolved2, ToolCallFormatName::CodeMode);
+
+        // Native unavailable -> fall back
+        let mut cfg3 = ToolCallFormatConfig {
+            enabled: vec![ToolCallFormatName::Native, ToolCallFormatName::Hermes],
+            primary: ToolCallFormatName::Native,
+        };
+        cfg3.normalize();
+        let resolved3 = cfg3.resolve_primary_for_prompt(true, false);
+        assert_eq!(resolved3, ToolCallFormatName::Hermes);
+
+        // Native available -> keep primary
+        let resolved4 = cfg3.resolve_primary_for_prompt(true, true);
+        assert_eq!(resolved4, ToolCallFormatName::Native);
     }
 
     // ============ Database Toolbox Configuration Tests ============

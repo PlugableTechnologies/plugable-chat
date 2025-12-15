@@ -498,7 +498,22 @@ fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> LaunchOver
         settings.python_tool_calling_enabled = v;
     }
     if let Some(v) = args.native_tool_calling {
-        settings.native_tool_calling_enabled = v;
+        // CLI override for native tool calling - add/remove Native format
+        if v {
+            if !settings.tool_call_formats.enabled.contains(&ToolCallFormatName::Native) {
+                settings.tool_call_formats.enabled.insert(0, ToolCallFormatName::Native);
+            }
+            settings.tool_call_formats.primary = ToolCallFormatName::Native;
+        } else {
+            settings.tool_call_formats.enabled.retain(|f| *f != ToolCallFormatName::Native);
+            if settings.tool_call_formats.primary == ToolCallFormatName::Native {
+                settings.tool_call_formats.primary = settings.tool_call_formats.enabled
+                    .first()
+                    .copied()
+                    .unwrap_or(ToolCallFormatName::Hermes);
+            }
+        }
+        settings.tool_call_formats.normalize();
     }
     if let Some(v) = args.tool_examples {
         settings.tool_use_examples_enabled = v;
@@ -1373,8 +1388,10 @@ async fn run_agentic_loop(
     turn_progress: Arc<RwLock<TurnProgress>>,
     chat_format_default: ChatFormatName,
     chat_format_overrides: std::collections::HashMap<String, ChatFormatName>,
-    native_tool_calling_enabled: bool,
 ) {
+    // Derive native tool calling from format config
+    let native_tool_calling_enabled = format_config.native_enabled();
+
     // Resolve model profile from model name
     let profile = resolve_profile(&model_name);
     let model_family = profile.model_family;
@@ -3025,7 +3042,8 @@ fn default_tool_search_prompt(has_deferred_tools: bool) -> String {
 
 fn tool_calling_format_prompt(primary: ToolCallFormatName) -> Option<String> {
     match primary {
-        ToolCallFormatName::CodeMode => None,
+        // Native and CodeMode don't need text-based format instructions
+        ToolCallFormatName::Native | ToolCallFormatName::CodeMode => None,
         ToolCallFormatName::Hermes => {
             Some("### Tool calling format (Hermes)\nUse <tool_call>{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg\": \"value\"}}</tool_call> with valid JSON only. Do not wrap in markdown or add prose.".to_string())
         }
@@ -3585,7 +3603,6 @@ async fn chat(
     let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
-    let native_tool_calling_enabled = settings.native_tool_calling_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
@@ -3598,6 +3615,43 @@ async fn chat(
     let chat_format_default = settings.chat_format_default;
     let chat_format_overrides = settings.chat_format_overrides.clone();
     drop(settings);
+
+    // Query current model info to check if it supports native tool calling
+    let (current_model_info, model_supports_native_tools) = {
+        let (tx, rx) = oneshot::channel();
+        if handles
+            .foundry_tx
+            .send(FoundryMsg::GetCurrentModel { respond_to: tx })
+            .await
+            .is_ok()
+        {
+            if let Ok(Some(model)) = rx.await {
+                let supports_native = model.tool_calling;
+                (Some(model), supports_native)
+            } else {
+                (None, false)
+            }
+        } else {
+            (None, false)
+        }
+    };
+
+    // Native tool calling is only available if: format is enabled AND model supports it
+    let native_tool_calling_enabled =
+        format_config.native_enabled() && model_supports_native_tools;
+
+    // Log model capabilities for debugging
+    let model_id = current_model_info
+        .as_ref()
+        .map(|m| m.id.as_str())
+        .unwrap_or("unknown");
+    println!(
+        "[chat] Model capabilities: model={}, native_enabled_in_config={}, model_supports_native={}, using_native={}",
+        model_id,
+        format_config.native_enabled(),
+        model_supports_native_tools,
+        native_tool_calling_enabled
+    );
 
     // Ensure registry reflects persisted database tool toggles before building prompts
     sync_registry_database_tools(
@@ -3696,7 +3750,10 @@ async fn chat(
         && python_tool_calling_enabled
         && tool_filter.builtin_allowed("python_execution");
     // Primary affects prompting only; execution should honor any enabled format.
-    let primary_format_for_prompt = format_config.resolve_primary_for_prompt(code_mode_possible);
+    // Native is available only if both enabled in config AND model supports it.
+    let native_available = native_tool_calling_enabled;
+    let primary_format_for_prompt =
+        format_config.resolve_primary_for_prompt(code_mode_possible, native_available);
     let python_tool_mode = code_mode_possible;
     let allow_tool_search_for_python =
         python_tool_mode && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
@@ -3707,9 +3764,11 @@ async fn chat(
         legacy_tool_calls_enabled && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
 
     println!(
-        "[chat] tool_call_formats: primary={:?}, enabled={:?}, python_execution_enabled={}, python_tool_calling_enabled={}, python_tool_mode={}, code_mode_possible={}",
+        "[chat] tool_call_formats: config_primary={:?}, resolved_primary={:?}, enabled={:?}, native_available={}, python_execution_enabled={}, python_tool_calling_enabled={}, python_tool_mode={}, code_mode_possible={}",
         format_config.primary,
+        primary_format_for_prompt,
         format_config.enabled,
+        native_available,
         python_execution_enabled,
         python_tool_calling_enabled,
         python_tool_mode,
@@ -4038,22 +4097,10 @@ async fn chat(
         system_prompt: None,
     });
 
-    // Get current model info for model-specific handling
-    let (model_info_tx, model_info_rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetCurrentModel {
-            respond_to: model_info_tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-    let current_model = model_info_rx
-        .await
-        .map_err(|_| "Foundry actor died".to_string())?;
-
-    // Get the current model name for profile resolution
-    let model_name = current_model
-        .map(|m| m.id)
+    // Use model info obtained earlier for profile resolution
+    let model_name = current_model_info
+        .as_ref()
+        .map(|m| m.id.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("[Chat] Using model: {}", model_name);
@@ -4082,7 +4129,6 @@ async fn chat(
     let turn_progress = turn_tracker.progress.clone();
     let chat_format_default_task = chat_format_default;
     let chat_format_overrides_task = chat_format_overrides.clone();
-    let native_tool_calling_enabled_task = native_tool_calling_enabled;
 
     // Spawn the agentic loop task
     tauri::async_runtime::spawn(async move {
@@ -4116,7 +4162,6 @@ async fn chat(
             turn_progress,
             chat_format_default_task,
             chat_format_overrides_task,
-            native_tool_calling_enabled_task,
         )
         .await;
     });
@@ -4519,11 +4564,38 @@ async fn update_native_tool_calling_enabled(
     settings_state: State<'_, SettingsState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
-    guard.native_tool_calling_enabled = enabled;
+    // Update the format config to add/remove Native format
+    if enabled {
+        if !guard
+            .tool_call_formats
+            .enabled
+            .contains(&ToolCallFormatName::Native)
+        {
+            guard
+                .tool_call_formats
+                .enabled
+                .insert(0, ToolCallFormatName::Native);
+        }
+        guard.tool_call_formats.primary = ToolCallFormatName::Native;
+    } else {
+        guard
+            .tool_call_formats
+            .enabled
+            .retain(|f| *f != ToolCallFormatName::Native);
+        if guard.tool_call_formats.primary == ToolCallFormatName::Native {
+            guard.tool_call_formats.primary = guard
+                .tool_call_formats
+                .enabled
+                .first()
+                .copied()
+                .unwrap_or(ToolCallFormatName::Hermes);
+        }
+    }
+    guard.tool_call_formats.normalize();
     settings::save_settings(&guard).await?;
     println!(
-        "[Settings] native_tool_calling_enabled updated to: {}",
-        enabled
+        "[Settings] Native tool calling updated to: {} (primary={:?}, enabled={:?})",
+        enabled, guard.tool_call_formats.primary, guard.tool_call_formats.enabled
     );
     Ok(())
 }
@@ -5586,7 +5658,6 @@ async fn get_system_prompt_preview(
     let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
-    let native_tool_calling_enabled = settings.native_tool_calling_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
@@ -5595,6 +5666,7 @@ async fn get_system_prompt_preview(
     let database_toolbox_config = settings.database_toolbox.clone();
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
+    let native_tool_calling_enabled = format_config.native_enabled();
     let tool_prompts = settings.tool_system_prompts.clone();
     drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
@@ -5649,7 +5721,9 @@ async fn get_system_prompt_preview(
         && python_execution_enabled
         && python_tool_calling_enabled
         && tool_filter.builtin_allowed("python_execution");
-    let primary_format_for_prompt = format_config.resolve_primary_for_prompt(code_mode_possible);
+    let native_available = format_config.native_enabled();
+    let primary_format_for_prompt =
+        format_config.resolve_primary_for_prompt(code_mode_possible, native_available);
     let python_tool_mode =
         code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
     let allow_tool_search_for_python =
@@ -5775,13 +5849,13 @@ async fn get_system_prompt_layers(
     let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
-    let native_tool_calling_enabled = settings.native_tool_calling_enabled;
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
     let compact_prompt_enabled = settings.compact_prompt_enabled;
     let compact_prompt_max_tools = settings.compact_prompt_max_tools;
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
+    let native_tool_calling_enabled = format_config.native_enabled();
     let tool_prompts = settings.tool_system_prompts.clone();
     drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
@@ -5836,7 +5910,9 @@ async fn get_system_prompt_layers(
         && python_execution_enabled
         && python_tool_calling_enabled
         && tool_filter.builtin_allowed("python_execution");
-    let primary_format_for_prompt = format_config.resolve_primary_for_prompt(code_mode_possible);
+    let native_available = format_config.native_enabled();
+    let primary_format_for_prompt =
+        format_config.resolve_primary_for_prompt(code_mode_possible, native_available);
     let python_tool_mode =
         code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
     let allow_tool_search_for_python =
