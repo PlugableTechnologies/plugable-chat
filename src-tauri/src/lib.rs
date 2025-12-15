@@ -2658,14 +2658,10 @@ fn collect_tool_prompt_additions(
                 body.push_str(trimmed);
             }
         }
-        additions.push(format!(
-            "### {} ({})\n{}",
-            PYTHON_LABEL,
-            BUILTIN_SERVER_LABEL,
-            body.trim()
-        ));
+        additions.push(body.trim().to_string());
 
-        if tool_search_available {
+        // Only add tool_search prompt if there are deferred tools
+        if tool_search_available && has_deferred_tools {
             let mut body = default_tool_search_prompt(has_deferred_tools);
             if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "tool_search")) {
                 let trimmed = custom.trim();
@@ -2689,17 +2685,14 @@ fn collect_tool_prompt_additions(
     }
 
     // If tool_search is enabled but not yet surfaced (e.g., python disabled), still provide guidance.
-    if !tool_search_prompt_added && tool_search_enabled && filter.builtin_allowed("tool_search") {
+    // Only add if there are deferred tools
+    if !tool_search_prompt_added && tool_search_enabled && filter.builtin_allowed("tool_search") && has_deferred_tools {
         let mut body = String::from(
             "Call tool_search to list relevant MCP tools before using them. Example:\n\
              <tool_call>{\"server\": \"builtin\", \"tool\": \"tool_search\", \"arguments\": {\"queries\": [\"your goal\"], \"top_k\": 3}}</tool_call>\n\
              Then call the returned tools directly.",
         );
-        if has_deferred_tools {
-            body.push_str("\n\nSome MCP tools are deferred; run tool_search early to discover them.");
-        } else {
-            body.push_str("\n\nUse tool_search when you are unsure which MCP tool to call.");
-        }
+        body.push_str("\n\nSome MCP tools are deferred; run tool_search early to discover them.");
         if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "tool_search")) {
             let trimmed = custom.trim();
             if !trimmed.is_empty() {
@@ -3287,6 +3280,7 @@ fn render_auto_context_sections(
                 }
                 body.push_str(&line);
             }
+            body.push_str("\n\n**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n1. Use the `execute_sql` tool with the `source_id` shown above (e.g., `bq-1765404617532`)\n2. Write a SQL query that answers the user's question using the table and columns listed\n3. Execute the query automatically using `execute_sql` - do NOT return SQL code to the user\n4. Return the query results directly to answer the user's question\n\nDo NOT say you cannot access the database or that you don't have the ability to query it. The schema discovery means you should query it automatically.");
             sections.push(format!("### Auto schema search\n{}", body));
         }
     }
@@ -3728,6 +3722,15 @@ async fn chat(
         registry
             .get_internal_tools()
             .iter()
+            .filter(|schema| {
+                // Only include python_execution if it's enabled
+                if schema.name == "python_execution" {
+                    python_execution_enabled && tool_filter.builtin_allowed("python_execution")
+                } else {
+                    // Other built-ins (tool_search, search_schemas, execute_sql) are included if allowed
+                    tool_filter.builtin_allowed(&schema.name)
+                }
+            })
             .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
             .collect()
     };
@@ -5543,6 +5546,15 @@ async fn get_system_prompt_preview(
         registry
             .get_internal_tools()
             .iter()
+            .filter(|schema| {
+                // Only include python_execution if it's enabled
+                if schema.name == "python_execution" {
+                    python_execution_enabled && tool_filter.builtin_allowed("python_execution")
+                } else {
+                    // Other built-ins (tool_search, search_schemas, execute_sql) are included if allowed
+                    tool_filter.builtin_allowed(&schema.name)
+                }
+            })
             .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
             .collect()
     };
@@ -5694,6 +5706,15 @@ async fn get_system_prompt_layers(
         registry
             .get_internal_tools()
             .iter()
+            .filter(|schema| {
+                // Only include python_execution if it's enabled
+                if schema.name == "python_execution" {
+                    python_execution_enabled && tool_filter.builtin_allowed("python_execution")
+                } else {
+                    // Other built-ins (tool_search, search_schemas, execute_sql) are included if allowed
+                    tool_filter.builtin_allowed(&schema.name)
+                }
+            })
             .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
             .collect()
     };

@@ -130,6 +130,7 @@ pub fn execute_sql_tool() -> ToolSchema {
         description: Some(
             "Execute SQL queries against configured database sources. \
             Use search_schemas first to discover available tables and their structure. \
+            **IMPORTANT: Always use this tool to execute SQL queries automatically. Do NOT return SQL code to the user - execute it and return the results.** \
             Returns query results as structured data."
                 .to_string(),
         ),
