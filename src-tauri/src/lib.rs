@@ -2638,6 +2638,7 @@ fn build_system_prompt(
     python_execution_enabled: bool,
     tool_search_enabled: bool,
     tuning: &PromptTuningOptions,
+    use_native_tools: bool,
 ) -> String {
     let additions = collect_tool_prompt_additions(
         tool_descriptions,
@@ -2651,6 +2652,7 @@ fn build_system_prompt(
         python_execution_enabled,
         tool_search_enabled,
         tuning,
+        use_native_tools,
     );
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
@@ -2674,6 +2676,7 @@ fn collect_tool_prompt_additions(
     python_execution_enabled: bool,
     tool_search_enabled: bool,
     tuning: &PromptTuningOptions,
+    use_native_tools: bool,
 ) -> Vec<String> {
     const BUILTIN_SERVER_LABEL: &str = "Built-in Tools";
     const TOOL_SEARCH_LABEL: &str = "Tool Search";
@@ -2744,21 +2747,33 @@ fn collect_tool_prompt_additions(
             ));
             tool_search_prompt_added = true;
         }
-    } else if has_any_tools {
+    } else if has_any_tools && !use_native_tools {
+        // Only add text-based format prompts when NOT using native tools
+        // Native tools use the model's built-in format, no additional instructions needed
         if let Some(format_prompt) = tool_calling_format_prompt(primary_format) {
             additions.push(format_prompt);
         }
     }
 
     // If tool_search is enabled but not yet surfaced (e.g., python disabled), still provide guidance.
-    // Only add if there are deferred tools
+    // Only add if there are deferred tools. Skip text-based examples when using native tools.
     if !tool_search_prompt_added && tool_search_enabled && filter.builtin_allowed("tool_search") && has_deferred_tools {
-        let mut body = String::from(
-            "Call tool_search to list relevant MCP tools before using them. Example:\n\
-             <tool_call>{\"server\": \"builtin\", \"tool\": \"tool_search\", \"arguments\": {\"queries\": [\"your goal\"], \"top_k\": 3}}</tool_call>\n\
-             Then call the returned tools directly.",
-        );
-        body.push_str("\n\nSome MCP tools are deferred; run tool_search early to discover them.");
+        let mut body = if use_native_tools {
+            // Native tools: simple guidance without format examples
+            String::from(
+                "Call the `tool_search` tool to discover available MCP tools before using them.\n\
+                 Some MCP tools are deferred; run tool_search early to discover them.",
+            )
+        } else {
+            // Text-based format: include format example
+            let mut s = String::from(
+                "Call tool_search to list relevant MCP tools before using them. Example:\n\
+                 <tool_call>{\"server\": \"builtin\", \"tool\": \"tool_search\", \"arguments\": {\"queries\": [\"your goal\"], \"top_k\": 3}}</tool_call>\n\
+                 Then call the returned tools directly.",
+            );
+            s.push_str("\n\nSome MCP tools are deferred; run tool_search early to discover them.");
+            s
+        };
         if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "tool_search")) {
             let trimmed = custom.trim();
             if !trimmed.is_empty() {
@@ -2772,8 +2787,13 @@ fn collect_tool_prompt_additions(
         ));
     }
 
-    // MCP tools
+    // MCP tools (skip builtin tools - they're handled separately above)
     for (server_id, tools) in tool_descriptions {
+        // Skip builtin tools - they don't need "discover with tool_search" messaging
+        // and are documented via python_execution/tool_search sections above
+        if server_id == "builtin" {
+            continue;
+        }
         let server_config = server_configs.iter().find(|c| c.id == *server_id);
         let server_name = server_config
             .map(|c| c.name.clone())
@@ -2929,6 +2949,7 @@ fn build_system_prompt_layers(
     python_execution_enabled: bool,
     tool_search_enabled: bool,
     tuning: &PromptTuningOptions,
+    use_native_tools: bool,
 ) -> SystemPromptLayers {
     let additions = collect_tool_prompt_additions(
         tool_descriptions,
@@ -2942,6 +2963,7 @@ fn build_system_prompt_layers(
         python_execution_enabled,
         tool_search_enabled,
         tuning,
+        use_native_tools,
     );
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
@@ -3844,6 +3866,23 @@ async fn chat(
             if compact_prompt_enabled && included_count >= max_tools_for_prompt {
                 break;
             }
+            // Filter builtin tools based on their enabled state and tool filter
+            if server_id == "builtin" {
+                if schema.name == "python_execution" {
+                    if !python_execution_enabled || !tool_filter.builtin_allowed("python_execution")
+                    {
+                        continue;
+                    }
+                } else if schema.name == "tool_search" {
+                    // Only include tool_search if there are deferred tools to discover
+                    if !has_deferred_mcp_tools || !tool_filter.builtin_allowed("tool_search") {
+                        continue;
+                    }
+                } else if !tool_filter.builtin_allowed(&schema.name) {
+                    // Other built-ins (search_schemas, execute_sql) - check filter
+                    continue;
+                }
+            }
             // Build OpenAI tool; MCP tools get server prefix for routing (sanitized)
             let openai_tool = if server_id == "builtin" {
                 OpenAITool::from_tool_schema(&schema)
@@ -3920,8 +3959,8 @@ async fn chat(
     );
 
     // Build the full system prompt with tool descriptions
-    // Note: We still include text-based tool instructions as a fallback for models
-    // that don't support native tool calling
+    // When native_tool_calling_enabled is true, skip text-based format prompts
+    // to avoid confusing the model with conflicting format instructions
     let system_prompt = build_system_prompt(
         &base_system_prompt,
         &visible_tool_descriptions,
@@ -3935,6 +3974,7 @@ async fn chat(
         python_execution_enabled,
         tool_search_enabled,
         &prompt_tuning,
+        native_tool_calling_enabled,
     );
 
     // === LOGGING: System prompt construction ===
@@ -5546,6 +5586,7 @@ async fn get_system_prompt_preview(
     let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let native_tool_calling_enabled = settings.native_tool_calling_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
@@ -5712,6 +5753,7 @@ async fn get_system_prompt_preview(
         python_execution_enabled,
         tool_search_enabled,
         &prompt_tuning,
+        native_tool_calling_enabled,
     );
 
     Ok(preview)
@@ -5733,6 +5775,7 @@ async fn get_system_prompt_layers(
     let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let native_tool_calling_enabled = settings.native_tool_calling_enabled;
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
     let compact_prompt_enabled = settings.compact_prompt_enabled;
@@ -5864,6 +5907,7 @@ async fn get_system_prompt_layers(
         python_execution_enabled,
         tool_search_enabled,
         &prompt_tuning,
+        native_tool_calling_enabled,
     );
 
     Ok(layers)
@@ -6600,6 +6644,7 @@ mod tests {
             false,
             false,
             &PromptTuningOptions::default(),
+            false, // use_native_tools
         );
 
         assert_eq!(layers.base_prompt, "Base prompt");
@@ -6647,6 +6692,7 @@ mod tests {
             false,
             false,
             &PromptTuningOptions::default(),
+            false, // use_native_tools
         );
 
         let addition = layers
@@ -6702,6 +6748,7 @@ mod tests {
             false,
             false,
             &tuning,
+            false, // use_native_tools
         );
 
         // Only one tool section should be present due to compact cap
@@ -6745,6 +6792,7 @@ mod tests {
             false, // python_execution_enabled
             true,  // tool_search_enabled
             &tuning,
+            false, // use_native_tools
         );
 
         assert!(
@@ -6756,7 +6804,9 @@ mod tests {
     }
 
     #[test]
-    fn test_build_system_prompt_layers_adds_tool_search_when_enabled_no_defer() {
+    fn test_build_system_prompt_layers_skips_tool_search_when_no_deferred_tools() {
+        // Tool search instructions should NOT be added when there are no deferred tools
+        // because there would be nothing to discover
         let base_prompt = "Base prompt";
         let tool = McpTool {
             name: "tool_a".to_string(),
@@ -6768,7 +6818,7 @@ mod tests {
         let tool_descriptions = vec![("srv1".to_string(), vec![tool])];
 
         let mut server_config = McpServerConfig::new("srv1".to_string(), "Server 1".to_string());
-        server_config.defer_tools = false;
+        server_config.defer_tools = false; // No deferred tools
         let server_configs = vec![server_config];
         let tool_prompts = HashMap::new();
         let filter = ToolLaunchFilter::default();
@@ -6792,13 +6842,15 @@ mod tests {
             false, // python_execution_enabled
             true,  // tool_search_enabled
             &tuning,
+            false, // use_native_tools
         );
 
+        // tool_search instructions should NOT be present when no tools are deferred
         assert!(
-            layers
+            !layers
                 .combined
-                .contains("Call tool_search to list relevant MCP tools"),
-            "tool_search instructions should be present whenever enabled"
+                .contains("Call tool_search"),
+            "tool_search instructions should NOT be present when no tools are deferred"
         );
     }
 
