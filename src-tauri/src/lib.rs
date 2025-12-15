@@ -3,8 +3,12 @@ pub mod model_profiles;
 pub mod protocol;
 pub mod settings;
 pub mod tool_adapters;
+pub mod tool_capability;
 pub mod tool_registry;
 pub mod tools;
+
+#[cfg(test)]
+mod tests;
 
 use actors::database_toolbox_actor::{DatabaseToolboxActor, DatabaseToolboxMsg, ToolboxStatus};
 use actors::foundry_actor::ModelGatewayActor;
@@ -44,6 +48,7 @@ use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, oneshot};
 use tool_adapters::{detect_python_code, format_tool_result, parse_tool_calls_for_model_profile};
+use tool_capability::{ToolCapabilityResolver, ToolLaunchFilter};
 use tool_registry::{create_shared_registry, SharedToolRegistry, ToolSearchResult};
 use tools::code_execution::{CodeExecutionExecutor, CodeExecutionInput, CodeExecutionOutput};
 use tools::tool_search::{
@@ -303,44 +308,7 @@ struct LaunchOverrides {
     initial_prompt: Option<String>,
 }
 
-/// Launch-time tool filter derived from CLI args.
-#[derive(Debug, Clone, Default)]
-struct ToolLaunchFilter {
-    allowed_builtins: Option<HashSet<String>>,
-    allowed_servers: Option<HashSet<String>>,
-    allowed_tools: Option<HashSet<(String, String)>>,
-}
-
-impl ToolLaunchFilter {
-    fn allow_all(&self) -> bool {
-        self.allowed_builtins.is_none()
-            && self.allowed_servers.is_none()
-            && self.allowed_tools.is_none()
-    }
-
-    fn builtin_allowed(&self, name: &str) -> bool {
-        match &self.allowed_builtins {
-            None => true,
-            Some(set) => set.contains(name),
-        }
-    }
-
-    fn server_allowed(&self, server_id: &str) -> bool {
-        match &self.allowed_servers {
-            None => true,
-            Some(set) => set.contains(server_id),
-        }
-    }
-
-    fn tool_allowed(&self, server_id: &str, tool_name: &str) -> bool {
-        if let Some(tools) = &self.allowed_tools {
-            if !tools.contains(&(server_id.to_string(), tool_name.to_string())) {
-                return false;
-            }
-        }
-        self.server_allowed(server_id)
-    }
-}
+// ToolLaunchFilter moved to tool_capability module
 
 /// Global launch configuration state
 struct LaunchConfigState {
@@ -2626,8 +2594,8 @@ fn legacy_build_system_prompt(
 struct PromptTuningOptions {
     include_examples: bool,
     examples_max_per_tool: usize,
-    compact_mode: bool,
-    compact_max_tools: usize,
+    // Note: compact_mode and compact_max_tools were removed.
+    // Now using capabilities.max_mcp_tools_in_prompt instead.
 }
 
 impl Default for PromptTuningOptions {
@@ -2635,8 +2603,6 @@ impl Default for PromptTuningOptions {
         Self {
             include_examples: false,
             examples_max_per_tool: 0,
-            compact_mode: false,
-            compact_max_tools: usize::MAX,
         }
     }
 }
@@ -2649,13 +2615,8 @@ fn build_system_prompt(
     has_attachments: bool,
     tool_prompts: &HashMap<String, String>,
     filter: &ToolLaunchFilter,
-    primary_format: ToolCallFormatName,
-    python_tool_mode: bool,
-    allow_tool_search_for_python: bool,
-    python_execution_enabled: bool,
-    tool_search_enabled: bool,
+    capabilities: &tool_capability::ResolvedToolCapabilities,
     tuning: &PromptTuningOptions,
-    use_native_tools: bool,
 ) -> String {
     let additions = collect_tool_prompt_additions(
         tool_descriptions,
@@ -2663,13 +2624,8 @@ fn build_system_prompt(
         has_attachments,
         tool_prompts,
         filter,
-        primary_format,
-        python_tool_mode,
-        allow_tool_search_for_python,
-        python_execution_enabled,
-        tool_search_enabled,
+        capabilities,
         tuning,
-        use_native_tools,
     );
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
@@ -2686,55 +2642,32 @@ fn collect_tool_prompt_additions(
     server_configs: &[McpServerConfig],
     has_attachments: bool,
     tool_prompts: &HashMap<String, String>,
-    filter: &ToolLaunchFilter,
-    primary_format: ToolCallFormatName,
-    python_tool_mode: bool,
-    allow_tool_search_for_python: bool,
-    python_execution_enabled: bool,
-    tool_search_enabled: bool,
+    _filter: &ToolLaunchFilter,
+    capabilities: &tool_capability::ResolvedToolCapabilities,
     tuning: &PromptTuningOptions,
-    use_native_tools: bool,
 ) -> Vec<String> {
     const BUILTIN_SERVER_LABEL: &str = "Built-in Tools";
     const TOOL_SEARCH_LABEL: &str = "Tool Search";
 
     let mut additions: Vec<String> = Vec::new();
     let mut tools_included: usize = 0;
-    let max_tools = if tuning.compact_mode {
-        tuning.compact_max_tools.max(1)
-    } else {
-        usize::MAX
-    };
+    // Use max_mcp_tools_in_prompt from capabilities (based on model size)
+    let max_tools = capabilities.max_mcp_tools_in_prompt;
     let mut tool_search_prompt_added = false;
 
-    // Track server defer modes for contextual guidance
-    let mut has_deferred_tools = false;
-    let mut has_active_tools = false;
-    for (server_id, tools) in tool_descriptions {
-        if tools.is_empty() {
-            continue;
-        }
-        let is_deferred = server_configs
-            .iter()
-            .find(|c| c.id == *server_id)
-            .map(|c| c.defer_tools)
-            .unwrap_or(true);
-        if is_deferred {
-            has_deferred_tools = true;
-        } else {
-            has_active_tools = true;
-        }
-    }
+    // All MCP tools are deferred - check if we have any
+    let has_deferred_tools = !capabilities.deferred_mcp_tools.is_empty();
+    let has_active_tools = !capabilities.active_mcp_tools.is_empty();
 
-    let has_any_tools = !tool_descriptions.is_empty() || python_tool_mode;
+    let python_tool_mode = capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION);
+    let has_database_tools = capabilities.available_builtins.contains(tool_capability::BUILTIN_EXECUTE_SQL)
+        || capabilities.available_builtins.contains(tool_capability::BUILTIN_SEARCH_SCHEMAS);
+    let has_any_tools = !tool_descriptions.is_empty() || python_tool_mode || has_database_tools;
 
-    // Built-ins: always show prompts when enabled (even if MCP tools are deferred)
-    let python_prompt_allowed =
-        python_execution_enabled && filter.builtin_allowed("python_execution");
+    // Built-ins: use resolved capabilities to determine availability
+    let python_prompt_allowed = capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION);
     if python_prompt_allowed {
-        let tool_search_available = allow_tool_search_for_python
-            && tool_search_enabled
-            && filter.builtin_allowed("tool_search");
+        let tool_search_available = capabilities.available_builtins.contains(tool_capability::BUILTIN_TOOL_SEARCH);
         let mut body =
             default_python_prompt(has_attachments, has_deferred_tools, tool_search_available);
         if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "python_execution")) {
@@ -2764,18 +2697,18 @@ fn collect_tool_prompt_additions(
             ));
             tool_search_prompt_added = true;
         }
-    } else if has_any_tools && !use_native_tools {
+    } else if has_any_tools && !capabilities.use_native_tools {
         // Only add text-based format prompts when NOT using native tools
         // Native tools use the model's built-in format, no additional instructions needed
-        if let Some(format_prompt) = tool_calling_format_prompt(primary_format) {
+        if let Some(format_prompt) = ToolCapabilityResolver::get_prompt_format_instructions(capabilities.primary_format) {
             additions.push(format_prompt);
         }
     }
 
     // If tool_search is enabled but not yet surfaced (e.g., python disabled), still provide guidance.
     // Only add if there are deferred tools. Skip text-based examples when using native tools.
-    if !tool_search_prompt_added && tool_search_enabled && filter.builtin_allowed("tool_search") && has_deferred_tools {
-        let mut body = if use_native_tools {
+    if !tool_search_prompt_added && capabilities.available_builtins.contains(tool_capability::BUILTIN_TOOL_SEARCH) && has_deferred_tools {
+        let mut body = if capabilities.use_native_tools {
             // Native tools: simple guidance without format examples
             String::from(
                 "Call the `tool_search` tool to discover available MCP tools before using them.\n\
@@ -2804,6 +2737,45 @@ fn collect_tool_prompt_additions(
         ));
     }
 
+    // Database built-in tools: search_schemas and execute_sql
+    if capabilities.available_builtins.contains(tool_capability::BUILTIN_SEARCH_SCHEMAS) {
+        let mut body = String::from(
+            "Use `search_schemas` to discover database tables that may help answer the user's question.\n\
+             Parameters: `queries` (list of search terms), `top_k` (max results, default 5).\n\
+             Returns table names, columns, and descriptions relevant to the query.",
+        );
+        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "search_schemas")) {
+            let trimmed = custom.trim();
+            if !trimmed.is_empty() {
+                body.push_str("\n\n");
+                body.push_str(trimmed);
+            }
+        }
+        additions.push(format!(
+            "### search_schemas ({})\n{}",
+            BUILTIN_SERVER_LABEL, body.trim()
+        ));
+    }
+
+    if capabilities.available_builtins.contains(tool_capability::BUILTIN_EXECUTE_SQL) {
+        let mut body = String::from(
+            "Use `execute_sql` to run SQL queries against configured database sources.\n\
+             Parameters: `source_id` (from search_schemas results), `query` (SQL statement).\n\
+             Returns query results as rows. Always execute queries to answer data questions - do NOT return SQL code to the user.",
+        );
+        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "execute_sql")) {
+            let trimmed = custom.trim();
+            if !trimmed.is_empty() {
+                body.push_str("\n\n");
+                body.push_str(trimmed);
+            }
+        }
+        additions.push(format!(
+            "### execute_sql ({})\n{}",
+            BUILTIN_SERVER_LABEL, body.trim()
+        ));
+    }
+
     // MCP tools (skip builtin tools - they're handled separately above)
     for (server_id, tools) in tool_descriptions {
         // Skip builtin tools - they don't need "discover with tool_search" messaging
@@ -2821,7 +2793,13 @@ fn collect_tool_prompt_additions(
             .filter(|env| !env.is_empty());
 
         for tool in tools {
-            if tuning.compact_mode && tools_included >= max_tools {
+            // Limit MCP tools in prompt based on model size (from capabilities)
+            if tools_included >= max_tools {
+                continue;
+            }
+            
+            // Only include active (materialized) MCP tools
+            if !ToolCapabilityResolver::should_include_mcp_tool(server_id, &tool.name, capabilities) {
                 continue;
             }
             let mut parts: Vec<String> = Vec::new();
@@ -2892,7 +2870,8 @@ fn collect_tool_prompt_additions(
                     param_lines.push(line);
                 }
 
-                if tuning.compact_mode && param_lines.len() > 3 {
+                // Limit parameter details to avoid token bloat
+                if param_lines.len() > 3 {
                     param_lines.truncate(3);
                     param_lines.push("- ...".to_string());
                 }
@@ -2960,13 +2939,8 @@ fn build_system_prompt_layers(
     has_attachments: bool,
     tool_prompts: &HashMap<String, String>,
     filter: &ToolLaunchFilter,
-    primary_format: ToolCallFormatName,
-    python_tool_mode: bool,
-    allow_tool_search_for_python: bool,
-    python_execution_enabled: bool,
-    tool_search_enabled: bool,
+    capabilities: &tool_capability::ResolvedToolCapabilities,
     tuning: &PromptTuningOptions,
-    use_native_tools: bool,
 ) -> SystemPromptLayers {
     let additions = collect_tool_prompt_additions(
         tool_descriptions,
@@ -2974,13 +2948,8 @@ fn build_system_prompt_layers(
         has_attachments,
         tool_prompts,
         filter,
-        primary_format,
-        python_tool_mode,
-        allow_tool_search_for_python,
-        python_execution_enabled,
-        tool_search_enabled,
+        capabilities,
         tuning,
-        use_native_tools,
     );
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
@@ -3040,24 +3009,8 @@ fn default_tool_search_prompt(has_deferred_tools: bool) -> String {
     parts.join("\n\n")
 }
 
-fn tool_calling_format_prompt(primary: ToolCallFormatName) -> Option<String> {
-    match primary {
-        // Native and CodeMode don't need text-based format instructions
-        ToolCallFormatName::Native | ToolCallFormatName::CodeMode => None,
-        ToolCallFormatName::Hermes => {
-            Some("### Tool calling format (Hermes)\nUse <tool_call>{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg\": \"value\"}}</tool_call> with valid JSON only. Do not wrap in markdown or add prose.".to_string())
-        }
-        ToolCallFormatName::Mistral => {
-            Some("### Tool calling format (Mistral)\nUse [TOOL_CALLS] [{\"name\": \"TOOL_NAME\", \"arguments\": {\"arg\": \"value\"}}] with no extra text or markdown.".to_string())
-        }
-        ToolCallFormatName::Pythonic => {
-            Some("### Tool calling format (Pythonic)\nUse function-call syntax like tool_name(arg1=\"value\", arg2=123). Do not wrap in code fences or add explanations.".to_string())
-        }
-        ToolCallFormatName::PureJson => {
-            Some("### Tool calling format (Pure JSON)\nReturn a raw JSON object or array such as {\"tool\": \"TOOL_NAME\", \"args\": {\"arg\": \"value\"}}. No markdown or additional text.".to_string())
-        }
-    }
-}
+// Note: tool_calling_format_prompt was removed.
+// Format instructions are now generated via ToolCapabilityResolver::get_prompt_format_instructions()
 
 #[tauri::command]
 async fn search_history(
@@ -3875,6 +3828,48 @@ async fn chat(
         .await;
     }
 
+    // Resolve tool capabilities using centralized resolver
+    // NOTE: Must be after auto_enable_execute_sql so database tools are included
+    let resolved_capabilities = {
+        // Refresh settings to pick up any auto-enabled tools (like execute_sql after schema search)
+        let fresh_settings = settings_state.settings.read().await;
+        let settings_for_resolver = fresh_settings.clone();
+        drop(fresh_settings);
+        
+        let registry = tool_registry_state.registry.read().await;
+        let default_model_info = ModelInfo {
+            id: "unknown".to_string(),
+            family: ModelFamily::Generic,
+            tool_calling: false,
+            tool_format: ToolFormat::TextBased,
+            vision: false,
+            reasoning: false,
+            reasoning_format: protocol::ReasoningFormat::None,
+            max_input_tokens: 4096,
+            max_output_tokens: 2048,
+            supports_temperature: true,
+            supports_top_p: true,
+            supports_reasoning_effort: false,
+        };
+        let model_info = current_model_info.as_ref().unwrap_or(&default_model_info);
+        ToolCapabilityResolver::resolve(
+            &settings_for_resolver,
+            model_info,
+            &tool_filter,
+            &server_configs,
+            &registry,
+        )
+    };
+
+    println!(
+        "[Chat] Resolved capabilities: builtins={:?}, primary_format={:?}, use_native={}, active_mcp={}, deferred_mcp={}",
+        resolved_capabilities.available_builtins,
+        resolved_capabilities.primary_format,
+        resolved_capabilities.use_native_tools,
+        resolved_capabilities.active_mcp_tools.len(),
+        resolved_capabilities.deferred_mcp_tools.len()
+    );
+
     // Visible tools: always include enabled built-ins; defer MCP tools to tool_search unless materialized.
     let builtin_tools: Vec<(String, Vec<McpTool>)> = {
         let registry = tool_registry_state.registry.read().await;
@@ -3996,16 +3991,9 @@ async fn chat(
     let prompt_tuning = PromptTuningOptions {
         include_examples: tool_use_examples_enabled,
         examples_max_per_tool: tool_use_examples_max.max(1),
-        compact_mode: compact_prompt_enabled,
-        compact_max_tools: compact_prompt_max_tools.max(1),
     };
 
-    if compact_prompt_enabled {
-        println!(
-            "[Chat] Compact prompt mode enabled (max_tools_in_prompt={})",
-            prompt_tuning.compact_max_tools
-        );
-    }
+    // Note: compact_prompt_enabled removed - now using capabilities.max_mcp_tools_in_prompt
     if tool_use_examples_enabled {
         println!(
             "[Chat] Tool examples enabled (max_per_tool={})",
@@ -4018,8 +4006,7 @@ async fn chat(
     );
 
     // Build the full system prompt with tool descriptions
-    // When native_tool_calling_enabled is true, skip text-based format prompts
-    // to avoid confusing the model with conflicting format instructions
+    // Use resolved capabilities to inform prompt building
     let system_prompt = build_system_prompt(
         &base_system_prompt,
         &visible_tool_descriptions,
@@ -4027,13 +4014,8 @@ async fn chat(
         has_attachments,
         &tool_system_prompts,
         &tool_filter,
-        primary_format_for_prompt,
-        python_tool_mode,
-        allow_tool_search_for_python,
-        python_execution_enabled,
-        tool_search_enabled,
+        &resolved_capabilities,
         &prompt_tuning,
-        native_tool_calling_enabled,
     );
 
     // === LOGGING: System prompt construction ===
@@ -5657,17 +5639,14 @@ async fn get_system_prompt_preview(
     let search_schemas_enabled = settings.search_schemas_enabled;
     let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
-    let python_tool_calling_enabled = settings.python_tool_calling_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
-    let compact_prompt_enabled = settings.compact_prompt_enabled;
-    let compact_prompt_max_tools = settings.compact_prompt_max_tools;
     let database_toolbox_config = settings.database_toolbox.clone();
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
-    let native_tool_calling_enabled = format_config.native_enabled();
     let tool_prompts = settings.tool_system_prompts.clone();
+    let settings_for_resolver = settings.clone();
     drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
 
@@ -5717,17 +5696,7 @@ async fn get_system_prompt_preview(
     let has_mcp_tools = !filtered_tool_descriptions.is_empty();
     // Deferred tools exist only if tool_search is enabled AND there are MCP tools
     let has_deferred_mcp_tools = tool_search_enabled && has_mcp_tools;
-    let code_mode_possible = format_config.is_enabled(ToolCallFormatName::CodeMode)
-        && python_execution_enabled
-        && python_tool_calling_enabled
-        && tool_filter.builtin_allowed("python_execution");
-    let native_available = format_config.native_enabled();
-    let primary_format_for_prompt =
-        format_config.resolve_primary_for_prompt(code_mode_possible, native_available);
-    let python_tool_mode =
-        code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
-    let allow_tool_search_for_python =
-        python_tool_mode && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
+    // Note: code_mode_possible and python_tool_mode now handled by resolver
     let prompt_for_discovery = user_prompt.unwrap_or_default();
     let auto_discovery = perform_auto_discovery_for_prompt(
         &prompt_for_discovery,
@@ -5797,11 +5766,47 @@ async fn get_system_prompt_preview(
         }
     };
 
+    // Resolve capabilities for prompt building
+    let resolved_capabilities = {
+        let registry = tool_registry_state.registry.read().await;
+        let (tx, rx) = oneshot::channel();
+        let fetched_model_info = if handles
+            .foundry_tx
+            .send(FoundryMsg::GetCurrentModel { respond_to: tx })
+            .await
+            .is_ok()
+        {
+            rx.await.ok().flatten()
+        } else {
+            None
+        };
+        let default_model_info = ModelInfo {
+            id: "unknown".to_string(),
+            family: ModelFamily::Generic,
+            tool_calling: false,
+            tool_format: ToolFormat::TextBased,
+            vision: false,
+            reasoning: false,
+            reasoning_format: protocol::ReasoningFormat::None,
+            max_input_tokens: 4096,
+            max_output_tokens: 2048,
+            supports_temperature: true,
+            supports_top_p: true,
+            supports_reasoning_effort: false,
+        };
+        let model_info = fetched_model_info.as_ref().unwrap_or(&default_model_info);
+        ToolCapabilityResolver::resolve(
+            &settings_for_resolver,
+            model_info,
+            &tool_filter,
+            &server_configs,
+            &registry,
+        )
+    };
+
     let prompt_tuning = PromptTuningOptions {
         include_examples: tool_use_examples_enabled,
         examples_max_per_tool: tool_use_examples_max.max(1),
-        compact_mode: compact_prompt_enabled,
-        compact_max_tools: compact_prompt_max_tools.max(1),
     };
 
     let base_prompt_with_context = if auto_context_sections.is_empty() {
@@ -5821,13 +5826,8 @@ async fn get_system_prompt_preview(
         has_attachments,
         &tool_prompts,
         &tool_filter,
-        primary_format_for_prompt,
-        python_tool_mode,
-        allow_tool_search_for_python,
-        python_execution_enabled,
-        tool_search_enabled,
+        &resolved_capabilities,
         &prompt_tuning,
-        native_tool_calling_enabled,
     );
 
     Ok(preview)
@@ -5848,15 +5848,13 @@ async fn get_system_prompt_layers(
     let search_schemas_enabled = settings.search_schemas_enabled;
     let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
-    let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    // python_tool_calling_enabled now handled by resolver
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
-    let compact_prompt_enabled = settings.compact_prompt_enabled;
-    let compact_prompt_max_tools = settings.compact_prompt_max_tools;
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
-    let native_tool_calling_enabled = format_config.native_enabled();
     let tool_prompts = settings.tool_system_prompts.clone();
+    let settings_for_resolver = settings.clone();
     drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
 
@@ -5906,17 +5904,6 @@ async fn get_system_prompt_layers(
     let has_mcp_tools = !filtered_tool_descriptions.is_empty();
     // Deferred tools exist only if tool_search is enabled AND there are MCP tools
     let has_deferred_mcp_tools = tool_search_enabled && has_mcp_tools;
-    let code_mode_possible = format_config.is_enabled(ToolCallFormatName::CodeMode)
-        && python_execution_enabled
-        && python_tool_calling_enabled
-        && tool_filter.builtin_allowed("python_execution");
-    let native_available = format_config.native_enabled();
-    let primary_format_for_prompt =
-        format_config.resolve_primary_for_prompt(code_mode_possible, native_available);
-    let python_tool_mode =
-        code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
-    let allow_tool_search_for_python =
-        python_tool_mode && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
 
     let builtin_tools: Vec<(String, Vec<McpTool>)> = {
         let registry = tool_registry_state.registry.read().await;
@@ -5963,11 +5950,47 @@ async fn get_system_prompt_layers(
         }
     };
 
+    // Resolve capabilities for prompt building
+    let resolved_capabilities = {
+        let registry = tool_registry_state.registry.read().await;
+        let (tx, rx) = oneshot::channel();
+        let fetched_model_info = if handles
+            .foundry_tx
+            .send(FoundryMsg::GetCurrentModel { respond_to: tx })
+            .await
+            .is_ok()
+        {
+            rx.await.ok().flatten()
+        } else {
+            None
+        };
+        let default_model_info = ModelInfo {
+            id: "unknown".to_string(),
+            family: ModelFamily::Generic,
+            tool_calling: false,
+            tool_format: ToolFormat::TextBased,
+            vision: false,
+            reasoning: false,
+            reasoning_format: protocol::ReasoningFormat::None,
+            max_input_tokens: 4096,
+            max_output_tokens: 2048,
+            supports_temperature: true,
+            supports_top_p: true,
+            supports_reasoning_effort: false,
+        };
+        let model_info = fetched_model_info.as_ref().unwrap_or(&default_model_info);
+        ToolCapabilityResolver::resolve(
+            &settings_for_resolver,
+            model_info,
+            &tool_filter,
+            &server_configs,
+            &registry,
+        )
+    };
+
     let prompt_tuning = PromptTuningOptions {
         include_examples: tool_use_examples_enabled,
         examples_max_per_tool: tool_use_examples_max.max(1),
-        compact_mode: compact_prompt_enabled,
-        compact_max_tools: compact_prompt_max_tools.max(1),
     };
 
     let layers = build_system_prompt_layers(
@@ -5977,13 +6000,8 @@ async fn get_system_prompt_layers(
         has_attachments,
         &tool_prompts,
         &tool_filter,
-        primary_format_for_prompt,
-        python_tool_mode,
-        allow_tool_search_for_python,
-        python_execution_enabled,
-        tool_search_enabled,
+        &resolved_capabilities,
         &prompt_tuning,
-        native_tool_calling_enabled,
     );
 
     Ok(layers)
@@ -6479,6 +6497,36 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::tool_capability::{ResolvedToolCapabilities, ToolCallFormatName as CapabilityFormatName};
+    use crate::protocol::ToolFormat;
+    use std::collections::HashSet;
+
+    // Helper to create test ResolvedToolCapabilities
+    fn create_test_capabilities(
+        primary_format: ToolCallFormatName,
+        available_builtins: Vec<&str>,
+        use_native: bool,
+        max_mcp_tools: usize,
+    ) -> ResolvedToolCapabilities {
+        ResolvedToolCapabilities {
+            available_builtins: available_builtins.iter().map(|s| s.to_string()).collect(),
+            primary_format: match primary_format {
+                ToolCallFormatName::Native => CapabilityFormatName::Native,
+                ToolCallFormatName::Hermes => CapabilityFormatName::Hermes,
+                ToolCallFormatName::Mistral => CapabilityFormatName::Mistral,
+                ToolCallFormatName::Pythonic => CapabilityFormatName::Pythonic,
+                ToolCallFormatName::PureJson => CapabilityFormatName::PureJson,
+                ToolCallFormatName::CodeMode => CapabilityFormatName::CodeMode,
+            },
+            enabled_formats: vec![],
+            use_native_tools: use_native,
+            active_mcp_tools: vec![],
+            deferred_mcp_tools: vec![],
+            model_supports_native: false,
+            model_tool_format: ToolFormat::TextBased,
+            max_mcp_tools_in_prompt: max_mcp_tools,
+        }
+    }
     use super::*;
     use serde_json::json;
 
@@ -6707,6 +6755,27 @@ mod tests {
         tool_prompts.insert("srv1::tool_a".to_string(), "custom prompt".to_string());
 
         let filter = ToolLaunchFilter::default();
+        let capabilities = create_test_capabilities(
+            ToolCallFormatName::CodeMode,
+            vec!["python_execution"],
+            false,
+            usize::MAX,
+        );
+        // Add active tool for this test
+        let mut capabilities = capabilities;
+        capabilities.active_mcp_tools = vec![(
+            "srv1".to_string(),
+            protocol::ToolSchema {
+                name: "tool_a".to_string(),
+                description: Some("Demo tool".to_string()),
+                parameters: serde_json::json!({}),
+                input_examples: vec![],
+                tool_type: None,
+                allowed_callers: None,
+                defer_loading: false,
+                embedding: None,
+            },
+        )];
         let layers = build_system_prompt_layers(
             base_prompt,
             &tool_descriptions,
@@ -6714,13 +6783,8 @@ mod tests {
             false,
             &tool_prompts,
             &filter,
-            ToolCallFormatName::CodeMode,
-            true,
-            false,
-            false,
-            false,
+            &capabilities,
             &PromptTuningOptions::default(),
-            false, // use_native_tools
         );
 
         assert_eq!(layers.base_prompt, "Base prompt");
@@ -6755,6 +6819,12 @@ mod tests {
 
         let tool_prompts = HashMap::new();
         let filter = ToolLaunchFilter::default();
+        let capabilities = create_test_capabilities(
+            ToolCallFormatName::CodeMode,
+            vec!["python_execution"],
+            false,
+            usize::MAX,
+        );
         let layers = build_system_prompt_layers(
             base_prompt,
             &tool_descriptions,
@@ -6762,13 +6832,8 @@ mod tests {
             false,
             &tool_prompts,
             &filter,
-            ToolCallFormatName::CodeMode,
-            true,
-            false,
-            false,
-            false,
+            &capabilities,
             &PromptTuningOptions::default(),
-            false, // use_native_tools
         );
 
         let addition = layers
@@ -6807,9 +6872,13 @@ mod tests {
         let tuning = PromptTuningOptions {
             include_examples: false,
             examples_max_per_tool: 1,
-            compact_mode: true,
-            compact_max_tools: 1,
         };
+        let capabilities = create_test_capabilities(
+            ToolCallFormatName::CodeMode,
+            vec![],
+            false,
+            1, // Limit to 1 tool
+        );
 
         let layers = build_system_prompt_layers(
             base_prompt,
@@ -6818,13 +6887,8 @@ mod tests {
             false,
             &tool_prompts,
             &filter,
-            ToolCallFormatName::CodeMode,
-            false,
-            false,
-            false,
-            false,
+            &capabilities,
             &tuning,
-            false, // use_native_tools
         );
 
         // Only one tool section should be present due to compact cap
@@ -6851,10 +6915,29 @@ mod tests {
         let tuning = PromptTuningOptions {
             include_examples: false,
             examples_max_per_tool: 1,
-            compact_mode: false,
-            compact_max_tools: usize::MAX,
         };
 
+        let capabilities = create_test_capabilities(
+            ToolCallFormatName::Hermes,
+            vec!["tool_search"], // tool_search enabled
+            false,
+            usize::MAX,
+        );
+        // Add deferred tools to capabilities for this test
+        let mut capabilities = capabilities;
+        capabilities.deferred_mcp_tools = vec![(
+            "srv1".to_string(),
+            protocol::ToolSchema {
+                name: "tool_a".to_string(),
+                description: Some("Demo tool".to_string()),
+                parameters: serde_json::json!({}),
+                input_examples: vec![],
+                tool_type: None,
+                allowed_callers: None,
+                defer_loading: true,
+                embedding: None,
+            },
+        )];
         let layers = build_system_prompt_layers(
             base_prompt,
             &tool_descriptions,
@@ -6862,13 +6945,8 @@ mod tests {
             false,
             &tool_prompts,
             &filter,
-            ToolCallFormatName::Hermes,
-            false, // python_tool_mode
-            false, // allow_tool_search_for_python
-            false, // python_execution_enabled
-            true,  // tool_search_enabled
+            &capabilities,
             &tuning,
-            false, // use_native_tools
         );
 
         assert!(
@@ -6901,9 +6979,15 @@ mod tests {
         let tuning = PromptTuningOptions {
             include_examples: false,
             examples_max_per_tool: 1,
-            compact_mode: false,
-            compact_max_tools: usize::MAX,
         };
+        // No deferred tools - empty deferred_mcp_tools
+        let capabilities = create_test_capabilities(
+            ToolCallFormatName::Hermes,
+            vec!["tool_search"], // tool_search enabled but no deferred tools
+            false,
+            usize::MAX,
+        );
+        // capabilities.deferred_mcp_tools is empty by default
 
         let layers = build_system_prompt_layers(
             base_prompt,
@@ -6912,13 +6996,8 @@ mod tests {
             false,
             &tool_prompts,
             &filter,
-            ToolCallFormatName::Hermes,
-            false, // python_tool_mode
-            false, // allow_tool_search_for_python
-            false, // python_execution_enabled
-            true,  // tool_search_enabled
+            &capabilities,
             &tuning,
-            false, // use_native_tools
         );
 
         // tool_search instructions should NOT be present when no tools are deferred
