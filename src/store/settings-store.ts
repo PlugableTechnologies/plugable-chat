@@ -70,6 +70,7 @@ export interface AppSettings {
     tool_search_enabled: boolean;
     python_execution_enabled: boolean;
     python_tool_calling_enabled: boolean;
+    native_tool_calling_enabled: boolean;
     legacy_tool_call_format_enabled: boolean;
     tool_use_examples_enabled: boolean;
     tool_use_examples_max: number;
@@ -123,6 +124,7 @@ interface SettingsState {
     updateToolCallFormats: (config: ToolCallFormatConfig) => Promise<void>;
     updateChatFormat: (modelId: string, format: ChatFormatName) => Promise<void>;
     updateCodeExecutionEnabled: (enabled: boolean) => Promise<void>;
+    updateNativeToolCallingEnabled: (enabled: boolean) => Promise<void>;
     updateToolSearchEnabled: (enabled: boolean) => Promise<void>;
     updateToolSearchMaxResults: (maxResults: number) => Promise<void>;
     updateToolExamplesEnabled: (enabled: boolean) => Promise<void>;
@@ -332,6 +334,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     tool_search_enabled: false,
                     python_execution_enabled: false,
                     python_tool_calling_enabled: true,
+                    native_tool_calling_enabled: true,
                     legacy_tool_call_format_enabled: false,
                     tool_use_examples_enabled: false,
                     tool_use_examples_max: 2,
@@ -472,6 +475,29 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             console.log('[SettingsStore] Code execution enabled updated:', enabled);
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update code execution enabled:', e);
+            // Revert on error
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+
+    updateNativeToolCallingEnabled: async (enabled: boolean) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+
+        // Optimistic update
+        set({
+            settings: { ...currentSettings, native_tool_calling_enabled: enabled },
+            error: null
+        });
+
+        try {
+            await invoke('update_native_tool_calling_enabled', { enabled });
+            console.log('[SettingsStore] Native tool calling enabled updated:', enabled);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update native tool calling enabled:', e);
             // Revert on error
             set({
                 settings: currentSettings,

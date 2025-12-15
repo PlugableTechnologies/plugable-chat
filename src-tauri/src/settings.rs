@@ -557,6 +557,11 @@ pub struct AppSettings {
     /// When enabled, models can execute SQL queries via configured database sources.
     #[serde(default)]
     pub execute_sql_enabled: bool,
+    /// Whether to use native tool calling (OpenAI-compatible) when the model supports it.
+    /// When enabled, tools are sent in the request body and parsed from structured responses.
+    /// When disabled, falls back to text-based tool calling via prompts.
+    #[serde(default = "default_native_tool_calling_enabled")]
+    pub native_tool_calling_enabled: bool,
 }
 
 fn default_system_prompt() -> String {
@@ -577,6 +582,10 @@ fn default_tool_use_examples_max() -> usize {
 
 fn default_compact_prompt_max_tools() -> usize {
     4
+}
+
+fn default_native_tool_calling_enabled() -> bool {
+    true
 }
 
 fn find_workspace_root() -> Option<PathBuf> {
@@ -676,6 +685,7 @@ impl Default for AppSettings {
             database_toolbox: DatabaseToolboxConfig::default(),
             search_schemas_enabled: false,
             execute_sql_enabled: false,
+            native_tool_calling_enabled: default_native_tool_calling_enabled(),
         }
     }
 }

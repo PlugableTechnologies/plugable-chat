@@ -530,6 +530,7 @@ impl ModelGatewayActor {
                     chat_history_messages,
                     reasoning_effort,
                     native_tool_specs,
+                    native_tool_calling_enabled,
                     chat_format_default,
                     chat_format_overrides,
                     respond_to,
@@ -708,15 +709,13 @@ impl ModelGatewayActor {
                             .map(|m| m.family)
                             .unwrap_or(ModelFamily::Generic);
 
-                        // Only use native tools if model supports them AND tools were provided.
-                        // Phi/Hermes models work best with text-based Hermes tags; sending OpenAI
-                        // tools causes Foundry to reject the request. Disable native tools for Phi.
+                        // Only use native tools if model supports them, tools were provided, and native tool calling is enabled.
                         let use_native_tools = model_supports_tools
+                            && native_tool_calling_enabled
                             && native_tool_specs
                                 .as_ref()
                                 .map(|t| !t.is_empty())
-                                .unwrap_or(false)
-                            && model_family != ModelFamily::Phi;
+                                .unwrap_or(false);
 
                         println!("[FoundryActor] Model: {} | family: {:?} | reasoning: {} | tools: {} | reasoning_effort: {}",
                             model, model_family, model_supports_reasoning, use_native_tools, supports_reasoning_effort);

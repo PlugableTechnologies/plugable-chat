@@ -882,6 +882,8 @@ pub enum FoundryMsg {
         reasoning_effort: String,
         /// Optional OpenAI-format tools for native tool calling
         native_tool_specs: Option<Vec<OpenAITool>>,
+        /// Whether to use native tool calling (when model supports it)
+        native_tool_calling_enabled: bool,
         /// Chat API format selection (per-model overrides resolved in actor)
         chat_format_default: ChatFormatName,
         chat_format_overrides: HashMap<String, ChatFormatName>,

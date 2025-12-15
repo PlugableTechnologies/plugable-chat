@@ -187,6 +187,9 @@ struct CliArgs {
     /// Enable/disable python-driven tool calling
     #[arg(long, value_name = "BOOL", env = "PLUGABLE_PYTHON_TOOL_CALLING", value_parser = clap::builder::BoolishValueParser::new())]
     python_tool_calling: Option<bool>,
+    /// Enable/disable native tool calling (OpenAI-compatible) when model supports it
+    #[arg(long, value_name = "BOOL", env = "PLUGABLE_NATIVE_TOOL_CALLING", value_parser = clap::builder::BoolishValueParser::new())]
+    native_tool_calling: Option<bool>,
     /// Enable/disable inclusion of tool input_examples in prompts
     #[arg(long, value_name = "BOOL", env = "PLUGABLE_TOOL_EXAMPLES", value_parser = clap::builder::BoolishValueParser::new())]
     tool_examples: Option<bool>,
@@ -493,6 +496,9 @@ fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> LaunchOver
     }
     if let Some(v) = args.python_tool_calling {
         settings.python_tool_calling_enabled = v;
+    }
+    if let Some(v) = args.native_tool_calling {
+        settings.native_tool_calling_enabled = v;
     }
     if let Some(v) = args.tool_examples {
         settings.tool_use_examples_enabled = v;
@@ -1367,6 +1373,7 @@ async fn run_agentic_loop(
     turn_progress: Arc<RwLock<TurnProgress>>,
     chat_format_default: ChatFormatName,
     chat_format_overrides: std::collections::HashMap<String, ChatFormatName>,
+    native_tool_calling_enabled: bool,
 ) {
     // Resolve model profile from model name
     let profile = resolve_profile(&model_name);
@@ -1432,6 +1439,7 @@ async fn run_agentic_loop(
                 chat_history_messages: model_messages,
                 reasoning_effort: reasoning_effort.clone(),
                 native_tool_specs: openai_tools.clone(),
+                native_tool_calling_enabled,
                 chat_format_default,
                 chat_format_overrides: chat_format_overrides.clone(),
                 respond_to: tx,
@@ -3495,6 +3503,7 @@ async fn chat(
     let execute_sql_enabled = settings.execute_sql_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let native_tool_calling_enabled = settings.native_tool_calling_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
@@ -3949,6 +3958,7 @@ async fn chat(
     let turn_progress = turn_tracker.progress.clone();
     let chat_format_default_task = chat_format_default;
     let chat_format_overrides_task = chat_format_overrides.clone();
+    let native_tool_calling_enabled_task = native_tool_calling_enabled;
 
     // Spawn the agentic loop task
     tauri::async_runtime::spawn(async move {
@@ -3982,6 +3992,7 @@ async fn chat(
             turn_progress,
             chat_format_default_task,
             chat_format_overrides_task,
+            native_tool_calling_enabled_task,
         )
         .await;
     });
@@ -4373,6 +4384,21 @@ async fn update_python_execution_enabled(
     settings::save_settings(&guard).await?;
     println!(
         "[Settings] python_execution_enabled updated to: {}",
+        enabled
+    );
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_native_tool_calling_enabled(
+    enabled: bool,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.native_tool_calling_enabled = enabled;
+    settings::save_settings(&guard).await?;
+    println!(
+        "[Settings] native_tool_calling_enabled updated to: {}",
         enabled
     );
     Ok(())
@@ -6175,6 +6201,7 @@ pub fn run() {
             update_tool_call_formats,
             update_chat_format,
             update_python_execution_enabled,
+            update_native_tool_calling_enabled,
             update_tool_search_enabled,
             update_search_schemas_enabled,
             update_execute_sql_enabled,
