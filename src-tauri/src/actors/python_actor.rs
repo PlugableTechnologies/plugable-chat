@@ -100,7 +100,6 @@ impl PythonSandboxActor {
     }
 
     pub async fn run(mut self) {
-        println!("[PythonActor] Starting with RustPython sandbox...");
 
         loop {
             tokio::select! {

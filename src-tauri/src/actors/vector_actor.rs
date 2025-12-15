@@ -33,7 +33,6 @@ impl ChatVectorStoreActor {
     }
 
     pub async fn run(mut self) {
-        println!("VectorActor loop starting");
         while let Some(msg) = self.vector_msg_rx.recv().await {
             // Clone table handle for parallel execution (it's cheap, just an Arc internally)
             let chat_table = self.chat_table.clone();
@@ -47,13 +46,11 @@ impl ChatVectorStoreActor {
                         limit,
                         respond_to,
                     } => {
-                        println!("VectorActor: Searching history (limit: {})", limit);
                         let search_results =
                             search_chats_by_embedding(chat_table, query_vector, limit).await;
                         let _ = respond_to.send(search_results);
                     }
                     VectorMsg::FetchAllChats { respond_to } => {
-                        println!("VectorActor: Getting all chats");
                         let zero_embedding_vector = vec![0.0; 384];
                         let search_results =
                             search_chats_by_embedding(chat_table, zero_embedding_vector, 100)
@@ -68,14 +65,7 @@ impl ChatVectorStoreActor {
                         embedding_vector,
                         pinned,
                     } => {
-                        println!(
-                            "VectorActor: Upserting chat (id: {}, title: {}, has_vector: {})",
-                            &id[..8.min(id.len())],
-                            title,
-                            embedding_vector.is_some()
-                        );
                         if let Some(vector_values) = embedding_vector {
-                            println!("VectorActor: Vector length: {}", vector_values.len());
                             upsert_chat_record_with_embedding(
                                 &chat_table,
                                 id,
@@ -243,10 +233,6 @@ async fn search_chats_by_embedding(
         }
     }
 
-    println!(
-        "VectorActor: Search returned {} results",
-        search_results.len()
-    );
     search_results
 }
 
@@ -299,10 +285,6 @@ async fn ensure_chats_table_schema(db_connection: &Connection) -> Table {
                         .await
                         .expect("Failed to create chats table after schema migration")
                     } else {
-                        println!(
-                            "VectorActor: Table schema is up to date ({} fields)",
-                            existing_field_count
-                        );
                         table
                     }
                 }
@@ -343,10 +325,6 @@ async fn upsert_chat_record_with_embedding(
     embedding_vector: Vec<f32>,
     pinned: bool,
 ) {
-    println!(
-        "VectorActor: upsert_chat_record_with_embedding starting for id={}",
-        &id[..8.min(id.len())]
-    );
     // #region agent log
     use std::io::Write;
     let upsert_start = std::time::Instant::now();

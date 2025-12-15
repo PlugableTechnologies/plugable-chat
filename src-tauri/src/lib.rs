@@ -2688,7 +2688,7 @@ fn collect_tool_prompt_additions(
     let mut tool_search_prompt_added = false;
 
     // Track server defer modes for contextual guidance
-    let mut has_deferred_tools = tool_search_enabled && !server_configs.is_empty();
+    let mut has_deferred_tools = false;
     let mut has_active_tools = false;
     for (server_id, tools) in tool_descriptions {
         if tools.is_empty() {
@@ -3653,9 +3653,21 @@ async fn chat(
         .iter()
         .any(|(_, tools)| !tools.is_empty());
 
+    // Check if there are any deferred MCP tools (for tool_search discovery)
+    let has_deferred_mcp_tools = filtered_tool_descriptions
+        .iter()
+        .any(|(server_id, tools)| {
+            !tools.is_empty()
+                && server_configs
+                    .iter()
+                    .find(|c| c.id == *server_id)
+                    .map(|c| c.defer_tools)
+                    .unwrap_or(true)
+        });
+
     // Build the tools list:
     // 1. Include python_execution if enabled in settings
-    // 2. Include tool_search when MCP servers with tools are available
+    // 2. Include tool_search when MCP servers with deferred tools are available
     // 3. Include all MCP tools
     let code_mode_possible = format_config.is_enabled(ToolCallFormatName::CodeMode)
         && python_execution_enabled
@@ -3665,12 +3677,12 @@ async fn chat(
     let primary_format_for_prompt = format_config.resolve_primary_for_prompt(code_mode_possible);
     let python_tool_mode = code_mode_possible;
     let allow_tool_search_for_python =
-        python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
+        python_tool_mode && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
     let non_code_formats_enabled = format_config.any_non_code();
     let legacy_tool_calls_enabled =
         non_code_formats_enabled && primary_format_for_prompt != ToolCallFormatName::CodeMode;
     let legacy_tool_search_enabled =
-        legacy_tool_calls_enabled && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
+        legacy_tool_calls_enabled && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
 
     println!(
         "[chat] tool_call_formats: primary={:?}, enabled={:?}, python_execution_enabled={}, python_tool_calling_enabled={}, python_tool_mode={}, code_mode_possible={}",
@@ -3792,8 +3804,11 @@ async fn chat(
                 // Only include python_execution if it's enabled
                 if schema.name == "python_execution" {
                     python_execution_enabled && tool_filter.builtin_allowed("python_execution")
+                } else if schema.name == "tool_search" {
+                    // Only include tool_search if there are deferred tools to discover
+                    has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
                 } else {
-                    // Other built-ins (tool_search, search_schemas, execute_sql) are included if allowed
+                    // Other built-ins (search_schemas, execute_sql) are included if allowed
                     tool_filter.builtin_allowed(&schema.name)
                 }
             })
@@ -5322,7 +5337,17 @@ async fn sync_mcp_servers(
     let configs = settings.mcp_servers.clone();
     drop(settings);
 
-    println!("[MCP] Syncing {} server configs...", configs.len());
+    // Count enabled and deferred servers for informative logging
+    let enabled_count = configs.iter().filter(|c| c.enabled).count();
+    let deferred_count = configs.iter().filter(|c| c.enabled && c.defer_tools).count();
+    let active_count = enabled_count - deferred_count;
+    println!(
+        "[MCP] Syncing {} servers ({} enabled: {} active, {} deferred)",
+        configs.len(),
+        enabled_count,
+        active_count,
+        deferred_count
+    );
 
     let (tx, rx) = oneshot::channel();
     handles
@@ -5577,6 +5602,8 @@ async fn get_system_prompt_preview(
         })
         .collect();
     let has_mcp_tools = !filtered_tool_descriptions.is_empty();
+    // Deferred tools exist only if tool_search is enabled AND there are MCP tools
+    let has_deferred_mcp_tools = tool_search_enabled && has_mcp_tools;
     let code_mode_possible = format_config.is_enabled(ToolCallFormatName::CodeMode)
         && python_execution_enabled
         && python_tool_calling_enabled
@@ -5585,7 +5612,7 @@ async fn get_system_prompt_preview(
     let python_tool_mode =
         code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
     let allow_tool_search_for_python =
-        python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
+        python_tool_mode && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
     let prompt_for_discovery = user_prompt.unwrap_or_default();
     let auto_discovery = perform_auto_discovery_for_prompt(
         &prompt_for_discovery,
@@ -5616,8 +5643,11 @@ async fn get_system_prompt_preview(
                 // Only include python_execution if it's enabled
                 if schema.name == "python_execution" {
                     python_execution_enabled && tool_filter.builtin_allowed("python_execution")
+                } else if schema.name == "tool_search" {
+                    // Only include tool_search if there are deferred tools to discover
+                    has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
                 } else {
-                    // Other built-ins (tool_search, search_schemas, execute_sql) are included if allowed
+                    // Other built-ins (search_schemas, execute_sql) are included if allowed
                     tool_filter.builtin_allowed(&schema.name)
                 }
             })
@@ -5757,6 +5787,8 @@ async fn get_system_prompt_layers(
         })
         .collect();
     let has_mcp_tools = !filtered_tool_descriptions.is_empty();
+    // Deferred tools exist only if tool_search is enabled AND there are MCP tools
+    let has_deferred_mcp_tools = tool_search_enabled && has_mcp_tools;
     let code_mode_possible = format_config.is_enabled(ToolCallFormatName::CodeMode)
         && python_execution_enabled
         && python_tool_calling_enabled
@@ -5765,7 +5797,7 @@ async fn get_system_prompt_layers(
     let python_tool_mode =
         code_mode_possible && primary_format_for_prompt == ToolCallFormatName::CodeMode;
     let allow_tool_search_for_python =
-        python_tool_mode && has_mcp_tools && tool_filter.builtin_allowed("tool_search");
+        python_tool_mode && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
 
     let builtin_tools: Vec<(String, Vec<McpTool>)> = {
         let registry = tool_registry_state.registry.read().await;
@@ -5776,8 +5808,11 @@ async fn get_system_prompt_layers(
                 // Only include python_execution if it's enabled
                 if schema.name == "python_execution" {
                     python_execution_enabled && tool_filter.builtin_allowed("python_execution")
+                } else if schema.name == "tool_search" {
+                    // Only include tool_search if there are deferred tools to discover
+                    has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
                 } else {
-                    // Other built-ins (tool_search, search_schemas, execute_sql) are included if allowed
+                    // Other built-ins (search_schemas, execute_sql) are included if allowed
                     tool_filter.builtin_allowed(&schema.name)
                 }
             })
@@ -6165,33 +6200,27 @@ pub fn run() {
             let app_handle = app.handle();
             // Spawn Vector Actor
             tauri::async_runtime::spawn(async move {
-                println!("Starting Chat Vector Store Actor...");
                 // Ensure data directory exists
                 let _ = tokio::fs::create_dir_all("./data").await;
-
                 let actor = ChatVectorStoreActor::new(vector_rx, "./data/lancedb").await;
-                println!("Chat Vector Store Actor initialized.");
                 actor.run().await;
             });
 
             // Spawn Foundry Actor
             let foundry_app_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                println!("Starting Model Gateway Actor...");
                 let actor = ModelGatewayActor::new(foundry_rx, foundry_app_handle);
                 actor.run().await;
             });
 
             // Spawn RAG Actor
             tauri::async_runtime::spawn(async move {
-                println!("Starting RAG Actor...");
                 let actor = RagRetrievalActor::new(rag_rx);
                 actor.run().await;
             });
 
             // Spawn MCP Host Actor
             tauri::async_runtime::spawn(async move {
-                println!("Starting MCP Host Actor...");
                 let actor = McpToolRouterActor::new(mcp_host_rx);
                 actor.run().await;
             });
@@ -6199,7 +6228,6 @@ pub fn run() {
             // Spawn Python Actor for code execution
             let python_tool_registry = tool_registry.clone();
             tauri::async_runtime::spawn(async move {
-                println!("Starting Python Actor...");
                 let actor = PythonSandboxActor::new(
                     python_rx,
                     python_tool_registry,
@@ -6211,7 +6239,6 @@ pub fn run() {
 
             // Initialize embedding model in background (shared between FoundryActor and RAG)
             tauri::async_runtime::spawn(async move {
-                println!("Initializing shared embedding model for RAG...");
                 use fastembed::{EmbeddingModel, InitOptions};
 
                 match tokio::task::spawn_blocking(|| {
@@ -6225,13 +6252,13 @@ pub fn run() {
                     Ok(Ok(model)) => {
                         let mut guard = embedding_model_arc.write().await;
                         *guard = Some(Arc::new(model));
-                        println!("Shared embedding model initialized successfully");
+                        println!("[Startup] Embedding model ready (all-MiniLM-L6-v2)");
                     }
                     Ok(Err(e)) => {
-                        println!("ERROR: Failed to initialize embedding model: {}", e);
+                        println!("[Startup] ERROR: Failed to initialize embedding model: {}", e);
                     }
                     Err(e) => {
-                        println!("ERROR: Embedding model task panicked: {}", e);
+                        println!("[Startup] ERROR: Embedding model task panicked: {}", e);
                     }
                 }
             });
@@ -6242,7 +6269,6 @@ pub fn run() {
             ));
             let db_state_clone = database_toolbox_state.clone();
             tauri::async_runtime::spawn(async move {
-                println!("Starting Database Toolbox Actor...");
                 let actor = DatabaseToolboxActor::new(
                     database_toolbox_rx,
                     db_state_clone,
@@ -6253,7 +6279,6 @@ pub fn run() {
 
             // Spawn Schema Vector Store Actor
             tauri::async_runtime::spawn(async move {
-                println!("Starting Schema Vector Store Actor...");
                 let _ = tokio::fs::create_dir_all("./data").await;
                 let actor = SchemaVectorStoreActor::new(schema_rx, "./data/lancedb").await;
                 actor.run().await;

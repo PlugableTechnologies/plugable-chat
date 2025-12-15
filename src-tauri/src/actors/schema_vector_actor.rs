@@ -128,7 +128,6 @@ impl SchemaVectorStoreActor {
 
     /// Run the actor's message loop
     pub async fn run(mut self) {
-        println!("[SchemaVectorActor] Starting...");
 
         while let Some(msg) = self.rx.recv().await {
             let tables_table = self.tables_table.clone();

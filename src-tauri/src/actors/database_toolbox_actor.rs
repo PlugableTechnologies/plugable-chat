@@ -139,7 +139,6 @@ impl DatabaseToolboxActor {
 
     /// Run the actor's message loop
     pub async fn run(mut self) {
-        println!("[DatabaseToolboxActor] Starting...");
 
         while let Some(msg) = self.rx.recv().await {
             match msg {

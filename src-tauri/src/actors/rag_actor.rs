@@ -81,7 +81,6 @@ impl RagRetrievalActor {
     }
 
     pub async fn run(mut self) {
-        println!("RagActor: Starting...");
 
         while let Some(msg) = self.rx.recv().await {
             match msg {

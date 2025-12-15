@@ -245,7 +245,6 @@ impl McpToolRouterActor {
     }
 
     pub async fn run(mut self) {
-        println!("McpHostActor: Starting...");
 
         while let Some(msg) = self.mcp_tool_msg_rx.recv().await {
             match msg {
@@ -742,11 +741,6 @@ impl McpToolRouterActor {
             connections.keys().cloned().collect()
         };
 
-        println!(
-            "McpHostActor: Syncing {} configs, {} currently connected",
-            configs.len(),
-            connected_ids.len()
-        );
 
         // Connect enabled servers that aren't connected
         for config in &configs {
@@ -778,15 +772,17 @@ impl McpToolRouterActor {
             }
         }
 
-        // Log summary
+        // Log summary only if connections changed
         let connected_count = {
             let connections = self.connections.read().await;
             connections.len()
         };
-        println!(
-            "McpHostActor: Sync complete - {} servers now connected",
-            connected_count
-        );
+        if !results.is_empty() {
+            println!(
+                "McpHostActor: Sync complete - {} servers connected",
+                connected_count
+            );
+        }
 
         results
     }
