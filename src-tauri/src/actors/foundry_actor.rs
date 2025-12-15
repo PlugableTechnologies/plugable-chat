@@ -455,6 +455,13 @@ impl ModelGatewayActor {
                             "FoundryActor: Generating embedding locally (text len: {})",
                             text.len()
                         );
+                        // #region agent log
+                        use std::io::Write;
+                        let embed_start = std::time::Instant::now();
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                            let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H4","location":"foundry_actor.rs:GetEmbedding","message":"embed_start","data":{{"text_len":{}}},"timestamp":{}}}"#, text.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+                        }
+                        // #endregion
 
                         match tokio::task::spawn_blocking(move || {
                             model_clone.embed(vec![text_clone], None)
@@ -462,6 +469,12 @@ impl ModelGatewayActor {
                         .await
                         {
                             Ok(Ok(embeddings)) => {
+                                // #region agent log
+                                let embed_elapsed = embed_start.elapsed().as_millis();
+                                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                                    let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H4","location":"foundry_actor.rs:GetEmbedding","message":"embed_complete","data":{{"elapsed_ms":{}}},"timestamp":{}}}"#, embed_elapsed, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+                                }
+                                // #endregion
                                 if let Some(embedding) = embeddings.into_iter().next() {
                                     println!(
                                         "FoundryActor: Generated embedding (dim: {})",

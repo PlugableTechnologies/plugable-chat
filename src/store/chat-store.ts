@@ -1281,10 +1281,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const chatSavedListener = await listen<string>('chat-saved', async (event) => {
                 const chatId = event.payload;
                 console.log(`[ChatStore] chat-saved event received for: ${chatId.slice(0, 8)}...`);
+                // #region agent log
+                fetch(DEBUG_LOG_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H2',location:'chat-store.ts:chatSavedListener',message:'chat_saved_event_start',data:{chatId:chatId.slice(0,8)},timestamp:Date.now()})}).catch(()=>{});
+                // #endregion
                 
                 // The chat is already in history via upsertHistoryEntry() called when the message was sent.
                 // We just need to clear the pending flag - no need to re-fetch everything from the backend.
                 get().clearPendingSummary(chatId);
+                // #region agent log
+                fetch(DEBUG_LOG_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H2',location:'chat-store.ts:chatSavedListener',message:'chat_saved_event_end',data:{chatId:chatId.slice(0,8)},timestamp:Date.now()})}).catch(()=>{});
+                // #endregion
                 console.log(`[ChatStore] Cleared pending summary for ${chatId.slice(0, 8)}`);
             });
 

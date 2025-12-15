@@ -1533,6 +1533,17 @@ async fn run_agentic_loop(
             iteration_elapsed.as_secs_f64()
         );
         let _ = std::io::stdout().flush();
+        // #region agent log
+        {
+            let response_preview: String = assistant_response.chars().take(1000).collect();
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"MODEL","location":"lib.rs:agentic_loop","message":"model_response_complete","data":{{"iteration":{},"token_count":{},"response_len":{},"response_preview":"{}"}},"timestamp":{}}}"#, 
+                    iteration, token_count, assistant_response.len(), 
+                    response_preview.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r"),
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+            }
+        }
+        // #endregion
 
         let agentic_action = detect_agentic_action(
             &assistant_response,
@@ -1789,6 +1800,19 @@ async fn run_agentic_loop(
             });
 
             // Execute the tool - check for built-in tools first
+            // #region agent log
+            {
+                let args_json = serde_json::to_string(&resolved_call.arguments).unwrap_or_else(|_| "{}".to_string());
+                let args_preview: String = args_json.chars().take(500).collect();
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                    let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"TOOL","location":"lib.rs:agentic_loop","message":"tool_call_start","data":{{"iteration":{},"idx":{},"server":"{}","tool":"{}","is_builtin":{},"args_preview":"{}"}},"timestamp":{}}}"#, 
+                        iteration, idx, resolved_call.server, resolved_call.tool, is_builtin_tool(&resolved_call.tool),
+                        args_preview.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n"),
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+                }
+            }
+            let tool_exec_start = std::time::Instant::now();
+            // #endregion
             let (result_text, is_error) = if is_builtin_tool(&resolved_call.tool) {
                 match resolved_call.tool.as_str() {
                     "tool_search" => {
@@ -2069,6 +2093,19 @@ async fn run_agentic_loop(
                 }
             };
 
+            // #region agent log
+            {
+                let tool_elapsed_ms = tool_exec_start.elapsed().as_millis();
+                let result_preview: String = result_text.chars().take(500).collect();
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                    let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"TOOL","location":"lib.rs:agentic_loop","message":"tool_call_end","data":{{"iteration":{},"idx":{},"server":"{}","tool":"{}","is_error":{},"elapsed_ms":{},"result_len":{},"result_preview":"{}"}},"timestamp":{}}}"#, 
+                        iteration, idx, resolved_call.server, resolved_call.tool, is_error, tool_elapsed_ms, result_text.len(),
+                        result_preview.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r"),
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+                }
+            }
+            // #endregion
+
             // After any schema search, automatically surface execute_sql for follow-up
             if resolved_call.tool == "search_schemas" {
                 {
@@ -2166,6 +2203,11 @@ async fn run_agentic_loop(
     }
 
     // Emit loop finished event
+    // #region agent log
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:agentic_loop","message":"emit_tool_loop_finished_before","data":{{"iterations":{},"had_tool_calls":{}}},"timestamp":{}}}"#, iteration, had_tool_calls, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+    }
+    // #endregion
     let _ = app_handle.emit(
         "tool-loop-finished",
         ToolLoopFinishedEvent {
@@ -2173,7 +2215,17 @@ async fn run_agentic_loop(
             had_tool_calls,
         },
     );
+    // #region agent log
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:agentic_loop","message":"emit_chat_finished_before","data":{{}},"timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+    }
+    // #endregion
     let _ = app_handle.emit("chat-finished", ());
+    // #region agent log
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:agentic_loop","message":"emit_chat_finished_after","data":{{}},"timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+    }
+    // #endregion
 
     {
         let now_ms = std::time::SystemTime::now()
@@ -2244,7 +2296,17 @@ async fn run_agentic_loop(
                             println!(
                                 "[ChatSave] UpsertChatRecord sent, emitting chat-saved event"
                             );
+                            // #region agent log
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:run_agentic_loop","message":"chat_saved_emit_before","data":{{"chat_id":"{}"}},"timestamp":{}}}"#, &chat_id[..8.min(chat_id.len())], std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+                            }
+                            // #endregion
                             let _ = app_handle.emit("chat-saved", chat_id.clone());
+                            // #region agent log
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:run_agentic_loop","message":"chat_saved_emit_after","data":{{"chat_id":"{}"}},"timestamp":{}}}"#, &chat_id[..8.min(chat_id.len())], std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+                            }
+                            // #endregion
                         }
                         Err(e) => println!(
                             "[ChatSave] ERROR: Failed to send UpsertChatRecord: {}",
@@ -2257,6 +2319,11 @@ async fn run_agentic_loop(
         }
         Err(e) => println!("[ChatSave] ERROR: Failed to send GetEmbedding: {}", e),
     }
+    // #region agent log
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:run_agentic_loop","message":"agentic_loop_end","data":{{"chat_id":"{}"}},"timestamp":{}}}"#, &chat_id[..8.min(chat_id.len())], std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+    }
+    // #endregion
 }
 
 /// Legacy system prompt builder (kept for reference)
@@ -2609,7 +2676,6 @@ fn collect_tool_prompt_additions(
     tuning: &PromptTuningOptions,
 ) -> Vec<String> {
     const BUILTIN_SERVER_LABEL: &str = "Built-in Tools";
-    const PYTHON_LABEL: &str = "Python Execution";
     const TOOL_SEARCH_LABEL: &str = "Tool Search";
 
     let mut additions: Vec<String> = Vec::new();
@@ -5894,6 +5960,13 @@ fn get_launch_overrides(
 /// Resets the "frontend alive" timer; backend will log if beats stop arriving.
 #[tauri::command]
 async fn heartbeat_ping(heartbeat_state: State<'_, HeartbeatState>) -> Result<(), String> {
+    // #region agent log
+    use std::io::Write;
+    let hb_start = std::time::Instant::now();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"lib.rs:heartbeat_ping","message":"heartbeat_ping_start","data":{{"timestamp_ms":{}}},"timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+    }
+    // #endregion
     let mut last = heartbeat_state.last_frontend_beat.write().await;
     *last = Some(Instant::now());
 
@@ -5901,6 +5974,12 @@ async fn heartbeat_ping(heartbeat_state: State<'_, HeartbeatState>) -> Result<()
     let mut logged = heartbeat_state.logged_unresponsive.write().await;
     *logged = false;
 
+    // #region agent log
+    let hb_elapsed = hb_start.elapsed().as_micros();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"lib.rs:heartbeat_ping","message":"heartbeat_ping_end","data":{{"elapsed_us":{}}},"timestamp":{}}}"#, hb_elapsed, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+    }
+    // #endregion
     Ok(())
 }
 

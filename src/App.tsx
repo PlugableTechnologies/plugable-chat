@@ -241,12 +241,18 @@ function App() {
     const sendHeartbeat = async () => {
       if (cancelled) return;
       const startedAt = Date.now();
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/ed1dd551-d0f1-4880-9a65-c463a4dc7c0d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H5',location:'App.tsx:sendHeartbeat',message:'heartbeat_send_start',data:{startedAt},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
 
       const heartbeatPromise = new Promise<void>((resolve, reject) => {
         const timeoutId = setTimeout(() => reject(new Error('heartbeat-timeout')), HEARTBEAT_TIMEOUT_MS);
         invoke('heartbeat_ping')
           .then(() => {
             clearTimeout(timeoutId);
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ed1dd551-d0f1-4880-9a65-c463a4dc7c0d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H5',location:'App.tsx:sendHeartbeat',message:'heartbeat_send_success',data:{elapsed:Date.now()-startedAt},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
             resolve();
           })
           .catch((err) => {
