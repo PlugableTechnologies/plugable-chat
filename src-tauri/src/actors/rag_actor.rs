@@ -1,10 +1,20 @@
-use crate::protocol::{RagChunk, RagIndexResult, RagMsg, RemoveFileResult};
+use crate::protocol::{RagChunk, RagIndexResult, RagMsg, RagProgressEvent, RemoveFileResult};
+use arrow_array::types::Float32Type;
+use arrow_array::{
+    Array, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
+};
+use arrow_schema::{DataType, Field, Schema};
 use fastembed::TextEmbedding;
+use futures::StreamExt;
+use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::{connect, Connection, Table};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tauri::AppHandle;
+use tauri::Emitter;
 use tokio::sync::mpsc;
 
 /// Chunk size in characters
@@ -12,6 +22,9 @@ const CHUNK_SIZE: usize = 500;
 
 /// Overlap between chunks in characters
 const CHUNK_OVERLAP: usize = 100;
+
+/// The name of the table in LanceDB for RAG chunks
+const RAG_CHUNKS_TABLE: &str = "rag_chunks";
 
 /// A document chunk with its embedding
 #[derive(Clone)]
@@ -23,64 +36,81 @@ struct IndexedChunk {
     vector: Vec<f32>,
 }
 
-/// Maximum age for cached embeddings (1 day in seconds)
-const CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
-
-/// Manifest entry for a cached file
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct ManifestEntry {
-    file_hash: String,
-    chunk_count: usize,
-    /// Unix timestamp (seconds) when embeddings were generated
-    #[serde(default)]
-    generated_at: u64,
-}
-
-/// Cached embedding data for a file (stored separately from manifest)
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct CachedEmbeddings {
-    /// File path this cache is for
-    file_path: String,
-    /// Content hash when embeddings were generated
-    file_hash: String,
-    /// The text chunks
-    chunks: Vec<String>,
-    /// The embedding vectors (one per chunk)
-    embeddings: Vec<Vec<f32>>,
-}
-
-/// Statistics from processing a single file
-struct FileProcessingStats {
-    chunks_added: usize,
-    bytes_processed: usize,
-    chars_processed: usize,
-    embedding_time_ms: u128,
-    was_cached: bool,
-}
+/// Truncate a string to a maximum length, adding ellipsis if needed
+fn truncate_str(s: &str, max_len: usize) -> String {
 
 /// The RAG Actor handles document processing and retrieval
 pub struct RagRetrievalActor {
     rx: mpsc::Receiver<RagMsg>,
-    /// In-memory index of all chunks (for simplicity, we keep it in memory)
-    /// In production, this would be persisted to LanceDB
-    chunks: Vec<IndexedChunk>,
-    /// Cache directory path (set when processing documents)
-    cache_dir: Option<PathBuf>,
-    /// Manifest of processed files: file_path -> (hash, chunk_ids)
-    manifest: HashMap<String, ManifestEntry>,
+    /// LanceDB connection
+    db: Option<Connection>,
+    /// Table handle for RAG chunks
+    table: Option<Table>,
+    /// App handle for emitting events
+    app_handle: Option<AppHandle>,
+    /// Path to LanceDB directory
+    db_path: PathBuf,
 }
 
 impl RagRetrievalActor {
-    pub fn new(rx: mpsc::Receiver<RagMsg>) -> Self {
+    pub fn new(rx: mpsc::Receiver<RagMsg>, db_path: PathBuf, app_handle: Option<AppHandle>) -> Self {
         Self {
             rx,
-            chunks: Vec::new(),
-            cache_dir: None,
-            manifest: HashMap::new(),
+            db: None,
+            table: None,
+            app_handle,
+            db_path,
         }
     }
 
+    async fn init_db(&mut self) -> Result<(), String> {
+        let db_path_str = self.db_path.to_string_lossy().to_string();
+        let db = connect(&db_path_str)
+            .execute()
+            .await
+            .map_err(|e| format!("Failed to connect to LanceDB: {}", e))?;
+
+        let schema = self.expected_schema();
+        
+        // Ensure table exists
+        let table = if db.table_names().execute().await.map_err(|e| e.to_string())?.contains(&RAG_CHUNKS_TABLE.to_string()) {
+            db.open_table(RAG_CHUNKS_TABLE).execute().await.map_err(|e| e.to_string())?
+        } else {
+            let batch = RecordBatch::new_empty(schema.clone());
+            db.create_table(
+                RAG_CHUNKS_TABLE,
+                RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema),
+            )
+            .execute()
+            .await
+            .map_err(|e| e.to_string())?
+        };
+
+        self.db = Some(db);
+        self.table = Some(table);
+        Ok(())
+    }
+
+    fn expected_schema(&self) -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("hash", DataType::Utf8, false),
+            Field::new("content", DataType::Utf8, false),
+            Field::new("source_file", DataType::Utf8, false),
+            Field::new("chunk_index", DataType::Int64, false),
+            Field::new(
+                "vector",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 384),
+                true,
+            ),
+        ]))
+    }
+
     pub async fn run(mut self) {
+        // Initialize LanceDB
+        if let Err(e) = self.init_db().await {
+            println!("RagActor ERROR: Failed to initialize database: {}", e);
+        }
 
         while let Some(msg) = self.rx.recv().await {
             match msg {
@@ -99,43 +129,58 @@ impl RagRetrievalActor {
                     respond_to,
                 } => {
                     println!("RagActor: Searching with limit {}", limit);
-                    let results = self.search_documents(query_vector, limit);
+                    let results = self.search_documents(query_vector, limit).await;
                     let _ = respond_to.send(results);
                 }
                 RagMsg::ClearContext { respond_to } => {
                     println!("RagActor: Clearing context");
-                    self.chunks.clear();
-                    self.manifest.clear();
-                    self.cache_dir = None;
-                    let _ = respond_to.send(true);
+                    let result = if let Some(ref table) = self.table {
+                        match table.delete("1=1").await {
+                            Ok(_) => true,
+                            Err(e) => {
+                                println!("RagActor ERROR: Failed to clear context: {}", e);
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    let _ = respond_to.send(result);
                 }
                 RagMsg::RemoveFile {
                     source_file,
                     respond_to,
                 } => {
                     println!("RagActor: Removing file from index: {}", source_file);
-                    let original_count = self.chunks.len();
-                    self.chunks.retain(|chunk| chunk.source_file != source_file);
-                    let chunks_removed = original_count - self.chunks.len();
-                    println!(
-                        "RagActor: Removed {} chunks, {} remaining",
-                        chunks_removed,
-                        self.chunks.len()
-                    );
-                    let _ = respond_to.send(RemoveFileResult {
-                        chunks_removed,
-                        remaining_chunks: self.chunks.len(),
-                    });
+                    let result = if let Some(ref table) = self.table {
+                        let filter = format!("source_file = '{}'", source_file.replace("'", "''"));
+                        match table.delete(&filter).await {
+                            Ok(_) => {
+                                // Get remaining count
+                                let count = self.get_total_chunks().await;
+                                RemoveFileResult {
+                                    chunks_removed: 0, // LanceDB doesn't return count easily on delete
+                                    remaining_chunks: count,
+                                }
+                            }
+                            Err(e) => {
+                                println!("RagActor ERROR: Failed to remove file: {}", e);
+                                RemoveFileResult {
+                                    chunks_removed: 0,
+                                    remaining_chunks: self.get_total_chunks().await,
+                                }
+                            }
+                        }
+                    } else {
+                        RemoveFileResult {
+                            chunks_removed: 0,
+                            remaining_chunks: 0,
+                        }
+                    };
+                    let _ = respond_to.send(result);
                 }
                 RagMsg::GetIndexedFiles { respond_to } => {
-                    // Get unique source file names from all chunks
-                    let files: Vec<String> = self
-                        .chunks
-                        .iter()
-                        .map(|chunk| chunk.source_file.clone())
-                        .collect::<std::collections::HashSet<_>>()
-                        .into_iter()
-                        .collect();
+                    let files = self.get_indexed_files().await;
                     println!("RagActor: Returning {} indexed files", files.len());
                     let _ = respond_to.send(files);
                 }
@@ -145,49 +190,46 @@ impl RagRetrievalActor {
         println!("RagActor: Shutting down");
     }
 
+    async fn get_total_chunks(&self) -> usize {
+        if let Some(ref table) = self.table {
+            if let Ok(count) = table.count_rows(None).await {
+                return count;
+            }
+        }
+        0
+    }
+
+    async fn get_indexed_files(&self) -> Vec<String> {
+        if let Some(ref table) = self.table {
+            let mut files = std::collections::HashSet::new();
+            if let Ok(mut query) = table.query().select(&["source_file"]).execute().await {
+                while let Some(Ok(batch)) = query.next().await {
+                    if let Some(col) = batch.column_by_name("source_file") {
+                        if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                            for i in 0..arr.len() {
+                                files.insert(arr.value(i).to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            return files.into_iter().collect();
+        }
+        Vec::new()
+    }
+
     async fn process_documents(
         &mut self,
         paths: Vec<String>,
         embedding_model: Arc<TextEmbedding>,
     ) -> Result<RagIndexResult, String> {
         let indexing_start = Instant::now();
-        let mut total_chunks = 0;
-        let mut files_processed = 0;
         let mut cache_hits = 0;
-        let mut total_bytes: usize = 0;
-        let mut total_chars: usize = 0;
-        let mut embedding_time_ms: u128 = 0;
+        let mut files_processed_count = 0;
 
         println!("\n╔══════════════════════════════════════════════════════════════╗");
         println!("║                    RAG INDEXING STARTED                      ║");
         println!("╚══════════════════════════════════════════════════════════════╝");
-
-        // Determine cache directory in system temp (not alongside user data)
-        if let Some(first_path) = paths.first() {
-            let path = Path::new(first_path);
-            let source_dir = if path.is_dir() {
-                path.to_path_buf()
-            } else {
-                path.parent().unwrap_or(Path::new(".")).to_path_buf()
-            };
-
-            // Create a hash of the source directory to create a unique cache subdirectory
-            let source_hash = Self::compute_path_hash(&source_dir.to_string_lossy());
-            let cache_base = std::env::temp_dir().join("plugable-chat-rag");
-            self.cache_dir = Some(cache_base.join(&source_hash));
-
-            println!("RagActor: Cache directory: {:?}", self.cache_dir);
-
-            // Create cache directory if it doesn't exist
-            if let Some(ref cache_dir) = self.cache_dir {
-                if let Err(e) = tokio::fs::create_dir_all(cache_dir).await {
-                    println!("RagActor: Warning - failed to create cache dir: {}", e);
-                }
-            }
-        }
-
-        // Load existing manifest if present
-        self.load_manifest().await;
 
         // Collect all files to process
         let mut files_to_process: Vec<PathBuf> = Vec::new();
@@ -208,111 +250,182 @@ impl RagRetrievalActor {
             files_to_process.len()
         );
 
-        // Process each file
-        for file_path in files_to_process {
-            match self
-                .process_single_file_with_stats(&file_path, &embedding_model)
-                .await
-            {
-                Ok(stats) => {
-                    total_chunks += stats.chunks_added;
-                    total_bytes += stats.bytes_processed;
-                    total_chars += stats.chars_processed;
-                    embedding_time_ms += stats.embedding_time_ms;
-                    files_processed += 1;
-                    if stats.was_cached {
-                        cache_hits += 1;
+        // Pre-process: Collect all chunks from all files
+        struct PendingChunk {
+            hash: String,
+            content: String,
+            source_file: String,
+            chunk_index: usize,
+        }
+
+        let mut pending_chunks = Vec::new();
+        for file_path in &files_to_process {
+            let ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let is_binary = ext == "pdf" || ext == "docx";
+
+            let content = if is_binary {
+                // Binary files: extract_text reads from disk
+                String::new()
+            } else {
+                match tokio::fs::read_to_string(file_path).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        println!("RagActor: Error reading {:?}: {}", file_path, e);
+                        continue;
                     }
                 }
-                Err(e) => {
-                    println!("RagActor: Error processing {:?}: {}", file_path, e);
+            };
+
+            if let Ok(text_content) = self.extract_text(file_path, &content) {
+                let chunks = self.chunk_text(&text_content);
+                let source_file_name = file_path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                for (idx, chunk_content) in chunks.into_iter().enumerate() {
+                    let hash = self.compute_hash(&chunk_content);
+                    pending_chunks.push(PendingChunk {
+                        hash,
+                        content: chunk_content,
+                        source_file: source_file_name.clone(),
+                        chunk_index: idx,
+                    });
                 }
+                files_processed_count += 1;
             }
         }
 
-        // Save manifest
-        self.save_manifest().await;
+        let total_chunks = pending_chunks.len();
+        println!("RagActor: Total chunks to process: {}", total_chunks);
+
+        // Process chunks one by one
+        let mut processed_chunks = 0;
+        for chunk in pending_chunks {
+            let chunk_id = format!("{}:{}:{}", chunk.hash, chunk.source_file, chunk.chunk_index);
+            
+            // 1. Skip if already processed for this file
+            if self.chunk_exists(&chunk_id).await {
+                processed_chunks += 1;
+                cache_hits += 1;
+                continue;
+            }
+
+            // 2. Check if we have an embedding for this content anywhere
+            let cached_embedding = self.get_cached_embedding(&chunk.hash).await;
+            
+            let embedding = if let Some(v) = cached_embedding {
+                cache_hits += 1;
+                // Save new association for this file
+                self.save_chunk_to_db(&chunk_id, &chunk.hash, &chunk.content, &chunk.source_file, chunk.chunk_index, &v).await?;
+                v
+            } else {
+                // 3. Generate embedding
+                let model = Arc::clone(&embedding_model);
+                let content = chunk.content.clone();
+                let v = tokio::task::spawn_blocking(move || {
+                    model.embed(vec![content], None)
+                })
+                .await
+                .map_err(|e| format!("Embedding task failed: {}", e))?
+                .map_err(|e| format!("Embedding generation failed: {}", e))?
+                .into_iter()
+                .next()
+                .ok_or("Failed to get embedding")?;
+
+                // 4. Save to LanceDB
+                self.save_chunk_to_db(&chunk_id, &chunk.hash, &chunk.content, &chunk.source_file, chunk.chunk_index, &v).await?;
+                v
+            };
+
+            processed_chunks += 1;
+            
+            // Emit progress event
+            if let Some(ref handle) = self.app_handle {
+                let _ = handle.emit("rag-progress", RagProgressEvent {
+                    total_chunks,
+                    processed_chunks,
+                    current_file: chunk.source_file.clone(),
+                    is_complete: processed_chunks == total_chunks,
+                });
+            }
+
+            if processed_chunks % 100 == 0 || processed_chunks == total_chunks {
+                println!("RagActor: Progress: {}/{} chunks", processed_chunks, total_chunks);
+            }
+        }
 
         let total_time = indexing_start.elapsed();
-        let vector_dim = if !self.chunks.is_empty() {
-            self.chunks[0].vector.len()
-        } else {
-            0
-        };
-        let avg_chunk_chars = if total_chunks > 0 {
-            total_chars / total_chunks
-        } else {
-            0
-        };
-        let memory_estimate_kb = (self.chunks.len()
-            * (std::mem::size_of::<IndexedChunk>() + vector_dim * 4 + 500))
-            / 1024;
-
-        println!("\n┌──────────────────────────────────────────────────────────────┐");
-        println!("│                  RAG INDEXING SUMMARY                        │");
-        println!("├──────────────────────────────────────────────────────────────┤");
-        println!(
-            "│  Files processed:      {:>8}                              │",
-            files_processed
-        );
-        println!(
-            "│  Cache hits:           {:>8}                              │",
-            cache_hits
-        );
-        println!(
-            "│  Total chunks:         {:>8}                              │",
-            total_chunks
-        );
-        println!(
-            "│  Total bytes:          {:>8} ({:.2} KB)                   │",
-            total_bytes,
-            total_bytes as f64 / 1024.0
-        );
-        println!(
-            "│  Total chars:          {:>8}                              │",
-            total_chars
-        );
-        println!(
-            "│  Avg chunk size:       {:>8} chars                        │",
-            avg_chunk_chars
-        );
-        println!(
-            "│  Vector dimension:     {:>8}                              │",
-            vector_dim
-        );
-        println!("├──────────────────────────────────────────────────────────────┤");
-        println!(
-            "│  Embedding time:       {:>8} ms                           │",
-            embedding_time_ms
-        );
-        println!(
-            "│  Total time:           {:>8} ms                           │",
-            total_time.as_millis()
-        );
-        println!(
-            "│  Throughput:           {:>8.1} chunks/sec                  │",
-            if total_time.as_secs_f64() > 0.0 {
-                total_chunks as f64 / total_time.as_secs_f64()
-            } else {
-                0.0
-            }
-        );
-        println!("├──────────────────────────────────────────────────────────────┤");
-        println!(
-            "│  Total chunks in index:{:>8}                              │",
-            self.chunks.len()
-        );
-        println!(
-            "│  Est. memory usage:    {:>8} KB                           │",
-            memory_estimate_kb
-        );
-        println!("└──────────────────────────────────────────────────────────────┘\n");
+        println!("RagActor: Indexing complete in {} ms", total_time.as_millis());
 
         Ok(RagIndexResult {
             total_chunks,
-            files_processed,
+            files_processed: files_processed_count,
             cache_hits,
         })
+    }
+
+    async fn chunk_exists(&self, chunk_id: &str) -> bool {
+        let table = match self.table.as_ref() {
+            Some(t) => t,
+            None => return false,
+        };
+        // Escape single quotes for filter
+        let safe_id = chunk_id.replace("'", "''");
+        if let Ok(count) = table.count_rows(Some(format!("id = '{}'", safe_id))).await {
+            return count > 0;
+        }
+        false
+    }
+
+    async fn get_cached_embedding(&self, hash: &str) -> Option<Vec<f32>> {
+        let table = self.table.as_ref()?;
+        let query = table.query().only_if(format!("hash = '{}'", hash)).limit(1);
+        let mut stream = query.execute().await.ok()?;
+        
+        if let Some(Ok(batch)) = stream.next().await {
+            if batch.num_rows() > 0 {
+                let vectors = batch.column_by_name("vector")
+                    .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>())?;
+                let v = vectors.value(0);
+                let arr = v.as_any().downcast_ref::<Float32Array>()?;
+                return Some(arr.values().to_vec());
+            }
+        }
+        None
+    }
+
+    async fn save_chunk_to_db(&self, id: &str, hash: &str, content: &str, source_file: &str, chunk_index: usize, vector: &[f32]) -> Result<(), String> {
+        let table = self.table.as_ref().ok_or("Table not initialized")?;
+        let schema = self.expected_schema();
+
+        let id_arr = Arc::new(StringArray::from(vec![id.to_string()]));
+        let hash_arr = Arc::new(StringArray::from(vec![hash.to_string()]));
+        let content_arr = Arc::new(StringArray::from(vec![content.to_string()]));
+        let source_arr = Arc::new(StringArray::from(vec![source_file.to_string()]));
+        let index_arr = Arc::new(arrow_array::Int64Array::from(vec![chunk_index as i64]));
+        
+        let vector_values = Float32Array::from(vector.to_vec());
+        let vector_arr = Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            vec![Some(vector_values.values().iter().map(|v| Some(*v)).collect::<Vec<_>>())],
+            384,
+        ));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![id_arr, hash_arr, content_arr, source_arr, index_arr, vector_arr],
+        ).map_err(|e| format!("Failed to create record batch: {}", e))?;
+
+        table.add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
+            .execute()
+            .await
+            .map_err(|e| format!("Failed to add record to LanceDB: {}", e))?;
+
+        Ok(())
     }
 
     async fn collect_files_recursive(&self, dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -354,182 +467,6 @@ impl RagRetrievalActor {
             // Also support files without extension if they look like text
             false
         }
-    }
-
-    async fn process_single_file_with_stats(
-        &mut self,
-        file_path: &Path,
-        embedding_model: &Arc<TextEmbedding>,
-    ) -> Result<FileProcessingStats, String> {
-        let path_str = file_path.to_string_lossy().to_string();
-
-        // Check if this is a binary file type (PDF, DOCX)
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let is_binary = ext == "pdf" || ext == "docx";
-
-        // Read file content (as bytes for binary files, as string for text files)
-        let (content, bytes_processed, content_hash) = if is_binary {
-            // For binary files, read as bytes and hash the bytes
-            let bytes = tokio::fs::read(file_path)
-                .await
-                .map_err(|e| format!("Failed to read file: {}", e))?;
-            let bytes_len = bytes.len();
-            let hash = self.compute_hash_bytes(&bytes);
-            // Content is not used for binary files (extraction reads the file again)
-            (String::new(), bytes_len, hash)
-        } else {
-            // For text files, read as string
-            let text = tokio::fs::read_to_string(file_path)
-                .await
-                .map_err(|e| format!("Failed to read file: {}", e))?;
-            let bytes_len = text.len();
-            let hash = self.compute_hash(&text);
-            (text, bytes_len, hash)
-        };
-
-        // Check if we have a valid cache (same hash AND not expired)
-        if let Some(entry) = self.manifest.get(&path_str) {
-            if entry.file_hash == content_hash && !Self::is_cache_expired(entry.generated_at) {
-                // Try to load cached embeddings from disk
-                if let Some(cached) = self.load_embeddings(&path_str).await {
-                    if cached.file_hash == content_hash
-                        && cached.chunks.len() == cached.embeddings.len()
-                    {
-                        println!(
-                            "RagActor: Using cached embeddings for {:?} ({} chunks)",
-                            file_path,
-                            cached.chunks.len()
-                        );
-
-                        // Reconstruct indexed chunks from cache
-                        let file_name = file_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-
-                        let chars_processed: usize =
-                            cached.chunks.iter().map(|c| c.chars().count()).sum();
-                        let chunk_count = cached.chunks.len();
-
-                        for (idx, (chunk_text, embedding)) in cached
-                            .chunks
-                            .into_iter()
-                            .zip(cached.embeddings.into_iter())
-                            .enumerate()
-                        {
-                            let chunk = IndexedChunk {
-                                id: format!("{}:{}", path_str, idx),
-                                content: chunk_text,
-                                source_file: file_name.clone(),
-                                chunk_index: idx,
-                                vector: embedding,
-                            };
-                            self.chunks.push(chunk);
-                        }
-
-                        return Ok(FileProcessingStats {
-                            chunks_added: chunk_count,
-                            bytes_processed,
-                            chars_processed,
-                            embedding_time_ms: 0, // No embedding time - loaded from cache
-                            was_cached: true,
-                        });
-                    }
-                }
-            } else if entry.file_hash == content_hash {
-                println!(
-                    "RagActor: Cache expired for {:?}, regenerating embeddings",
-                    file_path
-                );
-            }
-        }
-
-        // Parse content based on file type
-        let text_content = self.extract_text(file_path, &content)?;
-        let chars_processed = text_content.chars().count();
-
-        // Chunk the content
-        let text_chunks = self.chunk_text(&text_content);
-        let chunk_count = text_chunks.len();
-
-        if chunk_count == 0 {
-            return Ok(FileProcessingStats {
-                chunks_added: 0,
-                bytes_processed,
-                chars_processed,
-                embedding_time_ms: 0,
-                was_cached: false,
-            });
-        }
-
-        println!(
-            "RagActor: Generating embeddings for {:?} ({} chunks, {} bytes, {} chars)",
-            file_path, chunk_count, bytes_processed, chars_processed
-        );
-
-        // Generate embeddings for all chunks
-        let model = Arc::clone(embedding_model);
-        let chunks_clone = text_chunks.clone();
-
-        let embed_start = Instant::now();
-        let embeddings = tokio::task::spawn_blocking(move || model.embed(chunks_clone, None))
-            .await
-            .map_err(|e| format!("Embedding task failed: {}", e))?
-            .map_err(|e| format!("Embedding generation failed: {}", e))?;
-        let embedding_time_ms = embed_start.elapsed().as_millis();
-
-        // Save embeddings to disk cache
-        if let Err(e) = self
-            .save_embeddings(&path_str, &content_hash, &text_chunks, &embeddings)
-            .await
-        {
-            println!("RagActor: Warning - failed to cache embeddings: {}", e);
-        }
-
-        // Store indexed chunks
-        let file_name = file_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        for (idx, (chunk_text, embedding)) in text_chunks
-            .into_iter()
-            .zip(embeddings.into_iter())
-            .enumerate()
-        {
-            let chunk = IndexedChunk {
-                id: format!("{}:{}", path_str, idx),
-                content: chunk_text,
-                source_file: file_name.clone(),
-                chunk_index: idx,
-                vector: embedding,
-            };
-            self.chunks.push(chunk);
-        }
-
-        // Update manifest with current timestamp
-        self.manifest.insert(
-            path_str,
-            ManifestEntry {
-                file_hash: content_hash,
-                chunk_count,
-                generated_at: Self::current_timestamp(),
-            },
-        );
-
-        Ok(FileProcessingStats {
-            chunks_added: chunk_count,
-            bytes_processed,
-            chars_processed,
-            embedding_time_ms,
-            was_cached: false,
-        })
     }
 
     fn extract_text(&self, file_path: &Path, content: &str) -> Result<String, String> {
@@ -708,180 +645,75 @@ impl RagRetrievalActor {
         format!("{:x}", hasher.finalize())
     }
 
-    fn search_documents(&self, query_vector: Vec<f32>, limit: usize) -> Vec<RagChunk> {
+    async fn search_documents(&self, query_vector: Vec<f32>, limit: usize) -> Vec<RagChunk> {
         let search_start = Instant::now();
-
-        if self.chunks.is_empty() {
-            println!("\n┌─────────────────────────────────────────────────────────────┐");
-            println!("│                   RAG SEARCH (empty index)                  │");
-            println!("└─────────────────────────────────────────────────────────────┘\n");
-            return Vec::new();
-        }
-
-        // Compute cosine similarity with all chunks
-        let similarity_start = Instant::now();
-        let mut scored: Vec<(f32, &IndexedChunk)> = self
-            .chunks
-            .iter()
-            .map(|chunk| {
-                let score = cosine_similarity(&query_vector, &chunk.vector);
-                (score, chunk)
-            })
-            .collect();
-        let similarity_time = similarity_start.elapsed();
-
-        // Sort by score descending
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Calculate score statistics
-        let all_scores: Vec<f32> = scored.iter().map(|(s, _)| *s).collect();
-        let min_score = all_scores.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max_score = all_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let avg_score: f32 = all_scores.iter().sum::<f32>() / all_scores.len() as f32;
-
-        // Take top results
-        let results: Vec<RagChunk> = scored
-            .into_iter()
-            .take(limit)
-            .map(|(score, chunk)| RagChunk {
-                id: chunk.id.clone(),
-                content: chunk.content.clone(),
-                source_file: chunk.source_file.clone(),
-                chunk_index: chunk.chunk_index,
-                score,
-            })
-            .collect();
-
-        let total_time = search_start.elapsed();
-
-        // Calculate top-K statistics
-        let top_scores: Vec<f32> = results.iter().map(|r| r.score).collect();
-        let top_min = top_scores.iter().cloned().fold(f32::INFINITY, f32::min);
-        let top_max = top_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let top_avg: f32 = if !top_scores.is_empty() {
-            top_scores.iter().sum::<f32>() / top_scores.len() as f32
-        } else {
-            0.0
+        let table = match &self.table {
+            Some(t) => t,
+            None => return Vec::new(),
         };
 
-        // Collect unique source files in results
-        let unique_sources: std::collections::HashSet<&str> =
-            results.iter().map(|r| r.source_file.as_str()).collect();
+        // LanceDB includes _distance column with similarity scores (lower = more similar)
+        let query = match table.query().nearest_to(query_vector.clone()) {
+            Ok(q) => q,
+            Err(e) => {
+                println!("RagActor ERROR: Failed to create vector query: {}", e);
+                return Vec::new();
+            }
+        };
 
-        println!("\n┌─────────────────────────────────────────────────────────────┐");
-        println!("│                      RAG SEARCH RESULTS                     │");
-        println!("├─────────────────────────────────────────────────────────────┤");
+        let mut results = Vec::new();
+        let mut query_stream = match query.limit(limit).execute().await {
+            Ok(s) => s,
+            Err(e) => {
+                println!("RagActor ERROR: Failed to execute search: {}", e);
+                return Vec::new();
+            }
+        };
+
+        while let Some(Ok(batch)) = query_stream.next().await {
+            let ids = batch
+                .column_by_name("id")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let contents = batch
+                .column_by_name("content")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let source_files = batch
+                .column_by_name("source_file")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let chunk_indices = batch
+                .column_by_name("chunk_index")
+                .and_then(|c| c.as_any().downcast_ref::<arrow_array::Int64Array>());
+            let distances = batch
+                .column_by_name("_distance")
+                .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+
+            if let (Some(ids), Some(contents), Some(source_files), Some(chunk_indices), Some(distances)) =
+                (ids, contents, source_files, chunk_indices, distances)
+            {
+                for i in 0..batch.num_rows() {
+                    let distance = distances.value(i);
+                    // Convert distance to similarity score (1 / (1 + distance))
+                    let score = 1.0 / (1.0 + distance);
+
+                    results.push(RagChunk {
+                        id: ids.value(i).to_string(),
+                        content: contents.value(i).to_string(),
+                        source_file: source_files.value(i).to_string(),
+                        chunk_index: chunk_indices.value(i) as usize,
+                        score,
+                    });
+                }
+            }
+        }
+
+        let total_time = search_start.elapsed();
         println!(
-            "│  Query vector dim:     {:>8}                             │",
-            query_vector.len()
-        );
-        println!(
-            "│  Chunks searched:      {:>8}                             │",
-            self.chunks.len()
-        );
-        println!(
-            "│  Results returned:     {:>8}                             │",
+            "RagActor: Search completed in {} ms ({} results)",
+            total_time.as_millis(),
             results.len()
         );
-        println!("├─────────────────────────────────────────────────────────────┤");
-        println!("│  All Scores (cosine similarity):                           │");
-        println!(
-            "│    Min:                {:>8.4}                             │",
-            min_score
-        );
-        println!(
-            "│    Max:                {:>8.4}                             │",
-            max_score
-        );
-        println!(
-            "│    Avg:                {:>8.4}                             │",
-            avg_score
-        );
-        println!("├─────────────────────────────────────────────────────────────┤");
-        println!(
-            "│  Top-{} Scores:                                             │",
-            limit
-        );
-        println!(
-            "│    Min:                {:>8.4}                             │",
-            top_min
-        );
-        println!(
-            "│    Max:                {:>8.4}                             │",
-            top_max
-        );
-        println!(
-            "│    Avg:                {:>8.4}                             │",
-            top_avg
-        );
-        println!("├─────────────────────────────────────────────────────────────┤");
-        println!(
-            "│  Source files in results: {}                               │",
-            unique_sources.len()
-        );
-        for source in unique_sources.iter().take(5) {
-            println!("│    - {:<52} │", truncate_str(source, 52));
-        }
-        if unique_sources.len() > 5 {
-            println!(
-                "│    ... and {} more                                         │",
-                unique_sources.len() - 5
-            );
-        }
-        println!("├─────────────────────────────────────────────────────────────┤");
-        println!(
-            "│  Similarity calc:      {:>8.2} ms                         │",
-            similarity_time.as_secs_f64() * 1000.0
-        );
-        println!(
-            "│  Total search time:    {:>8.2} ms                         │",
-            total_time.as_secs_f64() * 1000.0
-        );
-        println!("└─────────────────────────────────────────────────────────────┘\n");
-
-        // Log individual top results
-        if !results.is_empty() {
-            println!("Top {} results:", results.len().min(5));
-            for (i, result) in results.iter().take(5).enumerate() {
-                let preview = truncate_str(&result.content.replace('\n', " "), 60);
-                println!(
-                    "  {}. [{}] score={:.4}: \"{}\"",
-                    i + 1,
-                    result.source_file,
-                    result.score,
-                    preview
-                );
-            }
-            println!();
-        }
 
         results
-    }
-
-    async fn load_manifest(&mut self) {
-        if let Some(ref cache_dir) = self.cache_dir {
-            let manifest_path = cache_dir.join("manifest.json");
-            if let Ok(content) = tokio::fs::read_to_string(&manifest_path).await {
-                if let Ok(manifest) = serde_json::from_str(&content) {
-                    self.manifest = manifest;
-                    println!(
-                        "RagActor: Loaded manifest with {} entries",
-                        self.manifest.len()
-                    );
-                }
-            }
-        }
-    }
-
-    async fn save_manifest(&self) {
-        if let Some(ref cache_dir) = self.cache_dir {
-            let manifest_path = cache_dir.join("manifest.json");
-            if let Ok(content) = serde_json::to_string_pretty(&self.manifest) {
-                if let Err(e) = tokio::fs::write(&manifest_path, content).await {
-                    println!("RagActor: Warning - failed to save manifest: {}", e);
-                }
-            }
-        }
     }
 
     /// Get current Unix timestamp in seconds
@@ -890,73 +722,6 @@ impl RagRetrievalActor {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
-    }
-
-    /// Check if a cache entry is expired (older than 1 day)
-    fn is_cache_expired(generated_at: u64) -> bool {
-        let now = Self::current_timestamp();
-        // If generated_at is 0 (legacy entry without timestamp), treat as expired
-        if generated_at == 0 {
-            return true;
-        }
-        now.saturating_sub(generated_at) > CACHE_MAX_AGE_SECS
-    }
-
-    /// Compute a short hash of a path for use in cache directory names
-    fn compute_path_hash(path: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(path.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
-        hash[..16].to_string()
-    }
-
-    /// Generate a safe filename for caching embeddings based on file path
-    fn cache_filename_for_path(file_path: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(file_path.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
-        format!("{}.embeddings.json", &hash[..16])
-    }
-
-    /// Save embeddings to disk cache
-    async fn save_embeddings(
-        &self,
-        file_path: &str,
-        file_hash: &str,
-        chunks: &[String],
-        embeddings: &[Vec<f32>],
-    ) -> Result<(), String> {
-        let cache_dir = self
-            .cache_dir
-            .as_ref()
-            .ok_or_else(|| "No cache directory set".to_string())?;
-
-        let cache_file = cache_dir.join(Self::cache_filename_for_path(file_path));
-
-        let cached = CachedEmbeddings {
-            file_path: file_path.to_string(),
-            file_hash: file_hash.to_string(),
-            chunks: chunks.to_vec(),
-            embeddings: embeddings.to_vec(),
-        };
-
-        let content = serde_json::to_string(&cached)
-            .map_err(|e| format!("Failed to serialize embeddings: {}", e))?;
-
-        tokio::fs::write(&cache_file, content)
-            .await
-            .map_err(|e| format!("Failed to write embeddings cache: {}", e))?;
-
-        Ok(())
-    }
-
-    /// Load embeddings from disk cache
-    async fn load_embeddings(&self, file_path: &str) -> Option<CachedEmbeddings> {
-        let cache_dir = self.cache_dir.as_ref()?;
-        let cache_file = cache_dir.join(Self::cache_filename_for_path(file_path));
-
-        let content = tokio::fs::read_to_string(&cache_file).await.ok()?;
-        serde_json::from_str(&content).ok()
     }
 }
 
@@ -1001,23 +766,6 @@ fn extract_text_from_docx_xml(xml: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
-}
-
-/// Compute cosine similarity between two vectors
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-
-    dot / (norm_a * norm_b)
 }
 
 /// Truncate a string to a maximum length, adding ellipsis if needed

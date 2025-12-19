@@ -55,6 +55,14 @@ const getStatusBarColors = (status: OperationStatus) => {
                 icon: 'text-red-600',
                 progress: 'bg-red-500',
             };
+        case 'indexing':
+            return {
+                bg: 'bg-indigo-50',
+                border: 'border-indigo-200',
+                text: 'text-indigo-800',
+                icon: 'text-indigo-600',
+                progress: 'bg-indigo-500',
+            };
         default:
             return {
                 bg: 'bg-gray-50',
@@ -81,6 +89,8 @@ const getOperationIcon = (status: OperationStatus) => {
             return '💬';
         case 'reloading':
             return '🔄';
+        case 'indexing':
+            return '📂';
         default:
             return '⏳';
     }
@@ -177,17 +187,17 @@ export function StatusBar() {
                                 {operationStatus.message}
                             </span>
                             
-                            {/* Progress info for downloads */}
-                            {operationStatus.type === 'downloading' && operationStatus.currentFile && !operationStatus.completed && (
-                                <span className="ml-2 text-xs opacity-75">
-                                    ({operationStatus.currentFile})
-                                </span>
-                            )}
-                        </div>
-                        
-                        {/* Progress bar for downloads */}
-                        {operationStatus.type === 'downloading' && operationStatus.progress !== undefined && !operationStatus.completed && (
-                            <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden flex-shrink-0">
+                        {/* Progress info for downloads and indexing */}
+                        {(operationStatus.type === 'downloading' || operationStatus.type === 'indexing') && operationStatus.currentFile && !operationStatus.completed && (
+                            <span className="ml-2 text-xs opacity-75">
+                                ({operationStatus.currentFile})
+                            </span>
+                        )}
+                    </div>
+                    
+                    {/* Progress bar for downloads and indexing */}
+                    {(operationStatus.type === 'downloading' || operationStatus.type === 'indexing') && operationStatus.progress !== undefined && !operationStatus.completed && (
+                        <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden flex-shrink-0">
                                 <div 
                                     className={`h-full ${colors!.progress} transition-all duration-300`}
                                     style={{ width: `${operationStatus.progress}%` }}

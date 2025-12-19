@@ -811,6 +811,15 @@ pub struct RagIndexResult {
     pub cache_hits: usize,
 }
 
+/// Event payload for RAG indexing progress
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RagProgressEvent {
+    pub total_chunks: usize,
+    pub processed_chunks: usize,
+    pub current_file: String,
+    pub is_complete: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatSummary {
     pub id: String,

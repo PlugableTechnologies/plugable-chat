@@ -13,7 +13,7 @@ import {
 export type ReasoningEffort = 'low' | 'medium' | 'high';
 
 // Operation status types for the status bar
-export type OperationType = 'none' | 'downloading' | 'loading' | 'streaming' | 'reloading';
+export type OperationType = 'none' | 'downloading' | 'loading' | 'streaming' | 'reloading' | 'indexing';
 
 export interface OperationStatus {
     type: OperationType;
@@ -316,6 +316,7 @@ let unlistenServiceStartComplete: (() => void) | undefined;
 let unlistenServiceRestartStarted: (() => void) | undefined;
 let unlistenServiceRestartComplete: (() => void) | undefined;
 let unlistenSystemPrompt: (() => void) | undefined;
+let unlistenRagProgress: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
 let modelFetchPromise: Promise<void> | null = null;
@@ -1274,6 +1275,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
             });
 
+            // RAG progress listener
+            const ragProgressListener = await listen<{ total_chunks: number; processed_chunks: number; current_file: string; is_complete: boolean }>('rag-progress', (event) => {
+                const { total_chunks, processed_chunks, current_file, is_complete } = event.payload;
+                const progress = total_chunks > 0 ? (processed_chunks / total_chunks) * 100 : 0;
+                
+                set((state) => ({
+                    operationStatus: {
+                        type: 'indexing',
+                        message: `Processing Chunk ${processed_chunks} / ${total_chunks}`,
+                        currentFile: current_file,
+                        progress,
+                        completed: is_complete,
+                        startTime: state.operationStatus?.startTime || Date.now(),
+                    },
+                    ragChunkCount: processed_chunks,
+                }));
+
+                if (is_complete) {
+                    setTimeout(() => {
+                        const state = get();
+                        if (state.operationStatus?.completed && state.operationStatus?.type === 'indexing') {
+                            set({ operationStatus: null });
+                        }
+                    }, 3000);
+                }
+            });
+
             const modelSelectedListener = await listen<string>('model-selected', (event) => {
                 set({ currentModel: event.payload });
             });
@@ -1574,6 +1602,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 systemPromptListener();
                 downloadProgressListener();
                 loadCompleteListener();
+                ragProgressListener();
                 serviceStopStartedListener();
                 serviceStopCompleteListener();
                 serviceStartStartedListener();
@@ -1598,6 +1627,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenSidebarUpdate = sidebarUpdateListener;
             unlistenDownloadProgress = downloadProgressListener;
             unlistenLoadComplete = loadCompleteListener;
+            unlistenRagProgress = ragProgressListener;
             unlistenServiceStopStarted = serviceStopStartedListener;
             unlistenServiceStopComplete = serviceStopCompleteListener;
             unlistenServiceStartStarted = serviceStartStartedListener;
@@ -1672,6 +1702,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenLoadComplete();
             unlistenLoadComplete = undefined;
         }
+        if (unlistenRagProgress) {
+            unlistenRagProgress();
+            unlistenRagProgress = undefined;
+        }
         if (unlistenServiceStopStarted) {
             unlistenServiceStopStarted();
             unlistenServiceStopStarted = undefined;
@@ -1730,7 +1764,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => ({ attachedPaths: [...s.attachedPaths, path] }));
         
         // Immediately trigger indexing
-        set({ isIndexingRag: true });
+        set({ 
+            isIndexingRag: true,
+            operationStatus: {
+                type: 'indexing',
+                message: 'Preparing documents...',
+                startTime: Date.now(),
+            }
+        });
         try {
             const result = await invoke<RagIndexResult>('process_rag_documents', { paths: get().attachedPaths });
             console.log(`[ChatStore] RAG indexing complete: ${result.total_chunks} chunks from ${result.files_processed} files`);
@@ -1766,7 +1807,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         
         console.log(`[ChatStore] Processing ${paths.length} RAG documents...`);
-        set({ isIndexingRag: true });
+        set({ 
+            isIndexingRag: true,
+            operationStatus: {
+                type: 'indexing',
+                message: 'Preparing documents...',
+                startTime: Date.now(),
+            }
+        });
         
         try {
             const result = await invoke<RagIndexResult>('process_rag_documents', { paths });
