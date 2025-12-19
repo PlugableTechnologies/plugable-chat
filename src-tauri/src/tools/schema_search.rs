@@ -15,6 +15,7 @@ use crate::actors::schema_vector_actor::SchemaVectorMsg;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaSearchInput {
     /// Natural language query describing what data/tables are needed
+    #[serde(alias = "queries")]
     pub query: String,
     /// Maximum number of tables to return (default: 5)
     #[serde(default = "default_max_tables")]

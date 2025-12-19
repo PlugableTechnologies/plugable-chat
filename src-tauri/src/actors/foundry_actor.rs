@@ -377,6 +377,8 @@ pub struct ModelGatewayActor {
     registered_eps: Vec<String>,
     /// All valid Execution Providers available on this system
     valid_eps: Vec<String>,
+    /// Last system prompt logged to avoid duplication
+    last_logged_system_prompt: Option<String>,
 }
 
 impl ModelGatewayActor {
@@ -391,6 +393,7 @@ impl ModelGatewayActor {
             embedding_model: None,
             registered_eps: Vec::new(),
             valid_eps: Vec::new(),
+            last_logged_system_prompt: None,
         }
     }
 
@@ -688,15 +691,26 @@ impl ModelGatewayActor {
                         } else {
                             // Log the actual system message being used
                             if let Some(sys_msg) = messages.iter().find(|m| m.role == "system") {
-                                println!(
-                                    "[FoundryActor] Using system message ({} chars)",
-                                    sys_msg.content.len()
-                                );
-                                // Always log the full system prompt for debugging, independent of verbosity.
-                                println!(
-                                    "[FoundryActor] --- SYSTEM PROMPT BEGIN ---\n{}\n[FoundryActor] --- SYSTEM PROMPT END ---",
-                                    sys_msg.content
-                                );
+                                let content = sys_msg.content.clone();
+                                let changed = self.last_logged_system_prompt.as_ref() != Some(&content);
+
+                                if changed {
+                                    println!(
+                                        "[FoundryActor] Using system message ({} chars)",
+                                        content.len()
+                                    );
+                                    // Always log the full system prompt for debugging, independent of verbosity.
+                                    println!(
+                                        "[FoundryActor] --- SYSTEM PROMPT BEGIN ---\n{}\n[FoundryActor] --- SYSTEM PROMPT END ---",
+                                        content
+                                    );
+                                    self.last_logged_system_prompt = Some(content);
+                                } else if verbose_logging {
+                                    println!(
+                                        "[FoundryActor] Using system message ({} chars) [UNCHANGED]",
+                                        content.len()
+                                    );
+                                }
                             }
                         }
 

@@ -1517,6 +1517,7 @@ async fn run_agentic_loop(
             assistant_response.len(),
             iteration_elapsed.as_secs_f64()
         );
+        println!("[AgenticLoop] 📄 Full model response:\n---\n{}\n---", assistant_response);
         let _ = std::io::stdout().flush();
         // #region agent log
         {
@@ -2630,6 +2631,8 @@ fn build_system_prompt(
 
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
     if !additions.is_empty() {
+        sections.push("## Capabilities\n\nYou are equipped with specialized tools to fetch real-time data, execute SQL queries, and perform calculations. You MUST use these tools whenever the user's request requires factual data or database access. Do NOT claim you cannot access databases or perform queries; you have these capabilities enabled via the tools listed below.".to_string());
+        sections.push("## Factual Grounding\n\n**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `execute_sql` or `search_schemas`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.".to_string());
         sections.push("## Additional prompts from tools".to_string());
         sections.extend(additions);
     }
@@ -2697,10 +2700,15 @@ fn collect_tool_prompt_additions(
             ));
             tool_search_prompt_added = true;
         }
-    } else if has_any_tools && !capabilities.use_native_tools {
-        // Only add text-based format prompts when NOT using native tools
-        // Native tools use the model's built-in format, no additional instructions needed
-        if let Some(format_prompt) = ToolCapabilityResolver::get_prompt_format_instructions(capabilities.primary_format) {
+    }
+
+    // Always provide format instructions if we have a known format for this model,
+    // even if using native tools (local models often need the explicit tag to activate).
+    if has_any_tools && !python_prompt_allowed {
+        if let Some(format_prompt) = ToolCapabilityResolver::get_prompt_format_instructions(
+            capabilities.primary_format,
+            capabilities.model_tool_format,
+        ) {
             additions.push(format_prompt);
         }
     }
@@ -2741,7 +2749,7 @@ fn collect_tool_prompt_additions(
     if capabilities.available_builtins.contains(tool_capability::BUILTIN_SEARCH_SCHEMAS) {
         let mut body = String::from(
             "Use `search_schemas` to discover database tables that may help answer the user's question.\n\
-             Parameters: `queries` (list of search terms), `top_k` (max results, default 5).\n\
+             Parameters: `query` (search term), `max_tables` (max results, default 5).\n\
              Returns table names, columns, and descriptions relevant to the query.",
         );
         if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "search_schemas")) {
@@ -2760,8 +2768,14 @@ fn collect_tool_prompt_additions(
     if capabilities.available_builtins.contains(tool_capability::BUILTIN_EXECUTE_SQL) {
         let mut body = String::from(
             "Use `execute_sql` to run SQL queries against configured database sources.\n\
-             Parameters: `source_id` (from search_schemas results), `query` (SQL statement).\n\
-             Returns query results as rows. Always execute queries to answer data questions - do NOT return SQL code to the user.",
+             Parameters: `source_id` (from search_schemas results), `sql` (SQL statement).\n\
+             Returns query results as rows.\n\n\
+             **CRITICAL REQUIREMENTS**:\n\
+             - Always execute queries to answer data questions using the tool-calling format described below - do NOT return SQL code to the user.\n\
+             - NEVER make up, infer, or guess data values. All numbers, dates, totals, and facts MUST come from executing `execute_sql`.\n\
+             - NEVER display SQL code or query text to the user - only show the actual query results.\n\
+             - NEVER say you cannot access the database or that you don't have the ability to query it. You ARE equipped with tools to do this; use them.\n\
+             - If you cannot execute the query, say so explicitly rather than inventing results.",
         );
         if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "execute_sql")) {
             let trimmed = custom.trim();
@@ -3339,7 +3353,7 @@ fn render_auto_context_sections(
                 }
                 body.push_str(&line);
             }
-            body.push_str("\n\n**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n1. Use the `execute_sql` tool with the `source_id` shown above (e.g., `bq-1765404617532`)\n2. Write a SQL query that answers the user's question using the table and columns listed\n3. Execute the query automatically using `execute_sql` - do NOT return SQL code to the user\n4. Return the query results directly to answer the user's question\n\nDo NOT say you cannot access the database or that you don't have the ability to query it. The schema discovery means you should query it automatically.");
+            body.push_str("\n\n**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n1. Use the `execute_sql` tool with the `source_id` shown above (e.g., `bq-1765404617532`)\n2. Write a SQL query that answers the user's question using the table and columns listed\n3. Execute the query automatically by calling `execute_sql(source_id=\"...\", sql=\"...\")` using the tool-calling format described below - do NOT return SQL code to the user\n4. Return the query results directly to answer the user's question\n\n**CRITICAL - NO HALLUCINATIONS**:\n- NEVER make up, infer, or guess data values. All numbers, dates, and facts MUST come from executing `execute_sql`.\n- NEVER display SQL code to the user - only show the actual query results.\n- NEVER say you cannot access the database or that you don't have the ability to query it. You ARE equipped with tools to do this; use them.\n- If you cannot execute the query, say so explicitly rather than inventing results.");
             sections.push(format!("### Auto schema search\n{}", body));
         }
     }
@@ -3826,6 +3840,18 @@ async fn chat(
             "auto schema_search",
         )
         .await;
+    }
+
+    // Ensure database toolbox is initialized if database tools are enabled
+    if search_schemas_enabled || execute_sql_enabled {
+        if let Err(e) =
+            ensure_toolbox_running(&handles.database_toolbox_tx, &database_toolbox_config).await
+        {
+            println!(
+                "[Chat] Warning: Failed to ensure database toolbox is running: {}",
+                e
+            );
+        }
     }
 
     // Resolve tool capabilities using centralized resolver
@@ -6189,6 +6215,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            // Set window title with version number
+            if let Some(window) = app.get_webview_window("main") {
+                let git_count = option_env!("PLUGABLE_CHAT_GIT_COUNT")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                let version_title = format!("Plugable Chat v0.{:03} - Microsoft Foundry", git_count);
+                if let Err(e) = window.set_title(&version_title) {
+                    eprintln!("[Launch] Failed to set window title: {}", e);
+                }
+            }
+
             // Initialize channels
             let (vector_tx, vector_rx) = mpsc::channel(32);
             let (foundry_tx, foundry_rx) = mpsc::channel(32);
@@ -6496,8 +6533,9 @@ pub fn run() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::tool_capability::{ResolvedToolCapabilities, ToolCallFormatName as CapabilityFormatName};
+mod inline_tests {
+    use super::tool_capability::{ResolvedToolCapabilities};
+    use crate::settings::ToolCallFormatName;
     use crate::protocol::ToolFormat;
     use std::collections::HashSet;
 
@@ -6510,14 +6548,7 @@ mod tests {
     ) -> ResolvedToolCapabilities {
         ResolvedToolCapabilities {
             available_builtins: available_builtins.iter().map(|s| s.to_string()).collect(),
-            primary_format: match primary_format {
-                ToolCallFormatName::Native => CapabilityFormatName::Native,
-                ToolCallFormatName::Hermes => CapabilityFormatName::Hermes,
-                ToolCallFormatName::Mistral => CapabilityFormatName::Mistral,
-                ToolCallFormatName::Pythonic => CapabilityFormatName::Pythonic,
-                ToolCallFormatName::PureJson => CapabilityFormatName::PureJson,
-                ToolCallFormatName::CodeMode => CapabilityFormatName::CodeMode,
-            },
+            primary_format,
             enabled_formats: vec![],
             use_native_tools: use_native,
             active_mcp_tools: vec![],

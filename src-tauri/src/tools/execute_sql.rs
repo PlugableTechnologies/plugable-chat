@@ -15,6 +15,7 @@ pub struct ExecuteSqlInput {
     /// The database source ID to query
     pub source_id: String,
     /// SQL query to execute
+    #[serde(alias = "query")]
     pub sql: String,
     /// Optional query parameters (for parameterized queries)
     #[serde(default)]

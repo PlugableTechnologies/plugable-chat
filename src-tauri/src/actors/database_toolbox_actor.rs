@@ -781,16 +781,23 @@ impl DatabaseToolboxActor {
         sql: &str,
         _parameters: &[Value],
     ) -> Result<SqlExecutionResult, String> {
-        let source = {
+        let (source, config) = {
             let state = self.state.read().await;
-            let config = state.config.as_ref().ok_or("Toolbox not configured")?;
-            config
-                .sources
-                .iter()
-                .find(|s| s.id == source_id)
-                .cloned()
-                .ok_or_else(|| format!("Source not found: {}", source_id))?
+            let config = state.config.clone();
+            let source = config.as_ref().and_then(|c| {
+                c.sources.iter().find(|s| s.id == source_id).cloned()
+            });
+            (source, config)
         };
+
+        // If not configured, we can't execute. The caller (lib.rs) should ensure_toolbox_running.
+        let source = source.ok_or_else(|| {
+            if config.is_none() {
+                "Toolbox not configured. Please ensure database sources are enabled in settings.".to_string()
+            } else {
+                format!("Source not found: {}", source_id)
+            }
+        })?;
 
         let execute_candidates: Vec<&str> = if source.kind == SupportedDatabaseKind::Bigquery {
             vec!["execute_sql", "bigquery-execute-sql"]
@@ -798,16 +805,24 @@ impl DatabaseToolboxActor {
             vec![source.kind.execute_tool_name()]
         };
 
-        let response = self
+        let result = self
             .call_mcp_tool_value_checked(
                 &source.id,
                 "execute sql",
                 &execute_candidates,
                 json!({ "sql": sql }),
             )
-            .await?;
+            .await;
 
-        self.parse_sql_execution_result(&response)
+        match result {
+            Ok(response) => self.parse_sql_execution_result(&response),
+            Err(e) if e.contains("required tool not found") || e.contains("host unavailable") => {
+                // Potential connection issue, suggest re-syncing
+                println!("[DatabaseToolboxActor] ExecuteSql failed with potential connection issue: {}. Suggesting re-initialization.", e);
+                Err(format!("Database connection lost for '{}'. Please try refreshing database schemas in settings or check if the database is reachable.", source.name))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Test connection to a source
@@ -1022,31 +1037,57 @@ impl DatabaseToolboxActor {
     }
 
     fn parse_sql_execution_result(&self, response: &Value) -> Result<SqlExecutionResult, String> {
-        // Extract columns and rows from response
-        let columns = response
-            .get("columns")
-            .and_then(|c| c.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default();
+        let mut columns: Vec<String> = Vec::new();
+        let mut rows: Vec<Vec<Value>> = Vec::new();
 
-        let rows: Vec<Vec<Value>> = response
-            .get("rows")
-            .or_else(|| response.get("data"))
-            .and_then(|r| r.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|row| {
-                        if let Some(obj) = row.as_object() {
-                            Some(obj.values().cloned().collect())
-                        } else if let Some(arr) = row.as_array() {
-                            Some(arr.clone())
-                        } else {
-                            None
+        if let Some(arr) = response.as_array() {
+            // Case 1: Raw array of objects (records) - common for BigQuery
+            if !arr.is_empty() {
+                if let Some(first_obj) = arr[0].as_object() {
+                    // Extract column names from the first object
+                    columns = first_obj.keys().cloned().collect();
+                    for row_val in arr {
+                        if let Some(obj) = row_val.as_object() {
+                            let mut row = Vec::new();
+                            for key in &columns {
+                                row.push(obj.get(key).cloned().unwrap_or(Value::Null));
+                            }
+                            rows.push(row);
                         }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+                    }
+                }
+            }
+        } else if let Some(obj) = response.as_object() {
+            // Case 2: Structured object with explicit "columns" and "rows"/"data"
+            columns = obj
+                .get("columns")
+                .and_then(|c| c.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
+            let rows_data = obj
+                .get("rows")
+                .or_else(|| obj.get("data"))
+                .and_then(|r| r.as_array());
+
+            if let Some(arr) = rows_data {
+                for row_val in arr {
+                    if let Some(row_obj) = row_val.as_object() {
+                        // If columns weren't explicit, extract from first row
+                        if columns.is_empty() {
+                            columns = row_obj.keys().cloned().collect();
+                        }
+                        let mut row = Vec::new();
+                        for key in &columns {
+                            row.push(row_obj.get(key).cloned().unwrap_or(Value::Null));
+                        }
+                        rows.push(row);
+                    } else if let Some(row_arr) = row_val.as_array() {
+                        rows.push(row_arr.clone());
+                    }
+                }
+            }
+        }
 
         let row_count = rows.len();
 
@@ -1088,5 +1129,26 @@ mod tests {
         assert!(parsed.success);
         assert_eq!(parsed.columns.len(), 2);
         assert_eq!(parsed.row_count, 1);
+    }
+
+    #[test]
+    fn test_parse_sql_execution_result_array() {
+        let actor = DatabaseToolboxActor::new(
+            tokio::sync::mpsc::channel(1).1,
+            Arc::new(RwLock::new(DatabaseToolboxState::default())),
+            tokio::sync::mpsc::channel(1).0,
+        );
+
+        let array_response = json!([
+            {"id": 1, "name": "Alice"},
+            {"id": 2, "name": "Bob"}
+        ]);
+
+        let result = actor.parse_sql_execution_result(&array_response).unwrap();
+        assert_eq!(result.columns.len(), 2);
+        assert!(result.columns.contains(&"id".to_string()));
+        assert!(result.columns.contains(&"name".to_string()));
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.row_count, 2);
     }
 }

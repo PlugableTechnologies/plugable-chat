@@ -36,6 +36,9 @@ fn main() {
     // Try to build python-sandbox WASM module for double-sandbox security
     build_python_sandbox_wasm(manifest_path);
 
+    // Get git commit count and hash for versioning
+    set_git_version_info(project_root);
+
     tauri_build::build()
 }
 
@@ -194,4 +197,43 @@ fn build_python_sandbox_wasm(manifest_path: &Path) {
             println!("cargo:warning=code_execution will use RustPython directly");
         }
     }
+}
+
+/// Get git commit count and short hash, export as environment variables
+fn set_git_version_info(project_root: &Path) {
+    // Get git commit count
+    let commit_count = Command::new("git")
+        .args(["rev-list", "--count", "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+
+    // Get short git hash
+    let git_hash = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Export as environment variables for use in Rust code
+    println!("cargo:rustc-env=PLUGABLE_CHAT_GIT_COUNT={}", commit_count);
+    println!("cargo:rustc-env=PLUGABLE_CHAT_GIT_HASH={}", git_hash);
 }

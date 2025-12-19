@@ -6759,7 +6759,7 @@ dependencies = [
 
 [[package]]
 name = "plugable-chat"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "arrow",
  "arrow-array",
