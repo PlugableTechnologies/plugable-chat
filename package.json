@@ -1,7 +1,7 @@
 {
   "name": "plugable-chat",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.138.0",
   "type": "module",
   "scripts": {
     "generate-icons": "tauri icon src-tauri/icons/icon.png --output src-tauri/icons",
