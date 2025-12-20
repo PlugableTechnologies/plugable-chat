@@ -55,4 +55,3 @@ src-tauri/data/
 .fastembed_cache
 src/components/plugable-chat.code-workspace
 assets/*
-Cargo.toml

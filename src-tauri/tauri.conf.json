@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "plugable-chat",
-  "version": "0.138.0",
+  "version": "0.139.0",
   "identifier": "com.plugable.chat",
   "build": {
     "beforeDevCommand": "npm run dev",
