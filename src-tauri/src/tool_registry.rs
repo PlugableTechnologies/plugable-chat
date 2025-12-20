@@ -131,6 +131,8 @@ pub fn sql_select_tool() -> ToolSchema {
             "Execute SQL queries against configured database sources. \
             Use schema_search first to discover available tables and their structure. \
             **IMPORTANT: Always use this tool to execute SQL queries automatically. Do NOT return SQL code to the user - execute it and return the results.** \
+            **STRICT SCHEMA ADHERENCE: Only use columns explicitly listed in the schema context. Do NOT hallucinate column names.** \
+            **AGGREGATION PREFERRED: Use SQL aggregation (SUM, COUNT, etc.) to get final answers directly from the database instead of fetching many raw rows.** \
             Returns query results as structured data."
                 .to_string(),
         ),

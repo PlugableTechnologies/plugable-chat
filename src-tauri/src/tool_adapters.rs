@@ -672,6 +672,16 @@ pub fn format_tool_result(
     is_error: bool,
     tool_format: ToolFormat,
 ) -> String {
+    let guidance = if is_error && call.tool == "sql_select" {
+        "\n\n**SQL ERROR**: The query failed. This is often due to using a column name that does not exist in the table. \
+        Please check the 'Auto schema search' results in the system prompt again and ONLY use the columns listed there. \
+        Do NOT guess or hallucinate column names (like 'date', 'sales_date', 'user_id') if they are not explicitly shown in the schema context."
+    } else if is_error {
+        ERROR_GUIDANCE
+    } else {
+        ""
+    };
+
     match tool_format {
         ToolFormat::OpenAI => {
             // OpenAI format - this would typically be a separate message with role "tool"
@@ -679,7 +689,7 @@ pub fn format_tool_result(
             if is_error {
                 format!(
                     "<tool_result server=\"{}\" tool=\"{}\" error=\"true\">\n{}\n</tool_result>{}",
-                    call.server, call.tool, result, ERROR_GUIDANCE
+                    call.server, call.tool, result, guidance
                 )
             } else {
                 format!(
@@ -693,7 +703,7 @@ pub fn format_tool_result(
             if is_error {
                 format!(
                     "<tool_response error=\"true\">\n{}\n</tool_response>{}",
-                    result, ERROR_GUIDANCE
+                    result, guidance
                 )
             } else {
                 format!("<tool_response>\n{}\n</tool_response>", result)
@@ -707,7 +717,7 @@ pub fn format_tool_result(
                     call.server,
                     call.tool,
                     result.replace('"', "\\\""),
-                    ERROR_GUIDANCE
+                    guidance
                 )
             } else {
                 format!(
@@ -723,7 +733,7 @@ pub fn format_tool_result(
             if is_error {
                 format!(
                     "<function_response error=\"true\">\n{}\n</function_response>{}",
-                    result, ERROR_GUIDANCE
+                    result, guidance
                 )
             } else {
                 format!("<function_response>\n{}\n</function_response>", result)
@@ -734,7 +744,7 @@ pub fn format_tool_result(
             if is_error {
                 format!(
                     "<tool_result server=\"{}\" tool=\"{}\" error=\"true\">\n{}\n</tool_result>{}",
-                    call.server, call.tool, result, ERROR_GUIDANCE
+                    call.server, call.tool, result, guidance
                 )
             } else {
                 format!(

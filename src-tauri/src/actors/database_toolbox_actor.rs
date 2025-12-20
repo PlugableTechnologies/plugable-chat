@@ -326,12 +326,17 @@ impl DatabaseToolboxActor {
         }
 
         if let Some(first) = result.content.first() {
-            // If there are multiple text items, treat them as an array of strings
+            // If there are multiple text items, treat them as an array.
+            // Try to parse each as JSON if possible, otherwise keep as string.
             if result.content.len() > 1 && result.content.iter().all(|c| c.text.is_some()) {
                 let items: Vec<Value> = result
                     .content
                     .iter()
-                    .filter_map(|c| c.text.as_ref().map(|t| Value::String(t.clone())))
+                    .filter_map(|c| {
+                        c.text.as_ref().map(|t| {
+                            serde_json::from_str::<Value>(t).unwrap_or(Value::String(t.clone()))
+                        })
+                    })
                     .collect();
                 return Ok(Value::Array(items));
             }
@@ -1043,40 +1048,56 @@ impl DatabaseToolboxActor {
         if let Some(arr) = response.as_array() {
             // Case 1: Raw array of objects (records) - common for BigQuery
             if !arr.is_empty() {
-                if let Some(first_obj) = arr[0].as_object() {
-                    // Extract column names from the first object
-                    columns = first_obj.keys().cloned().collect();
-                    for row_val in arr {
-                        if let Some(obj) = row_val.as_object() {
-                            let mut row = Vec::new();
-                            for key in &columns {
-                                row.push(obj.get(key).cloned().unwrap_or(Value::Null));
-                            }
-                            rows.push(row);
+                // Collect all unique keys from all objects to ensure we don't miss any columns
+                let mut all_keys = std::collections::BTreeSet::new();
+                for row_val in arr {
+                    if let Some(obj) = row_val.as_object() {
+                        for key in obj.keys() {
+                            all_keys.insert(key.clone());
                         }
+                    }
+                }
+                columns = all_keys.into_iter().collect();
+
+                for row_val in arr {
+                    if let Some(obj) = row_val.as_object() {
+                        let mut row = Vec::new();
+                        for key in &columns {
+                            row.push(obj.get(key).cloned().unwrap_or(Value::Null));
+                        }
+                        rows.push(row);
                     }
                 }
             }
         } else if let Some(obj) = response.as_object() {
             // Case 2: Structured object with explicit "columns" and "rows"/"data"
-            columns = obj
-                .get("columns")
-                .and_then(|c| c.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-
             let rows_data = obj
                 .get("rows")
                 .or_else(|| obj.get("data"))
                 .and_then(|r| r.as_array());
 
             if let Some(arr) = rows_data {
+                columns = obj
+                    .get("columns")
+                    .and_then(|c| c.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+
+                // If columns weren't explicit, collect from all rows
+                if columns.is_empty() {
+                    let mut all_keys = std::collections::BTreeSet::new();
+                    for row_val in arr {
+                        if let Some(row_obj) = row_val.as_object() {
+                            for key in row_obj.keys() {
+                                all_keys.insert(key.clone());
+                            }
+                        }
+                    }
+                    columns = all_keys.into_iter().collect();
+                }
+
                 for row_val in arr {
                     if let Some(row_obj) = row_val.as_object() {
-                        // If columns weren't explicit, extract from first row
-                        if columns.is_empty() {
-                            columns = row_obj.keys().cloned().collect();
-                        }
                         let mut row = Vec::new();
                         for key in &columns {
                             row.push(row_obj.get(key).cloned().unwrap_or(Value::Null));
@@ -1085,6 +1106,16 @@ impl DatabaseToolboxActor {
                     } else if let Some(row_arr) = row_val.as_array() {
                         rows.push(row_arr.clone());
                     }
+                }
+            } else {
+                // Case 3: Single record object (e.g. from an aggregation query)
+                columns = obj.keys().cloned().collect();
+                if !columns.is_empty() {
+                    let mut row = Vec::new();
+                    for key in &columns {
+                        row.push(obj.get(key).cloned().unwrap_or(Value::Null));
+                    }
+                    rows.push(row);
                 }
             }
         }
