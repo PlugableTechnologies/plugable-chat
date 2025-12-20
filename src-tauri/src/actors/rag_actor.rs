@@ -6,7 +6,8 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::TextEmbedding;
 use futures::StreamExt;
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::index::Index;
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::{connect, Connection, Table};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -35,9 +36,6 @@ struct IndexedChunk {
     chunk_index: usize,
     vector: Vec<f32>,
 }
-
-/// Truncate a string to a maximum length, adding ellipsis if needed
-fn truncate_str(s: &str, max_len: usize) -> String {
 
 /// The RAG Actor handles document processing and retrieval
 pub struct RagRetrievalActor {
@@ -87,7 +85,13 @@ impl RagRetrievalActor {
         };
 
         self.db = Some(db);
-        self.table = Some(table);
+        self.table = Some(table.clone());
+
+        // Create scalar indexes for faster lookups
+        // Note: In LanceDB 0.4, create_index on a non-vector column creates a scalar index
+        let _ = table.create_index(&["id"], Index::Auto).execute().await;
+        let _ = table.create_index(&["hash"], Index::Auto).execute().await;
+
         Ok(())
     }
 
@@ -202,7 +206,7 @@ impl RagRetrievalActor {
     async fn get_indexed_files(&self) -> Vec<String> {
         if let Some(ref table) = self.table {
             let mut files = std::collections::HashSet::new();
-            if let Ok(mut query) = table.query().select(&["source_file"]).execute().await {
+            if let Ok(mut query) = table.query().select(Select::Columns(vec!["source_file".to_string()])).execute().await {
                 while let Some(Ok(batch)) = query.next().await {
                     if let Some(col) = batch.column_by_name("source_file") {
                         if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
@@ -249,6 +253,42 @@ impl RagRetrievalActor {
             "RagActor: Found {} files to process",
             files_to_process.len()
         );
+
+        // Load existing chunk IDs for the files we are about to process
+        let mut existing_ids = std::collections::HashSet::new();
+        if let Some(ref table) = self.table {
+            let file_names: Vec<String> = files_to_process.iter()
+                .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                .map(|s| s.to_string())
+                .collect();
+            
+            if !file_names.is_empty() {
+                // If there are many files, we process in batches to avoid huge filters
+                for chunk in file_names.chunks(100) {
+                    let filter = chunk.iter()
+                        .map(|f| format!("source_file = '{}'", f.replace("'", "''")))
+                        .collect::<Vec<_>>()
+                        .join(" OR ");
+                    
+                    if let Ok(mut query) = table.query()
+                        .only_if(filter)
+                        .select(Select::Columns(vec!["id".to_string()]))
+                        .execute()
+                        .await 
+                    {
+                        while let Some(Ok(batch)) = query.next().await {
+                            if let Some(col) = batch.column_by_name("id") {
+                                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                                    for i in 0..arr.len() {
+                                        existing_ids.insert(arr.value(i).to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Pre-process: Collect all chunks from all files
         struct PendingChunk {
@@ -305,24 +345,29 @@ impl RagRetrievalActor {
 
         // Process chunks one by one
         let mut processed_chunks = 0;
+        let mut session_hash_cache: HashMap<String, Vec<f32>> = HashMap::new();
+
         for chunk in pending_chunks {
             let chunk_id = format!("{}:{}:{}", chunk.hash, chunk.source_file, chunk.chunk_index);
             
-            // 1. Skip if already processed for this file
-            if self.chunk_exists(&chunk_id).await {
+            // 1. Skip if already processed for this file (uses in-memory HashSet from pre-pass)
+            if existing_ids.contains(&chunk_id) {
                 processed_chunks += 1;
                 cache_hits += 1;
                 continue;
             }
 
             // 2. Check if we have an embedding for this content anywhere
-            let cached_embedding = self.get_cached_embedding(&chunk.hash).await;
-            
-            let embedding = if let Some(v) = cached_embedding {
+            if let Some(v) = session_hash_cache.get(&chunk.hash) {
                 cache_hits += 1;
+                let v = v.clone();
                 // Save new association for this file
                 self.save_chunk_to_db(&chunk_id, &chunk.hash, &chunk.content, &chunk.source_file, chunk.chunk_index, &v).await?;
-                v
+            } else if let Some(v) = self.get_cached_embedding(&chunk.hash).await {
+                cache_hits += 1;
+                session_hash_cache.insert(chunk.hash.clone(), v.clone());
+                // Save new association for this file
+                self.save_chunk_to_db(&chunk_id, &chunk.hash, &chunk.content, &chunk.source_file, chunk.chunk_index, &v).await?;
             } else {
                 // 3. Generate embedding
                 let model = Arc::clone(&embedding_model);
@@ -337,9 +382,10 @@ impl RagRetrievalActor {
                 .next()
                 .ok_or("Failed to get embedding")?;
 
+                session_hash_cache.insert(chunk.hash.clone(), v.clone());
+
                 // 4. Save to LanceDB
                 self.save_chunk_to_db(&chunk_id, &chunk.hash, &chunk.content, &chunk.source_file, chunk.chunk_index, &v).await?;
-                v
             };
 
             processed_chunks += 1;

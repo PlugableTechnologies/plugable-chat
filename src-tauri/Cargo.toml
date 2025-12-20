@@ -31,6 +31,8 @@ reqwest = { version = "0.12.24", features = ["json"] }
 
 # Local embeddings via ONNX Runtime
 fastembed = "4"
+# ONNX Runtime with GPU support (CUDA, TensorRT, CoreML)
+ort = { version = "2.0.0-rc.9", features = ["cuda", "tensorrt", "coreml"] }
 
 # File hashing for cache invalidation
 sha2 = "0.10"

@@ -6378,6 +6378,7 @@ version = "2.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52afb44b6b0cffa9bf45e4d37e5a4935b0334a51570658e279e9e3e6cf324aa5"
 dependencies = [
+ "half 2.4.1",
  "ndarray",
  "ort-sys",
  "tracing",
@@ -6773,6 +6774,7 @@ dependencies = [
  "lancedb",
  "lazy_static",
  "mcp-test-server",
+ "ort",
  "pdf-extract",
  "python-sandbox",
  "regex",

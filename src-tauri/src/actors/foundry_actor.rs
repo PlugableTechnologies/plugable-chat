@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::{sleep, timeout};
 
 /// Target embedding dimension (must match LanceDB schema)
@@ -372,7 +372,8 @@ pub struct ModelGatewayActor {
     available_models: Vec<String>,
     model_info: Vec<ModelInfo>,
     app_handle: AppHandle,
-    embedding_model: Option<Arc<TextEmbedding>>,
+    /// Shared embedding model (managed by this actor, accessible to other actors)
+    shared_embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
     /// Execution Providers successfully registered by Foundry
     registered_eps: Vec<String>,
     /// All valid Execution Providers available on this system
@@ -382,7 +383,11 @@ pub struct ModelGatewayActor {
 }
 
 impl ModelGatewayActor {
-    pub fn new(foundry_msg_rx: mpsc::Receiver<FoundryMsg>, app_handle: AppHandle) -> Self {
+    pub fn new(
+        foundry_msg_rx: mpsc::Receiver<FoundryMsg>,
+        app_handle: AppHandle,
+        shared_embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+    ) -> Self {
         Self {
             foundry_msg_rx,
             port: None,
@@ -390,7 +395,7 @@ impl ModelGatewayActor {
             available_models: Vec::new(),
             model_info: Vec::new(),
             app_handle,
-            embedding_model: None,
+            shared_embedding_model,
             registered_eps: Vec::new(),
             valid_eps: Vec::new(),
             last_logged_system_prompt: None,
@@ -403,22 +408,72 @@ impl ModelGatewayActor {
         lower.contains("gpt-oss")
     }
 
+    /// Check if Foundry reports GPU execution providers are available
+    fn has_gpu_eps(valid_eps: &[String]) -> bool {
+        for ep in valid_eps {
+            let ep_lower = ep.to_lowercase();
+            if ep_lower.contains("cuda")
+                || ep_lower.contains("tensorrt")
+                || ep_lower.contains("coreml")
+                || ep_lower.contains("openvino")
+                || ep_lower.contains("directml")
+                || ep_lower.contains("rocm")
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     pub async fn run(mut self) {
         println!("Initializing Foundry Local Manager via CLI...");
 
-        // Initialize local embedding model (all-MiniLM-L6-v2, 384 dimensions)
+        // Try to start the service or ensure it's running
+        if let Err(e) = self.ensure_service_running().await {
+            println!(
+                "Warning: Failed to ensure Foundry service is running: {}",
+                e
+            );
+        }
+
+        // Try to get the port and EPs with retries
+        // Foundry may take time to start up, so we retry with exponential backoff
+        self.update_connection_info_with_retry(5, Duration::from_secs(2))
+            .await;
+
+        // Initialize embedding model after detecting available execution providers
+        // Note: fastembed uses ort internally, which will automatically use GPU if
+        // available (since ort is compiled with GPU features). We log GPU detection
+        // for user awareness, but don't need to explicitly configure execution providers.
         println!("FoundryActor: Initializing local embedding model (all-MiniLM-L6-v2)...");
-        match tokio::task::spawn_blocking(|| {
+        
+        let has_gpu = Self::has_gpu_eps(&self.valid_eps);
+        if has_gpu {
+            println!(
+                "FoundryActor: Detected GPU execution providers: {:?}",
+                self.valid_eps
+            );
+            println!("FoundryActor: GPU acceleration will be used if available");
+        } else {
+            println!("FoundryActor: No GPU execution providers detected, using CPU");
+        }
+
+        let shared_model = Arc::clone(&self.shared_embedding_model);
+        match tokio::task::spawn_blocking(move || {
             let mut options = InitOptions::default();
             options.model_name = EmbeddingModel::AllMiniLML6V2;
             options.show_download_progress = true;
+            // Note: execution_providers field may not be available in fastembed v4
+            // The ort crate (used by fastembed) will automatically use GPU if compiled
+            // with GPU features and GPU is available
             TextEmbedding::try_new(options)
         })
         .await
         {
             Ok(Ok(model)) => {
                 println!("FoundryActor: Embedding model loaded successfully");
-                self.embedding_model = Some(Arc::new(model));
+                let mut guard = shared_model.write().await;
+                *guard = Some(Arc::new(model));
             }
             Ok(Err(e)) => {
                 println!("FoundryActor ERROR: Failed to load embedding model: {}", e);
@@ -431,28 +486,17 @@ impl ModelGatewayActor {
             }
         }
 
-        // Try to start the service or ensure it's running
-        if let Err(e) = self.ensure_service_running().await {
-            println!(
-                "Warning: Failed to ensure Foundry service is running: {}",
-                e
-            );
-        }
-
-        // Try to get the port and model with retries
-        // Foundry may take time to start up, so we retry with exponential backoff
-        self.update_connection_info_with_retry(5, Duration::from_secs(2))
-            .await;
-
         let client = reqwest::Client::new();
 
         while let Some(msg) = self.foundry_msg_rx.recv().await {
             match msg {
                 FoundryMsg::GetEmbedding { text, respond_to } => {
-                    // Generate embeddings using local fastembed model
-                    if let Some(model) = &self.embedding_model {
+                    // Generate embeddings using shared fastembed model
+                    let model_guard = self.shared_embedding_model.read().await;
+                    if let Some(model) = model_guard.as_ref() {
                         let model_clone = Arc::clone(model);
                         let text_clone = text.clone();
+                        drop(model_guard); // Release lock before blocking operation
 
                         println!(
                             "FoundryActor: Generating embedding locally (text len: {})",

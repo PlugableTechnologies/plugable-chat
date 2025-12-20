@@ -6381,10 +6381,15 @@ pub fn run() {
                 actor.run().await;
             });
 
-            // Spawn Foundry Actor
+            // Spawn Foundry Actor (manages embedding model initialization with GPU support)
             let foundry_app_handle = app_handle.clone();
+            let embedding_model_arc_for_foundry = embedding_model_arc.clone();
             tauri::async_runtime::spawn(async move {
-                let actor = ModelGatewayActor::new(foundry_rx, foundry_app_handle);
+                let actor = ModelGatewayActor::new(
+                    foundry_rx,
+                    foundry_app_handle,
+                    embedding_model_arc_for_foundry,
+                );
                 actor.run().await;
             });
 
@@ -6417,31 +6422,8 @@ pub fn run() {
                 actor.run().await;
             });
 
-            // Initialize embedding model in background (shared between FoundryActor and RAG)
-            tauri::async_runtime::spawn(async move {
-                use fastembed::{EmbeddingModel, InitOptions};
-
-                match tokio::task::spawn_blocking(|| {
-                    let mut options = InitOptions::default();
-                    options.model_name = EmbeddingModel::AllMiniLML6V2;
-                    options.show_download_progress = true;
-                    TextEmbedding::try_new(options)
-                })
-                .await
-                {
-                    Ok(Ok(model)) => {
-                        let mut guard = embedding_model_arc.write().await;
-                        *guard = Some(Arc::new(model));
-                        println!("[Startup] Embedding model ready (all-MiniLM-L6-v2)");
-                    }
-                    Ok(Err(e)) => {
-                        println!("[Startup] ERROR: Failed to initialize embedding model: {}", e);
-                    }
-                    Err(e) => {
-                        println!("[Startup] ERROR: Embedding model task panicked: {}", e);
-                    }
-                }
-            });
+            // Embedding model initialization is now handled by ModelGatewayActor
+            // after it detects available execution providers from Foundry Local
 
             // Spawn Database Toolbox Actor
             let database_toolbox_state = Arc::new(RwLock::new(
