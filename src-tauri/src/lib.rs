@@ -2285,6 +2285,7 @@ async fn run_agentic_loop(
                             messages: messages_json,
                             embedding_vector: Some(vector),
                             pinned: false,
+                            model: Some(model_name.clone()),
                         })
                         .await
                     {
@@ -6207,7 +6208,18 @@ struct LaunchOverridesPayload {
 }
 
 #[tauri::command]
-fn get_launch_overrides(
+async fn get_current_model(handles: State<'_, ActorHandles>) -> Result<Option<ModelInfo>, String> {
+    let (tx, rx) = oneshot::channel();
+    handles
+        .foundry_tx
+        .send(FoundryMsg::GetCurrentModel { respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "Foundry actor died".to_string())
+}
+
+#[tauri::command]
+async fn get_launch_overrides(
     launch_config: State<'_, LaunchConfigState>,
 ) -> Result<LaunchOverridesPayload, String> {
     let launch_overrides = &launch_config.launch_overrides;
@@ -6578,6 +6590,7 @@ pub fn run() {
             approve_tool_call,
             reject_tool_call,
             get_pending_tool_approvals,
+            get_current_model,
             get_launch_overrides,
             heartbeat_ping
         ])

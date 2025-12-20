@@ -1348,25 +1348,30 @@ const AssistantMessage = memo(function AssistantMessage({
     return (
         <>
             {showSystemPromptAccordion && message.systemPromptText && (
-                <details className="system-prompt-accordion group/system-prompt my-3 border border-blue-200 rounded-xl overflow-hidden bg-blue-50/70">
-                    <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-blue-100/60 transition-colors select-none">
-                        <span className="text-blue-600 text-lg">🛈</span>
-                        <span className="font-semibold text-blue-900 text-sm">System prompt</span>
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-blue-200 text-blue-800">
+                <details className="system-prompt-accordion group/system-prompt my-3 border border-gray-200 rounded-lg overflow-hidden bg-gray-50/50">
+                    <summary className="cursor-pointer px-3 py-1 flex items-center gap-2.5 hover:bg-gray-100/80 transition-colors select-none">
+                        <span className="text-gray-400 text-base">🛈</span>
+                        <span className="font-medium text-gray-500 text-xs">System prompt</span>
+                        {message.model && (
+                            <span className="text-[10px] px-1.5 py-0 rounded-full bg-blue-100 text-blue-700 font-semibold">
+                                {message.model}
+                            </span>
+                        )}
+                        <span className="text-[10px] px-1.5 py-0 rounded-full bg-gray-200 text-gray-600">
                             {systemPromptLength} chars
                         </span>
-                        <span className="ml-auto text-xs text-blue-400 group-open/system-prompt:rotate-180 transition-transform">▼</span>
+                        <span className="ml-auto text-[10px] text-gray-400 group-open/system-prompt:rotate-180 transition-transform">▼</span>
                     </summary>
-                    <div className="border-t border-blue-200 px-4 py-3 bg-white">
+                    <div className="border-t border-gray-200 px-3 py-2 bg-white">
                         <div className="flex justify-end mb-2">
                             <button
                                 onClick={() => message.systemPromptText && navigator.clipboard?.writeText(message.systemPromptText)}
-                                className="text-xs px-2 py-1 rounded border border-blue-200 text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors"
+                                className="text-[10px] px-1.5 py-0.5 rounded border border-gray-200 text-gray-500 bg-gray-50 hover:bg-gray-100 transition-colors"
                             >
                                 Copy
                             </button>
                         </div>
-                        <div className="prose prose-slate max-w-none text-sm text-gray-900">
+                        <div className="prose prose-slate max-w-none text-[13px] text-gray-700">
                             <ReactMarkdown
                                 remarkPlugins={[remarkGfm, remarkMath]}
                                 rehypePlugins={[
@@ -1592,7 +1597,8 @@ export function ChatArea() {
             title: derivedTitle,
             preview,
             score: summaryScore,
-            pinned: summaryPinned
+            pinned: summaryPinned,
+            model: storeState.currentModel
         });
 
         // #region agent log
@@ -1628,6 +1634,7 @@ export function ChatArea() {
             role: 'assistant',
             content: '',
             timestamp: Date.now(),
+            model: storeState.currentModel
         });
 
         try {

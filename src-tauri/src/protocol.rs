@@ -854,6 +854,7 @@ pub struct ChatSummary {
     pub preview: String,
     pub score: f32, // Similarity score
     pub pinned: bool,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -875,6 +876,7 @@ pub enum VectorMsg {
         // or receive a pre-computed vector.
         embedding_vector: Option<Vec<f32>>,
         pinned: bool,
+        model: Option<String>,
     },
     /// Search for similar chats
     SearchChatsByEmbedding {

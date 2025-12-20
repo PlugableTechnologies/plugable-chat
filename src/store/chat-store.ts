@@ -64,6 +64,7 @@ export interface ChatSummary {
     preview: string;
     score: number;
     pinned: boolean;
+    model?: string;
 }
 
 // A single tool call execution record for display
@@ -93,6 +94,8 @@ export interface Message {
     role: 'user' | 'assistant';
     content: string;
     timestamp: number;
+    /** Model ID used for this turn (only for assistant messages) */
+    model?: string;
     /** System prompt string used for this assistant turn */
     systemPromptText?: string;
     /** Tool calls made during this assistant message */
@@ -391,6 +394,17 @@ async function initializeModelsOnStartup(
         const state = get();
         const cachedModels = state.cachedModels;
         
+        // Sync current model with backend if possible
+        try {
+            const currentBackendModel = await invoke<ModelInfo | null>('get_current_model');
+            if (currentBackendModel) {
+                console.log('[ChatStore] Synced current model from backend:', currentBackendModel.id);
+                set({ currentModel: currentBackendModel.id });
+            }
+        } catch (syncError) {
+            console.warn('[ChatStore] Failed to sync current model from backend:', syncError);
+        }
+
         if (cachedModels.length === 0) {
             // No models available - attempt auto-download
             // The App.tsx will also show the help chat so users understand what's happening
@@ -616,7 +630,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Model loading operations
     loadModel: async (modelName: string) => {
+        const state = get();
+        if (state.currentModel === modelName) {
+            console.log('[ChatStore] Model already active:', modelName);
+            return;
+        }
+
         console.log('[ChatStore] Loading model:', modelName);
+        
+        // If we have an active chat, start a new one when switching models
+        if (state.currentChatId || state.chatMessages.length > 0) {
+            console.log('[ChatStore] Switching models, starting new chat');
+            set({ currentChatId: null, chatMessages: [] });
+        }
+
         set({
             operationStatus: {
                 type: 'loading',
@@ -932,8 +959,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     },
     setModel: async (model) => {
         try {
+            const state = get();
+            if (state.currentModel === model) return;
+
             await invoke('set_model', { model });
             set({ currentModel: model });
+
+            // Start new chat on model change
+            if (state.currentChatId || state.chatMessages.length > 0) {
+                console.log('[ChatStore] Model set, starting new chat');
+                set({ currentChatId: null, chatMessages: [] });
+            }
         } catch (e) {
             console.error("Failed to set model", e);
         }
@@ -992,6 +1028,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     backendError: null 
                 });
                 return;
+            }
+
+            // Find the chat summary to see if it has an associated model
+            const chatSummary = state.history.find(c => c.id === id);
+            if (chatSummary?.model && chatSummary.model !== state.currentModel) {
+                console.log(`[ChatStore] Chat ${id.slice(0, 8)} uses model ${chatSummary.model}, switching current model`);
+                await get().setModel(chatSummary.model);
             }
             
             const messagesJson = await invoke<string | null>('load_chat', { id });

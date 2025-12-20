@@ -64,6 +64,7 @@ impl ChatVectorStoreActor {
                         messages,
                         embedding_vector,
                         pinned,
+                        model,
                     } => {
                         if let Some(vector_values) = embedding_vector {
                             upsert_chat_record_with_embedding(
@@ -74,6 +75,7 @@ impl ChatVectorStoreActor {
                                 messages,
                                 vector_values,
                                 pinned,
+                                model,
                             )
                             .await;
                         } else {
@@ -98,7 +100,7 @@ impl ChatVectorStoreActor {
                         );
                         // We need to clone table for async block if we were spawning, but we are in spawned block
                         let chat_table_clone = chat_table.clone();
-                        if let Some((_, old_title, content, messages, vector, old_pinned)) =
+                        if let Some((_, old_title, content, messages, vector, old_pinned, model)) =
                             fetch_full_chat_record(chat_table_clone.clone(), id.clone()).await
                         {
                             let new_title = title.unwrap_or(old_title.clone());
@@ -115,6 +117,7 @@ impl ChatVectorStoreActor {
                                 messages,
                                 vector,
                                 new_pinned,
+                                model,
                             )
                             .await;
                             let _ = respond_to.send(true);
@@ -197,6 +200,14 @@ async fn search_chats_by_embedding(
                     None
                 };
 
+                // Handle optional model column
+                let model_col = batch.column_by_name("model");
+                let model_vals = if let Some(col) = model_col {
+                    col.as_any().downcast_ref::<StringArray>()
+                } else {
+                    None
+                };
+
                 // LanceDB includes _distance column with similarity scores (lower = more similar)
                 let distance_col = batch.column_by_name("_distance");
                 let distance_vals = if let Some(col) = distance_col {
@@ -210,6 +221,7 @@ async fn search_chats_by_embedding(
                     let title = titles.value(i).to_string();
                     let content = contents.value(i).to_string();
                     let pinned = pinned_vals.map(|p| p.value(i)).unwrap_or(false);
+                    let model = model_vals.map(|m| m.value(i).to_string());
                     // Convert distance to similarity score (1 / (1 + distance)) for display
                     let distance = distance_vals.map(|d| d.value(i)).unwrap_or(0.0);
                     let score = 1.0 / (1.0 + distance);
@@ -227,6 +239,7 @@ async fn search_chats_by_embedding(
                         preview,
                         score,
                         pinned,
+                        model,
                     });
                 }
             }
@@ -243,6 +256,7 @@ fn expected_chats_table_schema() -> Arc<Schema> {
         Field::new("content", DataType::Utf8, false),
         Field::new("messages", DataType::Utf8, false),
         Field::new("pinned", DataType::Boolean, false),
+        Field::new("model", DataType::Utf8, true),
         Field::new(
             "vector",
             DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 384),
@@ -324,12 +338,13 @@ async fn upsert_chat_record_with_embedding(
     messages: String,
     embedding_vector: Vec<f32>,
     pinned: bool,
+    model: Option<String>,
 ) {
     // #region agent log
     use std::io::Write;
     let upsert_start = std::time::Instant::now();
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"vector_actor.rs:upsert","message":"upsert_start","data":{{"id":"{}","vec_len":{},"msg_len":{}}},"timestamp":{}}}"#, &id[..8.min(id.len())], embedding_vector.len(), messages.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
+        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"vector_actor.rs:upsert","message":"upsert_start","data":{{"id":"{}","vec_len":{},"msg_len":{},"model":{:?}}},"timestamp":{}}}"#, &id[..8.min(id.len())], embedding_vector.len(), messages.len(), model, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
     }
     // #endregion
 
@@ -346,6 +361,10 @@ async fn upsert_chat_record_with_embedding(
     let content_array = StringArray::from(vec![content]);
     let messages_array = StringArray::from(vec![messages]);
     let pinned_array = BooleanArray::from(vec![pinned]);
+    let model_array = match model {
+        Some(m) => StringArray::from(vec![Some(m)]),
+        None => StringArray::from(vec![Option::<String>::None]),
+    };
 
     let vector_values = Float32Array::from(embedding_vector);
     let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
@@ -367,6 +386,7 @@ async fn upsert_chat_record_with_embedding(
             Arc::new(content_array),
             Arc::new(messages_array),
             Arc::new(pinned_array),
+            Arc::new(model_array),
             Arc::new(vector_array),
         ],
     ) {
@@ -439,7 +459,7 @@ async fn fetch_chat_messages_json(chat_table: Table, id: String) -> Option<Strin
 async fn fetch_full_chat_record(
     chat_table: Table,
     id: String,
-) -> Option<(String, String, String, String, Vec<f32>, bool)> {
+) -> Option<(String, String, String, String, Vec<f32>, bool, Option<String>)> {
     let query = chat_table
         .query()
         .only_if(format!("id = '{}'", id))
@@ -474,6 +494,18 @@ async fn fetch_full_chat_record(
             false
         };
 
+        let model_col = batch.column_by_name("model");
+        let model = if let Some(col) = model_col {
+            let arr = col.as_any().downcast_ref::<StringArray>()?;
+            if arr.is_null(0) {
+                None
+            } else {
+                Some(arr.value(0).to_string())
+            }
+        } else {
+            None
+        };
+
         let vectors = batch
             .column_by_name("vector")?
             .as_any()
@@ -489,6 +521,7 @@ async fn fetch_full_chat_record(
             messages_col.value(0).to_string(),
             vector,
             pinned,
+            model,
         ));
     }
     None
