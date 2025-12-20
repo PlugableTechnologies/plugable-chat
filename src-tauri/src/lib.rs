@@ -2642,7 +2642,7 @@ fn build_system_prompt(
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
     if !additions.is_empty() {
         sections.push("## Capabilities\n\nYou are equipped with specialized tools to fetch real-time data, execute SQL queries, and perform calculations. You MUST use these tools whenever the user's request requires factual data or database access. Do NOT claim you cannot access databases or perform queries; you have these capabilities enabled via the tools listed below.".to_string());
-        sections.push("## Factual Grounding\n\n**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `sql_select` or `schema_search`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.".to_string());
+        sections.push("## Factual Grounding\n\n**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `sql_select`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.".to_string());
         sections.push("## Additional prompts from tools".to_string());
         sections.extend(additions);
     }
@@ -2778,7 +2778,7 @@ fn collect_tool_prompt_additions(
     if capabilities.available_builtins.contains(tool_capability::BUILTIN_SQL_SELECT) {
         let mut body = String::from(
             "Use `sql_select` to run SQL queries against configured database sources.\n\
-             Parameters: `sql` (SQL statement), `source_id` (optional; found in schema_search results).\n\
+             Parameters: `sql` (SQL statement), `source_id` (optional; found in auto-discovered schema context).\n\
              Returns query results as rows.\n\n\
              **CRITICAL REQUIREMENTS**:\n\
              - Always execute queries to answer data questions using the tool-calling format described below - do NOT return SQL code to the user.\n\
@@ -3900,7 +3900,7 @@ async fn chat(
         tool_search_enabled && tool_search_allowed, // Only run auto tool discovery if allowed for this turn
         tool_search_max_results,
         has_mcp_tools,
-        schema_search_enabled || schema_search_internal_only,
+        schema_search_enabled || schema_search_internal_only || sql_select_enabled,
         &database_toolbox_config,
         &filtered_tool_descriptions,
         tool_registry_state.registry.clone(),
