@@ -1347,9 +1347,9 @@ async fn run_agentic_loop(
     embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
     pending_approvals: PendingApprovals,
     app_handle: tauri::AppHandle,
-    mut full_history: Vec<ChatMessage>,
+    mut     full_history: Vec<ChatMessage>,
     reasoning_effort: String,
-    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
     server_configs: Vec<McpServerConfig>,
     chat_id: String,
     generation_id: u32,
@@ -3379,6 +3379,7 @@ fn map_tool_search_hits_to_schemas(
 fn render_auto_context_sections(
     tool_search_output: Option<&ToolSearchOutput>,
     schema_search_output: Option<&SchemaSearchOutput>,
+    has_attachments: bool,
 ) -> Vec<String> {
     let mut sections: Vec<String> = Vec::new();
 
@@ -3402,6 +3403,20 @@ fn render_auto_context_sections(
 
     if let Some(output) = schema_search_output {
         if !output.tables.is_empty() {
+            // Apply rule: if we have RAG results (attachments), only include SQL context
+            // if the highest relevance score is > 40%.
+            if has_attachments {
+                let max_score = output
+                    .tables
+                    .iter()
+                    .map(|t| t.relevance)
+                    .fold(0.0f32, f32::max);
+                if max_score <= 0.40 {
+                    println!("[Chat] Auto schema_search suppressed: RAG available and max SQL score ({:.2}) <= 0.40", max_score);
+                    return sections;
+                }
+            }
+
             let mut body = String::from("Auto-discovered database tables for this prompt:");
             for table in &output.tables {
                 let mut line = format!(
@@ -3970,9 +3985,25 @@ async fn chat(
     )
     .await;
 
+    // Check if there are any attached documents (RAG indexed files)
+    let has_attachments = {
+        let (tx, rx) = oneshot::channel();
+        if handles
+            .rag_tx
+            .send(RagMsg::GetIndexedFiles { respond_to: tx })
+            .await
+            .is_ok()
+        {
+            rx.await.map(|files| !files.is_empty()).unwrap_or(false)
+        } else {
+            false
+        }
+    };
+
     let auto_context_sections = render_auto_context_sections(
         auto_discovery.tool_search_output.as_ref(),
         auto_discovery.schema_search_output.as_ref(),
+        has_attachments,
     );
 
     // If we already performed schema search for this prompt, surface sql_select immediately
@@ -4119,21 +4150,6 @@ async fn chat(
         composed.push_str("\n\n## Auto-discovered context\n");
         composed.push_str(&auto_context_sections.join("\n\n"));
         composed
-    };
-
-    // Check if there are any attached documents (RAG indexed files)
-    let has_attachments = {
-        let (tx, rx) = oneshot::channel();
-        if handles
-            .rag_tx
-            .send(RagMsg::GetIndexedFiles { respond_to: tx })
-            .await
-            .is_ok()
-        {
-            rx.await.map(|files| !files.is_empty()).unwrap_or(false)
-        } else {
-            false
-        }
     };
 
     let prompt_tuning = PromptTuningOptions {
@@ -5859,44 +5875,6 @@ async fn get_system_prompt_preview(
     )
     .await;
 
-    let auto_context_sections = render_auto_context_sections(
-        auto_discovery.tool_search_output.as_ref(),
-        auto_discovery.schema_search_output.as_ref(),
-    );
-
-    let builtin_tools: Vec<(String, Vec<McpTool>)> = {
-        let registry = tool_registry_state.registry.read().await;
-        registry
-            .get_internal_tools()
-            .iter()
-            .filter(|schema| {
-                // Only include python_execution if it's enabled
-                if schema.name == "python_execution" {
-                    python_execution_enabled && tool_filter.builtin_allowed("python_execution")
-                } else if schema.name == "tool_search" {
-                    // Only include tool_search if there are deferred tools to discover
-                    has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
-                } else {
-                    // Other built-ins (schema_search, sql_select) are included if allowed
-                    tool_filter.builtin_allowed(&schema.name)
-                }
-            })
-            .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
-            .collect()
-    };
-
-    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
-        let mut list = builtin_tools;
-        if !auto_discovery.discovered_tool_schemas.is_empty() {
-            list.extend(auto_discovery.discovered_tool_schemas.clone());
-        }
-        list
-    } else {
-        let mut list = builtin_tools;
-        list.extend(filtered_tool_descriptions.clone());
-        list
-    };
-
     // Check if there are any attached documents
     let has_attachments = {
         let (tx, rx) = oneshot::channel();
@@ -5911,6 +5889,12 @@ async fn get_system_prompt_preview(
             false
         }
     };
+
+    let auto_context_sections = render_auto_context_sections(
+        auto_discovery.tool_search_output.as_ref(),
+        auto_discovery.schema_search_output.as_ref(),
+        has_attachments,
+    );
 
     // Resolve capabilities for prompt building
     let resolved_capabilities = {
@@ -5954,6 +5938,40 @@ async fn get_system_prompt_preview(
     let prompt_tuning = PromptTuningOptions {
         include_examples: tool_use_examples_enabled,
         examples_max_per_tool: tool_use_examples_max.max(1),
+    };
+
+    // Visible tools: always include enabled built-ins; defer MCP tools to tool_search unless materialized.
+    let builtin_tools: Vec<(String, Vec<McpTool>)> = {
+        let registry = tool_registry_state.registry.read().await;
+        registry
+            .get_internal_tools()
+            .iter()
+            .filter(|schema| {
+                // Only include python_execution if it's enabled
+                if schema.name == "python_execution" {
+                    python_execution_enabled && tool_filter.builtin_allowed("python_execution")
+                } else if schema.name == "tool_search" {
+                    // Only include tool_search if there are deferred tools to discover
+                    has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
+                } else {
+                    // Other built-ins (schema_search, sql_select) are included if allowed
+                    tool_filter.builtin_allowed(&schema.name)
+                }
+            })
+            .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
+            .collect()
+    };
+
+    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
+        let mut list = builtin_tools;
+        if !auto_discovery.discovered_tool_schemas.is_empty() {
+            list.extend(auto_discovery.discovered_tool_schemas.clone());
+        }
+        list
+    } else {
+        let mut list = builtin_tools;
+        list.extend(filtered_tool_descriptions.clone());
+        list
     };
 
     let base_prompt_with_context = if auto_context_sections.is_empty() {

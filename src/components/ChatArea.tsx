@@ -433,13 +433,6 @@ const RagContextBlock = ({ chunks }: { chunks: RagChunk[] }) => {
     // Get unique source files
     const uniqueFiles = [...new Set(chunks.map(c => c.source_file))];
     
-    // Truncate content preview
-    const truncateContent = (content: string, maxLen: number = 60) => {
-        const cleaned = content.replace(/\s+/g, ' ').trim();
-        if (cleaned.length <= maxLen) return cleaned;
-        return cleaned.slice(0, maxLen - 3) + '...';
-    };
-    
     return (
         <details className="my-4 group/rag border border-emerald-200 rounded-xl overflow-hidden bg-emerald-50/50">
             <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-emerald-100/50 transition-colors select-none">
@@ -464,8 +457,8 @@ const RagContextBlock = ({ chunks }: { chunks: RagChunk[] }) => {
                                 {(chunk.score * 100).toFixed(0)}% match
                             </span>
                         </div>
-                        <p className="mt-2 text-xs text-gray-600 italic">
-                            "{truncateContent(chunk.content)}"
+                        <p className="mt-2 text-xs text-gray-600 italic whitespace-pre-wrap">
+                            "{chunk.content}"
                         </p>
                     </div>
                 ))}
@@ -1650,7 +1643,9 @@ export function ChatArea() {
                 setRagStartTime(Date.now());
                 setRagStage('searching');
                 
-                const relevantChunks = await searchRagContext(trimmedText, 5);
+                const allChunks = await searchRagContext(trimmedText, 10);
+                // Entirely ignore rag results with a relevance score below 30%
+                const relevantChunks = allChunks.filter(chunk => chunk.score >= 0.3);
                 
                 if (relevantChunks.length > 0) {
                     // Store chunks on the assistant message for display
