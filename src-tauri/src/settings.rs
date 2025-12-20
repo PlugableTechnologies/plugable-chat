@@ -336,7 +336,7 @@ impl SupportedDatabaseKind {
     /// Get the SQL dialect name for this database kind
     pub fn sql_dialect(&self) -> &'static str {
         match self {
-            SupportedDatabaseKind::Bigquery => "StandardSQL",
+            SupportedDatabaseKind::Bigquery => "GoogleSQL",
             SupportedDatabaseKind::Postgres => "PostgreSQL",
             SupportedDatabaseKind::Mysql => "MySQL",
             SupportedDatabaseKind::Sqlite => "SQLite",
@@ -389,6 +389,10 @@ pub struct DatabaseSourceConfig {
     /// Optional project id for BigQuery and similar
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Optional SQL dialect override (e.g., "GoogleSQL", "PostgreSQL").
+    /// If not provided, the default for the database kind is used.
+    #[serde(default)]
+    pub sql_dialect: Option<String>,
     /// Optional comma-separated allowlist of datasets (BigQuery only). Empty => all datasets.
     #[serde(default)]
     pub dataset_allowlist: Option<String>,
@@ -411,9 +415,20 @@ impl DatabaseSourceConfig {
             auto_approve_tools: false,
             defer_tools: true,
             project_id: None,
+            sql_dialect: None,
             dataset_allowlist: None,
             table_allowlist: None,
         }
+    }
+
+    /// Get the SQL dialect for this source, respecting overrides
+    pub fn get_sql_dialect(&self) -> &str {
+        if let Some(dialect) = self.sql_dialect.as_ref() {
+            if !dialect.trim().is_empty() {
+                return dialect.trim();
+            }
+        }
+        self.kind.sql_dialect()
     }
 }
 
@@ -447,6 +462,9 @@ pub struct CachedTableSchema {
     pub source_id: String,
     /// Database kind (for SQL dialect)
     pub kind: SupportedDatabaseKind,
+    /// SQL dialect for this table (resolved from source config)
+    #[serde(default)]
+    pub sql_dialect: String,
     /// Whether this table should be used for search/SQL
     #[serde(default = "default_schema_enabled")]
     pub enabled: bool,
@@ -1123,13 +1141,13 @@ mod tests {
 
     #[test]
     fn test_supported_database_kind_methods() {
-        assert_eq!(SupportedDatabaseKind::Bigquery.execute_tool_name(), "bigquery-execute-sql");
+        assert_eq!(SupportedDatabaseKind::Bigquery.execute_tool_name(), "execute_sql");
         assert_eq!(SupportedDatabaseKind::Postgres.execute_tool_name(), "postgres-sql");
         assert_eq!(SupportedDatabaseKind::Mysql.execute_tool_name(), "mysql-sql");
         assert_eq!(SupportedDatabaseKind::Sqlite.execute_tool_name(), "sqlite-sql");
         assert_eq!(SupportedDatabaseKind::Spanner.execute_tool_name(), "spanner-sql");
 
-        assert_eq!(SupportedDatabaseKind::Bigquery.sql_dialect(), "StandardSQL");
+        assert_eq!(SupportedDatabaseKind::Bigquery.sql_dialect(), "GoogleSQL");
         assert_eq!(SupportedDatabaseKind::Postgres.sql_dialect(), "PostgreSQL");
 
         assert_eq!(SupportedDatabaseKind::Bigquery.display_name(), "BigQuery");
@@ -1174,6 +1192,7 @@ mod tests {
                     auto_approve_tools: false,
                     defer_tools: true,
                     project_id: Some("my-project".to_string()),
+                    sql_dialect: None,
                     dataset_allowlist: None,
                     table_allowlist: None,
                 },

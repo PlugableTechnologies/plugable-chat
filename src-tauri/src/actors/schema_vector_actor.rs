@@ -94,6 +94,7 @@ pub struct SchemaSearchResult {
     pub table_fq_name: String,
     pub source_id: String,
     pub database_kind: SupportedDatabaseKind,
+    pub sql_dialect: String,
     pub relevance_score: f32,
     pub description: Option<String>,
     pub key_columns: Vec<String>,
@@ -250,6 +251,7 @@ fn tables_table_schema() -> Arc<Schema> {
         Field::new("table_fq_name", DataType::Utf8, false),
         Field::new("source_id", DataType::Utf8, false),
         Field::new("database_kind", DataType::Utf8, false),
+        Field::new("sql_dialect", DataType::Utf8, false),
         Field::new("description", DataType::Utf8, true),
         Field::new("key_columns", DataType::Utf8, false), // JSON array
         Field::new("partition_columns", DataType::Utf8, false), // JSON array
@@ -366,6 +368,7 @@ async fn upsert_table_schema(
     let fq_name_array = StringArray::from(vec![schema.fully_qualified_name.clone()]);
     let source_id_array = StringArray::from(vec![schema.source_id.clone()]);
     let kind_array = StringArray::from(vec![format!("{:?}", schema.kind).to_lowercase()]);
+    let dialect_array = StringArray::from(vec![schema.sql_dialect.clone()]);
     let desc_array = StringArray::from(vec![schema.description.clone().unwrap_or_default()]);
     let key_cols_array =
         StringArray::from(vec![serde_json::to_string(&schema.primary_keys).unwrap_or_default()]);
@@ -397,6 +400,7 @@ async fn upsert_table_schema(
             Arc::new(fq_name_array),
             Arc::new(source_id_array),
             Arc::new(kind_array),
+            Arc::new(dialect_array),
             Arc::new(desc_array),
             Arc::new(key_cols_array),
             Arc::new(partition_cols_array),
@@ -534,6 +538,9 @@ async fn search_tables(
         let kinds = batch
             .column_by_name("database_kind")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let dialects = batch
+            .column_by_name("sql_dialect")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let descriptions = batch
             .column_by_name("description")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
@@ -575,10 +582,17 @@ async fn search_tables(
                     _ => continue,
                 };
 
+                let sql_dialect = if let Some(d) = dialects {
+                    d.value(i).to_string()
+                } else {
+                    database_kind.sql_dialect().to_string()
+                };
+
                 results.push(SchemaSearchResult {
                     table_fq_name: fq.value(i).to_string(),
                     source_id: src.value(i).to_string(),
                     database_kind,
+                    sql_dialect,
                     relevance_score: score,
                     description: descriptions.map(|d| d.value(i).to_string()).filter(|s| !s.is_empty()),
                     key_columns: key_cols
@@ -696,6 +710,9 @@ async fn set_table_enabled(
     let kinds = batch
         .column_by_name("database_kind")
         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let dialects = batch
+        .column_by_name("sql_dialect")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
     let descriptions = batch
         .column_by_name("description")
         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
@@ -736,6 +753,12 @@ async fn set_table_enabled(
         _ => return Err(format!("Unsupported database kind: {}", kind_str)),
     };
 
+    let sql_dialect = if let Some(d) = dialects {
+        d.value(0).to_string()
+    } else {
+        database_kind.sql_dialect().to_string()
+    };
+
     let vector_values = vector_col.value(0);
     let values = vector_values
         .as_any()
@@ -751,6 +774,7 @@ async fn set_table_enabled(
             .and_then(|c| Some(c.value(0).to_string()))
             .ok_or("Missing source id")?,
         kind: database_kind,
+        sql_dialect,
         enabled,
         columns: columns_json
             .and_then(|c| serde_json::from_str(c.value(0)).ok())
@@ -800,6 +824,9 @@ async fn get_tables_for_source(table: &Table, source_id: &str) -> Vec<CachedTabl
         let kinds = batch
             .column_by_name("database_kind")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let dialects = batch
+            .column_by_name("sql_dialect")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let descriptions = batch
             .column_by_name("description")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
@@ -833,10 +860,17 @@ async fn get_tables_for_source(table: &Table, source_id: &str) -> Vec<CachedTabl
                 let columns: Vec<CachedColumnSchema> =
                     serde_json::from_str(cols.value(i)).unwrap_or_default();
 
+                let sql_dialect = if let Some(d) = dialects {
+                    d.value(i).to_string()
+                } else {
+                    kind.sql_dialect().to_string()
+                };
+
                 results.push(CachedTableSchema {
                     fully_qualified_name: fq.value(i).to_string(),
                     source_id: src.value(i).to_string(),
                     kind,
+                    sql_dialect,
                     columns,
                     primary_keys: key_cols
                         .and_then(|c| serde_json::from_str(c.value(i)).ok())
@@ -905,6 +939,7 @@ mod tests {
             table_fq_name: "project.dataset.orders".to_string(),
             source_id: "bq-prod".to_string(),
             database_kind: SupportedDatabaseKind::Bigquery,
+            sql_dialect: "GoogleSQL".to_string(),
             relevance_score: 0.85,
             description: Some("Customer orders".to_string()),
             key_columns: vec!["order_id".to_string()],

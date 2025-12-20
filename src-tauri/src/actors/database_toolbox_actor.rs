@@ -701,7 +701,7 @@ impl DatabaseToolboxActor {
                         self.sanitize_identifier(parts[2]),
                     )
                 } else {
-                    let project = source.project_id.ok_or("BigQuery source requires project_id")?;
+                    let project = source.project_id.as_ref().ok_or("BigQuery source requires project_id")?.clone();
                     (
                         project,
                         self.sanitize_identifier(parts[0]),
@@ -723,7 +723,7 @@ impl DatabaseToolboxActor {
                     )
                     .await?;
 
-                self.parse_bigquery_table_info(&source.id, source.kind, &response)
+                self.parse_bigquery_table_info(&source.id, source.kind, source.get_sql_dialect(), &response)
             }
             _ => {
                 // For other databases, use INFORMATION_SCHEMA
@@ -770,6 +770,7 @@ impl DatabaseToolboxActor {
             fully_qualified_name: fully_qualified_table.to_string(),
             source_id: source.id.clone(),
             kind: source.kind,
+            sql_dialect: source.get_sql_dialect().to_string(),
             enabled: true,
             columns,
             primary_keys: Vec::new(), // Would need additional query for PKs
@@ -908,6 +909,7 @@ impl DatabaseToolboxActor {
         &self,
         source_id: &str,
         kind: SupportedDatabaseKind,
+        sql_dialect: &str,
         response: &Value,
     ) -> Result<CachedTableSchema, String> {
         // Toolbox returns Schema as a top-level array with Pascal-case field names
@@ -971,6 +973,7 @@ impl DatabaseToolboxActor {
             fully_qualified_name,
             source_id: source_id.to_string(),
             kind,
+            sql_dialect: sql_dialect.to_string(),
             enabled: true,
             columns,
             primary_keys: Vec::new(), // BigQuery doesn't have traditional PKs

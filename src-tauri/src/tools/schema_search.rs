@@ -187,7 +187,7 @@ impl SchemaSearchExecutor {
             output_tables.push(TableMatchOutput {
                 table_name: table.table_fq_name.clone(),
                 source_id: table.source_id.clone(),
-                sql_dialect: table.database_kind.sql_dialect().to_string(),
+                sql_dialect: table.sql_dialect.clone(),
                 relevance: table.relevance_score,
                 description: table.description.clone(),
                 primary_keys: table.key_columns.clone(),
@@ -280,7 +280,7 @@ mod tests {
             tables: vec![TableMatchOutput {
                 table_name: "project.dataset.orders".to_string(),
                 source_id: "bq-prod".to_string(),
-                sql_dialect: "StandardSQL".to_string(),
+                sql_dialect: "GoogleSQL".to_string(),
                 relevance: 0.85,
                 description: Some("Customer orders".to_string()),
                 primary_keys: vec!["order_id".to_string()],
@@ -301,6 +301,6 @@ mod tests {
 
         let json = serde_json::to_string(&output).unwrap();
         assert!(json.contains("orders"));
-        assert!(json.contains("StandardSQL"));
+        assert!(json.contains("GoogleSQL"));
     }
 }
