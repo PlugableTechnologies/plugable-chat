@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 use tauri::AppHandle;
 use tauri::Emitter;
 use tokio::sync::mpsc;
@@ -31,6 +31,8 @@ const RAG_CHUNKS_TABLE: &str = "rag_chunks";
 #[derive(Clone)]
 struct IndexedChunk {
     id: String,
+    hash: String,
+    file_hash: String,
     content: String,
     source_file: String,
     chunk_index: usize,
@@ -70,9 +72,26 @@ impl RagRetrievalActor {
 
         let schema = self.expected_schema();
         
-        // Ensure table exists
+        // Ensure table exists and has correct schema
         let table = if db.table_names().execute().await.map_err(|e| e.to_string())?.contains(&RAG_CHUNKS_TABLE.to_string()) {
-            db.open_table(RAG_CHUNKS_TABLE).execute().await.map_err(|e| e.to_string())?
+            let table = db.open_table(RAG_CHUNKS_TABLE).execute().await.map_err(|e| e.to_string())?;
+            
+            // Check schema
+            let existing_schema = table.schema().await.map_err(|e| e.to_string())?;
+            if existing_schema.fields().len() != schema.fields().len() {
+                println!("RagActor: Schema mismatch detected. Recreating table...");
+                let _ = db.drop_table(RAG_CHUNKS_TABLE).await;
+                let batch = RecordBatch::new_empty(schema.clone());
+                db.create_table(
+                    RAG_CHUNKS_TABLE,
+                    RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema),
+                )
+                .execute()
+                .await
+                .map_err(|e| e.to_string())?
+            } else {
+                table
+            }
         } else {
             let batch = RecordBatch::new_empty(schema.clone());
             db.create_table(
@@ -88,9 +107,9 @@ impl RagRetrievalActor {
         self.table = Some(table.clone());
 
         // Create scalar indexes for faster lookups
-        // Note: In LanceDB 0.4, create_index on a non-vector column creates a scalar index
         let _ = table.create_index(&["id"], Index::Auto).execute().await;
         let _ = table.create_index(&["hash"], Index::Auto).execute().await;
+        let _ = table.create_index(&["source_file"], Index::Auto).execute().await;
 
         Ok(())
     }
@@ -99,6 +118,7 @@ impl RagRetrievalActor {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("hash", DataType::Utf8, false),
+            Field::new("file_hash", DataType::Utf8, false),
             Field::new("content", DataType::Utf8, false),
             Field::new("source_file", DataType::Utf8, false),
             Field::new("chunk_index", DataType::Int64, false),
@@ -240,7 +260,6 @@ impl RagRetrievalActor {
         for path_str in &paths {
             let path = Path::new(path_str);
             if path.is_dir() {
-                // Recursively collect files from directory
                 if let Ok(entries) = self.collect_files_recursive(path).await {
                     files_to_process.extend(entries);
                 }
@@ -249,183 +268,156 @@ impl RagRetrievalActor {
             }
         }
 
-        println!(
-            "RagActor: Found {} files to process",
-            files_to_process.len()
-        );
+        println!("RagActor: Found {} files to process", files_to_process.len());
 
-        // Load existing chunk IDs for the files we are about to process
-        let mut existing_ids = std::collections::HashSet::new();
-        if let Some(ref table) = self.table {
-            let file_names: Vec<String> = files_to_process.iter()
-                .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-                .map(|s| s.to_string())
-                .collect();
-            
-            if !file_names.is_empty() {
-                // If there are many files, we process in batches to avoid huge filters
-                for chunk in file_names.chunks(100) {
-                    let filter = chunk.iter()
-                        .map(|f| format!("source_file = '{}'", f.replace("'", "''")))
-                        .collect::<Vec<_>>()
-                        .join(" OR ");
-                    
-                    if let Ok(mut query) = table.query()
-                        .only_if(filter)
-                        .select(Select::Columns(vec!["id".to_string()]))
-                        .execute()
-                        .await 
-                    {
-                        while let Some(Ok(batch)) = query.next().await {
-                            if let Some(col) = batch.column_by_name("id") {
-                                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                                    for i in 0..arr.len() {
-                                        existing_ids.insert(arr.value(i).to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Pre-process: Collect all chunks from all files
-        struct PendingChunk {
-            hash: String,
-            content: String,
-            source_file: String,
-            chunk_index: usize,
-        }
-
-        let mut pending_chunks = Vec::new();
+        // 1. Identify which files need chunking
+        let mut all_pending_chunks = Vec::new();
+        let mut total_chunks_in_index = 0;
+        
         for file_path in &files_to_process {
-            let ext = file_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let is_binary = ext == "pdf" || ext == "docx";
+            let file_name = file_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
 
-            let content = if is_binary {
-                // Binary files: extract_text reads from disk
-                String::new()
-            } else {
-                match tokio::fs::read_to_string(file_path).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        println!("RagActor: Error reading {:?}: {}", file_path, e);
+            // Read as bytes for hashing
+            let bytes = match tokio::fs::read(file_path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    println!("RagActor: Error reading {:?}: {}", file_path, e);
+                    continue;
+                }
+            };
+            let file_hash = self.compute_hash_bytes(&bytes);
+
+            // Check if file is already indexed with this hash
+            if let Some(ref table) = self.table {
+                let filter = format!("source_file = '{}' AND file_hash = '{}'", 
+                    file_name.replace("'", "''"), 
+                    file_hash);
+                if let Ok(count) = table.count_rows(Some(filter)).await {
+                    if count > 0 {
+                        // Skip file, already indexed
+                        files_processed_count += 1;
+                        cache_hits += count as usize;
+                        total_chunks_in_index += count as usize;
                         continue;
                     }
                 }
+            }
+
+            // If not binary, we can use the bytes we already read
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let is_binary = ext == "pdf" || ext == "docx";
+            
+            let content = if is_binary {
+                String::new()
+            } else {
+                String::from_utf8_lossy(&bytes).to_string()
             };
 
             if let Ok(text_content) = self.extract_text(file_path, &content) {
                 let chunks = self.chunk_text(&text_content);
-                let source_file_name = file_path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-
+                total_chunks_in_index += chunks.len();
                 for (idx, chunk_content) in chunks.into_iter().enumerate() {
-                    let hash = self.compute_hash(&chunk_content);
-                    pending_chunks.push(PendingChunk {
-                        hash,
+                    let chunk_hash = self.compute_hash(&chunk_content);
+                    all_pending_chunks.push(IndexedChunk {
+                        id: format!("{}:{}:{}", chunk_hash, file_name, idx),
+                        hash: chunk_hash,
+                        file_hash: file_hash.clone(),
                         content: chunk_content,
-                        source_file: source_file_name.clone(),
+                        source_file: file_name.clone(),
                         chunk_index: idx,
+                        vector: Vec::new(),
                     });
                 }
                 files_processed_count += 1;
             }
         }
 
-        let total_chunks = pending_chunks.len();
-        println!("RagActor: Total chunks to process: {}", total_chunks);
+        let total_pending_chunks = all_pending_chunks.len();
+        println!("RagActor: {} chunks need processing", total_pending_chunks);
 
-        // Process chunks one by one
-        let mut processed_chunks = 0;
+        if total_pending_chunks == 0 {
+            return Ok(RagIndexResult {
+                total_chunks: total_chunks_in_index,
+                files_processed: files_processed_count,
+                cache_hits,
+            });
+        }
+
+        // 2. Identify which chunks need new embeddings
+        let mut chunks_to_embed = Vec::new();
+        let mut final_chunks = Vec::new();
         let mut session_hash_cache: HashMap<String, Vec<f32>> = HashMap::new();
 
-        for chunk in pending_chunks {
-            let chunk_id = format!("{}:{}:{}", chunk.hash, chunk.source_file, chunk.chunk_index);
-            
-            // 1. Skip if already processed for this file (uses in-memory HashSet from pre-pass)
-            if existing_ids.contains(&chunk_id) {
-                processed_chunks += 1;
+        for mut chunk in all_pending_chunks {
+            // Check in-memory session cache first
+            if let Some(v) = session_hash_cache.get(&chunk.hash) {
+                chunk.vector = v.clone();
+                final_chunks.push(chunk);
                 cache_hits += 1;
                 continue;
             }
 
-            // 2. Check if we have an embedding for this content anywhere
-            if let Some(v) = session_hash_cache.get(&chunk.hash) {
-                cache_hits += 1;
-                let v = v.clone();
-                // Save new association for this file
-                self.save_chunk_to_db(&chunk_id, &chunk.hash, &chunk.content, &chunk.source_file, chunk.chunk_index, &v).await?;
-            } else if let Some(v) = self.get_cached_embedding(&chunk.hash).await {
-                cache_hits += 1;
+            // Check LanceDB for existing embedding of this content hash
+            if let Some(v) = self.get_cached_embedding(&chunk.hash).await {
                 session_hash_cache.insert(chunk.hash.clone(), v.clone());
-                // Save new association for this file
-                self.save_chunk_to_db(&chunk_id, &chunk.hash, &chunk.content, &chunk.source_file, chunk.chunk_index, &v).await?;
+                chunk.vector = v;
+                final_chunks.push(chunk);
+                cache_hits += 1;
             } else {
-                // 3. Generate embedding
+                // Needs embedding
+                chunks_to_embed.push(chunk);
+            }
+        }
+
+        println!("RagActor: Generating embeddings for {} chunks", chunks_to_embed.len());
+
+        // 3. Batch generate embeddings
+        if !chunks_to_embed.is_empty() {
+            // Process in batches of 100 to avoid huge requests
+            for batch in chunks_to_embed.chunks_mut(100) {
+                let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
                 let model = Arc::clone(&embedding_model);
-                let content = chunk.content.clone();
-                let v = tokio::task::spawn_blocking(move || {
-                    model.embed(vec![content], None)
+                
+                let embeddings = tokio::task::spawn_blocking(move || {
+                    model.embed(texts, None)
                 })
                 .await
                 .map_err(|e| format!("Embedding task failed: {}", e))?
-                .map_err(|e| format!("Embedding generation failed: {}", e))?
-                .into_iter()
-                .next()
-                .ok_or("Failed to get embedding")?;
+                .map_err(|e| format!("Embedding generation failed: {}", e))?;
 
-                session_hash_cache.insert(chunk.hash.clone(), v.clone());
+                for (chunk, vector) in batch.iter_mut().zip(embeddings.into_iter()) {
+                    chunk.vector = vector.clone();
+                    session_hash_cache.insert(chunk.hash.clone(), vector);
+                    final_chunks.push(chunk.clone());
+                }
 
-                // 4. Save to LanceDB
-                self.save_chunk_to_db(&chunk_id, &chunk.hash, &chunk.content, &chunk.source_file, chunk.chunk_index, &v).await?;
-            };
-
-            processed_chunks += 1;
-            
-            // Emit progress event
-            if let Some(ref handle) = self.app_handle {
-                let _ = handle.emit("rag-progress", RagProgressEvent {
-                    total_chunks,
-                    processed_chunks,
-                    current_file: chunk.source_file.clone(),
-                    is_complete: processed_chunks == total_chunks,
-                });
-            }
-
-            if processed_chunks % 100 == 0 || processed_chunks == total_chunks {
-                println!("RagActor: Progress: {}/{} chunks", processed_chunks, total_chunks);
+                // Emit progress
+                if let Some(ref handle) = self.app_handle {
+                    let _ = handle.emit("rag-progress", RagProgressEvent {
+                        total_chunks: total_pending_chunks,
+                        processed_chunks: final_chunks.len(),
+                        current_file: final_chunks.last().map(|c| c.source_file.clone()).unwrap_or_default(),
+                        is_complete: final_chunks.len() == total_pending_chunks,
+                    });
+                }
             }
         }
+
+        // 4. Batch save to LanceDB
+        println!("RagActor: Saving {} chunks to database", final_chunks.len());
+        self.save_chunks_to_db(final_chunks).await?;
 
         let total_time = indexing_start.elapsed();
         println!("RagActor: Indexing complete in {} ms", total_time.as_millis());
 
         Ok(RagIndexResult {
-            total_chunks,
+            total_chunks: total_chunks_in_index,
             files_processed: files_processed_count,
             cache_hits,
         })
-    }
-
-    async fn chunk_exists(&self, chunk_id: &str) -> bool {
-        let table = match self.table.as_ref() {
-            Some(t) => t,
-            None => return false,
-        };
-        // Escape single quotes for filter
-        let safe_id = chunk_id.replace("'", "''");
-        if let Ok(count) = table.count_rows(Some(format!("id = '{}'", safe_id))).await {
-            return count > 0;
-        }
-        false
     }
 
     async fn get_cached_embedding(&self, hash: &str) -> Option<Vec<f32>> {
@@ -445,31 +437,53 @@ impl RagRetrievalActor {
         None
     }
 
-    async fn save_chunk_to_db(&self, id: &str, hash: &str, content: &str, source_file: &str, chunk_index: usize, vector: &[f32]) -> Result<(), String> {
+    async fn save_chunks_to_db(&self, chunks: Vec<IndexedChunk>) -> Result<(), String> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+
         let table = self.table.as_ref().ok_or("Table not initialized")?;
         let schema = self.expected_schema();
 
-        let id_arr = Arc::new(StringArray::from(vec![id.to_string()]));
-        let hash_arr = Arc::new(StringArray::from(vec![hash.to_string()]));
-        let content_arr = Arc::new(StringArray::from(vec![content.to_string()]));
-        let source_arr = Arc::new(StringArray::from(vec![source_file.to_string()]));
-        let index_arr = Arc::new(arrow_array::Int64Array::from(vec![chunk_index as i64]));
+        let mut ids = Vec::with_capacity(chunks.len());
+        let mut hashes = Vec::with_capacity(chunks.len());
+        let mut file_hashes = Vec::with_capacity(chunks.len());
+        let mut contents = Vec::with_capacity(chunks.len());
+        let mut source_files = Vec::with_capacity(chunks.len());
+        let mut indices = Vec::with_capacity(chunks.len());
+        let mut vectors = Vec::with_capacity(chunks.len());
+
+        for chunk in chunks {
+            ids.push(chunk.id);
+            hashes.push(chunk.hash);
+            file_hashes.push(chunk.file_hash);
+            contents.push(chunk.content);
+            source_files.push(chunk.source_file);
+            indices.push(chunk.chunk_index as i64);
+            vectors.push(Some(chunk.vector.into_iter().map(Some).collect::<Vec<_>>()));
+        }
+
+        let id_arr = Arc::new(StringArray::from(ids));
+        let hash_arr = Arc::new(StringArray::from(hashes));
+        let file_hash_arr = Arc::new(StringArray::from(file_hashes));
+        let content_arr = Arc::new(StringArray::from(contents));
+        let source_arr = Arc::new(StringArray::from(source_files));
+        let index_arr = Arc::new(arrow_array::Int64Array::from(indices));
         
-        let vector_values = Float32Array::from(vector.to_vec());
         let vector_arr = Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-            vec![Some(vector_values.values().iter().map(|v| Some(*v)).collect::<Vec<_>>())],
+            vectors,
             384,
         ));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
-            vec![id_arr, hash_arr, content_arr, source_arr, index_arr, vector_arr],
+            vec![id_arr, hash_arr, file_hash_arr, content_arr, source_arr, index_arr, vector_arr],
         ).map_err(|e| format!("Failed to create record batch: {}", e))?;
 
         table.add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
             .execute()
             .await
-            .map_err(|e| format!("Failed to add record to LanceDB: {}", e))?;
+            .map_err(|e| format!("Failed to add records to LanceDB: {}", e))?;
 
         Ok(())
     }
@@ -761,14 +775,6 @@ impl RagRetrievalActor {
 
         results
     }
-
-    /// Get current Unix timestamp in seconds
-    fn current_timestamp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    }
 }
 
 /// Extract text content from DOCX XML (word/document.xml)
@@ -812,15 +818,4 @@ fn extract_text_from_docx_xml(xml: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
-}
-
-/// Truncate a string to a maximum length, adding ellipsis if needed
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else if max_len > 3 {
-        format!("{}...", &s[..max_len - 3])
-    } else {
-        s[..max_len].to_string()
-    }
 }
