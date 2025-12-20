@@ -3,11 +3,13 @@ use crate::protocol::{
     CachedModel, ChatMessage, FoundryMsg, ModelFamily, ModelInfo, OpenAITool, ParsedToolCall,
     ReasoningFormat, ToolFormat,
 };
+use crate::LoggingPersistence;
 use serde::Deserialize;
 use crate::settings::ChatFormatName;
 use crate::tool_adapters::parse_combined_tool_name;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use serde_json::{json, Value};
+use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -391,8 +393,8 @@ pub struct ModelGatewayActor {
     registered_eps: Vec<String>,
     /// All valid Execution Providers available on this system
     valid_eps: Vec<String>,
-    /// Last system prompt logged to avoid duplication
-    last_logged_system_prompt: Option<String>,
+    /// Shared logging persistence (prompts, tools)
+    logging_persistence: Arc<LoggingPersistence>,
 }
 
 impl ModelGatewayActor {
@@ -400,6 +402,7 @@ impl ModelGatewayActor {
         foundry_msg_rx: mpsc::Receiver<FoundryMsg>,
         app_handle: AppHandle,
         shared_embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+        logging_persistence: Arc<LoggingPersistence>,
     ) -> Self {
         Self {
             foundry_msg_rx,
@@ -411,7 +414,7 @@ impl ModelGatewayActor {
             shared_embedding_model,
             registered_eps: Vec::new(),
             valid_eps: Vec::new(),
-            last_logged_system_prompt: None,
+            logging_persistence,
         }
     }
 
@@ -749,25 +752,12 @@ impl ModelGatewayActor {
                             // Log the actual system message being used
                             if let Some(sys_msg) = messages.iter().find(|m| m.role == "system") {
                                 let content = sys_msg.content.clone();
-                                let changed = self.last_logged_system_prompt.as_ref() != Some(&content);
-
-                                if changed {
-                                    println!(
-                                        "[FoundryActor] Using system message ({} chars)",
-                                        content.len()
-                                    );
-                                    // Always log the full system prompt for debugging, independent of verbosity.
-                                    println!(
-                                        "[FoundryActor] --- SYSTEM PROMPT BEGIN ---\n{}\n[FoundryActor] --- SYSTEM PROMPT END ---",
-                                        content
-                                    );
-                                    self.last_logged_system_prompt = Some(content);
-                                } else if verbose_logging {
-                                    println!(
-                                        "[FoundryActor] Using system message ({} chars) [UNCHANGED]",
-                                        content.len()
-                                    );
-                                }
+                                self.log_with_diff(
+                                    "FoundryActor:SystemPrompt",
+                                    &content,
+                                    &self.logging_persistence.last_logged_system_prompt,
+                                )
+                                .await;
                             }
                         }
 
@@ -814,6 +804,18 @@ impl ModelGatewayActor {
                                 tool_names.len(),
                                 tool_names
                             );
+
+                            // Log tool specs with diff logic
+                            if let Some(specs) = &native_tool_specs {
+                                if let Ok(specs_json) = serde_json::to_string_pretty(specs) {
+                                    self.log_with_diff(
+                                        "FoundryActor:ToolsJSON",
+                                        &specs_json,
+                                        &self.logging_persistence.last_logged_tools_json,
+                                    )
+                                    .await;
+                                }
+                            }
                         } else if native_tool_specs
                             .as_ref()
                             .map(|t| !t.is_empty())
@@ -877,15 +879,8 @@ impl ModelGatewayActor {
                                 use_responses_api,
                             );
 
-                            // Temporary debug: log request body when native tools are included
-                            if use_native_tools {
-                                if let Ok(pretty) = serde_json::to_string_pretty(&current_body) {
-                                    println!("[FoundryActor] Request body (with tools): {}", pretty);
-                                }
-                            }
-
-                            // NOTE: Removed verbose tool JSON logging for cleaner output
-                            // Enable RUST_LOG=debug for full request body if needed
+                            // Note: Request body logging moved to log_with_diff for system prompt and tools JSON
+                            // to keep logs clean. Enable RUST_LOG=debug for full request body if needed.
 
                             match client_clone
                                 .post(&current_url)
@@ -1452,6 +1447,51 @@ impl ModelGatewayActor {
 
     fn emit_model_selected(&self, model: &str) {
         let _ = self.app_handle.emit("model-selected", model.to_string());
+    }
+
+    /// Logs the content with a diff if it has changed since the last log.
+    /// If it's the first log, it logs the full content.
+    async fn log_with_diff(
+        &self,
+        label: &str,
+        current_content: &str,
+        storage: &Arc<RwLock<Option<String>>>,
+    ) {
+        let mut last_content_guard = storage.write().await;
+        
+        match last_content_guard.as_ref() {
+            None => {
+                // First time logging this content in this execution
+                println!(
+                    "[{}] --- FIRST LOG BEGIN ---\n{}\n[{}] --- FIRST LOG END ---",
+                    label, current_content, label
+                );
+                *last_content_guard = Some(current_content.to_string());
+            }
+            Some(last_content) if last_content != current_content => {
+                // Content changed, log the diff
+                println!("[{}] Content changed! Printing line-based diff:", label);
+                
+                let diff = TextDiff::from_lines(last_content.as_str(), current_content);
+                for change in diff.iter_all_changes() {
+                    let sign = match change.tag() {
+                        ChangeTag::Delete => "-",
+                        ChangeTag::Insert => "+",
+                        ChangeTag::Equal => " ",
+                    };
+                    print!("{}{}", sign, change);
+                }
+                println!("[{}] --- DIFF END ---", label);
+                
+                *last_content_guard = Some(current_content.to_string());
+            }
+            _ => {
+                // Content unchanged, skip logging unless verbose
+                if crate::is_verbose_logging_enabled() {
+                    println!("[{}] Content unchanged ({} chars)", label, current_content.len());
+                }
+            }
+        }
     }
 
     async fn ensure_service_running(&self) -> std::io::Result<()> {

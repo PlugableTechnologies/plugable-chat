@@ -43,6 +43,9 @@ dirs = "5"
 # CLI argument parsing
 clap = { version = "4", features = ["derive", "env"] }
 
+# Text diffing for optimized logging
+similar = "2.4"
+
 # Regex for parsing tool calls
 regex = "1"
 

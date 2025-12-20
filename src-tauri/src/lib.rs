@@ -77,6 +77,8 @@ struct ActorHandles {
     python_tx: mpsc::Sender<PythonMsg>,
     database_toolbox_tx: mpsc::Sender<DatabaseToolboxMsg>,
     schema_tx: mpsc::Sender<SchemaVectorMsg>,
+    #[allow(dead_code)]
+    logging_persistence: Arc<LoggingPersistence>,
 }
 
 // Shared tool registry state
@@ -92,6 +94,21 @@ struct EmbeddingModelState {
 // Shared settings state
 struct SettingsState {
     settings: Arc<RwLock<AppSettings>>,
+}
+
+// Shared state for persistent logging of prompts and tools to avoid noise
+pub struct LoggingPersistence {
+    pub last_logged_system_prompt: Arc<RwLock<Option<String>>>,
+    pub last_logged_tools_json: Arc<RwLock<Option<String>>>,
+}
+
+impl Default for LoggingPersistence {
+    fn default() -> Self {
+        Self {
+            last_logged_system_prompt: Arc::new(RwLock::new(None)),
+            last_logged_tools_json: Arc::new(RwLock::new(None)),
+        }
+    }
 }
 
 // Pending tool approvals state
@@ -4108,11 +4125,7 @@ async fn chat(
         tool_count,
         auto_approve_servers
     );
-    // Always log the full system prompt to aid debugging, regardless of verbosity.
-    println!(
-        "[Chat] --- SYSTEM PROMPT BEGIN ---\n{}\n[Chat] --- SYSTEM PROMPT END ---",
-        system_prompt
-    );
+    // Note: Full system prompt logging is now handled in ModelGatewayActor with diff logic.
 
     // Emit the exact system prompt for UI visibility (matches what the model receives)
     let _ = app_handle.emit(
@@ -6286,6 +6299,8 @@ pub fn run() {
             let python_mcp_host_tx = mcp_host_tx.clone();
             let mcp_host_tx_for_db = mcp_host_tx.clone();
             let mcp_host_tx_for_handles = mcp_host_tx.clone();
+            let logging_persistence = Arc::new(LoggingPersistence::default());
+            let logging_persistence_for_foundry = logging_persistence.clone();
 
             // Store handles in state
             app.manage(ActorHandles {
@@ -6296,6 +6311,7 @@ pub fn run() {
                 python_tx,
                 database_toolbox_tx: database_toolbox_tx.clone(),
                 schema_tx: schema_tx.clone(),
+                logging_persistence,
             });
 
             // Initialize shared embedding model state
@@ -6438,6 +6454,7 @@ pub fn run() {
                     foundry_rx,
                     foundry_app_handle,
                     embedding_model_arc_for_foundry,
+                    logging_persistence_for_foundry,
                 );
                 actor.run().await;
             });
