@@ -223,22 +223,28 @@ function parsePlainText(content: string): MessagePart[] {
  * Tool calls have "name" field with a known tool name pattern
  */
 function looksLikeToolCallJson(jsonStr: string): boolean {
-    // Known tool names that should be treated as tool calls
+    // Known tool names or structural markers that should be treated as tool calls
     const toolPatterns = [
+        '"name"\\s*:\\s*"python_execution"',
         '"name"\\s*:\\s*"code_execution"',
         '"name"\\s*:\\s*"tool_search"',
+        '"name"\\s*:\\s*"schema_search"',
+        '"name"\\s*:\\s*"sql_select"',
         '"tool_name"\\s*:',
+        '"tool"\\s*:\\s*"',
         '"name"\\s*:\\s*"[^"]+___',  // MCP tool format: server___tool
     ];
     
     // Check if it contains name/arguments structure typical of tool calls
-    const hasToolStructure = /"name"\s*:\s*"/.test(jsonStr) && 
-                            (/"arguments"\s*:/.test(jsonStr) || /"parameters"\s*:/.test(jsonStr) || /"code"\s*:/.test(jsonStr));
+    const hasToolStructure = (/"name"\s*:\s*"/.test(jsonStr) || /"tool_name"\s*:\s*"/.test(jsonStr) || /"tool"\s*:\s*"/.test(jsonStr)) && 
+                            (/"arguments"\s*:/.test(jsonStr) || /"parameters"\s*:/.test(jsonStr) || /"tool_args"\s*:/.test(jsonStr) || /"code"\s*:/.test(jsonStr) || /"args"\s*:/.test(jsonStr));
     
     if (!hasToolStructure) return false;
     
-    // Check against known patterns
-    return toolPatterns.some(pattern => new RegExp(pattern, 'i').test(jsonStr));
+    // Check against known patterns or if it has a server/tool pair
+    const hasServerToolPair = /"server"\s*:\s*"/.test(jsonStr) && /"tool"\s*:\s*"/.test(jsonStr);
+    
+    return hasServerToolPair || toolPatterns.some(pattern => new RegExp(pattern, 'i').test(jsonStr));
 }
 
 /**
@@ -269,11 +275,11 @@ function extractToolCalls(parts: MessagePart[]): MessagePart[] {
             const functionCallStart = current.indexOf('<function_call>');
             
             // Also look for markdown JSON code blocks that might be tool calls
-            const jsonCodeBlockMatch = current.match(/```(?:json)?\s*\n?\s*(\{[\s\S]*?"name"\s*:[\s\S]*?)\n?\s*```/);
+            const jsonCodeBlockMatch = current.match(/```(?:json)?\s*\n?\s*(\{[\s\S]*?(?:"name"|"tool_name"|"tool"|"server")\s*:[\s\S]*?)\n?\s*```/);
             const jsonCodeBlockStart = jsonCodeBlockMatch ? current.indexOf(jsonCodeBlockMatch[0]) : -1;
             
             // Check for unclosed JSON code block (streaming)
-            const unclosedJsonMatch = !jsonCodeBlockMatch ? current.match(/```(?:json)?\s*\n?\s*(\{[\s\S]*?"name"\s*:[\s\S]*)$/) : null;
+            const unclosedJsonMatch = !jsonCodeBlockMatch ? current.match(/```(?:json)?\s*\n?\s*(\{[\s\S]*?(?:"name"|"tool_name"|"tool"|"server")\s*:[\s\S]*)$/) : null;
             const unclosedJsonStart = unclosedJsonMatch ? current.indexOf(unclosedJsonMatch[0]) : -1;
             
             // Determine which comes first
