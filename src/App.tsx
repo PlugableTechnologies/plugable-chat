@@ -421,7 +421,9 @@ function App() {
         <div className="app-header-bar h-14 shrink-0 flex items-center px-4 sm:px-6 bg-white">
           <div className="app-branding-block flex items-center gap-3">
             <img src="/plugable-logo.png" alt="Plugable" className="app-logo h-12 max-w-[240px] w-auto object-contain" />
-            <span className="app-product-label font-semibold text-sm text-gray-900">Local Chat - Microsoft Foundry</span>
+            <span className="app-product-label font-semibold text-sm text-gray-900">
+              Accelerate with the <a href="https://plugable.com/products/tbt5-AI" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">TBT5-AI</a>
+            </span>
           </div>
           <div className="flex-1" />
           <div className="app-model-controls flex items-center gap-2 text-sm text-gray-500">
