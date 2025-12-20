@@ -1414,6 +1414,23 @@ async fn run_agentic_loop(
             }
         }
 
+        // Create an internal cancellation channel that we can trigger if we detect a tool call early.
+        // This is separate from the user turn's cancel_rx so we can stop the current stream
+        // without cancelling the entire turn.
+        let (internal_cancel_tx, mut internal_cancel_rx) = tokio::sync::watch::channel(false);
+
+        // Forward external cancellation to internal one
+        let mut external_cancel_rx = cancel_rx.clone();
+        let internal_cancel_tx_for_external = internal_cancel_tx.clone();
+        tokio::spawn(async move {
+            while external_cancel_rx.changed().await.is_ok() {
+                if *external_cancel_rx.borrow() {
+                    let _ = internal_cancel_tx_for_external.send(true);
+                    break;
+                }
+            }
+        });
+
         // Create channel for this iteration
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -1439,7 +1456,7 @@ async fn run_agentic_loop(
                 chat_format_default,
                 chat_format_overrides: chat_format_overrides.clone(),
                 respond_to: tx,
-                stream_cancel_rx: cancel_rx.clone(),
+                stream_cancel_rx: internal_cancel_rx.clone(),
             })
             .await
         {
@@ -1459,11 +1476,15 @@ async fn run_agentic_loop(
 
         loop {
             tokio::select! {
-                // Check for cancellation
-                _ = cancel_rx.changed() => {
-                    if *cancel_rx.borrow() {
-                        println!("[AgenticLoop] Cancellation received!");
-                        cancelled = true;
+                // Check for cancellation (internal or external)
+                _ = internal_cancel_rx.changed() => {
+                    if *internal_cancel_rx.borrow() {
+                        if *cancel_rx.borrow() {
+                            println!("[AgenticLoop] User cancellation received!");
+                            cancelled = true;
+                        } else {
+                            println!("[AgenticLoop] Internal early-stop cancellation triggered.");
+                        }
                         break;
                     }
                 }
@@ -1479,7 +1500,7 @@ async fn run_agentic_loop(
                             }
                             token_count += 1;
                             assistant_response.push_str(&token);
-                            let _ = app_handle.emit("chat-token", token);
+                            let _ = app_handle.emit("chat-token", token.clone());
                             {
                                 let mut progress = turn_progress.write().await;
                                 progress.assistant_response = assistant_response.clone();
@@ -1488,6 +1509,44 @@ async fn run_agentic_loop(
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map(|d| d.as_millis())
                                     .unwrap_or(progress.timestamp_ms);
+                            }
+
+                            // Check for early stop if we see a potential closing character.
+                            // This prevents models from hallucinating results or extra text after tool calls.
+                            if assistant_response.len() > 20 && (token.contains('>') || token.contains('`') || token.contains('}') || token.contains(']')) {
+                                let action = detect_agentic_action(
+                                    &assistant_response,
+                                    model_family,
+                                    tool_format,
+                                    python_tool_mode,
+                                    &format_config,
+                                    primary_format,
+                                );
+                                
+                                if let AgenticAction::ToolCalls { .. } = action {
+                                    let trimmed = assistant_response.trim_end();
+                                    let mut should_stop = false;
+                                    
+                                    // Check if the response ends with a valid closing tag or code fence
+                                    if trimmed.ends_with("</tool_call>")
+                                        || trimmed.ends_with("</function_call>")
+                                        || trimmed.ends_with("</function>")
+                                        || trimmed.ends_with("[/TOOL_CALLS]")
+                                    {
+                                        should_stop = true;
+                                    } else if python_tool_mode && trimmed.ends_with("```") {
+                                        // Only stop on ``` if it's actually closing a python block
+                                        if assistant_response.contains("```python") || assistant_response.contains("```py") {
+                                            should_stop = true;
+                                        }
+                                    }
+                                    
+                                    if should_stop {
+                                        println!("[AgenticLoop] 🛑 Detected complete tool call during streaming, stopping early to prevent hallucination.");
+                                        let _ = internal_cancel_tx.send(true);
+                                        // The next iteration of the tokio::select! will catch the cancellation
+                                    }
+                                }
                             }
 
                             // Log progress every 5 seconds (verbose only)
