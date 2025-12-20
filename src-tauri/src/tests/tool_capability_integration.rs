@@ -40,6 +40,7 @@ impl ToolCapabilityTestHarness {
             reasoning_format: crate::protocol::ReasoningFormat::None,
             max_input_tokens: 4096,
             max_output_tokens: 2048,
+            supports_tool_calling: supports_native,
             supports_temperature: true,
             supports_top_p: true,
             supports_reasoning_effort: false,

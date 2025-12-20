@@ -698,6 +698,8 @@ pub struct ModelInfo {
     pub reasoning_format: ReasoningFormat,
     pub max_input_tokens: u32,
     pub max_output_tokens: u32,
+    /// Whether the model natively supports tool calling (from supportsToolCalling tag)
+    pub supports_tool_calling: bool,
     /// Whether the model supports temperature parameter
     pub supports_temperature: bool,
     /// Whether the model supports top_p parameter
@@ -728,10 +730,17 @@ impl OpenAITool {
     /// The function name is prefixed with server_id for routing
     pub fn from_mcp(server_id: &str, tool: &crate::actors::mcp_host_actor::McpTool) -> Self {
         // Ensure the schema is OpenAI-compatible: always an object with properties
-        let parameters = match &tool.input_schema {
+        let mut parameters = match &tool.input_schema {
             Some(schema) if schema.is_object() => schema.clone(),
             _ => json!({"type": "object", "properties": {}}),
         };
+
+        // Ensure "required" field is present (even if empty) for models that enforce it
+        if parameters.is_object() && !parameters.get("required").is_some() {
+            if let Some(obj) = parameters.as_object_mut() {
+                obj.insert("required".to_string(), json!([]));
+            }
+        }
 
         let name = sanitize_function_name(&format!("{}___{}", server_id, tool.name));
 
@@ -749,12 +758,21 @@ impl OpenAITool {
     /// Create from a built-in ToolSchema (python_execution, tool_search)
     /// Built-in tools don't need server_id prefix since they're handled internally
     pub fn from_tool_schema(tool: &ToolSchema) -> Self {
+        let mut parameters = tool.parameters.clone();
+
+        // Ensure "required" field is present (even if empty) for models that enforce it
+        if parameters.is_object() && !parameters.get("required").is_some() {
+            if let Some(obj) = parameters.as_object_mut() {
+                obj.insert("required".to_string(), json!([]));
+            }
+        }
+
         Self {
             tool_type: "function".to_string(),
             function: OpenAIFunction {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: Some(tool.parameters.clone()),
+                parameters: Some(parameters),
             },
         }
     }
@@ -762,12 +780,21 @@ impl OpenAITool {
     /// Create from a ToolSchema using server id (for registry->OpenAI conversion)
     pub fn from_mcp_schema(server_id: &str, schema: &ToolSchema) -> Self {
         let name = sanitize_function_name(&format!("{}___{}", server_id, schema.name));
+        let mut parameters = schema.parameters.clone();
+
+        // Ensure "required" field is present (even if empty) for models that enforce it
+        if parameters.is_object() && !parameters.get("required").is_some() {
+            if let Some(obj) = parameters.as_object_mut() {
+                obj.insert("required".to_string(), json!([]));
+            }
+        }
+
         Self {
             tool_type: "function".to_string(),
             function: OpenAIFunction {
                 name,
                 description: schema.description.clone(),
-                parameters: Some(schema.parameters.clone()),
+                parameters: Some(parameters),
             },
         }
     }

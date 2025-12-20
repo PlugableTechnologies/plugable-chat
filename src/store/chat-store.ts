@@ -52,6 +52,7 @@ export interface ModelInfo {
     reasoning_format: ReasoningFormat;
     max_input_tokens: number;
     max_output_tokens: number;
+    supports_tool_calling: boolean;
     supports_temperature: boolean;
     supports_top_p: boolean;
     supports_reasoning_effort: boolean;

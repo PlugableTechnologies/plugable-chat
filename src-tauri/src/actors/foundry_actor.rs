@@ -3,6 +3,7 @@ use crate::protocol::{
     CachedModel, ChatMessage, FoundryMsg, ModelFamily, ModelInfo, OpenAITool, ParsedToolCall,
     ReasoningFormat, ToolFormat,
 };
+use serde::Deserialize;
 use crate::settings::ChatFormatName;
 use crate::tool_adapters::parse_combined_tool_name;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
@@ -363,6 +364,18 @@ struct ServiceStatus {
     port: Option<u16>,
     registered_eps: Vec<String>,
     valid_eps: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FoundryModel {
+    id: String,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FoundryModelsResponse {
+    data: Vec<FoundryModel>,
 }
 
 pub struct ModelGatewayActor {
@@ -1228,12 +1241,12 @@ impl ModelGatewayActor {
             }
 
             // Build available_models and model_info from REST API response
-            self.available_models = models.clone();
+            self.available_models = models.iter().map(|m| m.id.clone()).collect();
 
             // Build model info with inferred capabilities from model names
             self.model_info = models.iter()
-                .map(|model_id| {
-                    let id = model_id.clone();
+                .map(|model_obj| {
+                    let id = model_obj.id.clone();
                     let id_lower = id.to_lowercase();
 
                     // Detect model family from ID
@@ -1242,7 +1255,7 @@ impl ModelGatewayActor {
                     // Infer tool calling support from model name
                     // Most modern instruction-tuned models support tool calling
                     // Either natively or via text-based format (Hermes-style <tool_call>)
-                    let tool_calling = id_lower.contains("instruct")
+                    let mut tool_calling = id_lower.contains("instruct")
                         || id_lower.contains("coder")
                         || id_lower.contains("qwen")
                         || id_lower.contains("phi")
@@ -1251,6 +1264,13 @@ impl ModelGatewayActor {
                         || id_lower.contains("mistral")
                         || id_lower.contains("gemma")
                         || id_lower.contains("chat");
+
+                    // Check for supportsToolCalling tag from Foundry
+                    let supports_tool_calling = model_obj.tags.iter().any(|t| t == "supportsToolCalling");
+                    if supports_tool_calling {
+                        println!("FoundryActor: Model {} explicitly supports tool calling via tag", id);
+                        tool_calling = true;
+                    }
 
                     // Determine tool format based on model family and capabilities
                     // Note: This should match the format expected by model_profiles.rs
@@ -1309,6 +1329,7 @@ impl ModelGatewayActor {
                         reasoning_format,
                         max_input_tokens,
                         max_output_tokens,
+                        supports_tool_calling,
                         supports_temperature,
                         supports_top_p,
                         supports_reasoning_effort,
@@ -1337,8 +1358,8 @@ impl ModelGatewayActor {
     }
 
     /// Get models via REST API: GET /openai/models
-    /// Returns a list of model names as strings
-    async fn get_models_via_rest(&self, port: u16) -> Vec<String> {
+    /// Returns a list of model info objects
+    async fn get_models_via_rest(&self, port: u16) -> Vec<FoundryModel> {
         let url = format!("http://127.0.0.1:{}/openai/models", port);
         println!("FoundryActor: Fetching models via REST API: {}", url);
 
@@ -1346,17 +1367,36 @@ impl ModelGatewayActor {
         match client.get(&url).send().await {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    // Response is an array of model names: ["model1", "model2"]
-                    match resp.json::<Vec<String>>().await {
-                        Ok(models) => {
-                            println!("FoundryActor: REST API returned {} models", models.len());
-                            models
-                        }
+                    let body_val: Value = match resp.json().await {
+                        Ok(v) => v,
                         Err(e) => {
-                            println!("FoundryActor: Failed to parse models response: {}", e);
-                            Vec::new()
+                            println!("FoundryActor: Failed to parse models response JSON: {}", e);
+                            return Vec::new();
                         }
+                    };
+
+                    // Try parsing as array of strings first (legacy format)
+                    if let Some(arr) = body_val.as_array() {
+                        if arr.get(0).and_then(|v| v.as_str()).is_some() {
+                            return arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .map(|id| FoundryModel { id: id.to_string(), tags: Vec::new() })
+                                .collect();
+                        }
+                        
+                        // Try parsing as array of objects (foundry specific)
+                        return arr.iter()
+                            .filter_map(|v| serde_json::from_value::<FoundryModel>(v.clone()).ok())
+                            .collect();
                     }
+
+                    // Try parsing as OpenAI-compatible list: { "data": [...] }
+                    if let Ok(resp_obj) = serde_json::from_value::<FoundryModelsResponse>(body_val) {
+                        return resp_obj.data;
+                    }
+
+                    println!("FoundryActor: Unexpected models response format");
+                    Vec::new()
                 } else {
                     println!("FoundryActor: REST API error: {}", resp.status());
                     Vec::new()
