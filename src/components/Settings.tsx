@@ -1281,23 +1281,28 @@ function BuiltinsTab({
     const {
         settings,
         updateCodeExecutionEnabled,
-        updateNativeToolCallingEnabled,
         updateToolSearchEnabled,
         updateToolSearchMaxResults,
         updateToolExamplesEnabled,
         updateToolExamplesMax,
-        updateCompactPromptEnabled,
-        updateCompactPromptMaxTools,
         updateToolSystemPrompt,
-        updateSearchSchemasEnabled,
-        updateExecuteSqlEnabled,
+        updateSchemaSearchEnabled,
+        updateSchemaSearchInternalOnly,
+        updateSqlSelectEnabled,
         pythonAllowedImports,
     } = useSettingsStore();
-    const codeExecutionEnabled = settings?.python_execution_enabled ?? false;
-    const toolSearchEnabled = settings?.tool_search_enabled ?? false;
     const allowedImports = (pythonAllowedImports && pythonAllowedImports.length > 0)
         ? pythonAllowedImports
         : FALLBACK_PYTHON_ALLOWED_IMPORTS;
+    const [localCodeExecutionEnabled, setLocalCodeExecutionEnabled] = useState(settings?.python_execution_enabled ?? false);
+    const [localToolSearchEnabled, setLocalToolSearchEnabled] = useState(settings?.tool_search_enabled ?? false);
+    const [localSchemaSearchEnabled, setLocalSchemaSearchEnabled] = useState(settings?.schema_search_enabled ?? false);
+    const [localSchemaSearchInternalOnly, setLocalSchemaSearchInternalOnly] = useState(settings?.schema_search_internal_only ?? false);
+    const [localSqlSelectEnabled, setLocalSqlSelectEnabled] = useState(settings?.sql_select_enabled ?? false);
+    const [localToolSearchMaxResults, setLocalToolSearchMaxResults] = useState(settings?.tool_search_max_results ?? 3);
+    const [localToolExamplesEnabled, setLocalToolExamplesEnabled] = useState(settings?.tool_use_examples_enabled ?? false);
+    const [localToolExamplesMax, setLocalToolExamplesMax] = useState(settings?.tool_use_examples_max ?? 2);
+
     const defaultPythonPrompt = [
         "Use python_execution for calling tools, calculations, and data transforms.",
         "Tools found with tool_search will be available in the global scope, with parameters with the same name and in the same order as returned in the tool description.",
@@ -1305,115 +1310,127 @@ function BuiltinsTab({
         `Here are the allowed imports: ${allowedImports.join(', ')}.`
     ].join(' ');
     const defaultToolSearchPrompt = "Call tool_search to discover MCP tools related to your search string. If the returned tools appear to be relevant to your goal, use them";
-    const defaultToolSearchMaxResults = settings?.tool_search_max_results ?? 3;
-    const defaultToolExamplesEnabled = settings?.tool_use_examples_enabled ?? false;
-    const defaultToolExamplesMax = settings?.tool_use_examples_max ?? 2;
-    const defaultCompactPromptEnabled = settings?.compact_prompt_enabled ?? false;
-    const defaultCompactPromptMaxTools = settings?.compact_prompt_max_tools ?? 4;
-    const initialPythonPrompt = settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt;
-    const initialToolSearchPrompt = settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt;
+    const defaultSchemaSearchPrompt = "Use `schema_search` to discover database tables and their structure when you need to write SQL queries. Returns table names, column information, and SQL dialect hints.";
+    const defaultSqlSelectPrompt = "Use `sql_select` to run SQL queries against configured database sources. NEVER make up or guess data values - always execute queries to get factual information. Do NOT return SQL code to the user; only show results.";
 
-    const [localCodeExecutionEnabled, setLocalCodeExecutionEnabled] = useState(codeExecutionEnabled);
-    const [localToolSearchEnabled, setLocalToolSearchEnabled] = useState(toolSearchEnabled);
-    const [pythonPromptDraft, setPythonPromptDraft] = useState(initialPythonPrompt);
-    const [toolSearchPromptDraft, setToolSearchPromptDraft] = useState(initialToolSearchPrompt);
-    const [localToolSearchMaxResults, setLocalToolSearchMaxResults] = useState(defaultToolSearchMaxResults);
-    const [localToolExamplesEnabled, setLocalToolExamplesEnabled] = useState(defaultToolExamplesEnabled);
-    const [localToolExamplesMax, setLocalToolExamplesMax] = useState(defaultToolExamplesMax);
-    const [localCompactPromptEnabled, setLocalCompactPromptEnabled] = useState(defaultCompactPromptEnabled);
-    const [localCompactPromptMaxTools, setLocalCompactPromptMaxTools] = useState(defaultCompactPromptMaxTools);
+    const [pythonPromptDraft, setPythonPromptDraft] = useState(settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt);
+    const [toolSearchPromptDraft, setToolSearchPromptDraft] = useState(settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt);
+    const [schemaSearchPromptDraft, setSchemaSearchPromptDraft] = useState(settings?.tool_system_prompts?.['builtin::schema_search'] || defaultSchemaSearchPrompt);
+    const [sqlSelectPromptDraft, setSqlSelectPromptDraft] = useState(settings?.tool_system_prompts?.['builtin::sql_select'] || defaultSqlSelectPrompt);
+
     const [baselineBuiltins, setBaselineBuiltins] = useState({
-        codeExecutionEnabled,
-        toolSearchEnabled,
-        pythonPrompt: initialPythonPrompt,
-        toolSearchPrompt: initialToolSearchPrompt,
-        toolSearchMaxResults: defaultToolSearchMaxResults,
-        toolExamplesEnabled: defaultToolExamplesEnabled,
-        toolExamplesMax: defaultToolExamplesMax,
-        compactPromptEnabled: defaultCompactPromptEnabled,
-        compactPromptMaxTools: defaultCompactPromptMaxTools,
+        codeExecutionEnabled: settings?.python_execution_enabled ?? false,
+        toolSearchEnabled: settings?.tool_search_enabled ?? false,
+        schemaSearchEnabled: settings?.schema_search_enabled ?? false,
+        schemaSearchInternalOnly: settings?.schema_search_internal_only ?? false,
+        sqlSelectEnabled: settings?.sql_select_enabled ?? false,
+        pythonPrompt: settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt,
+        toolSearchPrompt: settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt,
+        schemaSearchPrompt: settings?.tool_system_prompts?.['builtin::schema_search'] || defaultSchemaSearchPrompt,
+        sqlSelectPrompt: settings?.tool_system_prompts?.['builtin::sql_select'] || defaultSqlSelectPrompt,
+        toolSearchMaxResults: settings?.tool_search_max_results ?? 3,
+        toolExamplesEnabled: settings?.tool_use_examples_enabled ?? false,
+        toolExamplesMax: settings?.tool_use_examples_max ?? 2,
     });
     const [isSaving, setIsSaving] = useState(false);
 
     useEffect(() => {
         const nextBaseline = {
-            codeExecutionEnabled: codeExecutionEnabled,
-            toolSearchEnabled: toolSearchEnabled,
+            codeExecutionEnabled: settings?.python_execution_enabled ?? false,
+            toolSearchEnabled: settings?.tool_search_enabled ?? false,
+            schemaSearchEnabled: settings?.schema_search_enabled ?? false,
+            schemaSearchInternalOnly: settings?.schema_search_internal_only ?? false,
+            sqlSelectEnabled: settings?.sql_select_enabled ?? false,
             pythonPrompt: settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt,
             toolSearchPrompt: settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt,
-            toolSearchMaxResults: settings?.tool_search_max_results ?? defaultToolSearchMaxResults,
-            toolExamplesEnabled: settings?.tool_use_examples_enabled ?? defaultToolExamplesEnabled,
-            toolExamplesMax: settings?.tool_use_examples_max ?? defaultToolExamplesMax,
-            compactPromptEnabled: settings?.compact_prompt_enabled ?? defaultCompactPromptEnabled,
-            compactPromptMaxTools: settings?.compact_prompt_max_tools ?? defaultCompactPromptMaxTools,
+            schemaSearchPrompt: settings?.tool_system_prompts?.['builtin::schema_search'] || defaultSchemaSearchPrompt,
+            sqlSelectPrompt: settings?.tool_system_prompts?.['builtin::sql_select'] || defaultSqlSelectPrompt,
+            toolSearchMaxResults: settings?.tool_search_max_results ?? 3,
+            toolExamplesEnabled: settings?.tool_use_examples_enabled ?? false,
+            toolExamplesMax: settings?.tool_use_examples_max ?? 2,
         };
 
         const hasPending =
             localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
             localToolSearchEnabled !== baselineBuiltins.toolSearchEnabled ||
+            localSchemaSearchEnabled !== baselineBuiltins.schemaSearchEnabled ||
+            localSchemaSearchInternalOnly !== baselineBuiltins.schemaSearchInternalOnly ||
+            localSqlSelectEnabled !== baselineBuiltins.sqlSelectEnabled ||
             pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
             toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt ||
+            schemaSearchPromptDraft !== baselineBuiltins.schemaSearchPrompt ||
+            sqlSelectPromptDraft !== baselineBuiltins.sqlSelectPrompt ||
             localToolSearchMaxResults !== baselineBuiltins.toolSearchMaxResults ||
             localToolExamplesEnabled !== baselineBuiltins.toolExamplesEnabled ||
-            localToolExamplesMax !== baselineBuiltins.toolExamplesMax ||
-            localCompactPromptEnabled !== baselineBuiltins.compactPromptEnabled ||
-            localCompactPromptMaxTools !== baselineBuiltins.compactPromptMaxTools;
+            localToolExamplesMax !== baselineBuiltins.toolExamplesMax;
 
         if (!hasPending) {
             setLocalCodeExecutionEnabled(nextBaseline.codeExecutionEnabled);
             setLocalToolSearchEnabled(nextBaseline.toolSearchEnabled);
+            setLocalSchemaSearchEnabled(nextBaseline.schemaSearchEnabled);
+            setLocalSchemaSearchInternalOnly(nextBaseline.schemaSearchInternalOnly);
+            setLocalSqlSelectEnabled(nextBaseline.sqlSelectEnabled);
             setPythonPromptDraft(nextBaseline.pythonPrompt);
             setToolSearchPromptDraft(nextBaseline.toolSearchPrompt);
+            setSchemaSearchPromptDraft(nextBaseline.schemaSearchPrompt);
+            setSqlSelectPromptDraft(nextBaseline.sqlSelectPrompt);
             setLocalToolSearchMaxResults(nextBaseline.toolSearchMaxResults);
             setLocalToolExamplesEnabled(nextBaseline.toolExamplesEnabled);
             setLocalToolExamplesMax(nextBaseline.toolExamplesMax);
-            setLocalCompactPromptEnabled(nextBaseline.compactPromptEnabled);
-            setLocalCompactPromptMaxTools(nextBaseline.compactPromptMaxTools);
             setBaselineBuiltins(nextBaseline);
         } else {
             setBaselineBuiltins(nextBaseline);
         }
     }, [
-        codeExecutionEnabled,
-        toolSearchEnabled,
+        settings?.python_execution_enabled,
+        settings?.tool_search_enabled,
+        settings?.schema_search_enabled,
+        settings?.schema_search_internal_only,
+        settings?.sql_select_enabled,
         defaultPythonPrompt,
         defaultToolSearchPrompt,
-        defaultToolSearchMaxResults,
-        defaultToolExamplesEnabled,
-        defaultToolExamplesMax,
-        defaultCompactPromptEnabled,
-        defaultCompactPromptMaxTools,
+        defaultSchemaSearchPrompt,
+        defaultSqlSelectPrompt,
         localCodeExecutionEnabled,
         localToolSearchEnabled,
+        localSchemaSearchEnabled,
+        localSchemaSearchInternalOnly,
+        localSqlSelectEnabled,
         pythonPromptDraft,
+        schemaSearchPromptDraft,
+        sqlSelectPromptDraft,
         localToolSearchMaxResults,
         localToolExamplesEnabled,
         localToolExamplesMax,
-        localCompactPromptEnabled,
-        localCompactPromptMaxTools,
         settings?.tool_system_prompts,
         toolSearchPromptDraft,
         baselineBuiltins.codeExecutionEnabled,
         baselineBuiltins.toolSearchEnabled,
+        baselineBuiltins.schemaSearchEnabled,
+        baselineBuiltins.schemaSearchInternalOnly,
+        baselineBuiltins.sqlSelectEnabled,
         baselineBuiltins.pythonPrompt,
         baselineBuiltins.toolSearchPrompt,
+        baselineBuiltins.schemaSearchPrompt,
+        baselineBuiltins.sqlSelectPrompt,
         baselineBuiltins.toolSearchMaxResults,
         baselineBuiltins.toolExamplesEnabled,
         baselineBuiltins.toolExamplesMax,
-        baselineBuiltins.compactPromptEnabled,
-        baselineBuiltins.compactPromptMaxTools,
     ]);
 
     const hasChanges =
         localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
         localToolSearchEnabled !== baselineBuiltins.toolSearchEnabled ||
+        localSchemaSearchEnabled !== baselineBuiltins.schemaSearchEnabled ||
+        localSchemaSearchInternalOnly !== baselineBuiltins.schemaSearchInternalOnly ||
+        localSqlSelectEnabled !== baselineBuiltins.sqlSelectEnabled ||
         pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
         toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt ||
+        schemaSearchPromptDraft !== baselineBuiltins.schemaSearchPrompt ||
+        sqlSelectPromptDraft !== baselineBuiltins.sqlSelectPrompt ||
         localToolSearchMaxResults !== baselineBuiltins.toolSearchMaxResults ||
         localToolExamplesEnabled !== baselineBuiltins.toolExamplesEnabled ||
-        localToolExamplesMax !== baselineBuiltins.toolExamplesMax ||
-        localCompactPromptEnabled !== baselineBuiltins.compactPromptEnabled ||
-        localCompactPromptMaxTools !== baselineBuiltins.compactPromptMaxTools;
+        localToolExamplesMax !== baselineBuiltins.toolExamplesMax;
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -1426,21 +1443,21 @@ function BuiltinsTab({
     const handleResetAll = useCallback(() => {
         setLocalCodeExecutionEnabled(false);
         setLocalToolSearchEnabled(false);
+        setLocalSchemaSearchEnabled(false);
+        setLocalSchemaSearchInternalOnly(false);
+        setLocalSqlSelectEnabled(false);
         setPythonPromptDraft(defaultPythonPrompt);
         setToolSearchPromptDraft(defaultToolSearchPrompt);
-        setLocalToolSearchMaxResults(defaultToolSearchMaxResults);
-        setLocalToolExamplesEnabled(defaultToolExamplesEnabled);
-        setLocalToolExamplesMax(defaultToolExamplesMax);
-        setLocalCompactPromptEnabled(defaultCompactPromptEnabled);
-        setLocalCompactPromptMaxTools(defaultCompactPromptMaxTools);
+        setSchemaSearchPromptDraft(defaultSchemaSearchPrompt);
+        setSqlSelectPromptDraft(defaultSqlSelectPrompt);
+        setLocalToolSearchMaxResults(3);
+        setLocalToolExamplesEnabled(false);
+        setLocalToolExamplesMax(2);
     }, [
         defaultPythonPrompt,
         defaultToolSearchPrompt,
-        defaultToolSearchMaxResults,
-        defaultToolExamplesEnabled,
-        defaultToolExamplesMax,
-        defaultCompactPromptEnabled,
-        defaultCompactPromptMaxTools,
+        defaultSchemaSearchPrompt,
+        defaultSqlSelectPrompt,
     ]);
 
     const handleToggleCodeExecution = () => {
@@ -1462,12 +1479,28 @@ function BuiltinsTab({
         }
     };
 
+    const handleToggleSchemaSearch = () => {
+        setLocalSchemaSearchEnabled((prev) => !prev);
+    };
+
+    const handleToggleSqlSelect = () => {
+        setLocalSqlSelectEnabled((prev) => !prev);
+    };
+
     const handleResetPythonPrompt = () => {
         setPythonPromptDraft(defaultPythonPrompt);
     };
 
     const handleResetToolSearchPrompt = () => {
         setToolSearchPromptDraft(defaultToolSearchPrompt);
+    };
+
+    const handleResetSchemaSearchPrompt = () => {
+        setSchemaSearchPromptDraft(defaultSchemaSearchPrompt);
+    };
+
+    const handleResetSqlSelectPrompt = () => {
+        setSqlSelectPromptDraft(defaultSqlSelectPrompt);
     };
 
     const handleSave = useCallback(async () => {
@@ -1478,6 +1511,8 @@ function BuiltinsTab({
         const saves: Promise<unknown>[] = [];
         const targetPythonPrompt = pythonPromptDraft?.trim() ? pythonPromptDraft : defaultPythonPrompt;
         const targetToolSearchPrompt = toolSearchPromptDraft?.trim() ? toolSearchPromptDraft : defaultToolSearchPrompt;
+        const targetSchemaSearchPrompt = schemaSearchPromptDraft?.trim() ? schemaSearchPromptDraft : defaultSchemaSearchPrompt;
+        const targetSqlSelectPrompt = sqlSelectPromptDraft?.trim() ? sqlSelectPromptDraft : defaultSqlSelectPrompt;
 
         if (localCodeExecutionEnabled !== settings.python_execution_enabled) {
             saves.push(updateCodeExecutionEnabled(localCodeExecutionEnabled));
@@ -1487,24 +1522,28 @@ function BuiltinsTab({
             saves.push(updateToolSearchEnabled(localToolSearchEnabled));
         }
 
-        if (localToolSearchMaxResults !== (settings.tool_search_max_results ?? defaultToolSearchMaxResults)) {
+        if (localSchemaSearchEnabled !== (settings.schema_search_enabled ?? false)) {
+            saves.push(updateSchemaSearchEnabled(localSchemaSearchEnabled));
+        }
+
+        if (localSchemaSearchInternalOnly !== (settings.schema_search_internal_only ?? false)) {
+            saves.push(updateSchemaSearchInternalOnly(localSchemaSearchInternalOnly));
+        }
+
+        if (localSqlSelectEnabled !== (settings.sql_select_enabled ?? false)) {
+            saves.push(updateSqlSelectEnabled(localSqlSelectEnabled));
+        }
+
+        if (localToolSearchMaxResults !== (settings.tool_search_max_results ?? 3)) {
             saves.push(updateToolSearchMaxResults(localToolSearchMaxResults));
         }
 
-        if (localToolExamplesEnabled !== (settings.tool_use_examples_enabled ?? defaultToolExamplesEnabled)) {
+        if (localToolExamplesEnabled !== (settings.tool_use_examples_enabled ?? false)) {
             saves.push(updateToolExamplesEnabled(localToolExamplesEnabled));
         }
 
-        if (localToolExamplesMax !== (settings.tool_use_examples_max ?? defaultToolExamplesMax)) {
+        if (localToolExamplesMax !== (settings.tool_use_examples_max ?? 2)) {
             saves.push(updateToolExamplesMax(localToolExamplesMax));
-        }
-
-        if (localCompactPromptEnabled !== (settings.compact_prompt_enabled ?? defaultCompactPromptEnabled)) {
-            saves.push(updateCompactPromptEnabled(localCompactPromptEnabled));
-        }
-
-        if (localCompactPromptMaxTools !== (settings.compact_prompt_max_tools ?? defaultCompactPromptMaxTools)) {
-            saves.push(updateCompactPromptMaxTools(localCompactPromptMaxTools));
         }
 
         if (targetPythonPrompt !== (settings.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt)) {
@@ -1515,18 +1554,29 @@ function BuiltinsTab({
             saves.push(updateToolSystemPrompt('builtin', 'tool_search', targetToolSearchPrompt));
         }
 
+        if (targetSchemaSearchPrompt !== (settings.tool_system_prompts?.['builtin::schema_search'] || defaultSchemaSearchPrompt)) {
+            saves.push(updateToolSystemPrompt('builtin', 'schema_search', targetSchemaSearchPrompt));
+        }
+
+        if (targetSqlSelectPrompt !== (settings.tool_system_prompts?.['builtin::sql_select'] || defaultSqlSelectPrompt)) {
+            saves.push(updateToolSystemPrompt('builtin', 'sql_select', targetSqlSelectPrompt));
+        }
+
         try {
             await Promise.all(saves);
             setBaselineBuiltins({
                 codeExecutionEnabled: localCodeExecutionEnabled,
                 toolSearchEnabled: localToolSearchEnabled,
+                schemaSearchEnabled: localSchemaSearchEnabled,
+                schemaSearchInternalOnly: localSchemaSearchInternalOnly,
+                sqlSelectEnabled: localSqlSelectEnabled,
                 pythonPrompt: targetPythonPrompt,
                 toolSearchPrompt: targetToolSearchPrompt,
+                schemaSearchPrompt: targetSchemaSearchPrompt,
+                sqlSelectPrompt: targetSqlSelectPrompt,
                 toolSearchMaxResults: localToolSearchMaxResults,
                 toolExamplesEnabled: localToolExamplesEnabled,
                 toolExamplesMax: localToolExamplesMax,
-                compactPromptEnabled: localCompactPromptEnabled,
-                compactPromptMaxTools: localCompactPromptMaxTools,
             });
         } finally {
             setIsSaving(false);
@@ -1535,30 +1585,30 @@ function BuiltinsTab({
     }, [
         defaultPythonPrompt,
         defaultToolSearchPrompt,
-        defaultToolSearchMaxResults,
-        defaultToolExamplesEnabled,
-        defaultToolExamplesMax,
-        defaultCompactPromptEnabled,
-        defaultCompactPromptMaxTools,
+        defaultSchemaSearchPrompt,
+        defaultSqlSelectPrompt,
         localCodeExecutionEnabled,
         localToolSearchEnabled,
+        localSchemaSearchEnabled,
+        localSchemaSearchInternalOnly,
+        localSqlSelectEnabled,
         localToolSearchMaxResults,
         localToolExamplesEnabled,
         localToolExamplesMax,
-        localCompactPromptEnabled,
-        localCompactPromptMaxTools,
         onSavingChange,
         pythonPromptDraft,
+        schemaSearchPromptDraft,
         settings,
+        sqlSelectPromptDraft,
         toolSearchPromptDraft,
         updateCodeExecutionEnabled,
-        updateNativeToolCallingEnabled,
-        updateToolSearchEnabled,
-        updateToolSearchMaxResults,
+        updateSchemaSearchEnabled,
+        updateSchemaSearchInternalOnly,
+        updateSqlSelectEnabled,
         updateToolExamplesEnabled,
         updateToolExamplesMax,
-        updateCompactPromptEnabled,
-        updateCompactPromptMaxTools,
+        updateToolSearchEnabled,
+        updateToolSearchMaxResults,
         updateToolSystemPrompt,
     ]);
 
@@ -1728,102 +1778,105 @@ function BuiltinsTab({
                         </div>
                     </div>
                 </div>
+            </div>
 
-                {/* Compact prompt mode */}
-                <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
-                    <div className="flex items-start justify-between">
-                        <div className="space-y-1">
-                            <div className="text-sm font-semibold text-gray-900">Compact prompt mode</div>
-                            <p className="text-xs text-gray-500">
-                                Limit how many tools are surfaced to reduce token usage for small models.
-                            </p>
-                        </div>
+            {/* schema_search card */}
+            <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
+                <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3">
                         <button
-                            onClick={() => setLocalCompactPromptEnabled((prev) => !prev)}
-                            className={`relative w-10 h-5 rounded-full transition-colors ${localCompactPromptEnabled ? 'bg-blue-500' : 'bg-gray-300'
+                            onClick={handleToggleSchemaSearch}
+                            className={`relative w-10 h-5 rounded-full transition-colors ${localSchemaSearchEnabled ? 'bg-blue-500' : 'bg-gray-300'
                                 }`}
-                            title="Toggle compact prompt mode"
+                            title="Toggle schema_search"
                         >
                             <div
-                                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localCompactPromptEnabled ? 'translate-x-5' : ''
+                                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localSchemaSearchEnabled ? 'translate-x-5' : ''
                                     }`}
                             />
                         </button>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <span className="text-xs font-semibold text-gray-800">Max tools in prompt</span>
-                        <input
-                            type="number"
-                            min={1}
-                            max={10}
-                            value={localCompactPromptMaxTools}
-                            onChange={(e) => {
-                                const next = Math.min(10, Math.max(1, Number(e.target.value) || 1));
-                                setLocalCompactPromptMaxTools(next);
-                            }}
-                            className="w-24 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
-                            disabled={!localCompactPromptEnabled}
-                        />
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <span className="font-medium text-gray-900">schema_search</span>
+                                <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">builtin</span>
+                            </div>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                Search database schemas by semantic similarity
+                            </p>
+                        </div>
                     </div>
                 </div>
+
+                <div className="flex items-center gap-3 ml-13">
+                    <button
+                        onClick={() => setLocalSchemaSearchInternalOnly(!localSchemaSearchInternalOnly)}
+                        className={`relative w-8 h-4 rounded-full transition-colors ${localSchemaSearchInternalOnly ? 'bg-blue-500' : 'bg-gray-300'}`}
+                    >
+                        <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full shadow transition-transform ${localSchemaSearchInternalOnly ? 'translate-x-4' : ''}`} />
+                    </button>
+                    <span className="text-xs text-gray-600">Internal search only (don't expose tool to model)</span>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-1">
+                    <div className="text-xs font-semibold text-gray-900">System prompt (optional)</div>
+                    <button
+                        onClick={handleResetSchemaSearchPrompt}
+                        className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
+                    >
+                        Reset
+                    </button>
+                </div>
+                <textarea
+                    value={schemaSearchPromptDraft}
+                    onChange={(e) => setSchemaSearchPromptDraft(e.target.value)}
+                    rows={2}
+                    className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
+                    placeholder={defaultSchemaSearchPrompt}
+                />
             </div>
 
-            {/* Database built-ins section */}
-            <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-4 w-full">
-                <div className="flex items-center gap-2 mb-2">
-                    <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-                    </svg>
-                    <span className="text-sm font-semibold text-gray-900">Database Tools</span>
-                    <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">builtin</span>
-                </div>
-                <p className="text-xs text-gray-500 -mt-2">
-                    Query databases via Google MCP Database Toolbox. Requires Toolbox to be running.
-                </p>
-
-                {/* search_schemas toggle */}
+            {/* sql_select card */}
+            <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
                 <div className="flex items-start justify-between gap-3">
-                    <div>
-                        <div className="text-sm font-medium text-gray-900">search_schemas</div>
-                        <p className="text-xs text-gray-500">Search database schemas by semantic similarity.</p>
-                    </div>
-                    <button
-                        onClick={async () => {
-                            const next = !(settings?.search_schemas_enabled ?? false);
-                            await updateSearchSchemasEnabled(next);
-                        }}
-                        className={`relative w-10 h-5 rounded-full transition-colors ${(settings?.search_schemas_enabled ?? false) ? 'bg-blue-500' : 'bg-gray-300'
-                            }`}
-                        title="Toggle search_schemas"
-                    >
-                        <div
-                            className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${(settings?.search_schemas_enabled ?? false) ? 'translate-x-5' : ''
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={handleToggleSqlSelect}
+                            className={`relative w-10 h-5 rounded-full transition-colors ${localSqlSelectEnabled ? 'bg-blue-500' : 'bg-gray-300'
                                 }`}
-                        />
+                            title="Toggle sql_select"
+                        >
+                            <div
+                                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localSqlSelectEnabled ? 'translate-x-5' : ''
+                                    }`}
+                            />
+                        </button>
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <span className="font-medium text-gray-900">sql_select</span>
+                                <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">builtin</span>
+                            </div>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                Execute SQL queries on configured databases
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div className="flex items-center justify-between gap-2 pt-1">
+                    <div className="text-xs font-semibold text-gray-900">System prompt (optional)</div>
+                    <button
+                        onClick={handleResetSqlSelectPrompt}
+                        className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
+                    >
+                        Reset
                     </button>
                 </div>
-
-                {/* execute_sql toggle */}
-                <div className="flex items-start justify-between gap-3">
-                    <div>
-                        <div className="text-sm font-medium text-gray-900">execute_sql</div>
-                        <p className="text-xs text-gray-500">Execute SQL queries on configured databases.</p>
-                    </div>
-                    <button
-                        onClick={async () => {
-                            const next = !(settings?.execute_sql_enabled ?? false);
-                            await updateExecuteSqlEnabled(next);
-                        }}
-                        className={`relative w-10 h-5 rounded-full transition-colors ${(settings?.execute_sql_enabled ?? false) ? 'bg-blue-500' : 'bg-gray-300'
-                            }`}
-                        title="Toggle execute_sql"
-                    >
-                        <div
-                            className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${(settings?.execute_sql_enabled ?? false) ? 'translate-x-5' : ''
-                                }`}
-                        />
-                    </button>
-                </div>
+                <textarea
+                    value={sqlSelectPromptDraft}
+                    onChange={(e) => setSqlSelectPromptDraft(e.target.value)}
+                    rows={2}
+                    className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
+                    placeholder={defaultSqlSelectPrompt}
+                />
             </div>
         </div>
     );
@@ -2807,7 +2860,7 @@ export function SettingsModal() {
                                 : false;
 
     // Conditions for showing database tabs
-    const showDatabasesTab = settings?.search_schemas_enabled || settings?.execute_sql_enabled;
+    const showDatabasesTab = settings?.schema_search_enabled || settings?.sql_select_enabled;
     const showSchemasTab = (settings?.database_toolbox?.sources ?? []).some(source => source.enabled);
 
     return (

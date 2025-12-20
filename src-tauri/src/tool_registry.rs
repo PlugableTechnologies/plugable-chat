@@ -1,7 +1,7 @@
 //! Tool Registry - Manages built-in tools and domain tools with deferred loading
 //!
 //! This module provides a centralized registry for all tools available in Plugable Chat:
-//! - Built-in tools: `python_execution`, `tool_search`, `search_schemas`, `execute_sql`
+//! - Built-in tools: `python_execution`, `tool_search`, `schema_search`, `sql_select`
 //! - Domain tools from MCP servers (can be deferred for semantic discovery)
 //!
 //! The registry also stores precomputed embeddings for semantic tool search.
@@ -83,10 +83,10 @@ pub fn tool_search_tool() -> ToolSchema {
     }
 }
 
-/// Create the search_schemas built-in tool schema
-pub fn search_schemas_tool() -> ToolSchema {
+/// Create the schema_search built-in tool schema
+pub fn schema_search_tool() -> ToolSchema {
     ToolSchema {
-        name: "search_schemas".to_string(),
+        name: "schema_search".to_string(),
         description: Some(
             "Semantic search over cached database schemas. \
             Use this to discover relevant tables and columns when you need to write SQL queries. \
@@ -116,20 +116,20 @@ pub fn search_schemas_tool() -> ToolSchema {
             "required": ["query"]
         }),
         input_examples: Vec::new(),
-        tool_type: Some("search_schemas_20251210".to_string()),
+        tool_type: Some("schema_search_20251210".to_string()),
         allowed_callers: None,
         defer_loading: false,
         embedding: None,
     }
 }
 
-/// Create the execute_sql built-in tool schema
-pub fn execute_sql_tool() -> ToolSchema {
+/// Create the sql_select built-in tool schema
+pub fn sql_select_tool() -> ToolSchema {
     ToolSchema {
-        name: "execute_sql".to_string(),
+        name: "sql_select".to_string(),
         description: Some(
             "Execute SQL queries against configured database sources. \
-            Use search_schemas first to discover available tables and their structure. \
+            Use schema_search first to discover available tables and their structure. \
             **IMPORTANT: Always use this tool to execute SQL queries automatically. Do NOT return SQL code to the user - execute it and return the results.** \
             Returns query results as structured data."
                 .to_string(),
@@ -139,7 +139,7 @@ pub fn execute_sql_tool() -> ToolSchema {
             "properties": {
                 "source_id": {
                     "type": "string",
-                    "description": "Database source ID to query (from search_schemas results)"
+                    "description": "Database source ID to query (optional if only one source is enabled; found in schema_search results)"
                 },
                 "sql": {
                     "type": "string",
@@ -155,10 +155,10 @@ pub fn execute_sql_tool() -> ToolSchema {
                     "description": "Maximum rows to return (default: 100)"
                 }
             },
-            "required": ["source_id", "sql"]
+            "required": ["sql"]
         }),
         input_examples: Vec::new(),
-        tool_type: Some("execute_sql_20251210".to_string()),
+        tool_type: Some("sql_select_20251210".to_string()),
         allowed_callers: None,
         defer_loading: false,
         embedding: None,
@@ -183,7 +183,7 @@ pub struct ToolSearchResult {
 
 /// Central registry for all tools in Plugable Chat
 pub struct ToolRegistry {
-    /// Built-in tools (python_execution, tool_search, search_schemas, execute_sql)
+    /// Built-in tools (python_execution, tool_search, schema_search, sql_select)
     internal_tools: Vec<ToolSchema>,
     /// Domain tools from MCP servers (indexed by server_id___tool_name)
     domain_tools: HashMap<String, ToolSchema>,
@@ -195,10 +195,10 @@ pub struct ToolRegistry {
     server_python_names: HashMap<String, String>,
     /// Reverse mapping of python module name to server_id
     python_name_to_server: HashMap<String, String>,
-    /// Whether search_schemas is enabled
-    search_schemas_enabled: bool,
-    /// Whether execute_sql is enabled
-    execute_sql_enabled: bool,
+    /// Whether schema_search is enabled
+    schema_search_enabled: bool,
+    /// Whether sql_select is enabled
+    sql_select_enabled: bool,
 }
 
 impl ToolRegistry {
@@ -214,33 +214,33 @@ impl ToolRegistry {
             materialized_tools: std::collections::HashSet::new(),
             server_python_names: HashMap::new(),
             python_name_to_server: HashMap::new(),
-            search_schemas_enabled: false,
-            execute_sql_enabled: false,
+            schema_search_enabled: false,
+            sql_select_enabled: false,
         }
     }
 
-    /// Enable or disable search_schemas built-in
-    pub fn set_search_schemas_enabled(&mut self, enabled: bool) {
-        if enabled && !self.search_schemas_enabled {
-            self.internal_tools.push(search_schemas_tool());
-            println!("[ToolRegistry] search_schemas enabled");
-        } else if !enabled && self.search_schemas_enabled {
-            self.internal_tools.retain(|t| t.name != "search_schemas");
-            println!("[ToolRegistry] search_schemas disabled");
+    /// Enable or disable schema_search built-in
+    pub fn set_schema_search_enabled(&mut self, enabled: bool) {
+        if enabled && !self.schema_search_enabled {
+            self.internal_tools.push(schema_search_tool());
+            println!("[ToolRegistry] schema_search enabled");
+        } else if !enabled && self.schema_search_enabled {
+            self.internal_tools.retain(|t| t.name != "schema_search");
+            println!("[ToolRegistry] schema_search disabled");
         }
-        self.search_schemas_enabled = enabled;
+        self.schema_search_enabled = enabled;
     }
 
-    /// Enable or disable execute_sql built-in
-    pub fn set_execute_sql_enabled(&mut self, enabled: bool) {
-        if enabled && !self.execute_sql_enabled {
-            self.internal_tools.push(execute_sql_tool());
-            println!("[ToolRegistry] execute_sql enabled");
-        } else if !enabled && self.execute_sql_enabled {
-            self.internal_tools.retain(|t| t.name != "execute_sql");
-            println!("[ToolRegistry] execute_sql disabled");
+    /// Enable or disable sql_select built-in
+    pub fn set_sql_select_enabled(&mut self, enabled: bool) {
+        if enabled && !self.sql_select_enabled {
+            self.internal_tools.push(sql_select_tool());
+            println!("[ToolRegistry] sql_select enabled");
+        } else if !enabled && self.sql_select_enabled {
+            self.internal_tools.retain(|t| t.name != "sql_select");
+            println!("[ToolRegistry] sql_select disabled");
         }
-        self.execute_sql_enabled = enabled;
+        self.sql_select_enabled = enabled;
     }
 
     /// Register domain tools from an MCP server with its Python module name

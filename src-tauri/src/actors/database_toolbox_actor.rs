@@ -183,7 +183,7 @@ impl DatabaseToolboxActor {
                     parameters,
                     reply_to,
                 } => {
-                    let result = self.execute_sql(&source_id, &sql, &parameters).await;
+                    let result = self.sql_select(&source_id, &sql, &parameters).await;
                     let _ = reply_to.send(result);
                 }
                 DatabaseToolboxMsg::TestConnection { source, reply_to } => {
@@ -775,7 +775,7 @@ impl DatabaseToolboxActor {
     }
 
     /// Execute SQL query
-    async fn execute_sql(
+    async fn sql_select(
         &self,
         source_id: &str,
         sql: &str,
@@ -800,9 +800,9 @@ impl DatabaseToolboxActor {
         })?;
 
         let execute_candidates: Vec<&str> = if source.kind == SupportedDatabaseKind::Bigquery {
-            vec!["execute_sql", "bigquery-execute-sql"]
+            vec!["sql_select", "execute_sql", "bigquery-execute-sql"]
         } else {
-            vec![source.kind.execute_tool_name()]
+            vec![source.kind.execute_tool_name(), "execute_sql"]
         };
 
         let result = self
@@ -818,7 +818,7 @@ impl DatabaseToolboxActor {
             Ok(response) => self.parse_sql_execution_result(&response),
             Err(e) if e.contains("required tool not found") || e.contains("host unavailable") => {
                 // Potential connection issue, suggest re-syncing
-                println!("[DatabaseToolboxActor] ExecuteSql failed with potential connection issue: {}. Suggesting re-initialization.", e);
+                println!("[DatabaseToolboxActor] SqlSelect failed with potential connection issue: {}. Suggesting re-initialization.", e);
                 Err(format!("Database connection lost for '{}'. Please try refreshing database schemas in settings or check if the database is reachable.", source.name))
             }
             Err(e) => Err(e),
@@ -837,7 +837,7 @@ impl DatabaseToolboxActor {
         };
 
         let test_candidates: Vec<&str> = if source.kind == SupportedDatabaseKind::Bigquery {
-            vec!["execute_sql", "bigquery-execute-sql"]
+            vec!["sql_select", "bigquery-execute-sql"]
         } else {
             vec![source.kind.execute_tool_name()]
         };

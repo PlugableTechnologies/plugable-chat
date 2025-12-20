@@ -322,7 +322,7 @@ const PYTHON_EXECUTION_TOOL_TYPE: &str = "python_execution_20251206";
 
 /// Check if a tool call is for a built-in tool (python_execution, tool_search, or database tools)
 fn is_builtin_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "python_execution" | "tool_search" | "search_schemas" | "execute_sql")
+    matches!(tool_name, "python_execution" | "tool_search" | "schema_search" | "sql_select")
 }
 
 /// Build a consistent key for tool-specific settings
@@ -359,36 +359,36 @@ fn parse_tool_call_format(name: &str) -> Option<ToolCallFormatName> {
 /// Keep the shared registry's database built-ins in sync with current settings.
 async fn sync_registry_database_tools(
     registry: &SharedToolRegistry,
-    search_schemas_enabled: bool,
-    execute_sql_enabled: bool,
+    schema_search_enabled: bool,
+    sql_select_enabled: bool,
 ) {
     let mut guard = registry.write().await;
-    guard.set_search_schemas_enabled(search_schemas_enabled);
-    guard.set_execute_sql_enabled(execute_sql_enabled);
+    guard.set_schema_search_enabled(schema_search_enabled);
+    guard.set_sql_select_enabled(sql_select_enabled);
 }
 
-/// Ensure execute_sql is enabled (registry + persisted settings) after schema search.
-async fn auto_enable_execute_sql(
+/// Ensure sql_select is enabled (registry + persisted settings) after schema search.
+async fn auto_enable_sql_select(
     registry: &SharedToolRegistry,
     settings_state: &State<'_, SettingsState>,
     reason: &str,
 ) {
     {
         let mut guard = registry.write().await;
-        guard.set_execute_sql_enabled(true);
+        guard.set_sql_select_enabled(true);
     }
 
     let mut settings_guard = settings_state.settings.write().await;
-    if !settings_guard.execute_sql_enabled {
-        settings_guard.execute_sql_enabled = true;
+    if !settings_guard.sql_select_enabled {
+        settings_guard.sql_select_enabled = true;
         if let Err(e) = settings::save_settings(&settings_guard).await {
             println!(
-                "[Chat] Failed to persist execute_sql_enabled ({}): {}",
+                "[Chat] Failed to persist sql_select_enabled ({}): {}",
                 reason, e
             );
         } else {
             println!(
-                "[Chat] execute_sql_enabled auto-enabled after {}",
+                "[Chat] sql_select_enabled auto-enabled after {}",
                 reason
             );
         }
@@ -489,13 +489,6 @@ fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> LaunchOver
     if let Some(max_examples) = args.tool_examples_max {
         let capped = max_examples.clamp(1, 5);
         settings.tool_use_examples_max = capped;
-    }
-    if let Some(v) = args.compact_mode {
-        settings.compact_prompt_enabled = v;
-    }
-    if let Some(max_tools) = args.compact_max_tools {
-        let capped = max_tools.clamp(1, 10);
-        settings.compact_prompt_max_tools = capped;
     }
     if let Some(defer) = args.defer_tools {
         for server in &mut settings.mcp_servers {
@@ -1356,6 +1349,7 @@ async fn run_agentic_loop(
     turn_progress: Arc<RwLock<TurnProgress>>,
     chat_format_default: ChatFormatName,
     chat_format_overrides: std::collections::HashMap<String, ChatFormatName>,
+    enabled_db_sources: Vec<String>,
 ) {
     // Derive native tool calling from format config
     let native_tool_calling_enabled = format_config.native_enabled();
@@ -1929,8 +1923,8 @@ async fn run_agentic_loop(
                             }
                         }
                     }
-                    "search_schemas" => {
-                        println!("[AgenticLoop] ⏳ Executing built-in: search_schemas");
+                    "schema_search" => {
+                        println!("[AgenticLoop] ⏳ Executing built-in: schema_search");
                         let _ = std::io::stdout().flush();
                         let exec_start = std::time::Instant::now();
 
@@ -1938,7 +1932,7 @@ async fn run_agentic_loop(
                         let input: tools::SchemaSearchInput = 
                             serde_json::from_value(resolved_call.arguments.clone())
                                 .unwrap_or_else(|e| {
-                                    println!("[AgenticLoop] ⚠️ Failed to parse search_schemas args: {}, using defaults", e);
+                                    println!("[AgenticLoop] ⚠️ Failed to parse schema_search args: {}, using defaults", e);
                                     tools::SchemaSearchInput {
                                         query: resolved_call.arguments
                                             .get("query")
@@ -1960,7 +1954,7 @@ async fn run_agentic_loop(
                             Ok(output) => {
                                 let elapsed = exec_start.elapsed();
                                 println!(
-                                    "[AgenticLoop] ✅ search_schemas completed in {:.2}s: {} tables found",
+                                    "[AgenticLoop] ✅ schema_search completed in {:.2}s: {} tables found",
                                     elapsed.as_secs_f64(),
                                     output.tables.len()
                                 );
@@ -1971,7 +1965,7 @@ async fn run_agentic_loop(
                             Err(e) => {
                                 let elapsed = exec_start.elapsed();
                                 println!(
-                                    "[AgenticLoop] ❌ search_schemas failed in {:.2}s: {}",
+                                    "[AgenticLoop] ❌ schema_search failed in {:.2}s: {}",
                                     elapsed.as_secs_f64(),
                                     e
                                 );
@@ -1979,22 +1973,21 @@ async fn run_agentic_loop(
                             }
                         }
                     }
-                    "execute_sql" => {
-                        println!("[AgenticLoop] ⏳ Executing built-in: execute_sql");
+                    "sql_select" => {
+                        println!("[AgenticLoop] ⏳ Executing built-in: sql_select");
                         let _ = std::io::stdout().flush();
                         let exec_start = std::time::Instant::now();
 
                         // Parse input
-                        let input: tools::ExecuteSqlInput = 
+                        let input: tools::SqlSelectInput = 
                             serde_json::from_value(resolved_call.arguments.clone())
                                 .unwrap_or_else(|e| {
-                                    println!("[AgenticLoop] ⚠️ Failed to parse execute_sql args: {}, using defaults", e);
-                                    tools::ExecuteSqlInput {
+                                    println!("[AgenticLoop] ⚠️ Failed to parse sql_select args: {}, using defaults", e);
+                                    tools::SqlSelectInput {
                                         source_id: resolved_call.arguments
                                             .get("source_id")
                                             .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
+                                            .map(|s| s.to_string()),
                                         sql: resolved_call.arguments
                                             .get("sql")
                                             .and_then(|v| v.as_str())
@@ -2005,13 +1998,13 @@ async fn run_agentic_loop(
                                     }
                                 });
 
-                        let executor = tools::ExecuteSqlExecutor::new(database_toolbox_tx.clone());
+                        let executor = tools::SqlSelectExecutor::new(database_toolbox_tx.clone());
 
-                        match executor.execute(input).await {
+                        match executor.execute(input, &enabled_db_sources).await {
                             Ok(output) => {
                                 let elapsed = exec_start.elapsed();
                                 println!(
-                                    "[AgenticLoop] ✅ execute_sql completed in {:.2}s: {} rows",
+                                    "[AgenticLoop] ✅ sql_select completed in {:.2}s: {} rows",
                                     elapsed.as_secs_f64(),
                                     output.row_count
                                 );
@@ -2022,7 +2015,7 @@ async fn run_agentic_loop(
                             Err(e) => {
                                 let elapsed = exec_start.elapsed();
                                 println!(
-                                    "[AgenticLoop] ❌ execute_sql failed in {:.2}s: {}",
+                                    "[AgenticLoop] ❌ sql_select failed in {:.2}s: {}",
                                     elapsed.as_secs_f64(),
                                     e
                                 );
@@ -2092,14 +2085,14 @@ async fn run_agentic_loop(
             }
             // #endregion
 
-            // After any schema search, automatically surface execute_sql for follow-up
-            if resolved_call.tool == "search_schemas" {
+            // After any schema search, automatically surface sql_select for follow-up
+            if resolved_call.tool == "schema_search" {
                 {
                     let mut registry = tool_registry.write().await;
-                    registry.set_execute_sql_enabled(true);
+                    registry.set_sql_select_enabled(true);
                 }
                 println!(
-                    "[AgenticLoop] execute_sql enabled after search_schemas tool call (runtime only)"
+                    "[AgenticLoop] sql_select enabled after schema_search tool call (runtime only)"
                 );
             }
 
@@ -2632,7 +2625,7 @@ fn build_system_prompt(
     let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
     if !additions.is_empty() {
         sections.push("## Capabilities\n\nYou are equipped with specialized tools to fetch real-time data, execute SQL queries, and perform calculations. You MUST use these tools whenever the user's request requires factual data or database access. Do NOT claim you cannot access databases or perform queries; you have these capabilities enabled via the tools listed below.".to_string());
-        sections.push("## Factual Grounding\n\n**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `execute_sql` or `search_schemas`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.".to_string());
+        sections.push("## Factual Grounding\n\n**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `sql_select` or `schema_search`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.".to_string());
         sections.push("## Additional prompts from tools".to_string());
         sections.extend(additions);
     }
@@ -2663,8 +2656,8 @@ fn collect_tool_prompt_additions(
     let has_active_tools = !capabilities.active_mcp_tools.is_empty();
 
     let python_tool_mode = capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION);
-    let has_database_tools = capabilities.available_builtins.contains(tool_capability::BUILTIN_EXECUTE_SQL)
-        || capabilities.available_builtins.contains(tool_capability::BUILTIN_SEARCH_SCHEMAS);
+    let has_database_tools = capabilities.available_builtins.contains(tool_capability::BUILTIN_SQL_SELECT)
+        || capabilities.available_builtins.contains(tool_capability::BUILTIN_SCHEMA_SEARCH);
     let has_any_tools = !tool_descriptions.is_empty() || python_tool_mode || has_database_tools;
 
     // Built-ins: use resolved capabilities to determine availability
@@ -2745,14 +2738,14 @@ fn collect_tool_prompt_additions(
         ));
     }
 
-    // Database built-in tools: search_schemas and execute_sql
-    if capabilities.available_builtins.contains(tool_capability::BUILTIN_SEARCH_SCHEMAS) {
+    // Database built-in tools: schema_search and sql_select
+    if capabilities.available_builtins.contains(tool_capability::BUILTIN_SCHEMA_SEARCH) {
         let mut body = String::from(
-            "Use `search_schemas` to discover database tables that may help answer the user's question.\n\
+            "Use `schema_search` to discover database tables that may help answer the user's question.\n\
              Parameters: `query` (search term), `max_tables` (max results, default 5).\n\
              Returns table names, columns, and descriptions relevant to the query.",
         );
-        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "search_schemas")) {
+        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "schema_search")) {
             let trimmed = custom.trim();
             if !trimmed.is_empty() {
                 body.push_str("\n\n");
@@ -2760,24 +2753,24 @@ fn collect_tool_prompt_additions(
             }
         }
         additions.push(format!(
-            "### search_schemas ({})\n{}",
+            "### schema_search ({})\n{}",
             BUILTIN_SERVER_LABEL, body.trim()
         ));
     }
 
-    if capabilities.available_builtins.contains(tool_capability::BUILTIN_EXECUTE_SQL) {
+    if capabilities.available_builtins.contains(tool_capability::BUILTIN_SQL_SELECT) {
         let mut body = String::from(
-            "Use `execute_sql` to run SQL queries against configured database sources.\n\
-             Parameters: `source_id` (from search_schemas results), `sql` (SQL statement).\n\
+            "Use `sql_select` to run SQL queries against configured database sources.\n\
+             Parameters: `sql` (SQL statement), `source_id` (optional; found in schema_search results).\n\
              Returns query results as rows.\n\n\
              **CRITICAL REQUIREMENTS**:\n\
              - Always execute queries to answer data questions using the tool-calling format described below - do NOT return SQL code to the user.\n\
-             - NEVER make up, infer, or guess data values. All numbers, dates, totals, and facts MUST come from executing `execute_sql`.\n\
+             - NEVER make up, infer, or guess data values. All numbers, dates, totals, and facts MUST come from executing `sql_select`.\n\
              - NEVER display SQL code or query text to the user - only show the actual query results.\n\
              - NEVER say you cannot access the database or that you don't have the ability to query it. You ARE equipped with tools to do this; use them.\n\
              - If you cannot execute the query, say so explicitly rather than inventing results.",
         );
-        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "execute_sql")) {
+        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "sql_select")) {
             let trimmed = custom.trim();
             if !trimmed.is_empty() {
                 body.push_str("\n\n");
@@ -2785,7 +2778,7 @@ fn collect_tool_prompt_additions(
             }
         }
         additions.push(format!(
-            "### execute_sql ({})\n{}",
+            "### sql_select ({})\n{}",
             BUILTIN_SERVER_LABEL, body.trim()
         ));
     }
@@ -3353,8 +3346,10 @@ fn render_auto_context_sections(
                 }
                 body.push_str(&line);
             }
-            body.push_str("\n\n**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n1. Use the `execute_sql` tool with the `source_id` shown above (e.g., `bq-1765404617532`)\n2. Write a SQL query that answers the user's question using the table and columns listed\n3. Execute the query automatically by calling `execute_sql(source_id=\"...\", sql=\"...\")` using the tool-calling format described below - do NOT return SQL code to the user\n4. Return the query results directly to answer the user's question\n\n**CRITICAL - NO HALLUCINATIONS**:\n- NEVER make up, infer, or guess data values. All numbers, dates, and facts MUST come from executing `execute_sql`.\n- NEVER display SQL code to the user - only show the actual query results.\n- NEVER say you cannot access the database or that you don't have the ability to query it. You ARE equipped with tools to do this; use them.\n- If you cannot execute the query, say so explicitly rather than inventing results.");
+            body.push_str("\n\n**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n1. Use the `sql_select` tool with the `source_id` shown above (e.g., `bq-1765404617532`)\n2. Write a SQL query that answers the user's question using the table and columns listed\n3. Execute the query automatically by calling `sql_select(sql=\"...\")` (the `source_id` is optional if only one database is enabled) using the tool-calling format described below - do NOT return SQL code to the user\n4. Return the query results directly to answer the user's question\n\n**CRITICAL - NO HALLUCINATIONS**:\n- NEVER make up, infer, or guess data values. All numbers, dates, and facts MUST come from executing `sql_select`.\n- NEVER display SQL code to the user - only show the actual query results.\n- NEVER say you cannot access the database or that you don't have the ability to query it. You ARE equipped with tools to do this; use them.\n- If you cannot execute the query, say so explicitly rather than inventing results.");
             sections.push(format!("### Auto schema search\n{}", body));
+        } else if output.summary.contains("WARNING") {
+            sections.push(format!("### Auto schema search\n{}", output.summary));
         }
     }
 
@@ -3410,14 +3405,14 @@ async fn auto_tool_search_for_prompt(
 
 async fn auto_schema_search_for_prompt(
     prompt: &str,
-    search_schemas_enabled: bool,
+    schema_search_enabled: bool,
     toolbox_config: &DatabaseToolboxConfig,
     schema_tx: mpsc::Sender<SchemaVectorMsg>,
     embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
 ) -> Option<SchemaSearchOutput> {
     // Use a generous cap so we don't silently drop discovered tables
     const AUTO_SCHEMA_SEARCH_MAX_TABLES: usize = 50;
-    if !search_schemas_enabled {
+    if !schema_search_enabled {
         return None;
     }
 
@@ -3438,19 +3433,55 @@ async fn auto_schema_search_for_prompt(
     }
 
     let executor = tools::SchemaSearchExecutor::new(schema_tx, embedding_model);
+    
+    // Check if any tables are cached
+    if let Ok(stats) = executor.get_stats().await {
+        if stats.table_count == 0 {
+            println!("[Chat] Auto schema_search skipped: No tables cached in LanceDB. User needs to click 'Refresh schemas'.");
+            return Some(SchemaSearchOutput {
+                tables: vec![],
+                query_used: prompt.to_string(),
+                summary: "WARNING: No database tables are currently cached. You CANNOT write accurate SQL queries yet. Please ask the user to click 'Refresh schemas' in Settings > Schemas to index their databases.".to_string(),
+            });
+        }
+    }
+
     let input = tools::SchemaSearchInput {
         query: prompt.to_string(),
         max_tables: AUTO_SCHEMA_SEARCH_MAX_TABLES,
         max_columns_per_table: 5,
-        min_relevance: 0.3,
+        min_relevance: 0.2, // Lower threshold for auto-discovery to be more helpful
     };
 
-    match executor.execute(input).await {
+    let mut search_result = executor.execute(input.clone()).await;
+
+    // Fallback: If semantic search found nothing but we HAVE tables in the cache,
+    // and the total number of tables is small (<= 10), just include all of them.
+    // This handles cases where table names are cryptic and embeddings are weak.
+    if let Ok(ref output) = search_result {
+        if output.tables.is_empty() {
+            if let Ok(stats) = executor.get_stats().await {
+                if stats.table_count > 0 && stats.table_count <= 10 {
+                    println!("[Chat] Auto schema_search fallback: semantic match failed (at 30%), but total tables small ({}). Including all tables.", stats.table_count);
+                    let fallback_input = tools::SchemaSearchInput {
+                        min_relevance: 0.0, // Get everything
+                        ..input
+                    };
+                    search_result = executor.execute(fallback_input).await;
+                }
+            }
+        }
+    }
+
+    match search_result {
         Ok(output) => {
             println!(
-                "[Chat] Auto schema_search completed: {} table(s) matched",
+                "[Chat] Auto schema_search found {} table(s) matching prompt",
                 output.tables.len()
             );
+            if output.tables.is_empty() {
+                println!("[Chat] Tip: If you have database sources enabled but see 0 tables, ensure you have clicked 'Refresh schemas' in Settings > Schemas.");
+            }
             Some(output)
         }
         Err(e) => {
@@ -3468,7 +3499,7 @@ async fn perform_auto_discovery_for_prompt(
     tool_search_enabled: bool,
     tool_search_max_results: usize,
     has_mcp_tools: bool,
-    search_schemas_enabled: bool,
+    schema_search_enabled: bool,
     toolbox_config: &DatabaseToolboxConfig,
     filtered_tool_descriptions: &[(String, Vec<McpTool>)],
     registry: SharedToolRegistry,
@@ -3490,7 +3521,7 @@ async fn perform_auto_discovery_for_prompt(
 
     let schema_search_output = auto_schema_search_for_prompt(
         prompt,
-        search_schemas_enabled,
+        schema_search_enabled,
         toolbox_config,
         schema_tx,
         embedding_model,
@@ -3564,24 +3595,70 @@ async fn chat(
     // Get server configs from settings
     let settings = settings_state.settings.read().await;
     let configured_system_prompt = settings.system_prompt.clone();
-    let mut server_configs = settings.mcp_servers.clone();
+    let mut server_configs = settings.get_all_mcp_configs();
     let tool_search_enabled = settings.tool_search_enabled;
-    let search_schemas_enabled = settings.search_schemas_enabled;
-    let execute_sql_enabled = settings.execute_sql_enabled;
+    let schema_search_enabled = settings.schema_search_enabled;
+    let schema_search_internal_only = settings.schema_search_internal_only;
+    let sql_select_enabled = settings.sql_select_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
-    let compact_prompt_enabled = settings.compact_prompt_enabled;
-    let compact_prompt_max_tools = settings.compact_prompt_max_tools;
     let database_toolbox_config = settings.database_toolbox.clone();
+    let enabled_db_sources: Vec<String> = database_toolbox_config
+        .sources
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|s| s.id.clone())
+        .collect();
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
     let tool_system_prompts = settings.tool_system_prompts.clone();
     let chat_format_default = settings.chat_format_default;
     let chat_format_overrides = settings.chat_format_overrides.clone();
     drop(settings);
+
+    // Initialize turn tracker for this generation
+    {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let mut progress = turn_tracker.progress.write().await;
+        *progress = TurnProgress {
+            chat_id: Some(chat_id.clone()),
+            generation_id,
+            assistant_response: String::new(),
+            last_token_index: 0,
+            finished: false,
+            had_tool_calls: false,
+            timestamp_ms: now_ms,
+        };
+    }
+
+    // Ensure database toolbox actor is initialized if database tools are enabled
+    if schema_search_enabled || schema_search_internal_only || sql_select_enabled {
+        if let Err(e) =
+            ensure_toolbox_running(&handles.database_toolbox_tx, &database_toolbox_config).await
+        {
+            println!(
+                "[Chat] Warning: Failed to ensure database toolbox is running: {}",
+                e
+            );
+        }
+    }
+
+    // Ensure all enabled MCP servers (regular + database) are connected before proceeding with discovery
+    let (sync_tx, sync_rx) = oneshot::channel();
+    if let Err(e) = handles.mcp_host_tx.send(McpHostMsg::SyncEnabledServers {
+        configs: server_configs.clone(),
+        respond_to: sync_tx,
+    }).await {
+        println!("[Chat] Warning: Failed to send sync request to MCP Host: {}", e);
+    } else {
+        let _ = sync_rx.await;
+    }
 
     // Query current model info to check if it supports native tool calling
     let (current_model_info, model_supports_native_tools) = {
@@ -3623,39 +3700,28 @@ async fn chat(
     // Ensure registry reflects persisted database tool toggles before building prompts
     sync_registry_database_tools(
         &tool_registry_state.registry,
-        search_schemas_enabled,
-        execute_sql_enabled,
+        schema_search_enabled,
+        sql_select_enabled,
     )
     .await;
 
-    // Initialize turn tracker for this generation
-    {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let mut progress = turn_tracker.progress.write().await;
-        *progress = TurnProgress {
-            chat_id: Some(chat_id.clone()),
-            generation_id,
-            assistant_response: String::new(),
-            last_token_index: 0,
-            finished: false,
-            had_tool_calls: false,
-            timestamp_ms: now_ms,
-        };
-    }
-
-    // Apply global tool_search flag to server defer settings
-    if tool_search_enabled {
+    // Apply global tool_search flag to server defer settings (only if tool_search is actually available)
+    let tool_search_allowed = tool_filter.builtin_allowed("tool_search");
+    if tool_search_enabled && tool_search_allowed {
         for config in &mut server_configs {
             config.defer_tools = true;
         }
-    } else {
+    } else if !tool_search_enabled {
+        // If tool search is explicitly disabled globally, we MUST surface regular tools or they'll be unreachable.
+        // HOWEVER, database sources should stay deferred because they are only meant for sql_select context injection.
         for config in &mut server_configs {
-            config.defer_tools = false;
+            if !enabled_db_sources.contains(&config.id) {
+                config.defer_tools = false;
+            }
         }
     }
+    // Otherwise, we respect the per-server config. This prevents bloating the prompt with 
+    // database tools that are handled via sql_select.
 
     // Get tool descriptions from MCP Host Actor
     let (tools_tx, tools_rx) = oneshot::channel();
@@ -3814,10 +3880,10 @@ async fn chat(
     // Run auto-discovery (tool search + schema search) for this user prompt
     let auto_discovery = perform_auto_discovery_for_prompt(
         &message,
-        tool_search_enabled,
+        tool_search_enabled && tool_search_allowed, // Only run auto tool discovery if allowed for this turn
         tool_search_max_results,
         has_mcp_tools,
-        search_schemas_enabled,
+        schema_search_enabled || schema_search_internal_only,
         &database_toolbox_config,
         &filtered_tool_descriptions,
         tool_registry_state.registry.clone(),
@@ -3832,9 +3898,9 @@ async fn chat(
         auto_discovery.schema_search_output.as_ref(),
     );
 
-    // If we already performed schema search for this prompt, surface execute_sql immediately
+    // If we already performed schema search for this prompt, surface sql_select immediately
     if auto_discovery.schema_search_output.is_some() {
-        auto_enable_execute_sql(
+        auto_enable_sql_select(
             &tool_registry_state.registry,
             &settings_state,
             "auto schema_search",
@@ -3842,22 +3908,10 @@ async fn chat(
         .await;
     }
 
-    // Ensure database toolbox is initialized if database tools are enabled
-    if search_schemas_enabled || execute_sql_enabled {
-        if let Err(e) =
-            ensure_toolbox_running(&handles.database_toolbox_tx, &database_toolbox_config).await
-        {
-            println!(
-                "[Chat] Warning: Failed to ensure database toolbox is running: {}",
-                e
-            );
-        }
-    }
-
     // Resolve tool capabilities using centralized resolver
-    // NOTE: Must be after auto_enable_execute_sql so database tools are included
+    // NOTE: Must be after auto_enable_sql_select so database tools are included
     let resolved_capabilities = {
-        // Refresh settings to pick up any auto-enabled tools (like execute_sql after schema search)
+        // Refresh settings to pick up any auto-enabled tools (like sql_select after schema search)
         let fresh_settings = settings_state.settings.read().await;
         let settings_for_resolver = fresh_settings.clone();
         drop(fresh_settings);
@@ -3911,7 +3965,7 @@ async fn chat(
                     // Only include tool_search if there are deferred tools to discover
                     has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
                 } else {
-                    // Other built-ins (search_schemas, execute_sql) are included if allowed
+                    // Other built-ins (schema_search, sql_select) are included if allowed
                     tool_filter.builtin_allowed(&schema.name)
                 }
             })
@@ -3936,17 +3990,8 @@ async fn chat(
         let registry = tool_registry_state.registry.read().await;
         let mut seen: HashSet<String> =
             tools_list.iter().map(|t| t.function.name.clone()).collect();
-        let mut included_count: usize = 0;
-        let max_tools_for_prompt = if compact_prompt_enabled {
-            compact_prompt_max_tools.max(1)
-        } else {
-            usize::MAX
-        };
 
         for (server_id, schema) in registry.get_visible_tools_with_servers() {
-            if compact_prompt_enabled && included_count >= max_tools_for_prompt {
-                break;
-            }
             // Filter builtin tools based on their enabled state and tool filter
             if server_id == "builtin" {
                 if schema.name == "python_execution" {
@@ -3960,7 +4005,7 @@ async fn chat(
                         continue;
                     }
                 } else if !tool_filter.builtin_allowed(&schema.name) {
-                    // Other built-ins (search_schemas, execute_sql) - check filter
+                    // Other built-ins (schema_search, sql_select) - check filter
                     continue;
                 }
             }
@@ -3975,7 +4020,6 @@ async fn chat(
                 continue;
             }
             tools_list.push(openai_tool);
-            included_count += 1;
         }
     }
 
@@ -4138,6 +4182,7 @@ async fn chat(
     let turn_progress = turn_tracker.progress.clone();
     let chat_format_default_task = chat_format_default;
     let chat_format_overrides_task = chat_format_overrides.clone();
+    let server_configs_task = server_configs.clone(); // Combined list!
 
     // Spawn the agentic loop task
     tauri::async_runtime::spawn(async move {
@@ -4155,7 +4200,7 @@ async fn chat(
             full_history,
             reasoning_effort,
             cancel_rx,
-            server_configs,
+            server_configs_task, // Pass the combined list
             chat_id_task,
             generation_id_task,
             title_task,
@@ -4171,6 +4216,7 @@ async fn chat(
             turn_progress,
             chat_format_default_task,
             chat_format_overrides_task,
+            enabled_db_sources,
         )
         .await;
     });
@@ -4424,14 +4470,14 @@ async fn update_mcp_server(
 ) -> Result<(), String> {
     enforce_python_name(&mut config);
 
-    let configs_for_sync;
+    let all_configs_for_sync;
     {
         let mut guard = settings_state.settings.write().await;
 
         if let Some(server) = guard.mcp_servers.iter_mut().find(|s| s.id == config.id) {
             *server = config;
             settings::save_settings(&guard).await?;
-            configs_for_sync = guard.mcp_servers.clone();
+            all_configs_for_sync = guard.get_all_mcp_configs();
         } else {
             return Err(format!("Server with ID '{}' not found", config.id));
         }
@@ -4442,7 +4488,7 @@ async fn update_mcp_server(
     handles
         .mcp_host_tx
         .send(McpHostMsg::SyncEnabledServers {
-            configs: configs_for_sync,
+            configs: all_configs_for_sync,
             respond_to: tx,
         })
         .await
@@ -4622,36 +4668,36 @@ async fn update_tool_search_enabled(
 }
 
 #[tauri::command]
-async fn update_search_schemas_enabled(
+async fn update_schema_search_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
     tool_registry_state: State<'_, ToolRegistryState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
-    guard.search_schemas_enabled = enabled;
+    guard.schema_search_enabled = enabled;
     settings::save_settings(&guard).await?;
     {
         let mut registry = tool_registry_state.registry.write().await;
-        registry.set_search_schemas_enabled(enabled);
+        registry.set_schema_search_enabled(enabled);
     }
-    println!("[Settings] search_schemas_enabled updated to: {}", enabled);
+    println!("[Settings] schema_search_enabled updated to: {}", enabled);
     Ok(())
 }
 
 #[tauri::command]
-async fn update_execute_sql_enabled(
+async fn update_sql_select_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
     tool_registry_state: State<'_, ToolRegistryState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
-    guard.execute_sql_enabled = enabled;
+    guard.sql_select_enabled = enabled;
     settings::save_settings(&guard).await?;
     {
         let mut registry = tool_registry_state.registry.write().await;
-        registry.set_execute_sql_enabled(enabled);
+        registry.set_sql_select_enabled(enabled);
     }
-    println!("[Settings] execute_sql_enabled updated to: {}", enabled);
+    println!("[Settings] sql_select_enabled updated to: {}", enabled);
     Ok(())
 }
 
@@ -5455,7 +5501,7 @@ async fn sync_mcp_servers(
     settings_state: State<'_, SettingsState>,
 ) -> Result<Vec<McpSyncResult>, String> {
     let settings = settings_state.settings.read().await;
-    let configs = settings.mcp_servers.clone();
+    let configs = settings.get_all_mcp_configs();
     drop(settings);
 
     // Count enabled and deferred servers for informative logging
@@ -5663,8 +5709,8 @@ async fn get_system_prompt_preview(
     let base_prompt = settings.system_prompt.clone();
     let mut server_configs = settings.mcp_servers.clone();
     let tool_search_enabled = settings.tool_search_enabled;
-    let search_schemas_enabled = settings.search_schemas_enabled;
-    let execute_sql_enabled = settings.execute_sql_enabled;
+    let schema_search_enabled = settings.schema_search_enabled;
+    let sql_select_enabled = settings.sql_select_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
@@ -5679,8 +5725,8 @@ async fn get_system_prompt_preview(
 
     sync_registry_database_tools(
         &tool_registry_state.registry,
-        search_schemas_enabled,
-        execute_sql_enabled,
+        schema_search_enabled,
+        sql_select_enabled,
     )
     .await;
 
@@ -5730,7 +5776,7 @@ async fn get_system_prompt_preview(
         tool_search_enabled,
         tool_search_max_results,
         has_mcp_tools,
-        search_schemas_enabled,
+        schema_search_enabled,
         &database_toolbox_config,
         &filtered_tool_descriptions,
         tool_registry_state.registry.clone(),
@@ -5758,7 +5804,7 @@ async fn get_system_prompt_preview(
                     // Only include tool_search if there are deferred tools to discover
                     has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
                 } else {
-                    // Other built-ins (search_schemas, execute_sql) are included if allowed
+                    // Other built-ins (schema_search, sql_select) are included if allowed
                     tool_filter.builtin_allowed(&schema.name)
                 }
             })
@@ -5873,8 +5919,8 @@ async fn get_system_prompt_layers(
     let base_prompt = settings.system_prompt.clone();
     let mut server_configs = settings.mcp_servers.clone();
     let tool_search_enabled = settings.tool_search_enabled;
-    let search_schemas_enabled = settings.search_schemas_enabled;
-    let execute_sql_enabled = settings.execute_sql_enabled;
+    let schema_search_enabled = settings.schema_search_enabled;
+    let sql_select_enabled = settings.sql_select_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     // python_tool_calling_enabled now handled by resolver
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
@@ -5888,8 +5934,8 @@ async fn get_system_prompt_layers(
 
     sync_registry_database_tools(
         &tool_registry_state.registry,
-        search_schemas_enabled,
-        execute_sql_enabled,
+        schema_search_enabled,
+        sql_select_enabled,
     )
     .await;
 
@@ -5946,7 +5992,7 @@ async fn get_system_prompt_layers(
                     // Only include tool_search if there are deferred tools to discover
                     has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
                 } else {
-                    // Other built-ins (search_schemas, execute_sql) are included if allowed
+                    // Other built-ins (schema_search, sql_select) are included if allowed
                     tool_filter.builtin_allowed(&schema.name)
                 }
             })
@@ -6493,8 +6539,8 @@ pub fn run() {
             update_python_execution_enabled,
             update_native_tool_calling_enabled,
             update_tool_search_enabled,
-            update_search_schemas_enabled,
-            update_execute_sql_enabled,
+            update_schema_search_enabled,
+            update_sql_select_enabled,
             update_database_toolbox_config,
             get_cached_database_schemas,
             refresh_database_schemas,
@@ -6720,13 +6766,13 @@ mod inline_tests {
 
     #[test]
     fn test_strip_unsupported_await_with_args() {
-        let input = vec!["data = await execute_sql(query=\"SELECT * FROM users\")".to_string()];
+        let input = vec!["data = await sql_select(query=\"SELECT * FROM users\")".to_string()];
 
         let result = strip_unsupported_python(&input);
 
         assert_eq!(
             result[0],
-            "data = execute_sql(query=\"SELECT * FROM users\")"
+            "data = sql_select(query=\"SELECT * FROM users\")"
         );
     }
 
@@ -6840,12 +6886,23 @@ mod inline_tests {
 
         let tool_prompts = HashMap::new();
         let filter = ToolLaunchFilter::default();
-        let capabilities = create_test_capabilities(
+        let mut capabilities = create_test_capabilities(
             ToolCallFormatName::CodeMode,
             vec!["python_execution"],
             false,
             usize::MAX,
         );
+        // Add the tool to active_mcp_tools so it's included in the prompt
+        capabilities.active_mcp_tools = vec![("srv1".to_string(), protocol::ToolSchema {
+            name: "tool_a".to_string(),
+            description: Some("Demo tool".to_string()),
+            parameters: serde_json::json!({}),
+            input_examples: vec![],
+            tool_type: None,
+            allowed_callers: None,
+            defer_loading: false,
+            embedding: None,
+        })];
         let layers = build_system_prompt_layers(
             base_prompt,
             &tool_descriptions,

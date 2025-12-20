@@ -73,12 +73,11 @@ export interface AppSettings {
     legacy_tool_call_format_enabled: boolean;
     tool_use_examples_enabled: boolean;
     tool_use_examples_max: number;
-    compact_prompt_enabled: boolean;
-    compact_prompt_max_tools: number;
     // Database built-ins
     database_toolbox: DatabaseToolboxConfig;
-    search_schemas_enabled: boolean;
-    execute_sql_enabled: boolean;
+    schema_search_enabled: boolean;
+    sql_select_enabled: boolean;
+    schema_search_internal_only: boolean;
 }
 
 // Connection status for MCP servers
@@ -128,10 +127,9 @@ interface SettingsState {
     updateToolSearchMaxResults: (maxResults: number) => Promise<void>;
     updateToolExamplesEnabled: (enabled: boolean) => Promise<void>;
     updateToolExamplesMax: (maxExamples: number) => Promise<void>;
-    updateCompactPromptEnabled: (enabled: boolean) => Promise<void>;
-    updateCompactPromptMaxTools: (maxTools: number) => Promise<void>;
-    updateSearchSchemasEnabled: (enabled: boolean) => Promise<void>;
-    updateExecuteSqlEnabled: (enabled: boolean) => Promise<void>;
+    updateSchemaSearchEnabled: (enabled: boolean) => Promise<void>;
+    updateSchemaSearchInternalOnly: (enabled: boolean) => Promise<void>;
+    updateSqlSelectEnabled: (enabled: boolean) => Promise<void>;
     updateDatabaseToolboxConfig: (config: DatabaseToolboxConfig) => Promise<void>;
     addMcpServer: (config: McpServerConfig) => Promise<void>;
     updateMcpServer: (config: McpServerConfig) => Promise<void>;
@@ -283,8 +281,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 tool_search_max_results: settings.tool_search_max_results ?? 3,
                 tool_use_examples_enabled: settings.tool_use_examples_enabled ?? false,
                 tool_use_examples_max: settings.tool_use_examples_max ?? 2,
-                compact_prompt_enabled: settings.compact_prompt_enabled ?? false,
-                compact_prompt_max_tools: settings.compact_prompt_max_tools ?? 4,
                 database_toolbox: {
                     enabled: settings.database_toolbox?.enabled ?? false,
                     sources: normalizedDbSources,
@@ -336,14 +332,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     legacy_tool_call_format_enabled: false,
                     tool_use_examples_enabled: false,
                     tool_use_examples_max: 2,
-                    compact_prompt_enabled: false,
-                    compact_prompt_max_tools: 4,
                     database_toolbox: {
                         enabled: false,
                         sources: [],
                     },
-                    search_schemas_enabled: false,
-                    execute_sql_enabled: false,
+                    schema_search_enabled: false,
+                    sql_select_enabled: false,
+                    schema_search_internal_only: false,
                 },
                 pythonAllowedImports: FALLBACK_PYTHON_ALLOWED_IMPORTS,
             });
@@ -607,54 +602,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             });
         }
     },
-    updateCompactPromptEnabled: async (enabled: boolean) => {
-        const currentSettings = get().settings;
-        if (!currentSettings) return;
-        const newSettings = { ...currentSettings, compact_prompt_enabled: enabled };
-        set({ settings: newSettings, error: null });
-        try {
-            await invoke('save_app_settings', { newSettings });
-            console.log('[SettingsStore] compact_prompt_enabled updated:', enabled);
-            get().bumpPromptRefresh();
-        } catch (e: any) {
-            console.error('[SettingsStore] Failed to update compact_prompt_enabled:', e);
-            set({
-                settings: currentSettings,
-                error: `Failed to save: ${e.message || e}`,
-            });
-        }
-    },
-    updateCompactPromptMaxTools: async (maxTools: number) => {
-        const currentSettings = get().settings;
-        if (!currentSettings) return;
-        const capped = Math.min(Math.max(Math.floor(maxTools), 1), 10);
-        const newSettings = { ...currentSettings, compact_prompt_max_tools: capped };
-        set({ settings: newSettings, error: null });
-        try {
-            await invoke('save_app_settings', { newSettings });
-            console.log('[SettingsStore] compact_prompt_max_tools updated:', capped);
-            get().bumpPromptRefresh();
-        } catch (e: any) {
-            console.error('[SettingsStore] Failed to update compact_prompt_max_tools:', e);
-            set({
-                settings: currentSettings,
-                error: `Failed to save: ${e.message || e}`,
-            });
-        }
-    },
 
-    updateSearchSchemasEnabled: async (enabled: boolean) => {
+    updateSchemaSearchEnabled: async (enabled: boolean) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
         set({
-            settings: { ...currentSettings, search_schemas_enabled: enabled },
+            settings: { ...currentSettings, schema_search_enabled: enabled },
             error: null
         });
         try {
-            await invoke('update_search_schemas_enabled', { enabled });
-            console.log('[SettingsStore] search_schemas_enabled updated:', enabled);
+            await invoke('update_schema_search_enabled', { enabled });
+            console.log('[SettingsStore] schema_search_enabled updated:', enabled);
         } catch (e: any) {
-            console.error('[SettingsStore] Failed to update search_schemas_enabled:', e);
+            console.error('[SettingsStore] Failed to update schema_search_enabled:', e);
             set({
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`
@@ -662,18 +622,37 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         }
     },
 
-    updateExecuteSqlEnabled: async (enabled: boolean) => {
+    updateSchemaSearchInternalOnly: async (enabled: boolean) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
         set({
-            settings: { ...currentSettings, execute_sql_enabled: enabled },
+            settings: { ...currentSettings, schema_search_internal_only: enabled },
             error: null
         });
         try {
-            await invoke('update_execute_sql_enabled', { enabled });
-            console.log('[SettingsStore] execute_sql_enabled updated:', enabled);
+            await invoke('update_schema_search_internal_only', { enabled });
+            console.log('[SettingsStore] schema_search_internal_only updated:', enabled);
         } catch (e: any) {
-            console.error('[SettingsStore] Failed to update execute_sql_enabled:', e);
+            console.error('[SettingsStore] Failed to update schema_search_internal_only:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+
+    updateSqlSelectEnabled: async (enabled: boolean) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        set({
+            settings: { ...currentSettings, sql_select_enabled: enabled },
+            error: null
+        });
+        try {
+            await invoke('update_sql_select_enabled', { enabled });
+            console.log('[SettingsStore] sql_select_enabled updated:', enabled);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update sql_select_enabled:', e);
             set({
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`

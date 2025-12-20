@@ -13,15 +13,15 @@ use std::collections::{HashMap, HashSet};
 /// Built-in tool names
 pub const BUILTIN_PYTHON_EXECUTION: &str = "python_execution";
 pub const BUILTIN_TOOL_SEARCH: &str = "tool_search";
-pub const BUILTIN_SEARCH_SCHEMAS: &str = "search_schemas";
-pub const BUILTIN_EXECUTE_SQL: &str = "execute_sql";
+pub const BUILTIN_SCHEMA_SEARCH: &str = "schema_search";
+pub const BUILTIN_SQL_SELECT: &str = "sql_select";
 
 /// All built-in tool names
 pub const ALL_BUILTINS: &[&str] = &[
     BUILTIN_PYTHON_EXECUTION,
     BUILTIN_TOOL_SEARCH,
-    BUILTIN_SEARCH_SCHEMAS,
-    BUILTIN_EXECUTE_SQL,
+    BUILTIN_SCHEMA_SEARCH,
+    BUILTIN_SQL_SELECT,
 ];
 
 /// Resolved tool capabilities for a specific context
@@ -161,11 +161,11 @@ impl ToolCapabilityResolver {
         if settings.tool_search_enabled {
             enabled.insert(BUILTIN_TOOL_SEARCH.to_string());
         }
-        if settings.search_schemas_enabled {
-            enabled.insert(BUILTIN_SEARCH_SCHEMAS.to_string());
+        if settings.schema_search_enabled {
+            enabled.insert(BUILTIN_SCHEMA_SEARCH.to_string());
         }
-        if settings.execute_sql_enabled {
-            enabled.insert(BUILTIN_EXECUTE_SQL.to_string());
+        if settings.sql_select_enabled {
+            enabled.insert(BUILTIN_SQL_SELECT.to_string());
         }
         
         enabled
@@ -196,20 +196,21 @@ impl ToolCapabilityResolver {
             available.insert(BUILTIN_TOOL_SEARCH.to_string());
         }
         
-        // Check search_schemas
-        if enabled_builtins.contains(BUILTIN_SEARCH_SCHEMAS)
-            && filter.builtin_allowed(BUILTIN_SEARCH_SCHEMAS)
+        // Check schema_search
+        if settings.schema_search_enabled
+            && filter.builtin_allowed(BUILTIN_SCHEMA_SEARCH)
+            && !settings.schema_search_internal_only // Only as a tool if not internal-only
             && Self::has_enabled_database_sources(&settings.database_toolbox)
         {
-            available.insert(BUILTIN_SEARCH_SCHEMAS.to_string());
+            available.insert(BUILTIN_SCHEMA_SEARCH.to_string());
         }
         
-        // Check execute_sql
-        if enabled_builtins.contains(BUILTIN_EXECUTE_SQL)
-            && filter.builtin_allowed(BUILTIN_EXECUTE_SQL)
+        // Check sql_select
+        if enabled_builtins.contains(BUILTIN_SQL_SELECT)
+            && filter.builtin_allowed(BUILTIN_SQL_SELECT)
             && Self::has_enabled_database_sources(&settings.database_toolbox)
         {
-            available.insert(BUILTIN_EXECUTE_SQL.to_string());
+            available.insert(BUILTIN_SQL_SELECT.to_string());
         }
         
         available

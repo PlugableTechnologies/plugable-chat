@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::is_verbose_logging_enabled;
 use crate::settings::{CachedColumnSchema, CachedTableSchema, SupportedDatabaseKind};
 
 /// Embedding dimension (matches fastembed all-MiniLM-L6-v2)
@@ -75,6 +76,16 @@ pub enum SchemaVectorMsg {
     ClearAll {
         respond_to: oneshot::Sender<Result<(), String>>,
     },
+    /// Get statistics (table count, etc.)
+    GetStats {
+        respond_to: oneshot::Sender<SchemaStoreStats>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaStoreStats {
+    pub table_count: usize,
+    pub column_count: usize,
 }
 
 /// Result from table schema search
@@ -215,6 +226,14 @@ impl SchemaVectorStoreActor {
                     SchemaVectorMsg::ClearAll { respond_to } => {
                         let result = clear_all(&tables_table, &columns_table).await;
                         let _ = respond_to.send(result);
+                    }
+                    SchemaVectorMsg::GetStats { respond_to } => {
+                        let table_count = tables_table.count_rows(None).await.unwrap_or(0);
+                        let column_count = columns_table.count_rows(None).await.unwrap_or(0);
+                        let _ = respond_to.send(SchemaStoreStats {
+                            table_count,
+                            column_count,
+                        });
                     }
                 }
             });
@@ -540,6 +559,9 @@ async fn search_tables(
                 let score = 1.0 / (1.0 + distance);
 
                 if score < min_score {
+                    if is_verbose_logging_enabled() {
+                        println!("[SchemaSearch] Skipping result '{}' with low score {:.3} (min={})", fq.value(i), score, min_score);
+                    }
                     continue;
                 }
 

@@ -19,7 +19,7 @@ Tool Included in Prompt?
 │   └── Format compatibility check:
 │       ├── python_execution: CodeMode in formats.enabled?
 │       ├── tool_search: Always available if enabled
-│       └── search_schemas/execute_sql: database_toolbox.has_enabled_sources?
+│       └── schema_search/sql_select: database_toolbox.has_enabled_sources?
 │
 └── MCP Tool?
     ├── server.enabled?
@@ -34,8 +34,8 @@ Tool Included in Prompt?
 The four built-in tools are:
 1. `python_execution` - Python code execution sandbox
 2. `tool_search` - Semantic search over MCP tools
-3. `search_schemas` - Semantic search over database schemas
-4. `execute_sql` - SQL query execution
+3. `schema_search` - Semantic search over database schemas
+4. `sql_select` - SQL query execution
 
 **Decision logic per built-in:**
 
@@ -47,12 +47,12 @@ The four built-in tools are:
 - Included if: `"tool_search" in enabled_builtins` AND `filter.builtin_allowed("tool_search")` AND `has_deferred_mcp_tools`
 - Purpose: Discovers deferred MCP tools. Always available for model to call even if not in initial prompt.
 
-### search_schemas
-- Included if: `"search_schemas" in enabled_builtins` AND `filter.builtin_allowed("search_schemas")` AND `database_toolbox.has_enabled_sources()`
+### schema_search
+- Included if: `"schema_search" in enabled_builtins` AND `filter.builtin_allowed("schema_search")` AND `database_toolbox.has_enabled_sources()`
 - Purpose: Semantic search over database table schemas
 
-### execute_sql
-- Included if: `"execute_sql" in enabled_builtins` AND `filter.builtin_allowed("execute_sql")` AND `database_toolbox.has_enabled_sources()`
+### sql_select
+- Included if: `"sql_select" in enabled_builtins` AND `filter.builtin_allowed("sql_select")` AND `database_toolbox.has_enabled_sources()`
 - Purpose: Execute SQL queries against configured databases
 
 ## MCP Tools

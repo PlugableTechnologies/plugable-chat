@@ -167,7 +167,7 @@ impl ModelProfile {
         }
 
         prompt.push_str("## Factual Grounding\n\n");
-        prompt.push_str("**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `execute_sql` or `search_schemas`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.\n\n");
+        prompt.push_str("**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `sql_select` or `schema_search`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.\n\n");
 
         prompt.push_str("## Available Tools\n\n");
         for tool in tools.iter().filter(|t| !t.defer_loading) {
@@ -275,7 +275,7 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
             .push_str("<tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>\n\n");
 
         prompt.push_str("## Factual Grounding\n\n");
-        prompt.push_str("**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `execute_sql` or `search_schemas`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.\n\n");
+        prompt.push_str("**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `sql_select` or `schema_search`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.\n\n");
 
         if options.code_mode_enabled {
             prompt.push_str(&Self::python_execution_explanation());
@@ -353,7 +353,7 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
         prompt.push_str("<function_call>{\"name\": \"function_name\", \"arguments\": {...}}</function_call>\n\n");
 
         prompt.push_str("## Factual Grounding\n\n");
-        prompt.push_str("**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `execute_sql` or `search_schemas`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.\n\n");
+        prompt.push_str("**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `sql_select` or `schema_search`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.\n\n");
 
         if options.code_mode_enabled {
             prompt.push_str(&Self::python_execution_explanation());
@@ -420,7 +420,7 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
         prompt.push_str("Do not include any other text when making a tool call.\n\n");
 
         prompt.push_str("## Factual Grounding\n\n");
-        prompt.push_str("**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `execute_sql` or `search_schemas`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.\n\n");
+        prompt.push_str("**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, sales figures, etc.) MUST come from executing tools like `sql_select` or `schema_search`. If you need data, you MUST call the appropriate tool first. Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.\n\n");
 
         if options.code_mode_enabled {
             prompt.push_str(&Self::python_execution_explanation());

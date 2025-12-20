@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
-use crate::actors::schema_vector_actor::SchemaVectorMsg;
+use crate::actors::schema_vector_actor::{SchemaVectorMsg, SchemaStoreStats};
 
-/// Input for the search_schemas built-in tool
+/// Input for the schema_search built-in tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaSearchInput {
     /// Natural language query describing what data/tables are needed
@@ -72,7 +72,7 @@ pub struct ColumnOutput {
     pub description: Option<String>,
 }
 
-/// Output from search_schemas
+/// Output from schema_search
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaSearchOutput {
     /// Matching tables with their schemas
@@ -83,7 +83,7 @@ pub struct SchemaSearchOutput {
     pub summary: String,
 }
 
-/// Executor for the search_schemas built-in tool
+/// Executor for the schema_search built-in tool
 pub struct SchemaSearchExecutor {
     schema_tx: mpsc::Sender<SchemaVectorMsg>,
     embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
@@ -101,11 +101,25 @@ impl SchemaSearchExecutor {
         }
     }
 
+    /// Check if the schema store is empty
+    pub async fn get_stats(&self) -> Result<SchemaStoreStats, String> {
+        let (tx, rx) = oneshot::channel();
+        self.schema_tx
+            .send(SchemaVectorMsg::GetStats { respond_to: tx })
+            .await
+            .map_err(|e| format!("Failed to send stats request: {}", e))?;
+
+        Ok(rx.await.map_err(|_| "Schema vector actor died".to_string())?)
+    }
+
     /// Execute a schema search
     pub async fn execute(&self, input: SchemaSearchInput) -> Result<SchemaSearchOutput, String> {
+        // Ensure min_relevance is at least 0.3
+        let min_relevance = input.min_relevance.max(0.3);
+
         println!(
             "[SchemaSearch] Executing search: '{}' (max_tables={}, min_relevance={})",
-            input.query, input.max_tables, input.min_relevance
+            input.query, input.max_tables, min_relevance
         );
 
         if input.query.trim().is_empty() {
@@ -128,7 +142,7 @@ impl SchemaSearchExecutor {
             .send(SchemaVectorMsg::SearchTables {
                 query_embedding: query_embedding.clone(),
                 limit: input.max_tables,
-                min_score: input.min_relevance,
+                min_score: min_relevance,
                 respond_to: table_tx,
             })
             .await

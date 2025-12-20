@@ -1,4 +1,4 @@
-//! Execute SQL Implementation
+//! SQL Select Implementation
 //!
 //! Execute SQL queries against configured database sources via Google MCP Database Toolbox.
 //! Returns structured query results.
@@ -9,11 +9,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::actors::database_toolbox_actor::DatabaseToolboxMsg;
 
-/// Input for the execute_sql built-in tool
+/// Input for the sql_select built-in tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecuteSqlInput {
-    /// The database source ID to query
-    pub source_id: String,
+pub struct SqlSelectInput {
+    /// The database source ID to query (optional if only one source is enabled)
+    pub source_id: Option<String>,
     /// SQL query to execute
     #[serde(alias = "query")]
     pub sql: String,
@@ -29,9 +29,9 @@ fn default_max_rows() -> usize {
     100
 }
 
-/// Output from execute_sql
+/// Output from sql_select
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecuteSqlOutput {
+pub struct SqlSelectOutput {
     /// Whether the query succeeded
     pub success: bool,
     /// Column names from the result
@@ -48,32 +48,47 @@ pub struct ExecuteSqlOutput {
     pub sql_executed: String,
 }
 
-/// Executor for the execute_sql built-in tool
-pub struct ExecuteSqlExecutor {
+/// Executor for the sql_select built-in tool
+pub struct SqlSelectExecutor {
     toolbox_tx: mpsc::Sender<DatabaseToolboxMsg>,
 }
 
-impl ExecuteSqlExecutor {
+impl SqlSelectExecutor {
     /// Create a new SQL execution executor
     pub fn new(toolbox_tx: mpsc::Sender<DatabaseToolboxMsg>) -> Self {
         Self { toolbox_tx }
     }
 
     /// Execute a SQL query
-    pub async fn execute(&self, input: ExecuteSqlInput) -> Result<ExecuteSqlOutput, String> {
+    pub async fn execute(
+        &self,
+        input: SqlSelectInput,
+        enabled_sources: &[String],
+    ) -> Result<SqlSelectOutput, String> {
+        let source_id = match input.source_id {
+            Some(id) if !id.trim().is_empty() => id,
+            _ => {
+                if enabled_sources.len() == 1 {
+                    enabled_sources[0].clone()
+                } else if enabled_sources.is_empty() {
+                    return Err("No database sources enabled. Please enable a source in Settings > Databases.".to_string());
+                } else {
+                    return Err(format!(
+                        "Multiple database sources enabled ({:?}). Please specify source_id.",
+                        enabled_sources
+                    ));
+                }
+            }
+        };
+
         println!(
-            "[ExecuteSQL] Executing on source '{}': {}",
-            input.source_id,
+            "[SqlSelect] Executing on source '{}': {}",
+            source_id,
             truncate_sql(&input.sql, 100)
         );
 
         if input.sql.trim().is_empty() {
             return Err("SQL query cannot be empty".to_string());
-        }
-
-        // Validate source_id is provided
-        if input.source_id.trim().is_empty() {
-            return Err("source_id is required".to_string());
         }
 
         // Apply row limit to SELECT queries
@@ -83,7 +98,7 @@ impl ExecuteSqlExecutor {
         let (tx, rx) = oneshot::channel();
         self.toolbox_tx
             .send(DatabaseToolboxMsg::ExecuteSql {
-                source_id: input.source_id.clone(),
+                source_id: source_id.clone(),
                 sql: limited_sql.clone(),
                 parameters: input.parameters.clone(),
                 reply_to: tx,
@@ -98,11 +113,11 @@ impl ExecuteSqlExecutor {
         match result {
             Ok(exec_result) => {
                 println!(
-                    "[ExecuteSQL] Success: {} rows returned",
+                    "[SqlSelect] Success: {} rows returned",
                     exec_result.row_count
                 );
 
-                Ok(ExecuteSqlOutput {
+                Ok(SqlSelectOutput {
                     success: true,
                     columns: exec_result.columns,
                     rows: exec_result.rows,
@@ -113,9 +128,9 @@ impl ExecuteSqlExecutor {
                 })
             }
             Err(e) => {
-                println!("[ExecuteSQL] Error: {}", e);
+                println!("[SqlSelect] Error: {}", e);
 
-                Ok(ExecuteSqlOutput {
+                Ok(SqlSelectOutput {
                     success: false,
                     columns: vec![],
                     rows: vec![],
@@ -162,11 +177,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_execute_sql_input_defaults() {
+    fn test_sql_select_input_defaults() {
         let json = r#"{"source_id": "bq-prod", "sql": "SELECT * FROM orders"}"#;
-        let input: ExecuteSqlInput = serde_json::from_str(json).unwrap();
+        let input: SqlSelectInput = serde_json::from_str(json).unwrap();
 
-        assert_eq!(input.source_id, "bq-prod");
+        assert_eq!(input.source_id, Some("bq-prod".to_string()));
         assert_eq!(input.sql, "SELECT * FROM orders");
         assert!(input.parameters.is_empty());
         assert_eq!(input.max_rows, 100);
@@ -198,8 +213,8 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_sql_output_serde() {
-        let output = ExecuteSqlOutput {
+    fn test_sql_select_output_serde() {
+        let output = SqlSelectOutput {
             success: true,
             columns: vec!["id".to_string(), "name".to_string()],
             rows: vec![
@@ -213,7 +228,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&output).unwrap();
-        let parsed: ExecuteSqlOutput = serde_json::from_str(&json).unwrap();
+        let parsed: SqlSelectOutput = serde_json::from_str(&json).unwrap();
 
         assert!(parsed.success);
         assert_eq!(parsed.row_count, 2);

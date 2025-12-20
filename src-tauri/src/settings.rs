@@ -325,7 +325,7 @@ impl SupportedDatabaseKind {
     /// Get the MCP Toolbox execute tool name for this database kind
     pub fn execute_tool_name(&self) -> &'static str {
         match self {
-            SupportedDatabaseKind::Bigquery => "bigquery-execute-sql",
+            SupportedDatabaseKind::Bigquery => "execute_sql",
             SupportedDatabaseKind::Postgres => "postgres-sql",
             SupportedDatabaseKind::Mysql => "mysql-sql",
             SupportedDatabaseKind::Sqlite => "sqlite-sql",
@@ -604,23 +604,20 @@ pub struct AppSettings {
     /// Maximum number of examples per tool when enabled
     #[serde(default = "default_tool_use_examples_max")]
     pub tool_use_examples_max: usize,
-    /// Compact prompt mode for small models (caps tool listings)
-    #[serde(default)]
-    pub compact_prompt_enabled: bool,
-    /// Maximum tools to surface in prompts when compact mode is on
-    #[serde(default = "default_compact_prompt_max_tools")]
-    pub compact_prompt_max_tools: usize,
     /// Configuration for Google MCP Database Toolbox integration
     #[serde(default)]
     pub database_toolbox: DatabaseToolboxConfig,
-    /// Whether the search_schemas built-in tool is enabled (disabled by default).
+    /// Whether the schema_search built-in tool is enabled (disabled by default).
     /// When enabled, models can search for relevant database tables using embeddings.
-    #[serde(default)]
-    pub search_schemas_enabled: bool,
-    /// Whether the execute_sql built-in tool is enabled (disabled by default).
+    #[serde(default, alias = "search_schemas_enabled")]
+    pub schema_search_enabled: bool,
+    /// Whether the sql_select built-in tool is enabled (disabled by default).
     /// When enabled, models can execute SQL queries via configured database sources.
+    #[serde(default, alias = "execute_sql_enabled")]
+    pub sql_select_enabled: bool,
+    /// Whether schema_search runs internally only (not exposed as a tool to the model).
     #[serde(default)]
-    pub execute_sql_enabled: bool,
+    pub schema_search_internal_only: bool,
     // NOTE: native_tool_calling_enabled has been removed.
     // Native tool calling is now controlled via tool_call_formats (Native format).
     // Old configs with this field will be migrated on load.
@@ -642,8 +639,45 @@ fn default_tool_use_examples_max() -> usize {
     2
 }
 
-fn default_compact_prompt_max_tools() -> usize {
-    4
+impl AppSettings {
+    /// Get all enabled MCP server configurations, including database sources.
+    pub fn get_all_mcp_configs(&self) -> Vec<McpServerConfig> {
+        let mut configs = self.mcp_servers.clone();
+
+        if self.database_toolbox.enabled {
+            for source in &self.database_toolbox.sources {
+                configs.push(self.source_to_mcp_config(source));
+            }
+        }
+
+        configs
+    }
+
+    fn source_to_mcp_config(&self, source: &DatabaseSourceConfig) -> McpServerConfig {
+        let mut env = source.env.clone();
+
+        // BigQuery requires BIGQUERY_PROJECT; derive it from project_id when not provided
+        if source.kind == SupportedDatabaseKind::Bigquery {
+            if let Some(project_id) = source.project_id.as_ref() {
+                if !project_id.trim().is_empty() && !env.contains_key("BIGQUERY_PROJECT") {
+                    env.insert("BIGQUERY_PROJECT".to_string(), project_id.trim().to_string());
+                }
+            }
+        }
+
+        McpServerConfig {
+            id: source.id.clone(),
+            name: source.name.clone(),
+            enabled: source.enabled,
+            transport: source.transport.clone(),
+            command: source.command.clone(),
+            args: source.args.clone(),
+            env,
+            auto_approve_tools: source.auto_approve_tools,
+            defer_tools: source.defer_tools,
+            python_name: None,
+        }
+    }
 }
 
 fn find_workspace_root() -> Option<PathBuf> {
@@ -738,11 +772,10 @@ impl Default for AppSettings {
             legacy_tool_call_format_enabled: false,
             tool_use_examples_enabled: false,
             tool_use_examples_max: default_tool_use_examples_max(),
-            compact_prompt_enabled: false,
-            compact_prompt_max_tools: default_compact_prompt_max_tools(),
             database_toolbox: DatabaseToolboxConfig::default(),
-            search_schemas_enabled: false,
-            execute_sql_enabled: false,
+            schema_search_enabled: false,
+            sql_select_enabled: false,
+            schema_search_internal_only: false,
         }
     }
 }
@@ -860,14 +893,11 @@ mod tests {
             settings.tool_use_examples_max,
             default_tool_use_examples_max()
         );
-        assert!(!settings.compact_prompt_enabled);
-        assert_eq!(
-            settings.compact_prompt_max_tools,
-            default_compact_prompt_max_tools()
-        );
         assert_eq!(settings.tool_call_formats, ToolCallFormatConfig::default());
         assert_eq!(settings.chat_format_default, default_chat_format());
         assert!(settings.chat_format_overrides.is_empty());
+        assert!(!settings.schema_search_enabled);
+        assert!(!settings.sql_select_enabled);
     }
 
     #[test]
@@ -895,6 +925,16 @@ mod tests {
         assert_eq!(settings.tool_call_formats, parsed.tool_call_formats);
         assert_eq!(settings.chat_format_default, parsed.chat_format_default);
         assert_eq!(settings.chat_format_overrides, parsed.chat_format_overrides);
+        assert_eq!(settings.schema_search_enabled, parsed.schema_search_enabled);
+        assert_eq!(settings.sql_select_enabled, parsed.sql_select_enabled);
+    }
+
+    #[test]
+    fn test_backwards_compat_database_tools_enabled() {
+        let json = r#"{"system_prompt": "test", "mcp_servers": [], "search_schemas_enabled": true, "execute_sql_enabled": true}"#;
+        let parsed: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(parsed.schema_search_enabled);
+        assert!(parsed.sql_select_enabled);
     }
 
     #[test]
@@ -1153,7 +1193,7 @@ mod tests {
     fn test_app_settings_includes_database_toolbox() {
         let settings = AppSettings::default();
         assert!(!settings.database_toolbox.enabled);
-        assert!(!settings.search_schemas_enabled);
-        assert!(!settings.execute_sql_enabled);
+        assert!(!settings.schema_search_enabled);
+        assert!(!settings.sql_select_enabled);
     }
 }

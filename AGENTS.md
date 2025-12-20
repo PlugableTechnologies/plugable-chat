@@ -190,15 +190,15 @@ The "Cursor for SQL" feature enables the agent to interact with SQL databases th
 ### Architecture
 - **Process Management**: The `DatabaseToolboxActor` spawns and manages a separate binary (Google's "toolbox" binary) that handles actual database connections.
 - **Communication**: The actor communicates with the Toolbox via standard MCP HTTP/SSE or stdio.
-- **Tools**: The actor exposes capabilities as MCP tools, which are then wrapped by built-in tools (`execute_sql`, `search_schemas`) for the agent to use.
+- **Tools**: The actor exposes capabilities as MCP tools, which are then wrapped by built-in tools (`sql_select`, `schema_search`) for the agent to use.
 
 ### Capabilities
 1.  **Schema Discovery**:
-    -   **Search**: `search_schemas` tool allows semantic search over table schemas using embeddings.
+    -   **Search**: `schema_search` tool allows semantic search over table schemas using embeddings.
     -   **Enumeration**: Can list schemas/datasets and tables for a given source.
     -   **Details**: Retrieves detailed table information including columns, types, and descriptions.
 2.  **SQL Execution**:
-    -   **Querying**: `execute_sql` tool executes SQL queries against configured sources.
+    -   **Querying**: `sql_select` tool executes SQL queries against configured sources.
     -   **Safety**: Queries are executed with read-only permissions where possible (enforced by the database user configuration).
 3.  **Connection Management**:
     -   **Testing**: Can test connections to configured sources.
@@ -213,7 +213,7 @@ The Toolbox supports the following databases (defined in `SupportedDatabaseKind`
 
 ### Caching
 -   **Table Schemas**: Discovered table schemas are cached on disk to reduce latency and database load.
--   **Embeddings**: Schema embeddings are generated and cached on disk to enable fast semantic search via `search_schemas`.
+-   **Embeddings**: Schema embeddings are generated and cached on disk to enable fast semantic search via `schema_search`.
 
 ## Python Sandbox Configuration Sync
 
