@@ -6,7 +6,12 @@ cd "$(dirname "$0")/.."
 
 echo "Building macOS Bundle..."
 
+# Get version from git revision count
+GIT_COUNT=$(git rev-list --count HEAD)
+VERSION="0.$GIT_COUNT.0"
+echo "Target Version: $VERSION"
+
 # Use Tauri CLI via npm to handle the bundling (dmg/app)
-# This handles code signing and notarization if configured
-npm run tauri build
+# Pass the version dynamically via TAURI_CONFIG to avoid dirtying Cargo.toml
+TAURI_CONFIG="{\"version\":\"$VERSION\"}" npm run tauri build
 

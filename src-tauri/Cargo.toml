@@ -1,6 +1,6 @@
 [package]
 name = "plugable-chat"
-version = "0.139.0"
+version = "0.0.0"
 description = "A Plugable Chat Application"
 authors = ["you"]
 edition = "2021"

@@ -37,69 +37,9 @@ fn main() {
     build_python_sandbox_wasm(manifest_path);
 
     // Get git commit count and hash for versioning
-    let commit_count = set_git_version_info(project_root);
-
-    // Update version in config files
-    update_version_files(project_root, commit_count);
+    set_git_version_info(project_root);
 
     tauri_build::build()
-}
-
-/// Update version in configuration files if they differ
-fn update_version_files(project_root: &Path, commit_count: u32) {
-    let version = format!("0.{}.0", commit_count);
-
-    // Files to update: (path, is_json)
-    let files = [
-        (project_root.join("package.json"), true),
-        (project_root.join("src-tauri/tauri.conf.json"), true),
-        (project_root.join("src-tauri/Cargo.toml"), false),
-    ];
-
-    for (path, is_json) in files {
-        if let Ok(content) = fs::read_to_string(&path) {
-            let mut updated_content = None;
-
-            if is_json {
-                // Simple regex-like replacement for "version": "..."
-                if let Some(start) = content.find("\"version\": \"") {
-                    let version_start = start + 12;
-                    if let Some(end) = content[version_start..].find("\"") {
-                        let old_version = &content[version_start..version_start + end];
-                        if old_version != version {
-                            let mut new_content = content.clone();
-                            new_content.replace_range(version_start..version_start + end, &version);
-                            updated_content = Some(new_content);
-                        }
-                    }
-                }
-            } else {
-                // Simple regex-like replacement for version = "..."
-                if let Some(start) = content.find("version = \"") {
-                    let version_start = start + 11;
-                    if let Some(end) = content[version_start..].find("\"") {
-                        let old_version = &content[version_start..version_start + end];
-                        if old_version != version {
-                            let mut new_content = content.clone();
-                            new_content.replace_range(version_start..version_start + end, &version);
-                            updated_content = Some(new_content);
-                        }
-                    }
-                }
-            }
-
-            if let Some(new_content) = updated_content {
-                println!(
-                    "cargo:warning=Updating version in {:?} from unknown to {}",
-                    path.file_name().unwrap(),
-                    version
-                );
-                if let Err(e) = fs::write(&path, new_content) {
-                    println!("cargo:warning=Failed to write to {:?}: {}", path, e);
-                }
-            }
-        }
-    }
 }
 
 /// Find the rustup executable, checking common locations
