@@ -1,7 +1,7 @@
 use crate::is_verbose_logging_enabled;
 use crate::protocol::{
-    CachedModel, ChatMessage, FoundryMsg, ModelFamily, ModelInfo, OpenAITool, ParsedToolCall,
-    ReasoningFormat, ToolFormat,
+    CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus, ModelFamily,
+    ModelInfo, OpenAITool, ParsedToolCall, ReasoningFormat, ToolFormat,
 };
 use crate::LoggingPersistence;
 use serde::Deserialize;
@@ -1138,6 +1138,15 @@ impl ModelGatewayActor {
                     println!("FoundryActor: Downloading model: {}", model_name);
                     if let Some(port) = self.port {
                         let result = self.download_model_impl(&client, port, &model_name).await;
+                        // Refresh the models list after successful download
+                        if result.is_ok() {
+                            let models = self.get_models_via_rest(port).await;
+                            self.available_models = models.iter().map(|m| m.id.clone()).collect();
+                            println!(
+                                "FoundryActor: Refreshed models list after download, {} models available",
+                                self.available_models.len()
+                            );
+                        }
                         let _ = respond_to.send(result);
                     } else {
                         let _ = respond_to.send(Err("Foundry service not available".to_string()));
@@ -1200,6 +1209,55 @@ impl ModelGatewayActor {
                         }
                     };
 
+                    let _ = respond_to.send(result);
+                }
+                FoundryMsg::GetCatalogModels { respond_to } => {
+                    println!("FoundryActor: Getting catalog models");
+                    if let Some(port) = self.port {
+                        let catalog = self.get_catalog_models_impl(&client, port).await;
+                        let _ = respond_to.send(catalog);
+                    } else {
+                        let _ = respond_to.send(Vec::new());
+                    }
+                }
+                FoundryMsg::UnloadModel {
+                    model_name,
+                    respond_to,
+                } => {
+                    println!("FoundryActor: Unloading model: {}", model_name);
+                    if let Some(port) = self.port {
+                        let result = self.unload_model_impl(&client, port, &model_name).await;
+                        let _ = respond_to.send(result);
+                    } else {
+                        let _ = respond_to.send(Err("Foundry service not available".to_string()));
+                    }
+                }
+                FoundryMsg::GetServiceStatus { respond_to } => {
+                    println!("FoundryActor: Getting service status");
+                    if let Some(port) = self.port {
+                        let result = self.get_service_status_impl(&client, port).await;
+                        let _ = respond_to.send(result);
+                    } else {
+                        let _ = respond_to.send(Err("Foundry service not available".to_string()));
+                    }
+                }
+                FoundryMsg::RemoveCachedModel {
+                    model_name,
+                    respond_to,
+                } => {
+                    println!("FoundryActor: Removing cached model: {}", model_name);
+                    let result = self.remove_cached_model_impl(&model_name).await;
+                    // Refresh the models list after successful removal
+                    if result.is_ok() {
+                        if let Some(port) = self.port {
+                            let models = self.get_models_via_rest(port).await;
+                            self.available_models = models.iter().map(|m| m.id.clone()).collect();
+                            println!(
+                                "FoundryActor: Refreshed models list after removal, {} models available",
+                                self.available_models.len()
+                            );
+                        }
+                    }
                     let _ = respond_to.send(result);
                 }
             }
@@ -1942,9 +2000,14 @@ impl ModelGatewayActor {
         });
 
         println!("FoundryActor: Download request body: {:?}", request_body);
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
 
         // Send download request with streaming response
-        let mut response = client
+        println!("FoundryActor: Sending download request to {}...", url);
+        let _ = std::io::stdout().flush();
+
+        let response = client
             .post(&url)
             .json(&request_body)
             .timeout(Duration::from_secs(3600)) // 1 hour timeout for large models
@@ -1952,17 +2015,43 @@ impl ModelGatewayActor {
             .await
             .map_err(|e| format!("Download request failed: {}", e))?;
 
+        println!(
+            "FoundryActor: Download response status: {}",
+            response.status()
+        );
+        let _ = std::io::stdout().flush();
+
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             return Err(format!("Download failed: HTTP {} - {}", status, text));
         }
 
-        // Read streaming progress
+        // Read streaming progress - the download happens during this phase
+        println!("FoundryActor: Reading download stream...");
+        let _ = std::io::stdout().flush();
+
         let mut buffer = String::new();
-        while let Ok(Some(chunk)) = response.chunk().await {
+        let mut chunk_count = 0u32;
+        let mut last_progress_log = std::time::Instant::now();
+
+        // Use bytes_stream for better streaming handling
+        let mut stream = response;
+        while let Ok(Some(chunk)) = stream.chunk().await {
+            chunk_count += 1;
             if let Ok(s) = String::from_utf8(chunk.to_vec()) {
                 buffer.push_str(&s);
+
+                // Log periodically to show we're receiving data
+                if last_progress_log.elapsed() > Duration::from_secs(5) {
+                    println!(
+                        "FoundryActor: Received {} chunks, buffer len: {}",
+                        chunk_count,
+                        buffer.len()
+                    );
+                    let _ = std::io::stdout().flush();
+                    last_progress_log = std::time::Instant::now();
+                }
 
                 // Parse progress updates: ("file name", percentage)
                 // Look for complete lines
@@ -1974,26 +2063,68 @@ impl ModelGatewayActor {
                         continue;
                     }
 
-                    // Try to parse progress: ("filename", 0.5) format
-                    if line.starts_with('(') && line.ends_with(')') {
+                    println!("FoundryActor: Download stream line: {}", line);
+                    let _ = std::io::stdout().flush();
+
+                    // Flexible parsing: look for any number followed by % anywhere in the line
+                    // This handles formats like:
+                    //   "Total 0.043% Downloading v4/model.onnx"
+                    //   "0.5% complete"
+                    //   "Progress: 50%"
+                    //   ("filename", 0.5)  <- legacy format where 0.5 = 50%
+                    if let Some(percent_pos) = line.find('%') {
+                        // Walk backwards from % to find the number
+                        let before_percent = &line[..percent_pos];
+                        let number_start = before_percent
+                            .rfind(|c: char| !c.is_ascii_digit() && c != '.')
+                            .map(|i| i + 1)
+                            .unwrap_or(0);
+                        let number_str = before_percent[number_start..].trim();
+
+                        if let Ok(progress) = number_str.parse::<f32>() {
+                            // Extract filename: anything after % that looks like a path
+                            let after_percent = &line[percent_pos + 1..];
+                            let filename = after_percent
+                                .split_whitespace()
+                                .find(|s| s.contains('/') || s.contains('.'))
+                                .unwrap_or("")
+                                .to_string();
+
+                            println!(
+                                "FoundryActor: Download progress: {} - {:.1}%",
+                                if filename.is_empty() { "downloading" } else { &filename },
+                                progress
+                            );
+                            let _ = std::io::stdout().flush();
+
+                            // Emit progress event
+                            let _ = self.app_handle.emit(
+                                "model-download-progress",
+                                serde_json::json!({
+                                    "file": filename,
+                                    "progress": progress
+                                }),
+                            );
+                        }
+                    }
+                    // Handle legacy tuple format: ("filename", 0.5) where 0.5 means 50%
+                    else if line.starts_with('(') && line.ends_with(')') {
                         let inner = &line[1..line.len() - 1];
                         let parts: Vec<&str> = inner.rsplitn(2, ',').collect();
                         if parts.len() == 2 {
                             let progress_str = parts[0].trim();
                             let file_part = parts[1].trim();
-
-                            // Extract filename (remove quotes)
                             let filename = file_part.trim_matches('"').to_string();
 
-                            // Parse progress
                             if let Ok(progress) = progress_str.parse::<f32>() {
+                                // Legacy format uses 0-1 scale, convert to percentage
                                 let progress_percent = progress * 100.0;
                                 println!(
                                     "FoundryActor: Download progress: {} - {:.1}%",
                                     filename, progress_percent
                                 );
+                                let _ = std::io::stdout().flush();
 
-                                // Emit progress event
                                 let _ = self.app_handle.emit(
                                     "model-download-progress",
                                     serde_json::json!({
@@ -2004,12 +2135,44 @@ impl ModelGatewayActor {
                             }
                         }
                     }
+                    // Try to parse as JSON response (final status)
+                    else if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                        println!("FoundryActor: Download JSON response: {:?}", json);
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+            }
+        }
+
+        println!(
+            "FoundryActor: Download stream ended. Total chunks: {}, remaining buffer: {}",
+            chunk_count,
+            buffer.len()
+        );
+        let _ = std::io::stdout().flush();
+
+        // Check for any remaining content in buffer (final response)
+        if !buffer.trim().is_empty() {
+            println!("FoundryActor: Final buffer content: {}", buffer.trim());
+            let _ = std::io::stdout().flush();
+
+            // Try to parse as JSON
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&buffer) {
+                if let Some(success) = json.get("Success").and_then(|v| v.as_bool()) {
+                    if !success {
+                        let error_msg = json
+                            .get("ErrorMessage")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unknown error");
+                        return Err(format!("Download failed: {}", error_msg));
+                    }
                 }
             }
         }
 
         // Note: Frontend should call fetchModels/fetchCachedModels to refresh after download
         println!("FoundryActor: Model download complete: {}", model_name);
+        let _ = std::io::stdout().flush();
         Ok(())
     }
 
@@ -2107,6 +2270,132 @@ impl ModelGatewayActor {
                 println!("FoundryActor: Get loaded models request failed: {}", e);
                 Vec::new()
             }
+        }
+    }
+
+    /// Get all models from the Foundry catalog
+    /// GET /foundry/list
+    async fn get_catalog_models_impl(
+        &self,
+        client: &reqwest::Client,
+        port: u16,
+    ) -> Vec<CatalogModel> {
+        let url = format!("http://127.0.0.1:{}/foundry/list", port);
+        println!("FoundryActor: Getting catalog models from {}", url);
+
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    match resp.json::<Vec<CatalogModel>>().await {
+                        Ok(models) => {
+                            println!("FoundryActor: Catalog contains {} models", models.len());
+                            models
+                        }
+                        Err(e) => {
+                            println!("FoundryActor: Failed to parse catalog models: {}", e);
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    println!(
+                        "FoundryActor: Get catalog models failed: HTTP {}",
+                        resp.status()
+                    );
+                    Vec::new()
+                }
+            }
+            Err(e) => {
+                println!("FoundryActor: Get catalog models request failed: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Unload a model from memory
+    /// GET /openai/unload/{name}
+    async fn unload_model_impl(
+        &self,
+        client: &reqwest::Client,
+        port: u16,
+        model_name: &str,
+    ) -> Result<(), String> {
+        let encoded_name = urlencoding::encode(model_name);
+        let url = format!(
+            "http://127.0.0.1:{}/openai/unload/{}?force=true",
+            port, encoded_name
+        );
+        println!("FoundryActor: Unloading model {} from {}", model_name, url);
+
+        let response = client
+            .get(&url)
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| format!("Unload request failed: {}", e))?;
+
+        if response.status().is_success() {
+            println!("FoundryActor: Model unloaded successfully: {}", model_name);
+            Ok(())
+        } else {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            Err(format!("HTTP {} - {}", status, text))
+        }
+    }
+
+    /// Get Foundry service status
+    /// GET /openai/status
+    async fn get_service_status_impl(
+        &self,
+        client: &reqwest::Client,
+        port: u16,
+    ) -> Result<FoundryServiceStatus, String> {
+        let url = format!("http://127.0.0.1:{}/openai/status", port);
+        println!("FoundryActor: Getting service status from {}", url);
+
+        let response = client
+            .get(&url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("Status request failed: {}", e))?;
+
+        if response.status().is_success() {
+            response
+                .json::<FoundryServiceStatus>()
+                .await
+                .map_err(|e| format!("Failed to parse status: {}", e))
+        } else {
+            let status = response.status();
+            Err(format!("HTTP {}", status))
+        }
+    }
+
+    /// Remove a model from the disk cache using CLI
+    /// foundry cache remove --yes <model>
+    async fn remove_cached_model_impl(&self, model_name: &str) -> Result<(), String> {
+        println!(
+            "FoundryActor: Removing model from cache via CLI: {}",
+            model_name
+        );
+
+        let output = Command::new("foundry")
+            .args(["cache", "remove", "--yes", model_name])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run foundry cache remove: {}", e))?;
+
+        if output.status.success() {
+            println!("FoundryActor: Model removed from cache: {}", model_name);
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Err(format!(
+                "Failed to remove model: {} {}",
+                stdout.trim(),
+                stderr.trim()
+            ))
         }
     }
 }

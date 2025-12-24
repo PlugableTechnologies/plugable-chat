@@ -109,12 +109,12 @@ interface SettingsState {
 
     // Modal state
     isSettingsOpen: boolean;
-    activeTab: 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas';
+    activeTab: 'models' | 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas';
 
     // Actions
     openSettings: () => void;
     closeSettings: () => void;
-    setActiveTab: (tab: 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas') => void;
+    setActiveTab: (tab: 'models' | 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas') => void;
 
     // Settings CRUD
     fetchSettings: () => Promise<void>;
@@ -222,7 +222,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     promptRefreshTick: 0,
     serverStatuses: {},
     isSettingsOpen: false,
-    activeTab: 'system-prompt',
+    activeTab: 'models',
     bumpPromptRefresh: () => set(state => ({ promptRefreshTick: state.promptRefreshTick + 1 })),
 
     openSettings: () => {

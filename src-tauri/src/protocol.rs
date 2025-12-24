@@ -968,6 +968,73 @@ pub enum FoundryMsg {
     Reload {
         respond_to: oneshot::Sender<Result<(), String>>,
     },
+    /// Get all models from the Foundry catalog (GET /foundry/list)
+    GetCatalogModels {
+        respond_to: oneshot::Sender<Vec<CatalogModel>>,
+    },
+    /// Unload a model from memory (GET /openai/unload/{name})
+    UnloadModel {
+        model_name: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Get service status including cache location (GET /openai/status)
+    GetServiceStatus {
+        respond_to: oneshot::Sender<Result<FoundryServiceStatus, String>>,
+    },
+    /// Remove a model from the disk cache
+    RemoveCachedModel {
+        model_name: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+/// A model from the Foundry catalog (/foundry/list)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogModel {
+    pub name: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub alias: String,
+    #[serde(default)]
+    pub uri: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub file_size_mb: u64,
+    #[serde(default)]
+    pub license: String,
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub supports_tool_calling: bool,
+    #[serde(default)]
+    pub runtime: CatalogModelRuntime,
+    #[serde(default)]
+    pub publisher: String,
+}
+
+/// Runtime info for a catalog model
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogModelRuntime {
+    #[serde(default)]
+    pub device_type: String,
+    #[serde(default)]
+    pub execution_provider: String,
+}
+
+/// Foundry service status from /openai/status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundryServiceStatus {
+    #[serde(default)]
+    pub endpoints: Vec<String>,
+    #[serde(default)]
+    pub model_dir_path: String,
+    #[serde(default)]
+    pub is_auto_registration_resolved: bool,
 }
 
 /// Event payload for model download progress

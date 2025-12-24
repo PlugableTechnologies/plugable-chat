@@ -55,3 +55,4 @@ src-tauri/data/
 .fastembed_cache
 src/components/plugable-chat.code-workspace
 assets/*
+plugable-chat.code-workspace

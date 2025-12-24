@@ -1,7 +1,7 @@
 import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName, type DatabaseSourceConfig, type SupportedDatabaseKind, type DatabaseToolboxConfig, type ChatFormatName } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw, RefreshCw, AlertCircle } from 'lucide-react';
-import { invoke } from '../lib/api';
+import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw, RefreshCw, AlertCircle, Download, Cpu, HardDrive, ExternalLink, Zap } from 'lucide-react';
+import { invoke, type FoundryCatalogModel, type FoundryServiceStatus } from '../lib/api';
 import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
 import { useChatStore } from '../store/chat-store';
 
@@ -815,6 +815,464 @@ function McpServerCard({
                     </div>
                 </div>
             )}
+        </div>
+    );
+}
+
+// ============ Models Tab ============
+
+type DeviceFilter = 'Auto' | 'CPU' | 'GPU' | 'NPU';
+
+interface ModelCardProps {
+    model: FoundryCatalogModel;
+    isCached: boolean;
+    isLoaded: boolean;
+    isDownloading: boolean;
+    downloadProgress?: { file: string; progress: number };
+    onDownload: () => void;
+    onUnload: () => void;
+    onRemove: () => void;
+}
+
+function ModelCard({
+    model,
+    isCached,
+    isLoaded,
+    isDownloading,
+    downloadProgress,
+    onDownload,
+    onUnload,
+    onRemove,
+}: ModelCardProps) {
+    const deviceType = model.runtime?.deviceType || 'CPU';
+    const fileSizeGB = (model.fileSizeMb / 1024).toFixed(2);
+    const tasks = model.task?.replace('-completion', '') || 'chat';
+    const supportsTools = model.supportsToolCalling;
+
+    // Device badge colors
+    const deviceBadgeClass = deviceType === 'GPU'
+        ? 'bg-emerald-100 text-emerald-700'
+        : deviceType === 'NPU'
+            ? 'bg-purple-100 text-purple-700'
+            : 'bg-gray-100 text-gray-600';
+
+    // Card border for loaded state
+    const cardBorderClass = isLoaded
+        ? 'border-2 border-blue-400 shadow-lg shadow-blue-100'
+        : 'border border-gray-200';
+
+    return (
+        <div className={`model-card bg-white rounded-xl p-4 ${cardBorderClass} transition-all duration-200 hover:shadow-md`}>
+            {/* Header: Device badge, alias, license */}
+            <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                    <span className={`text-xs font-semibold px-2 py-0.5 rounded ${deviceBadgeClass}`}>
+                        {deviceType}
+                    </span>
+                    <h3 className="font-semibold text-gray-900">{model.alias || model.displayName}</h3>
+                </div>
+                <span className="text-xs text-gray-500 bg-gray-50 px-2 py-0.5 rounded">
+                    {model.license || 'Unknown'}
+                </span>
+            </div>
+
+            {/* Model ID subtitle */}
+            <p className="text-xs text-gray-400 font-mono mb-3 truncate" title={model.name}>
+                {model.name}
+            </p>
+
+            {/* Details row */}
+            <div className="flex items-center gap-3 text-sm text-gray-600 mb-3">
+                <div className="flex items-center gap-1">
+                    <HardDrive size={14} className="text-gray-400" />
+                    <span>{fileSizeGB} GB</span>
+                </div>
+                <span className="text-gray-300">|</span>
+                <span className="capitalize">{tasks}</span>
+                {supportsTools && (
+                    <>
+                        <span className="text-gray-300">|</span>
+                        <span className="flex items-center gap-1 text-blue-600">
+                            <Wrench size={12} />
+                            tools
+                        </span>
+                    </>
+                )}
+            </div>
+
+            {/* Status badges */}
+            <div className="flex items-center gap-2 mb-4">
+                {isCached && (
+                    <span className="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700 flex items-center gap-1">
+                        <CheckCircle size={12} />
+                        Downloaded
+                    </span>
+                )}
+                {isLoaded && (
+                    <span className="text-xs px-2 py-0.5 rounded bg-blue-100 text-blue-700 flex items-center gap-1">
+                        <Zap size={12} />
+                        Loaded
+                    </span>
+                )}
+                {!isCached && !isDownloading && (
+                    <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-500">
+                        Not Downloaded
+                    </span>
+                )}
+            </div>
+
+            {/* Download progress */}
+            {isDownloading && downloadProgress && (
+                <div className="mb-4">
+                    <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                        <span className="truncate max-w-[60%]">{downloadProgress.file}</span>
+                        <span>{downloadProgress.progress.toFixed(1)}%</span>
+                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-2">
+                        <div
+                            className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                            style={{ width: `${downloadProgress.progress}%` }}
+                        />
+                    </div>
+                </div>
+            )}
+
+            {/* Action buttons */}
+            <div className="flex items-center gap-2">
+                {!isCached && !isDownloading && (
+                    <button
+                        onClick={onDownload}
+                        className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm font-medium"
+                    >
+                        <Download size={16} />
+                        Download
+                    </button>
+                )}
+                {isCached && !isLoaded && (
+                    <button
+                        onClick={onRemove}
+                        className="flex items-center justify-center gap-2 px-3 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors text-sm"
+                    >
+                        <Trash2 size={16} />
+                        Remove from Cache
+                    </button>
+                )}
+                {isLoaded && (
+                    <button
+                        onClick={onUnload}
+                        className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
+                    >
+                        Unload
+                    </button>
+                )}
+                {isDownloading && (
+                    <div className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-gray-100 text-gray-500 rounded-lg text-sm">
+                        <Loader2 size={16} className="animate-spin" />
+                        Downloading...
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function ModelsTab() {
+    const [catalogModels, setCatalogModels] = useState<FoundryCatalogModel[]>([]);
+    const [cachedModelIds, setCachedModelIds] = useState<string[]>([]);
+    const [loadedModelIds, setLoadedModelIds] = useState<string[]>([]);
+    const [serviceStatus, setServiceStatus] = useState<FoundryServiceStatus | null>(null);
+    const [deviceFilter, setDeviceFilter] = useState<DeviceFilter>('GPU');
+    const [isLoading, setIsLoading] = useState(true);
+    const [downloadingModel, setDownloadingModel] = useState<string | null>(null);
+    const [downloadProgress, setDownloadProgress] = useState<{ file: string; progress: number } | null>(null);
+    const [error, setError] = useState<string | null>(null);
+
+    const { operationStatus, setOperationStatus } = useChatStore();
+
+    // Fetch all data on mount
+    useEffect(() => {
+        fetchAllData();
+    }, []);
+
+    // Track download progress from operationStatus
+    useEffect(() => {
+        if (operationStatus?.type === 'downloading') {
+            setDownloadProgress({
+                file: operationStatus.currentFile || '',
+                progress: operationStatus.progress || 0,
+            });
+            if (operationStatus.completed) {
+                setDownloadingModel(null);
+                setDownloadProgress(null);
+                // Refresh cached models after download
+                fetchCachedModels();
+            }
+        }
+    }, [operationStatus]);
+
+    const fetchAllData = async () => {
+        setIsLoading(true);
+        setError(null);
+        try {
+            await Promise.all([
+                fetchCatalogModels(),
+                fetchCachedModels(),
+                fetchLoadedModels(),
+                fetchServiceStatus(),
+            ]);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to load model data');
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const fetchCatalogModels = async () => {
+        try {
+            const models = await invoke<FoundryCatalogModel[]>('get_catalog_models');
+            setCatalogModels(models);
+        } catch (err) {
+            console.error('Failed to fetch catalog models:', err);
+        }
+    };
+
+    const fetchCachedModels = async () => {
+        try {
+            const models = await invoke<string[]>('get_models');
+            setCachedModelIds(models);
+        } catch (err) {
+            console.error('Failed to fetch cached models:', err);
+        }
+    };
+
+    const fetchLoadedModels = async () => {
+        try {
+            const models = await invoke<string[]>('get_loaded_models');
+            setLoadedModelIds(models);
+        } catch (err) {
+            console.error('Failed to fetch loaded models:', err);
+        }
+    };
+
+    const fetchServiceStatus = async () => {
+        try {
+            const status = await invoke<FoundryServiceStatus>('get_foundry_service_status');
+            setServiceStatus(status);
+        } catch (err) {
+            console.error('Failed to fetch service status:', err);
+        }
+    };
+
+    const handleDownload = async (model: FoundryCatalogModel) => {
+        setDownloadingModel(model.name);
+        setDownloadProgress({ file: 'Starting...', progress: 0 });
+        // Set operation status so the chat-store listener tracks progress
+        setOperationStatus({
+            type: 'downloading',
+            message: `Downloading ${model.alias || model.name}...`,
+            progress: 0,
+            currentFile: 'Starting...',
+            startTime: Date.now(),
+        });
+        try {
+            await invoke('download_model', { modelName: model.name });
+            await fetchCachedModels();
+            setOperationStatus({
+                type: 'downloading',
+                message: `${model.alias || model.name} downloaded successfully`,
+                completed: true,
+                startTime: Date.now(),
+            });
+        } catch (err) {
+            console.error('Download failed:', err);
+            const errorMessage = `Failed to download ${model.alias || model.name}:\n\n${err}`;
+            alert(errorMessage);
+            setError(`Download failed: ${err}`);
+            setOperationStatus(null);
+        } finally {
+            setDownloadingModel(null);
+            setDownloadProgress(null);
+            // Clear operation status after a delay
+            setTimeout(() => {
+                setOperationStatus(null);
+            }, 3000);
+        }
+    };
+
+    const handleUnload = async (model: FoundryCatalogModel) => {
+        try {
+            await invoke('unload_model', { modelName: model.name });
+            await fetchLoadedModels();
+        } catch (err) {
+            console.error('Unload failed:', err);
+            const errorMessage = `Failed to unload ${model.alias || model.name}:\n\n${err}`;
+            alert(errorMessage);
+            setError(`Unload failed: ${err}`);
+        }
+    };
+
+    const handleRemove = async (model: FoundryCatalogModel) => {
+        if (!confirm(`Remove ${model.alias || model.name} from cache?\n\nThis will delete the downloaded model files from disk.`)) {
+            return;
+        }
+        try {
+            await invoke('remove_cached_model', { modelName: model.name });
+            // Refresh the cached models list to reflect the removal
+            await fetchCachedModels();
+            // Also refresh loaded models in case it was loaded
+            await fetchLoadedModels();
+        } catch (err) {
+            console.error('Remove failed:', err);
+            const errorMessage = `Failed to remove ${model.alias || model.name} from cache:\n\n${err}`;
+            alert(errorMessage);
+            setError(`Remove failed: ${err}`);
+        }
+    };
+
+    const handleOpenProductLink = () => {
+        window.open('https://plugable.com/products/tbt5-ai', '_blank');
+    };
+
+    // Filter and sort models
+    const filteredModels = catalogModels
+        .filter((model) => {
+            if (deviceFilter === 'Auto') return true;
+            return model.runtime?.deviceType === deviceFilter;
+        })
+        .sort((a, b) => {
+            // Sort: 1. Tools support first, 2. By size ascending (smaller first)
+            const aTools = a.supportsToolCalling ? 1 : 0;
+            const bTools = b.supportsToolCalling ? 1 : 0;
+            if (aTools !== bTools) return bTools - aTools; // Tools support first
+
+            // Then by size ascending (smaller models first)
+            return (a.fileSizeMb || 0) - (b.fileSizeMb || 0);
+        });
+
+    const isModelCached = (model: FoundryCatalogModel) => {
+        return cachedModelIds.some(id => 
+            id.toLowerCase().includes(model.name.toLowerCase()) || 
+            model.name.toLowerCase().includes(id.toLowerCase())
+        );
+    };
+
+    const isModelLoaded = (model: FoundryCatalogModel) => {
+        return loadedModelIds.some(id => 
+            id.toLowerCase().includes(model.name.toLowerCase()) || 
+            model.name.toLowerCase().includes(id.toLowerCase())
+        );
+    };
+
+    const serviceEndpoint = serviceStatus?.endpoints?.[0] || 'Not available';
+
+    return (
+        <div className="models-tab flex flex-col h-full">
+            {/* Header */}
+            <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-4">
+                    {/* Device Filter */}
+                    <div className="flex items-center gap-2">
+                        <Cpu size={16} className="text-gray-500" />
+                        <select
+                            value={deviceFilter}
+                            onChange={(e) => setDeviceFilter(e.target.value as DeviceFilter)}
+                            className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        >
+                            <option value="Auto">All Devices</option>
+                            <option value="GPU">GPU</option>
+                            <option value="CPU">CPU</option>
+                            <option value="NPU">NPU</option>
+                        </select>
+                    </div>
+
+                    {/* Service Status */}
+                    <div className="flex items-center gap-2 text-sm text-gray-500">
+                        <span className={`w-2 h-2 rounded-full ${serviceStatus ? 'bg-green-500' : 'bg-red-500'}`} />
+                        <span>{serviceStatus ? `Service: ${serviceEndpoint}` : 'Service not available'}</span>
+                    </div>
+                </div>
+
+                {/* Refresh Button */}
+                <button
+                    onClick={fetchAllData}
+                    disabled={isLoading}
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50"
+                >
+                    <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
+                    Refresh
+                </button>
+            </div>
+
+            {/* Error display */}
+            {error && (
+                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm flex items-center gap-2">
+                    <AlertCircle size={16} />
+                    {error}
+                    <button onClick={() => setError(null)} className="ml-auto text-red-500 hover:text-red-700">
+                        <X size={14} />
+                    </button>
+                </div>
+            )}
+
+            {/* Scrollable content area */}
+            <div className="flex-1 overflow-y-auto">
+                {/* Promotional Banner */}
+                <div className="mb-4 p-3 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-lg">
+                    <p className="text-sm text-gray-700">
+                        Enable more models with the{' '}
+                        <button
+                            onClick={handleOpenProductLink}
+                            className="text-blue-600 hover:text-blue-800 font-medium inline-flex items-center gap-1 hover:underline"
+                        >
+                            Plugable TBT5-AI
+                            <ExternalLink size={12} />
+                        </button>
+                    </p>
+                </div>
+
+                {/* Loading state */}
+                {isLoading && (
+                    <div className="flex items-center justify-center py-12">
+                        <Loader2 size={24} className="animate-spin text-blue-500" />
+                    </div>
+                )}
+
+                {/* Model Cards Grid */}
+                {!isLoading && (
+                    <div className="model-card-grid grid grid-cols-1 gap-4">
+                        {filteredModels.map((model) => (
+                            <ModelCard
+                                key={model.name}
+                                model={model}
+                                isCached={isModelCached(model)}
+                                isLoaded={isModelLoaded(model)}
+                                isDownloading={downloadingModel === model.name}
+                                downloadProgress={downloadingModel === model.name ? downloadProgress ?? undefined : undefined}
+                                onDownload={() => handleDownload(model)}
+                                onUnload={() => handleUnload(model)}
+                                onRemove={() => handleRemove(model)}
+                            />
+                        ))}
+                    </div>
+                )}
+
+                {/* Empty state */}
+                {!isLoading && filteredModels.length === 0 && (
+                    <div className="text-center py-12 text-gray-500">
+                        <Cpu size={48} className="mx-auto mb-4 text-gray-300" />
+                        <p>No models found for {deviceFilter} device type.</p>
+                        <p className="text-sm mt-2">Try selecting a different device filter.</p>
+                    </div>
+                )}
+            </div>
+
+            {/* Footer */}
+            <div className="mt-4 pt-4 border-t border-gray-100 text-xs text-gray-400">
+                <div className="flex items-center gap-2">
+                    <HardDrive size={12} />
+                    <span>Cache: {serviceStatus?.modelDirPath || 'Unknown location'}</span>
+                </div>
+            </div>
         </div>
     );
 }
@@ -2908,6 +3366,16 @@ export function SettingsModal() {
 
                 {/* Tabs */}
                 <div className="settings-tablist flex items-center border-b border-gray-100 overflow-x-auto min-h-[56px] pb-2">
+                    <button
+                        onClick={() => setActiveTab('models')}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'models'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <Cpu size={16} />
+                        Models
+                    </button>
                     {showSchemasTab && (
                         <button
                             onClick={() => setActiveTab('schemas')}
@@ -2982,6 +3450,9 @@ export function SettingsModal() {
                         </div>
                     ) : (
                         <>
+                            {activeTab === 'models' && (
+                                <ModelsTab />
+                            )}
                             {activeTab === 'system-prompt' && (
                                 <SystemPromptTab
                                     onDirtyChange={setSystemDirty}

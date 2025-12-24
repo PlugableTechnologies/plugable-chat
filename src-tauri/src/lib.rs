@@ -25,10 +25,10 @@ use mcp_test_server::{
 };
 use model_profiles::resolve_profile;
 use protocol::{
-    parse_tool_calls, CachedModel, ChatMessage, FoundryMsg, McpHostMsg, ModelFamily, ModelInfo,
-    OpenAITool, ParsedToolCall, RagChunk, RagIndexResult, RagMsg, RemoveFileResult,
-    ToolCallsPendingEvent, ToolExecutingEvent, ToolFormat, ToolHeartbeatEvent, ToolLoopFinishedEvent,
-    ToolResultEvent, ToolSchema, VectorMsg,
+    parse_tool_calls, CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus,
+    McpHostMsg, ModelFamily, ModelInfo, OpenAITool, ParsedToolCall, RagChunk, RagIndexResult,
+    RagMsg, RemoveFileResult, ToolCallsPendingEvent, ToolExecutingEvent, ToolFormat,
+    ToolHeartbeatEvent, ToolLoopFinishedEvent, ToolResultEvent, ToolSchema, VectorMsg,
 };
 use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
 use serde::de::DeserializeOwned;
@@ -3267,6 +3267,67 @@ async fn reload_foundry(handles: State<'_, ActorHandles>) -> Result<(), String> 
             Err("Foundry actor died".to_string())
         }
     }
+}
+
+#[tauri::command]
+async fn get_catalog_models(
+    handles: State<'_, ActorHandles>,
+) -> Result<Vec<CatalogModel>, String> {
+    println!("[get_catalog_models] Getting catalog models");
+    let (tx, rx) = oneshot::channel();
+    handles
+        .foundry_tx
+        .send(FoundryMsg::GetCatalogModels { respond_to: tx })
+        .await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+    Ok(rx.await.map_err(|_| "Foundry actor died".to_string())?)
+}
+
+#[tauri::command]
+async fn unload_model(model_name: String, handles: State<'_, ActorHandles>) -> Result<(), String> {
+    println!("[unload_model] Unloading model: {}", model_name);
+    let (tx, rx) = oneshot::channel();
+    handles
+        .foundry_tx
+        .send(FoundryMsg::UnloadModel {
+            model_name: model_name.clone(),
+            respond_to: tx,
+        })
+        .await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+    rx.await.map_err(|_| "Foundry actor died".to_string())?
+}
+
+#[tauri::command]
+async fn get_foundry_service_status(
+    handles: State<'_, ActorHandles>,
+) -> Result<FoundryServiceStatus, String> {
+    println!("[get_foundry_service_status] Getting service status");
+    let (tx, rx) = oneshot::channel();
+    handles
+        .foundry_tx
+        .send(FoundryMsg::GetServiceStatus { respond_to: tx })
+        .await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+    rx.await.map_err(|_| "Foundry actor died".to_string())?
+}
+
+#[tauri::command]
+async fn remove_cached_model(
+    model_name: String,
+    handles: State<'_, ActorHandles>,
+) -> Result<(), String> {
+    println!("[remove_cached_model] Removing cached model: {}", model_name);
+    let (tx, rx) = oneshot::channel();
+    handles
+        .foundry_tx
+        .send(FoundryMsg::RemoveCachedModel {
+            model_name: model_name.clone(),
+            respond_to: tx,
+        })
+        .await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+    rx.await.map_err(|_| "Foundry actor died".to_string())?
 }
 
 #[tauri::command]
@@ -6620,6 +6681,10 @@ pub fn run() {
             load_model,
             get_loaded_models,
             reload_foundry,
+            get_catalog_models,
+            unload_model,
+            get_foundry_service_status,
+            remove_cached_model,
             cancel_generation,
             get_turn_status,
             // RAG commands
