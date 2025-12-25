@@ -1,16 +1,20 @@
 //! Agentic State Machine Controller
 //!
-//! The central controller for the agentic loop state machine.
-//! Manages state computation, transitions, tool availability, and prompt generation.
+//! Tier 2 of the three-tier state machine hierarchy:
+//! 1. SettingsStateMachine - Settings -> OperationalMode
+//! 2. AgenticStateMachine (this module) - OperationalMode + Context -> AgenticState
+//! 3. MidTurnStateMachine - AgenticState + Events -> MidTurnState
+//!
+//! The AgenticStateMachine manages state computation, transitions, tool availability,
+//! and prompt generation for each turn.
 //!
 //! ## Architecture
 //!
 //! The state machine is the **single source of truth** for:
-//! - What capabilities are enabled (based on settings + CLI filter)
 //! - What tools are allowed in the current state
 //! - What the system prompt should contain
 //!
-//! This ensures alignment between what we tell the model and what we allow.
+//! Enabled capabilities are now provided by the SettingsStateMachine.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -21,30 +25,37 @@ use crate::agentic_state::{
 };
 use crate::protocol::ToolSchema;
 use crate::settings::{AppSettings, ToolCallFormatName};
+use crate::settings_state_machine::{OperationalMode, SettingsStateMachine};
 use crate::tool_capability::ToolLaunchFilter;
 
 // ============ State Machine ============
 
-/// The central state machine controller for the agentic loop.
+/// Tier 2 state machine controller for the agentic loop.
 /// 
-/// Manages:
-/// - Computing initial state from settings and context
+/// This is the turn-level state machine that manages:
+/// - Computing initial state from OperationalMode and context
 /// - State transitions after tool execution
 /// - Tool availability validation
 /// - System prompt generation (single source of truth)
+///
+/// ## Three-Tier Hierarchy
+///
+/// The AgenticStateMachine receives its enabled capabilities from
+/// the SettingsStateMachine (Tier 1) and produces states that can
+/// be consumed by the MidTurnStateMachine (Tier 3).
 ///
 /// ## Prompt Generation
 ///
 /// The state machine is responsible for generating the full system prompt.
 /// This ensures that what we tell the model matches what we allow:
-/// - Capabilities section reflects `enabled_capabilities`
+/// - Capabilities section reflects `enabled_capabilities` (from SettingsStateMachine)
 /// - Tool sections only show allowed tools
 /// - Format instructions match `tool_call_format`
 #[derive(Debug, Clone)]
 pub struct AgenticStateMachine {
     /// Current state of the machine
     current_state: AgenticState,
-    /// Capabilities enabled by settings (independent of context)
+    /// Capabilities enabled by settings (provided by SettingsStateMachine)
     enabled_capabilities: HashSet<Capability>,
     /// Relevancy thresholds for state transitions
     thresholds: RelevancyThresholds,
@@ -68,9 +79,99 @@ pub struct AgenticStateMachine {
 }
 
 impl AgenticStateMachine {
+    /// Create a new state machine from SettingsStateMachine and prompt context.
+    /// 
+    /// This is the **preferred constructor** for the three-tier architecture.
+    /// It takes capabilities and thresholds from the SettingsStateMachine (Tier 1)
+    /// and creates a turn-level state machine (Tier 2).
+    ///
+    /// # Arguments
+    /// * `settings_sm` - The SettingsStateMachine providing capabilities and thresholds
+    /// * `prompt_context` - Context for prompt generation (MCP tools, format, etc.)
+    pub fn new_from_settings_sm(
+        settings_sm: &SettingsStateMachine,
+        prompt_context: PromptContext,
+    ) -> Self {
+        let enabled_capabilities = settings_sm.enabled_capabilities().clone();
+        let thresholds = RelevancyThresholds {
+            rag_chunk_min: settings_sm.relevancy_thresholds().rag_chunk_min,
+            schema_table_min: settings_sm.relevancy_thresholds().schema_table_min,
+            sql_enable_min: settings_sm.relevancy_thresholds().sql_enable_min,
+            rag_dominant_threshold: settings_sm.relevancy_thresholds().rag_dominant_threshold,
+        };
+        
+        // Determine initial state based on operational mode
+        let initial_state = Self::compute_initial_state_from_mode(
+            settings_sm.operational_mode(),
+            &enabled_capabilities,
+        );
+        
+        Self {
+            current_state: initial_state,
+            enabled_capabilities,
+            thresholds,
+            state_history: Vec::new(),
+            base_prompt: prompt_context.base_prompt,
+            mcp_context: prompt_context.mcp_context,
+            tool_call_format: prompt_context.tool_call_format,
+            custom_tool_prompts: prompt_context.custom_tool_prompts,
+            python_primary: prompt_context.python_primary,
+            has_attachments: prompt_context.has_attachments,
+        }
+    }
+
+    /// Compute initial state from OperationalMode.
+    /// 
+    /// This maps the high-level OperationalMode to the appropriate
+    /// turn-start AgenticState.
+    fn compute_initial_state_from_mode(
+        mode: &OperationalMode,
+        enabled_capabilities: &HashSet<Capability>,
+    ) -> AgenticState {
+        match mode {
+            OperationalMode::Conversational => AgenticState::Conversational,
+            
+            OperationalMode::SqlMode { .. } => AgenticState::SqlRetrieval {
+                discovered_tables: Vec::new(),
+                max_table_relevancy: 0.0,
+            },
+            
+            OperationalMode::CodeMode { .. } => AgenticState::CodeExecution {
+                available_tools: Vec::new(),
+            },
+            
+            OperationalMode::ToolMode { .. } => AgenticState::ToolOrchestration {
+                materialized_tools: Vec::new(),
+            },
+            
+            OperationalMode::HybridMode { enabled_modes, .. } => {
+                // For hybrid mode, use priority order based on which modes are enabled
+                use crate::settings_state_machine::SimplifiedMode;
+                
+                if enabled_modes.contains(&SimplifiedMode::Code) {
+                    AgenticState::CodeExecution {
+                        available_tools: Vec::new(),
+                    }
+                } else if enabled_modes.contains(&SimplifiedMode::Tool) {
+                    AgenticState::ToolOrchestration {
+                        materialized_tools: Vec::new(),
+                    }
+                } else if enabled_modes.contains(&SimplifiedMode::Sql) {
+                    AgenticState::SqlRetrieval {
+                        discovered_tables: Vec::new(),
+                        max_table_relevancy: 0.0,
+                    }
+                } else {
+                    // Fallback to capability-based selection
+                    Self::compute_default_initial_state(enabled_capabilities)
+                }
+            }
+        }
+    }
+
     /// Create a new state machine with minimal context (legacy constructor).
     /// 
-    /// Prefer `new_with_context()` for full prompt generation capabilities.
+    /// **Deprecated**: Prefer `new_from_settings_sm()` for the three-tier architecture.
     pub fn new(
         settings: &AppSettings,
         filter: &ToolLaunchFilter,
@@ -95,12 +196,9 @@ impl AgenticStateMachine {
         }
     }
 
-    /// Create a new state machine with full prompt context.
+    /// Create a new state machine with full prompt context (legacy constructor).
     /// 
-    /// This is the preferred constructor that enables unified prompt generation.
-    /// The state machine becomes the single source of truth for both:
-    /// - What tools are allowed (via `is_tool_allowed()`)
-    /// - What the system prompt contains (via `build_system_prompt()`)
+    /// **Deprecated**: Prefer `new_from_settings_sm()` for the three-tier architecture.
     pub fn new_with_context(
         settings: &AppSettings,
         filter: &ToolLaunchFilter,

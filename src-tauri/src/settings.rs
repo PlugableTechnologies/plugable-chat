@@ -633,11 +633,10 @@ pub struct AppSettings {
     pub schema_search_enabled: bool,
     /// Whether the sql_select built-in tool is enabled (disabled by default).
     /// When enabled, models can execute SQL queries via configured database sources.
+    /// Note: If sql_select is enabled but schema_search is not, schema search will
+    /// automatically run internally to provide table context.
     #[serde(default, alias = "execute_sql_enabled")]
     pub sql_select_enabled: bool,
-    /// Whether schema_search runs internally only (not exposed as a tool to the model).
-    #[serde(default)]
-    pub schema_search_internal_only: bool,
     
     // ============ Relevancy Thresholds for State Machine ============
     
@@ -692,6 +691,20 @@ fn default_rag_dominant_threshold() -> f32 {
 }
 
 impl AppSettings {
+    /// Determine if schema search should run internally (not exposed as a tool).
+    /// 
+    /// This is automatically derived:
+    /// - If sql_select is enabled but schema_search is not, internal search is ON
+    /// - This provides table context for SQL queries without exposing schema_search as a tool
+    pub fn should_run_internal_schema_search(&self) -> bool {
+        self.sql_select_enabled && !self.schema_search_enabled
+    }
+    
+    /// Check if any schema search functionality is active (as tool or internal).
+    pub fn has_schema_search_active(&self) -> bool {
+        self.schema_search_enabled || self.should_run_internal_schema_search()
+    }
+    
     /// Get all enabled MCP server configurations, including database sources.
     pub fn get_all_mcp_configs(&self) -> Vec<McpServerConfig> {
         let mut configs = self.mcp_servers.clone();
@@ -702,7 +715,7 @@ impl AppSettings {
         // sql_select/schema_search internally, but those tools gate database access.
         let db_tools_available = self.schema_search_enabled 
             || self.sql_select_enabled 
-            || self.schema_search_internal_only;
+            || self.should_run_internal_schema_search();
 
         // Always include database sources so they can be disconnected if toolbox is disabled
         for source in &self.database_toolbox.sources {
@@ -848,7 +861,8 @@ impl Default for AppSettings {
             database_toolbox: DatabaseToolboxConfig::default(),
             schema_search_enabled: false,
             sql_select_enabled: false,
-            schema_search_internal_only: false,
+            // Note: schema_search_internal_only was removed - it's now auto-derived
+            // from sql_select_enabled && !schema_search_enabled
             // Relevancy thresholds
             rag_chunk_min_relevancy: default_rag_chunk_min_relevancy(),
             schema_table_min_relevancy: default_schema_table_min_relevancy(),

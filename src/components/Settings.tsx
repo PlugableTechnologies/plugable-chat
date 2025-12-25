@@ -1853,7 +1853,6 @@ function BuiltinsTab({
         updateToolExamplesMax,
         updateToolSystemPrompt,
         updateSchemaSearchEnabled,
-        updateSchemaSearchInternalOnly,
         updateSqlSelectEnabled,
         updateRagChunkMinRelevancy,
         updateSchemaTableMinRelevancy,
@@ -1867,7 +1866,7 @@ function BuiltinsTab({
     const [localCodeExecutionEnabled, setLocalCodeExecutionEnabled] = useState(settings?.python_execution_enabled ?? false);
     const [localToolSearchEnabled, setLocalToolSearchEnabled] = useState(settings?.tool_search_enabled ?? false);
     const [localSchemaSearchEnabled, setLocalSchemaSearchEnabled] = useState(settings?.schema_search_enabled ?? false);
-    const [localSchemaSearchInternalOnly, setLocalSchemaSearchInternalOnly] = useState(settings?.schema_search_internal_only ?? false);
+    // Note: schemaSearchInternalOnly was removed - it's now auto-derived when sql_select is on but schema_search is off
     const [localSqlSelectEnabled, setLocalSqlSelectEnabled] = useState(settings?.sql_select_enabled ?? false);
     const [localToolSearchMaxResults, setLocalToolSearchMaxResults] = useState(settings?.tool_search_max_results ?? 3);
     const [localToolExamplesEnabled, setLocalToolExamplesEnabled] = useState(settings?.tool_use_examples_enabled ?? false);
@@ -1898,7 +1897,6 @@ function BuiltinsTab({
         codeExecutionEnabled: settings?.python_execution_enabled ?? false,
         toolSearchEnabled: settings?.tool_search_enabled ?? false,
         schemaSearchEnabled: settings?.schema_search_enabled ?? false,
-        schemaSearchInternalOnly: settings?.schema_search_internal_only ?? false,
         sqlSelectEnabled: settings?.sql_select_enabled ?? false,
         pythonPrompt: settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt,
         toolSearchPrompt: settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt,
@@ -1915,7 +1913,6 @@ function BuiltinsTab({
             codeExecutionEnabled: settings?.python_execution_enabled ?? false,
             toolSearchEnabled: settings?.tool_search_enabled ?? false,
             schemaSearchEnabled: settings?.schema_search_enabled ?? false,
-            schemaSearchInternalOnly: settings?.schema_search_internal_only ?? false,
             sqlSelectEnabled: settings?.sql_select_enabled ?? false,
             pythonPrompt: settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt,
             toolSearchPrompt: settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt,
@@ -1930,7 +1927,6 @@ function BuiltinsTab({
             localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
             localToolSearchEnabled !== baselineBuiltins.toolSearchEnabled ||
             localSchemaSearchEnabled !== baselineBuiltins.schemaSearchEnabled ||
-            localSchemaSearchInternalOnly !== baselineBuiltins.schemaSearchInternalOnly ||
             localSqlSelectEnabled !== baselineBuiltins.sqlSelectEnabled ||
             pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
             toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt ||
@@ -1944,7 +1940,6 @@ function BuiltinsTab({
             setLocalCodeExecutionEnabled(nextBaseline.codeExecutionEnabled);
             setLocalToolSearchEnabled(nextBaseline.toolSearchEnabled);
             setLocalSchemaSearchEnabled(nextBaseline.schemaSearchEnabled);
-            setLocalSchemaSearchInternalOnly(nextBaseline.schemaSearchInternalOnly);
             setLocalSqlSelectEnabled(nextBaseline.sqlSelectEnabled);
             setPythonPromptDraft(nextBaseline.pythonPrompt);
             setToolSearchPromptDraft(nextBaseline.toolSearchPrompt);
@@ -1961,7 +1956,6 @@ function BuiltinsTab({
         settings?.python_execution_enabled,
         settings?.tool_search_enabled,
         settings?.schema_search_enabled,
-        settings?.schema_search_internal_only,
         settings?.sql_select_enabled,
         defaultPythonPrompt,
         defaultToolSearchPrompt,
@@ -1970,7 +1964,6 @@ function BuiltinsTab({
         localCodeExecutionEnabled,
         localToolSearchEnabled,
         localSchemaSearchEnabled,
-        localSchemaSearchInternalOnly,
         localSqlSelectEnabled,
         pythonPromptDraft,
         schemaSearchPromptDraft,
@@ -1983,7 +1976,6 @@ function BuiltinsTab({
         baselineBuiltins.codeExecutionEnabled,
         baselineBuiltins.toolSearchEnabled,
         baselineBuiltins.schemaSearchEnabled,
-        baselineBuiltins.schemaSearchInternalOnly,
         baselineBuiltins.sqlSelectEnabled,
         baselineBuiltins.pythonPrompt,
         baselineBuiltins.toolSearchPrompt,
@@ -1998,7 +1990,6 @@ function BuiltinsTab({
         localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
         localToolSearchEnabled !== baselineBuiltins.toolSearchEnabled ||
         localSchemaSearchEnabled !== baselineBuiltins.schemaSearchEnabled ||
-        localSchemaSearchInternalOnly !== baselineBuiltins.schemaSearchInternalOnly ||
         localSqlSelectEnabled !== baselineBuiltins.sqlSelectEnabled ||
         pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
         toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt ||
@@ -2020,7 +2011,6 @@ function BuiltinsTab({
         setLocalCodeExecutionEnabled(false);
         setLocalToolSearchEnabled(false);
         setLocalSchemaSearchEnabled(false);
-        setLocalSchemaSearchInternalOnly(false);
         setLocalSqlSelectEnabled(false);
         setPythonPromptDraft(defaultPythonPrompt);
         setToolSearchPromptDraft(defaultToolSearchPrompt);
@@ -2102,9 +2092,7 @@ function BuiltinsTab({
             saves.push(updateSchemaSearchEnabled(localSchemaSearchEnabled));
         }
 
-        if (localSchemaSearchInternalOnly !== (settings.schema_search_internal_only ?? false)) {
-            saves.push(updateSchemaSearchInternalOnly(localSchemaSearchInternalOnly));
-        }
+        // Note: schemaSearchInternalOnly removed - now auto-derived from sql_select && !schema_search
 
         if (localSqlSelectEnabled !== (settings.sql_select_enabled ?? false)) {
             saves.push(updateSqlSelectEnabled(localSqlSelectEnabled));
@@ -2144,7 +2132,6 @@ function BuiltinsTab({
                 codeExecutionEnabled: localCodeExecutionEnabled,
                 toolSearchEnabled: localToolSearchEnabled,
                 schemaSearchEnabled: localSchemaSearchEnabled,
-                schemaSearchInternalOnly: localSchemaSearchInternalOnly,
                 sqlSelectEnabled: localSqlSelectEnabled,
                 pythonPrompt: targetPythonPrompt,
                 toolSearchPrompt: targetToolSearchPrompt,
@@ -2166,7 +2153,6 @@ function BuiltinsTab({
         localCodeExecutionEnabled,
         localToolSearchEnabled,
         localSchemaSearchEnabled,
-        localSchemaSearchInternalOnly,
         localSqlSelectEnabled,
         localToolSearchMaxResults,
         localToolExamplesEnabled,
@@ -2179,7 +2165,6 @@ function BuiltinsTab({
         toolSearchPromptDraft,
         updateCodeExecutionEnabled,
         updateSchemaSearchEnabled,
-        updateSchemaSearchInternalOnly,
         updateSqlSelectEnabled,
         updateToolExamplesEnabled,
         updateToolExamplesMax,
@@ -2383,15 +2368,8 @@ function BuiltinsTab({
                     </div>
                 </div>
 
-                <div className="flex items-center gap-3 ml-13">
-                    <button
-                        onClick={() => setLocalSchemaSearchInternalOnly(!localSchemaSearchInternalOnly)}
-                        className={`relative w-8 h-4 rounded-full transition-colors ${localSchemaSearchInternalOnly ? 'bg-blue-500' : 'bg-gray-300'}`}
-                    >
-                        <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full shadow transition-transform ${localSchemaSearchInternalOnly ? 'translate-x-4' : ''}`} />
-                    </button>
-                    <span className="text-xs text-gray-600">Internal search only (don't expose tool to model)</span>
-                </div>
+                {/* Note: "Internal search only" toggle was removed - internal schema search is now
+                    auto-derived when sql_select is enabled but schema_search is not */}
 
                 {/* Relevancy Thresholds */}
                 <div className="border-t border-gray-100 pt-3 mt-2 space-y-3">

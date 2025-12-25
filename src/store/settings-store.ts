@@ -77,7 +77,8 @@ export interface AppSettings {
     database_toolbox: DatabaseToolboxConfig;
     schema_search_enabled: boolean;
     sql_select_enabled: boolean;
-    schema_search_internal_only: boolean;
+    // Note: schema_search_internal_only was removed - it's now auto-derived
+    // when sql_select is enabled but schema_search is not
     // Relevancy thresholds for state machine
     rag_chunk_min_relevancy: number;
     schema_table_min_relevancy: number;
@@ -133,7 +134,6 @@ interface SettingsState {
     updateToolExamplesEnabled: (enabled: boolean) => Promise<void>;
     updateToolExamplesMax: (maxExamples: number) => Promise<void>;
     updateSchemaSearchEnabled: (enabled: boolean) => Promise<void>;
-    updateSchemaSearchInternalOnly: (enabled: boolean) => Promise<void>;
     updateSqlSelectEnabled: (enabled: boolean) => Promise<void>;
     // Relevancy thresholds for state machine
     updateRagChunkMinRelevancy: (value: number) => Promise<void>;
@@ -348,7 +348,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     },
                     schema_search_enabled: false,
                     sql_select_enabled: false,
-                    schema_search_internal_only: false,
                     // Relevancy thresholds defaults
                     rag_chunk_min_relevancy: 0.3,
                     schema_table_min_relevancy: 0.2,
@@ -637,24 +636,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         }
     },
 
-    updateSchemaSearchInternalOnly: async (enabled: boolean) => {
-        const currentSettings = get().settings;
-        if (!currentSettings) return;
-        set({
-            settings: { ...currentSettings, schema_search_internal_only: enabled },
-            error: null
-        });
-        try {
-            await invoke('update_schema_search_internal_only', { enabled });
-            console.log('[SettingsStore] schema_search_internal_only updated:', enabled);
-        } catch (e: any) {
-            console.error('[SettingsStore] Failed to update schema_search_internal_only:', e);
-            set({
-                settings: currentSettings,
-                error: `Failed to save: ${e.message || e}`
-            });
-        }
-    },
+    // Note: updateSchemaSearchInternalOnly was removed - internal schema search
+    // is now auto-derived when sql_select is enabled but schema_search is not
 
     updateSqlSelectEnabled: async (enabled: boolean) => {
         const currentSettings = get().settings;

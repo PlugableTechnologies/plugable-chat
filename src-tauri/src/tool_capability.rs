@@ -3,14 +3,17 @@
 //! Centralizes all logic for determining which tools are available,
 //! which formats to use, and how to present tools to models.
 //!
-//! This module now works in conjunction with the state machine to provide
-//! context-aware tool availability based on the current agentic state.
+//! This module works with the three-tier state machine hierarchy:
+//! - SettingsStateMachine (Tier 1) provides enabled capabilities
+//! - AgenticStateMachine (Tier 2) provides context-aware tool availability
+//! - MidTurnStateMachine (Tier 3) manages tool execution state
 
 use crate::agentic_state::Capability;
 use crate::protocol::{ModelInfo, ToolFormat, ToolSchema};
 use crate::settings::{
     AppSettings, DatabaseToolboxConfig, McpServerConfig, ToolCallFormatConfig, ToolCallFormatName,
 };
+use crate::settings_state_machine::SettingsStateMachine;
 use crate::state_machine::AgenticStateMachine;
 use crate::tool_registry::ToolRegistry;
 use std::collections::{HashMap, HashSet};
@@ -201,10 +204,10 @@ impl ToolCapabilityResolver {
             available.insert(BUILTIN_TOOL_SEARCH.to_string());
         }
         
-        // Check schema_search
+        // Check schema_search - only exposed as a tool if explicitly enabled
+        // (internal schema search is auto-derived when sql_select is on but schema_search is off)
         if settings.schema_search_enabled
             && filter.builtin_allowed(BUILTIN_SCHEMA_SEARCH)
-            && !settings.schema_search_internal_only // Only as a tool if not internal-only
             && Self::has_enabled_database_sources(&settings.database_toolbox)
         {
             available.insert(BUILTIN_SCHEMA_SEARCH.to_string());
@@ -448,6 +451,90 @@ impl ToolCapabilityResolver {
             .collect();
         
         capabilities
+    }
+
+    // ============ SettingsStateMachine Integration (Three-Tier Hierarchy) ============
+
+    /// Resolve tool capabilities using the SettingsStateMachine (Tier 1).
+    /// 
+    /// This is the preferred method for the three-tier architecture.
+    /// It delegates capability checking to the SettingsStateMachine.
+    pub fn resolve_from_settings_sm(
+        settings_sm: &SettingsStateMachine,
+        model_info: &ModelInfo,
+        settings: &AppSettings,
+        server_configs: &[McpServerConfig],
+        tool_registry: &ToolRegistry,
+    ) -> ResolvedToolCapabilities {
+        // Get available builtins from SettingsStateMachine
+        let available_builtins = settings_sm.tool_availability().enabled_builtins.clone();
+        
+        // Get enabled capabilities from SettingsStateMachine
+        let enabled_capabilities = settings_sm.enabled_capabilities();
+        
+        // Select primary format with fallback
+        let code_mode_available = enabled_capabilities.contains(&Capability::PythonExecution);
+        let (primary_format, enabled_formats) = (
+            settings.tool_call_formats.resolve_primary_for_prompt(
+                code_mode_available,
+                model_info.tool_calling,
+            ),
+            settings.tool_call_formats.enabled.clone(),
+        );
+        
+        // Determine if we should use native tools
+        let use_native_tools = primary_format == ToolCallFormatName::Native
+            && model_info.tool_calling;
+        
+        // Get filter from tool availability - for now we use a permissive filter
+        // since SettingsStateMachine already applied the filter
+        let filter = ToolLaunchFilter::default();
+        
+        // Separate MCP tools into active (materialized) and deferred
+        let visible_tools = tool_registry.get_visible_tools_with_servers();
+        let (active_mcp_tools, deferred_mcp_tools) = Self::categorize_mcp_tools(
+            &visible_tools,
+            tool_registry,
+            server_configs,
+            &filter,
+        );
+        
+        // Calculate max MCP tools in prompt based on model size
+        let max_mcp_tools_in_prompt = Self::calculate_max_mcp_tools(model_info);
+        
+        ResolvedToolCapabilities {
+            available_builtins,
+            primary_format,
+            enabled_formats,
+            use_native_tools,
+            active_mcp_tools,
+            deferred_mcp_tools,
+            model_supports_native: model_info.tool_calling,
+            model_tool_format: model_info.tool_format,
+            max_mcp_tools_in_prompt,
+        }
+    }
+
+    /// Get enabled capabilities from SettingsStateMachine.
+    pub fn get_enabled_capabilities_from_sm(
+        settings_sm: &SettingsStateMachine,
+    ) -> HashSet<Capability> {
+        settings_sm.enabled_capabilities().clone()
+    }
+
+    /// Get available builtins from SettingsStateMachine.
+    pub fn get_available_builtins_from_sm(
+        settings_sm: &SettingsStateMachine,
+    ) -> HashSet<String> {
+        settings_sm.tool_availability().enabled_builtins.clone()
+    }
+
+    /// Check if a capability is enabled via SettingsStateMachine.
+    pub fn is_capability_enabled_from_sm(
+        settings_sm: &SettingsStateMachine,
+        capability: Capability,
+    ) -> bool {
+        settings_sm.is_capability_enabled(capability)
     }
 }
 

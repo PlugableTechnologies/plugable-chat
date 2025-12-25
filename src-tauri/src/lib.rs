@@ -1,8 +1,10 @@
 pub mod actors;
 pub mod agentic_state;
+pub mod mid_turn_state;
 pub mod model_profiles;
 pub mod protocol;
 pub mod settings;
+pub mod settings_state_machine;
 pub mod state_machine;
 pub mod tool_adapters;
 pub mod tool_capability;
@@ -52,6 +54,7 @@ use tokio::sync::{mpsc, oneshot};
 use tool_adapters::{detect_python_code, format_tool_result, parse_tool_calls_for_model_profile};
 use tool_capability::{ToolCapabilityResolver, ToolLaunchFilter};
 use tool_registry::{create_shared_registry, SharedToolRegistry, ToolSearchResult};
+use settings_state_machine::SettingsStateMachine;
 use state_machine::{AgenticStateMachine, StatePreview};
 use tools::code_execution::{CodeExecutionExecutor, CodeExecutionInput, CodeExecutionOutput};
 use tools::tool_search::{
@@ -97,6 +100,11 @@ struct EmbeddingModelState {
 // Shared settings state
 struct SettingsState {
     settings: Arc<RwLock<AppSettings>>,
+}
+
+// Shared settings state machine (Tier 1 of the three-tier hierarchy)
+struct SettingsStateMachineState {
+    machine: Arc<RwLock<SettingsStateMachine>>,
 }
 
 // Shared state for persistent logging of prompts and tools to avoid noise
@@ -3991,6 +3999,7 @@ async fn chat(
     model: String, // Frontend is source of truth for model selection
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
     approval_state: State<'_, ToolApprovalState>,
     tool_registry_state: State<'_, ToolRegistryState>,
     embedding_state: State<'_, EmbeddingModelState>,
@@ -4045,7 +4054,8 @@ async fn chat(
     let mut server_configs = settings.get_all_mcp_configs();
     let tool_search_enabled = settings.tool_search_enabled;
     let schema_search_enabled = settings.schema_search_enabled;
-    let schema_search_internal_only = settings.schema_search_internal_only;
+    // Internal schema search is auto-derived: ON when sql_select is enabled but schema_search is not
+    let internal_schema_search = settings.should_run_internal_schema_search();
     let sql_select_enabled = settings.sql_select_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     let python_tool_calling_enabled = settings.python_tool_calling_enabled;
@@ -4065,7 +4075,7 @@ async fn chat(
     let mut enabled_db_sources = Vec::new();
     // Database sources should only be enabled when database-specific tools are on.
     // python_execution alone does NOT require database MCP connections.
-    let db_tools_available = schema_search_enabled || sql_select_enabled || schema_search_internal_only;
+    let db_tools_available = schema_search_enabled || sql_select_enabled || internal_schema_search;
     
     if settings.database_toolbox.enabled && db_tools_available {
         enabled_db_sources = settings
@@ -4107,7 +4117,7 @@ async fn chat(
     }
 
     // Ensure database toolbox actor is initialized if database tools are enabled
-    if schema_search_enabled || schema_search_internal_only || sql_select_enabled {
+    if schema_search_enabled || internal_schema_search || sql_select_enabled {
         if let Err(e) =
             ensure_toolbox_running(&handles.database_toolbox_tx, &database_toolbox_config).await
         {
@@ -4370,7 +4380,7 @@ async fn chat(
         tool_search_enabled && tool_search_allowed, // Only run auto tool discovery if allowed for this turn
         tool_search_max_results,
         has_mcp_tools,
-        schema_search_enabled || schema_search_internal_only || sql_select_enabled,
+        schema_search_enabled || internal_schema_search || sql_select_enabled,
         &database_toolbox_config,
         &filtered_tool_descriptions,
         tool_registry_state.registry.clone(),
@@ -4566,8 +4576,8 @@ async fn chat(
 
     // === STATE MACHINE: Build system prompt from single source of truth ===
     
-    // Get relevancy thresholds
-    let relevancy_thresholds = {
+    // Get relevancy thresholds (now provided by SettingsStateMachine, keeping for potential future use)
+    let _relevancy_thresholds = {
         let settings_guard = settings_state.settings.read().await;
         settings_guard.get_relevancy_thresholds()
     };
@@ -4599,13 +4609,13 @@ async fn chat(
         python_primary: python_tool_mode,
     };
     
-    // Create state machine with full context (single source of truth for prompt)
+    // Create state machine using three-tier hierarchy:
+    // Tier 1 (SettingsStateMachine) provides capabilities and thresholds
+    // Tier 2 (AgenticStateMachine) manages turn-level state
     let initial_state_machine = {
-        let settings_guard = settings_state.settings.read().await;
-        state_machine::AgenticStateMachine::new_with_context(
-            &settings_guard,
-            &tool_filter,
-            relevancy_thresholds.clone(),
+        let settings_sm_guard = settings_sm_state.machine.read().await;
+        state_machine::AgenticStateMachine::new_from_settings_sm(
+            &settings_sm_guard,
             prompt_context,
         )
     };
@@ -4613,10 +4623,17 @@ async fn chat(
     // Build system prompt from state machine (single source of truth)
     let system_prompt = initial_state_machine.build_system_prompt();
     
+    // Log operational mode from Tier 1
+    let operational_mode_name = {
+        let sm_guard = settings_sm_state.machine.read().await;
+        sm_guard.operational_mode().name().to_string()
+    };
+    
     println!(
-        "[Chat] System prompt from state machine: {} chars, state={}",
+        "[Chat] System prompt from state machine: {} chars, state={}, mode={}",
         system_prompt.len(),
-        initial_state_machine.current_state().name()
+        initial_state_machine.current_state().name(),
+        operational_mode_name
     );
 
     // === LOGGING: System prompt construction ===
@@ -4951,6 +4968,8 @@ fn get_python_allowed_imports() -> Vec<String> {
 async fn save_app_settings(
     new_settings: AppSettings,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut normalized = new_settings;
     normalized.tool_call_formats.normalize();
@@ -4960,7 +4979,17 @@ async fn save_app_settings(
 
     // Update in-memory state
     let mut guard = settings_state.settings.write().await;
-    *guard = normalized;
+    *guard = normalized.clone();
+    
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    let mode_changed = sm_guard.refresh(&normalized, &launch_config.tool_filter);
+    if mode_changed {
+        println!(
+            "[SettingsStateMachine] Mode updated after settings save: {}",
+            sm_guard.operational_mode().name()
+        );
+    }
 
     Ok(())
 }
@@ -5220,17 +5249,8 @@ async fn update_schema_search_enabled(
     Ok(())
 }
 
-#[tauri::command]
-async fn update_schema_search_internal_only(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.schema_search_internal_only = enabled;
-    settings::save_settings(&guard).await?;
-    println!("[Settings] schema_search_internal_only updated to: {}", enabled);
-    Ok(())
-}
+// Note: update_schema_search_internal_only was removed - internal schema search
+// is now auto-derived when sql_select is enabled but schema_search is not
 
 #[tauri::command]
 async fn update_sql_select_enabled(
@@ -5303,20 +5323,34 @@ async fn update_rag_dominant_threshold(
 #[tauri::command]
 async fn get_state_machine_preview(
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
 ) -> Result<Vec<StatePreview>, String> {
     let guard = settings_state.settings.read().await;
-    let thresholds = guard.get_relevancy_thresholds();
-    let filter = ToolLaunchFilter::default();
     
-    let machine = AgenticStateMachine::new(
-        &guard,
-        &filter,
-        thresholds,
-        guard.system_prompt.clone(),
+    // Use three-tier hierarchy: SettingsStateMachine provides capabilities
+    let settings_sm_guard = settings_sm_state.machine.read().await;
+    
+    // Create a minimal PromptContext for preview
+    let prompt_context = agentic_state::PromptContext {
+        base_prompt: guard.system_prompt.clone(),
+        has_attachments: false,
+        mcp_context: agentic_state::McpToolContext::default(),
+        tool_call_format: guard.tool_call_formats.primary,
+        custom_tool_prompts: guard.tool_system_prompts.clone(),
+        python_primary: guard.python_execution_enabled,
+    };
+    
+    let machine = AgenticStateMachine::new_from_settings_sm(
+        &settings_sm_guard,
+        prompt_context,
     );
     
     let previews = machine.get_possible_states();
-    println!("[Settings] State machine preview: {} possible states", previews.len());
+    println!(
+        "[Settings] State machine preview: {} possible states (mode: {})",
+        previews.len(),
+        settings_sm_guard.operational_mode().name()
+    );
     Ok(previews)
 }
 
@@ -6992,10 +7026,24 @@ pub fn run() {
                 "Settings loaded: {} MCP servers configured",
                 settings.mcp_servers.len()
             );
+            // Create SettingsStateMachine (Tier 1 of the three-tier hierarchy)
+            let settings_sm = SettingsStateMachine::from_settings(&settings, &launch_filter);
+            println!(
+                "[SettingsStateMachine] Initialized with mode: {} (capabilities: {:?})",
+                settings_sm.operational_mode().name(),
+                settings_sm.enabled_capabilities()
+            );
+            
             let settings_state = SettingsState {
                 settings: Arc::new(RwLock::new(settings)),
             };
             app.manage(settings_state);
+            
+            // Manage the settings state machine
+            let settings_sm_state = SettingsStateMachineState {
+                machine: Arc::new(RwLock::new(settings_sm)),
+            };
+            app.manage(settings_sm_state);
 
             // Launch config state (tool filters + overrides)
             app.manage(LaunchConfigState {
@@ -7216,7 +7264,6 @@ pub fn run() {
             update_native_tool_calling_enabled,
             update_tool_search_enabled,
             update_schema_search_enabled,
-            update_schema_search_internal_only,
             update_sql_select_enabled,
             update_rag_chunk_min_relevancy,
             update_schema_table_min_relevancy,
