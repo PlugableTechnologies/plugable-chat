@@ -4835,6 +4835,18 @@ async fn update_schema_search_enabled(
 }
 
 #[tauri::command]
+async fn update_schema_search_internal_only(
+    enabled: bool,
+    settings_state: State<'_, SettingsState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.schema_search_internal_only = enabled;
+    settings::save_settings(&guard).await?;
+    println!("[Settings] schema_search_internal_only updated to: {}", enabled);
+    Ok(())
+}
+
+#[tauri::command]
 async fn update_sql_select_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
@@ -6711,6 +6723,7 @@ pub fn run() {
             update_native_tool_calling_enabled,
             update_tool_search_enabled,
             update_schema_search_enabled,
+            update_schema_search_internal_only,
             update_sql_select_enabled,
             update_database_toolbox_config,
             get_cached_database_schemas,
