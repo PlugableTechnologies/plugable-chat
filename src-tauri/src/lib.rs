@@ -3159,6 +3159,14 @@ fn collect_tool_prompt_additions(
             continue;
         }
         let server_config = server_configs.iter().find(|c| c.id == *server_id);
+        
+        // Skip database sources - they are handled via sql_select/schema_search built-ins
+        if let Some(config) = server_config {
+            if config.is_database_source {
+                continue;
+            }
+        }
+
         let server_name = server_config
             .map(|c| c.name.clone())
             .unwrap_or_else(|| server_id.clone());

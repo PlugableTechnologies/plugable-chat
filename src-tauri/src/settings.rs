@@ -524,6 +524,10 @@ pub struct McpServerConfig {
     /// Used for Python imports: `from {python_name} import tool_function`
     #[serde(default)]
     pub python_name: Option<String>,
+    /// If true, this server is managed by the Database Toolbox and its tools
+    /// should NOT be exposed directly as MCP tools in the system prompt.
+    #[serde(default)]
+    pub is_database_source: bool,
 }
 
 fn default_defer_tools() -> bool {
@@ -752,6 +756,7 @@ impl AppSettings {
             auto_approve_tools: source.auto_approve_tools,
             defer_tools: source.defer_tools,
             python_name: None,
+            is_database_source: true,
         }
     }
 

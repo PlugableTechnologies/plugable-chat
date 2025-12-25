@@ -29,6 +29,28 @@
 - **Tauri Events**: The store manually manages Tauri event listeners (`chat-token`, `chat-finished`) using a setup/cleanup pattern with **generation counters** (`listenerGeneration`).
   - **Guardrail**: Do not refactor `setupListeners`/`cleanupListeners` into simple `useEffect` calls without preserving the race-condition guards. The manual management ensures listeners are not duplicated or leaked during hot reloads or rapid component mounts.
 
+## State Machine Hierarchy (Cascading)
+
+The system uses a three-tier cascading state machine architecture to manage complexity across different time scales (app lifetime, single turn, and tool execution loop). This decouples high-level user preferences from low-level execution details.
+
+### Tier 1: Settings Layer (`SettingsStateMachine`)
+- **Scope**: App lifecycle (updates when settings change).
+- **Responsibility**: Computes the `OperationalMode` from raw `AppSettings` flags. This runs rarely and provides a single source of truth for the system's operational posture.
+- **Key Output**: `OperationalMode` (e.g., `Conversational`, `SqlMode`, `CodeMode`, `HybridMode`).
+- **Location**: `src-tauri/src/settings_state_machine.rs`
+
+### Tier 2: Turn Layer (`AgenticStateMachine`)
+- **Scope**: Single request turn (initialization to final response).
+- **Responsibility**: Manages high-level flow based on the `OperationalMode`. It focuses on context-aware transitions (e.g., RAG relevancy, schema relevancy) before and after model interactions.
+- **Key Output**: `AgenticState`.
+- **Location**: `src-tauri/src/state_machine.rs`
+
+### Tier 3: Mid-Turn Layer (`MidTurnStateMachine`)
+- **Scope**: During execution (the "inner loop" of tool calling).
+- **Responsibility**: Manages granular states during tool execution loops, such as handling tool results, managing Python handoffs, and tracking discovered tools.
+- **Key States**: `ProcessingToolCall`, `SqlResultsReturned`, `PythonHandoff`, `ToolsDiscovered`.
+- **Location**: `src-tauri/src/mid_turn_state.rs`
+
 ### CLI Parity With UI
 - Philosophy: **every end-user UI setting has a command-line argument equivalent** (clap/argparse). When adding a UI toggle/field, add a matching CLI flag and keep behaviors in sync.
 - Key flags: `--system-prompt`, `--initial-prompt`, `--model`, `--tool-search`, `--python-execution`, `--python-tool-calling`, `--legacy-tool-call-format`, `--tool-call-enabled`, `--tool-call-primary`, `--tool-system-prompt`, `--mcp-server` (JSON or @file), `--tools` (allowlist).

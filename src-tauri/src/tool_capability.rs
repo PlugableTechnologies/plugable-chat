@@ -199,7 +199,7 @@ impl ToolCapabilityResolver {
         // Check tool_search
         if enabled_builtins.contains(BUILTIN_TOOL_SEARCH)
             && filter.builtin_allowed(BUILTIN_TOOL_SEARCH)
-            && Self::has_deferred_mcp_tools(tool_registry)
+            && Self::has_deferred_mcp_tools(tool_registry, settings)
         {
             available.insert(BUILTIN_TOOL_SEARCH.to_string());
         }
@@ -224,9 +224,24 @@ impl ToolCapabilityResolver {
         available
     }
     
-    /// Check if there are any deferred MCP tools
-    fn has_deferred_mcp_tools(tool_registry: &ToolRegistry) -> bool {
-        !tool_registry.get_deferred_tools().is_empty()
+    /// Check if there are any deferred MCP tools (excluding database sources)
+    fn has_deferred_mcp_tools(tool_registry: &ToolRegistry, settings: &AppSettings) -> bool {
+        let deferred = tool_registry.get_deferred_tools();
+        if deferred.is_empty() {
+            return false;
+        }
+
+        let configs = settings.get_all_mcp_configs();
+        let server_map: HashMap<String, &McpServerConfig> =
+            configs.iter().map(|c| (c.id.clone(), c)).collect();
+
+        deferred.iter().any(|(key, _)| {
+            let server_id = key.splitn(2, "___").next().unwrap_or("unknown");
+            match server_map.get(server_id) {
+                Some(c) => c.enabled && !c.is_database_source,
+                None => false,
+            }
+        })
     }
     
     /// Check if database toolbox has enabled sources
@@ -281,9 +296,10 @@ impl ToolCapabilityResolver {
             // key format: server_id___tool_name
             let server_id = key.splitn(2, "___").next().unwrap_or("unknown");
 
-            // Check server is enabled and allowed
+            // Check server is enabled and allowed, and NOT a database source
+            // (Database sources are handled via sql_select/schema_search built-ins)
             let server_config = match server_map.get(server_id) {
-                Some(c) if c.enabled && filter.server_allowed(server_id) => c,
+                Some(c) if c.enabled && !c.is_database_source && filter.server_allowed(server_id) => c,
                 _ => continue,
             };
 
