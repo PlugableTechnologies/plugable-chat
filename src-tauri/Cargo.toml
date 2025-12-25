@@ -37,6 +37,12 @@ ort = { version = "2.0.0-rc.9", features = ["cuda", "tensorrt", "coreml"] }
 # File hashing for cache invalidation
 sha2 = "0.10"
 
+# Fast CRC32 for file-level cache
+crc32fast = "1.4"
+
+# LRU cache for embedding caching
+lru = "0.12"
+
 # Home directory detection for config files
 dirs = "5"
 
