@@ -304,6 +304,7 @@ interface ChatState {
 let unlistenToken: (() => void) | undefined;
 let unlistenFinished: (() => void) | undefined;
 let unlistenModelSelected: (() => void) | undefined;
+let unlistenToolBlocked: (() => void) | undefined;
 let unlistenChatSaved: (() => void) | undefined;
 let unlistenSidebarUpdate: (() => void) | undefined;
 let unlistenToolCallsPending: (() => void) | undefined;
@@ -794,6 +795,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 message: text,
                 history: [],
                 reasoningEffort: state.reasoningEffort,
+                model: state.currentModel, // Frontend is source of truth for model
             });
 
             if (returnedChatId && returnedChatId !== chatId) {
@@ -1350,6 +1352,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 set({ currentModel: event.payload });
             });
             
+            // Tool blocked by state machine - show error in status bar
+            const toolBlockedListener = await listen<{ tool: string; state: string; message: string }>('tool-blocked', (event) => {
+                console.warn(`[ChatStore] Tool blocked: ${event.payload.tool} in state ${event.payload.state}`);
+                set({
+                    operationStatus: {
+                        type: 'streaming',
+                        message: `Tool ${event.payload.tool} blocked: ${event.payload.message}`,
+                        startTime: Date.now(),
+                    },
+                    statusBarDismissed: false,
+                });
+                // Auto-dismiss after 5 seconds
+                setTimeout(() => {
+                    const currentState = get();
+                    if (currentState.operationStatus?.message?.includes('blocked')) {
+                        set({ operationStatus: null });
+                    }
+                }, 5000);
+            });
+            
             const chatSavedListener = await listen<string>('chat-saved', async (event) => {
                 const chatId = event.payload;
                 console.log(`[ChatStore] chat-saved event received for: ${chatId.slice(0, 8)}...`);
@@ -1637,6 +1659,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 tokenListener();
                 finishedListener();
                 modelSelectedListener();
+                toolBlockedListener();
                 chatSavedListener();
                 sidebarUpdateListener();
                 toolCallsPendingListener();
@@ -1661,6 +1684,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenToken = tokenListener;
             unlistenFinished = finishedListener;
             unlistenModelSelected = modelSelectedListener;
+            unlistenToolBlocked = toolBlockedListener;
             unlistenToolCallsPending = toolCallsPendingListener;
             unlistenToolExecuting = toolExecutingListener;
             unlistenToolHeartbeat = toolHeartbeatListener;
@@ -1705,6 +1729,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenModelSelected) {
             unlistenModelSelected();
             unlistenModelSelected = undefined;
+        }
+        if (unlistenToolBlocked) {
+            unlistenToolBlocked();
+            unlistenToolBlocked = undefined;
         }
         if (unlistenChatSaved) {
             unlistenChatSaved();

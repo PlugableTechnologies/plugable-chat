@@ -1712,11 +1712,28 @@ async fn run_agentic_loop(
 
             // State machine validation: check if tool is allowed in current state
             if !state_machine.is_tool_allowed(&resolved_call.tool) {
+                let error_msg = format!(
+                    "Tool '{}' not available in {} state. Enabled capabilities: {:?}",
+                    resolved_call.tool,
+                    state_machine.current_state().name(),
+                    state_machine.enabled_capabilities()
+                );
                 println!(
                     "[AgenticLoop] ⛔ Tool '{}' blocked by state machine (current state: {})",
                     resolved_call.tool,
                     state_machine.current_state().name()
                 );
+                
+                // Emit error to status bar so user knows why nothing happened
+                let _ = app_handle.emit(
+                    "tool-blocked",
+                    serde_json::json!({
+                        "tool": resolved_call.tool,
+                        "state": state_machine.current_state().name(),
+                        "message": error_msg,
+                    }),
+                );
+                
                 tool_results.push(format_tool_result(
                     &resolved_call,
                     &format!(
@@ -3971,6 +3988,7 @@ async fn chat(
     message: String,
     history: Vec<ChatMessage>,
     reasoning_effort: String,
+    model: String, // Frontend is source of truth for model selection
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
     approval_state: State<'_, ToolApprovalState>,
@@ -4045,7 +4063,9 @@ async fn chat(
     );
 
     let mut enabled_db_sources = Vec::new();
-    let db_tools_available = schema_search_enabled || sql_select_enabled || schema_search_internal_only || python_execution_enabled;
+    // Database sources should only be enabled when database-specific tools are on.
+    // python_execution alone does NOT require database MCP connections.
+    let db_tools_available = schema_search_enabled || sql_select_enabled || schema_search_internal_only;
     
     if settings.database_toolbox.enabled && db_tools_available {
         enabled_db_sources = settings
@@ -4109,18 +4129,26 @@ async fn chat(
         let _ = sync_rx.await;
     }
 
-    // Query current model info to check if it supports native tool calling
+    // Look up model info for the frontend-provided model to check capabilities
+    // Frontend is the source of truth for model selection
     let (current_model_info, model_supports_native_tools) = {
         let (tx, rx) = oneshot::channel();
         if handles
             .foundry_tx
-            .send(FoundryMsg::GetCurrentModel { respond_to: tx })
+            .send(FoundryMsg::GetModelInfo { respond_to: tx })
             .await
             .is_ok()
         {
-            if let Ok(Some(model)) = rx.await {
-                let supports_native = model.tool_calling;
-                (Some(model), supports_native)
+            if let Ok(models) = rx.await {
+                // Find the model that matches the frontend-selected model
+                if let Some(model_info) = models.into_iter().find(|m| m.id == model) {
+                    let supports_native = model_info.tool_calling;
+                    (Some(model_info), supports_native)
+                } else {
+                    // Model not found in info list - use defaults
+                    println!("[Chat] Warning: Model '{}' not found in model info, using defaults", model);
+                    (None, false)
+                }
             } else {
                 (None, false)
             }
@@ -4246,13 +4274,14 @@ async fn chat(
     let primary_format_for_prompt =
         format_config.resolve_primary_for_prompt(code_mode_possible, native_available);
     let python_tool_mode = code_mode_possible;
+    // tool_search is only offered when explicitly enabled in settings AND there are deferred tools
     let allow_tool_search_for_python =
-        python_tool_mode && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
+        python_tool_mode && tool_search_enabled && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
     let non_code_formats_enabled = format_config.any_non_code();
     let legacy_tool_calls_enabled =
         non_code_formats_enabled && primary_format_for_prompt != ToolCallFormatName::CodeMode;
     let legacy_tool_search_enabled =
-        legacy_tool_calls_enabled && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
+        legacy_tool_calls_enabled && tool_search_enabled && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
 
     println!(
         "[chat] tool_call_formats: config_primary={:?}, resolved_primary={:?}, enabled={:?}, native_available={}, python_execution_enabled={}, python_tool_calling_enabled={}, python_tool_mode={}, code_mode_possible={}",
@@ -4647,13 +4676,9 @@ async fn chat(
         system_prompt: None,
     });
 
-    // Use model info obtained earlier for profile resolution
-    let model_name = current_model_info
-        .as_ref()
-        .map(|m| m.id.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    println!("[Chat] Using model: {}", model_name);
+    // Use the frontend-provided model (frontend is source of truth)
+    let model_name = model.clone();
+    println!("[Chat] Using model: {} (frontend-provided)", model_name);
 
     // Clone handles for the async task
     let foundry_tx = handles.foundry_tx.clone();

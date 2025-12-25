@@ -78,9 +78,10 @@ impl AgenticStateMachine {
         base_prompt: String,
     ) -> Self {
         let enabled_capabilities = Self::compute_enabled_capabilities(settings, filter);
+        let initial_state = Self::compute_default_initial_state(&enabled_capabilities);
         
         Self {
-            current_state: AgenticState::Conversational,
+            current_state: initial_state,
             enabled_capabilities,
             thresholds,
             state_history: Vec::new(),
@@ -108,8 +109,13 @@ impl AgenticStateMachine {
     ) -> Self {
         let enabled_capabilities = Self::compute_enabled_capabilities(settings, filter);
         
+        // Determine initial state based on enabled capabilities.
+        // If no RAG/Schema context is available yet (we don't know relevancy scores),
+        // we should start in a state that allows tool execution based on capabilities.
+        let initial_state = Self::compute_default_initial_state(&enabled_capabilities);
+        
         Self {
-            current_state: AgenticState::Conversational,
+            current_state: initial_state,
             enabled_capabilities,
             thresholds,
             state_history: Vec::new(),
@@ -119,6 +125,32 @@ impl AgenticStateMachine {
             custom_tool_prompts: prompt_context.custom_tool_prompts,
             python_primary: prompt_context.python_primary,
             has_attachments: prompt_context.has_attachments,
+        }
+    }
+    
+    /// Compute the default initial state based on enabled capabilities.
+    /// 
+    /// This is used when creating the state machine before RAG/Schema relevancy
+    /// scores are known. It ensures tools are allowed based on what's enabled.
+    fn compute_default_initial_state(enabled_capabilities: &HashSet<Capability>) -> AgenticState {
+        // Priority order: CodeExecution > ToolOrchestration > SqlRetrieval > Conversational
+        if enabled_capabilities.contains(&Capability::PythonExecution) {
+            AgenticState::CodeExecution {
+                available_tools: Vec::new(),
+            }
+        } else if enabled_capabilities.contains(&Capability::McpTools) 
+            || enabled_capabilities.contains(&Capability::ToolSearch) {
+            AgenticState::ToolOrchestration {
+                materialized_tools: Vec::new(),
+            }
+        } else if enabled_capabilities.contains(&Capability::SqlQuery) 
+            || enabled_capabilities.contains(&Capability::SchemaSearch) {
+            AgenticState::SqlRetrieval {
+                discovered_tables: Vec::new(),
+                max_table_relevancy: 0.0,
+            }
+        } else {
+            AgenticState::Conversational
         }
     }
 
@@ -153,24 +185,14 @@ impl AgenticStateMachine {
             caps.insert(Capability::ToolSearch);
         }
 
-        // MCP tools (if any servers are enabled)
-        let mcp_configs = settings.get_all_mcp_configs();
-        let has_enabled_servers = mcp_configs
+        // MCP tools (if any non-database MCP servers are enabled)
+        // Note: We only check standard MCP servers here, NOT database sources.
+        // Database sources are accessed via sql_select/schema_search, not directly as MCP tools.
+        let has_enabled_mcp_servers = settings.mcp_servers
             .iter()
             .any(|s| s.enabled && filter.server_allowed(&s.id));
-        
-        // Also check if any built-in tools are enabled that can use the database toolbox
-        let db_usage_enabled = settings.schema_search_enabled 
-            || settings.sql_select_enabled 
-            || settings.schema_search_internal_only
-            || settings.python_execution_enabled;
-        
-        let has_enabled_mcp = has_enabled_servers && (
-            // If it's a database source, we only count it if database tools are on
-            !settings.database_toolbox.enabled || db_usage_enabled || settings.mcp_servers.iter().any(|s| s.enabled)
-        );
 
-        if has_enabled_mcp {
+        if has_enabled_mcp_servers {
             caps.insert(Capability::McpTools);
         }
 

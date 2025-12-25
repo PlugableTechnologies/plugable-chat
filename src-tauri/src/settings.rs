@@ -696,12 +696,13 @@ impl AppSettings {
     pub fn get_all_mcp_configs(&self) -> Vec<McpServerConfig> {
         let mut configs = self.mcp_servers.clone();
 
-        // Database sources are only active if the toolbox is enabled AND at least one tool 
-        // (sql_select, schema_search, or python_execution) is enabled to use them.
+        // Database sources are only active if the toolbox is enabled AND at least one
+        // database-specific tool (sql_select, schema_search) is enabled.
+        // Note: python_execution does NOT require database MCP connections - it can call
+        // sql_select/schema_search internally, but those tools gate database access.
         let db_tools_available = self.schema_search_enabled 
             || self.sql_select_enabled 
-            || self.schema_search_internal_only
-            || self.python_execution_enabled;
+            || self.schema_search_internal_only;
 
         // Always include database sources so they can be disconnected if toolbox is disabled
         for source in &self.database_toolbox.sources {
