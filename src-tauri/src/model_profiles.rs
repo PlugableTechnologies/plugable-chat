@@ -110,6 +110,8 @@ impl ModelProfile {
             role: "system".to_string(),
             content: system_content,
             system_prompt: None,
+            tool_calls: None,
+            tool_call_id: None,
         });
 
         // Add history (skip existing system messages)
@@ -230,6 +232,8 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
             role: "system".to_string(),
             content: system_content,
             system_prompt: None,
+            tool_calls: None,
+            tool_call_id: None,
         });
 
         for msg in history {
@@ -309,6 +313,8 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
             role: "system".to_string(),
             content: system_content,
             system_prompt: None,
+            tool_calls: None,
+            tool_call_id: None,
         });
 
         for msg in history {
@@ -387,6 +393,8 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
             role: "system".to_string(),
             content: system_content,
             system_prompt: None,
+            tool_calls: None,
+            tool_call_id: None,
         });
 
         for msg in history {
@@ -536,6 +544,7 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
                         tool,
                         arguments,
                         raw: trimmed.to_string(),
+                        id: None,
                     });
                 }
             }

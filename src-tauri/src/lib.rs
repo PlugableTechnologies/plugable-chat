@@ -30,9 +30,10 @@ use mcp_test_server::{
 use model_profiles::resolve_profile;
 use protocol::{
     parse_tool_calls, CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus,
-    McpHostMsg, ModelFamily, ModelInfo, OpenAITool, ParsedToolCall, RagChunk, RagIndexResult,
-    RagMsg, RemoveFileResult, ToolCallsPendingEvent, ToolExecutingEvent, ToolFormat,
-    ToolHeartbeatEvent, ToolLoopFinishedEvent, ToolResultEvent, ToolSchema, VectorMsg,
+    McpHostMsg, ModelFamily, ModelInfo, OpenAITool, OpenAIToolCall, OpenAIToolCallFunction,
+    ParsedToolCall, RagChunk, RagIndexResult, RagMsg, RemoveFileResult, ToolCallsPendingEvent,
+    ToolExecutingEvent, ToolFormat, ToolHeartbeatEvent, ToolLoopFinishedEvent, ToolResultEvent,
+    ToolSchema, VectorMsg,
 };
 use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
 use serde::de::DeserializeOwned;
@@ -1316,6 +1317,7 @@ pub(crate) fn detect_agentic_action(
                         tool: "python_execution".to_string(),
                         arguments: json!({ "code": code_lines }),
                         raw: "[python_program]".to_string(),
+                        id: None,
                     }],
                 };
             }
@@ -1344,6 +1346,72 @@ pub(crate) fn detect_agentic_action(
     AgenticAction::Final {
         response: assistant_response.to_string(),
     }
+}
+
+/// Create an assistant message with native tool_calls array when using native format
+fn create_assistant_message_with_tool_calls(
+    content: &str,
+    calls: &[ParsedToolCall],
+    use_native_format: bool,
+    system_prompt: Option<String>,
+) -> ChatMessage {
+    if use_native_format && calls.iter().all(|c| c.id.is_some()) {
+        // Native format: include tool_calls array in assistant message
+        let tool_calls: Vec<OpenAIToolCall> = calls
+            .iter()
+            .filter_map(|c| {
+                c.id.as_ref().map(|id| OpenAIToolCall {
+                    id: id.clone(),
+                    call_type: "function".to_string(),
+                    function: OpenAIToolCallFunction {
+                        name: if c.server == "builtin" || c.server == "unknown" {
+                            c.tool.clone()
+                        } else {
+                            format!("{}___{}", c.server, c.tool)
+                        },
+                        arguments: serde_json::to_string(&c.arguments).unwrap_or_default(),
+                    },
+                })
+            })
+            .collect();
+
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            system_prompt,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        }
+    } else {
+        // Text-based format: content only
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            system_prompt,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+}
+
+/// Create a tool result message for native OpenAI format
+fn create_native_tool_result_message(tool_call_id: &str, content: &str) -> ChatMessage {
+    ChatMessage {
+        role: "tool".to_string(),
+        content: content.to_string(),
+        system_prompt: None,
+        tool_calls: None,
+        tool_call_id: Some(tool_call_id.to_string()),
+    }
+}
+
+/// Check if we should use native tool result format
+/// Returns true when native tool calling is enabled AND all tool calls have IDs
+fn should_use_native_tool_results(
+    native_tool_calling_enabled: bool,
+    calls: &[ParsedToolCall],
+) -> bool {
+    native_tool_calling_enabled && calls.iter().all(|c| c.id.is_some())
 }
 
 /// Run the agentic loop: call model, detect tool calls, execute, repeat
@@ -1462,6 +1530,8 @@ async fn run_agentic_loop(
                 role: m.role.clone(),
                 content: m.content.clone(),
                 system_prompt: None,
+                tool_calls: m.tool_calls.clone(),
+                tool_call_id: m.tool_call_id.clone(),
             })
             .collect();
 
@@ -1638,6 +1708,8 @@ async fn run_agentic_loop(
                     role: "assistant".to_string(),
                     content: response,
                     system_prompt: Some(turn_system_prompt.clone()),
+                    tool_calls: None,
+                    tool_call_id: None,
                 });
                 break;
             }
@@ -1651,27 +1723,40 @@ async fn run_agentic_loop(
             );
             final_response = assistant_response.clone();
 
-            // Add response with unexecuted tool calls
-            full_history.push(ChatMessage {
-                role: "assistant".to_string(),
-                content: assistant_response,
-                system_prompt: Some(turn_system_prompt.clone()),
-            });
+            // Add response with unexecuted tool calls (use native format if available)
+            let use_native = should_use_native_tool_results(native_tool_calling_enabled, &tool_calls);
+            let assistant_msg = create_assistant_message_with_tool_calls(
+                &assistant_response,
+                &tool_calls,
+                use_native,
+                Some(turn_system_prompt.clone()),
+            );
+            full_history.push(assistant_msg);
             break;
         }
 
         had_tool_calls = true;
         println!("[AgenticLoop] Found {} tool call(s)", tool_calls.len());
 
+        // Determine if we should use native tool result format
+        let use_native_tool_results = should_use_native_tool_results(native_tool_calling_enabled, &tool_calls);
+        if use_native_tool_results {
+            println!("[AgenticLoop] Using native OpenAI tool result format (all calls have IDs)");
+        }
+
         // Add assistant response (with tool calls) to history
-        full_history.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: assistant_response.clone(),
-            system_prompt: Some(turn_system_prompt.clone()),
-        });
+        let assistant_msg = create_assistant_message_with_tool_calls(
+            &assistant_response,
+            &tool_calls,
+            use_native_tool_results,
+            Some(turn_system_prompt.clone()),
+        );
+        full_history.push(assistant_msg);
 
         // Process each tool call
+        // In native format, we'll add individual tool messages; otherwise collect as strings
         let mut tool_results: Vec<String> = Vec::new();
+        let mut native_tool_messages: Vec<ChatMessage> = Vec::new();
         let mut any_executed = false;
 
         for (idx, call) in tool_calls.iter().enumerate() {
@@ -1716,6 +1801,7 @@ async fn run_agentic_loop(
                 tool: call.tool.clone(),
                 arguments: call.arguments.clone(),
                 raw: call.raw.clone(),
+                id: call.id.clone(),
             };
 
             // State machine validation: check if tool is allowed in current state
@@ -2391,12 +2477,31 @@ async fn run_agentic_loop(
             }
 
             // Format and collect tool result using model-appropriate format
-            tool_results.push(format_tool_result(
-                &resolved_call,
-                &result_text,
-                is_error,
-                tool_format,
-            ));
+            if use_native_tool_results {
+                // Native format: create individual tool result messages
+                if let Some(ref tool_call_id) = resolved_call.id {
+                    native_tool_messages.push(create_native_tool_result_message(
+                        tool_call_id,
+                        &result_text,
+                    ));
+                } else {
+                    // Fallback for calls without IDs (shouldn't happen if use_native_tool_results is true)
+                    tool_results.push(format_tool_result(
+                        &resolved_call,
+                        &result_text,
+                        is_error,
+                        tool_format,
+                    ));
+                }
+            } else {
+                // Text-based format: collect as formatted strings
+                tool_results.push(format_tool_result(
+                    &resolved_call,
+                    &result_text,
+                    is_error,
+                    tool_format,
+                ));
+            }
             any_executed = true;
         }
 
@@ -2406,13 +2511,27 @@ async fn run_agentic_loop(
             break;
         }
 
-        // Add all tool results as a single user message
-        let combined_results = tool_results.join("\n\n");
-        full_history.push(ChatMessage {
-            role: "user".to_string(),
-            content: combined_results,
-            system_prompt: None,
-        });
+        // Add tool results to history using appropriate format
+        if use_native_tool_results && !native_tool_messages.is_empty() {
+            // Native format: add individual tool result messages
+            println!(
+                "[AgenticLoop] Adding {} native tool result messages to history",
+                native_tool_messages.len()
+            );
+            for msg in native_tool_messages {
+                full_history.push(msg);
+            }
+        } else if !tool_results.is_empty() {
+            // Text-based format: combine results into a single user message
+            let combined_results = tool_results.join("\n\n");
+            full_history.push(ChatMessage {
+                role: "user".to_string(),
+                content: combined_results,
+                system_prompt: None,
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
 
         // Check state machine for continuation
         let should_continue = state_machine.should_continue_loop();
@@ -4717,6 +4836,8 @@ async fn chat(
             role: "system".to_string(),
             content: system_prompt.clone(),
             system_prompt: None,
+            tool_calls: None,
+            tool_call_id: None,
         });
     }
 
@@ -4732,6 +4853,8 @@ async fn chat(
         role: "user".to_string(),
         content: message.clone(),
         system_prompt: None,
+        tool_calls: None,
+        tool_call_id: None,
     });
 
     // Use the frontend-provided model (frontend is source of truth)

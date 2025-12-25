@@ -179,6 +179,10 @@ pub struct ParsedToolCall {
     pub tool: String,
     pub arguments: serde_json::Value,
     pub raw: String,
+    /// Native tool call ID (from OpenAI streaming format)
+    /// Used to match tool results with their corresponding calls
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 // ============ Tool Execution Event Payloads ============
@@ -280,6 +284,7 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                             tool: tool.to_string(),
                             arguments,
                             raw,
+                            id: None,
                         });
                         continue;
                     }
@@ -307,6 +312,7 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                             tool,
                             arguments,
                             raw,
+                            id: None,
                         });
                     } else {
                         println!("[parse_tool_calls] WARNING: JSON parsed but no 'server'/'tool' or 'name' field found");
@@ -331,6 +337,7 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                                 .get(0)
                                 .map(|m| m.as_str().to_string())
                                 .unwrap_or_default(),
+                            id: None,
                         });
                     } else {
                         println!("[parse_tool_calls] Fallback also failed");
@@ -385,6 +392,7 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                                     tool,
                                     arguments,
                                     raw: format!("<tool_call>{}</tool_call>", balanced_json),
+                                    id: None,
                                 });
                             }
                         } else {
@@ -398,6 +406,7 @@ pub fn parse_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                                     tool,
                                     arguments,
                                     raw: format!("<tool_call>{}</tool_call>", balanced_json),
+                                    id: None,
                                 });
                             }
                         }
@@ -708,7 +717,7 @@ pub struct ModelInfo {
     pub supports_reasoning_effort: bool,
 }
 
-/// OpenAI-compatible tool definition for native tool calling
+/// OpenAI-compatible tool definition for native tool calling (request format)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAITool {
     #[serde(rename = "type")]
@@ -723,6 +732,28 @@ pub struct OpenAIFunction {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
+}
+
+/// OpenAI tool call from assistant response (response format)
+/// Used in assistant messages to indicate which tools were called
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIToolCall {
+    /// Unique identifier for this tool call (used to match results)
+    pub id: String,
+    /// Always "function" for function calls
+    #[serde(rename = "type")]
+    pub call_type: String,
+    /// The function that was called
+    pub function: OpenAIToolCallFunction,
+}
+
+/// Function details within an OpenAI tool call
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIToolCallFunction {
+    /// Name of the function (may be "server___tool" format)
+    pub name: String,
+    /// Arguments as a JSON string
+    pub arguments: String,
 }
 
 impl OpenAITool {
@@ -863,6 +894,14 @@ pub struct ChatMessage {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// Tool calls made by the assistant (for native OpenAI format)
+    /// Present when role="assistant" and the model made tool calls
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<OpenAIToolCall>>,
+    /// Tool call ID this message is responding to (for native OpenAI format)
+    /// Present when role="tool" to reference the original tool call
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 pub enum VectorMsg {

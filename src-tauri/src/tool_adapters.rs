@@ -163,6 +163,7 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                         tool: tool.to_string(),
                         arguments,
                         raw,
+                        id: None,
                     });
                     continue;
                 }
@@ -177,6 +178,7 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                         tool,
                         arguments,
                         raw,
+                        id: None,
                     });
                 }
             }
@@ -203,6 +205,7 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                                     tool,
                                     arguments,
                                     raw: format!("<tool_call>{}</tool_call>", balanced_json),
+                                    id: None,
                                 });
                             }
                         }
@@ -226,6 +229,17 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     // This handles smaller models that output ```json {...} ``` instead of <tool_call>
     if calls.is_empty() {
         calls = parse_markdown_json_tool_calls(content);
+    }
+
+    // Fallback: check for Pythonic function calls in code blocks
+    // This handles models that output ```plaintext tool_name(...) ``` or similar
+    if calls.is_empty() {
+        calls = parse_pythonic_code_block_tool_calls(content);
+    }
+
+    // Final fallback: try bare Pythonic function calls (not in code blocks)
+    if calls.is_empty() {
+        calls = parse_pythonic_tool_calls(content);
     }
 
     calls
@@ -268,6 +282,7 @@ fn parse_braintrust_function_calls(content: &str) -> Vec<ParsedToolCall> {
                 tool,
                 arguments,
                 raw,
+                id: None,
             });
         }
     }
@@ -325,6 +340,82 @@ fn parse_markdown_json_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                         tool,
                         arguments,
                         raw,
+                        id: None,
+                    });
+                }
+            }
+        }
+    }
+
+    calls
+}
+
+/// Parse Pythonic function calls inside markdown code blocks.
+/// Handles formats like:
+/// ```plaintext
+/// sql_select("SELECT ...", ["source_id"])
+/// ```
+/// or similar code blocks with any language tag (python, text, etc.)
+fn parse_pythonic_code_block_tool_calls(content: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+
+    // Match markdown code blocks with any language or no language
+    // (?s) for DOTALL mode
+    let code_block_re = Regex::new(r"(?s)```(?:\w*)?\s*\n?(.*?)\n?```").unwrap();
+
+    for cap in code_block_re.captures_iter(content) {
+        if let Some(block_content) = cap.get(1) {
+            let block_text = block_content.as_str().trim();
+
+            // Try to parse as a Pythonic function call: tool_name(args...)
+            // This regex captures the function name and everything inside the parentheses
+            // It handles nested parentheses and quoted strings with parentheses
+            let pythonic_re = Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(([\s\S]*)\)\s*$").ok();
+
+            if let Some(pythonic_re) = pythonic_re {
+                if let Some(func_cap) = pythonic_re.captures(block_text) {
+                    let name = func_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+                    let args_str = func_cap.get(2).map(|m| m.as_str()).unwrap_or("");
+
+                    if name.is_empty() {
+                        continue;
+                    }
+
+                    // Known tool names to filter out false positives
+                    let known_tools = [
+                        "sql_select",
+                        "schema_search",
+                        "tool_search",
+                        "python_execution",
+                    ];
+
+                    // Only parse if it looks like a known tool or has server prefix
+                    let is_known = known_tools.contains(&name) || name.contains("___");
+
+                    if !is_known {
+                        // Skip unknown function names to avoid false positives
+                        continue;
+                    }
+
+                    let arguments = parse_pythonic_arguments(args_str);
+                    let (server, tool) = parse_combined_tool_name(name);
+
+                    let raw = cap
+                        .get(0)
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_default();
+
+                    println!(
+                        "[parse_pythonic_code_block_tool_calls] Found tool call in code block: {} (server: {})",
+                        tool, server
+                    );
+
+                    calls.push(ParsedToolCall {
+                        server,
+                        tool,
+                        arguments,
+                        raw,
+                        id: None,
                     });
                 }
             }
@@ -355,6 +446,7 @@ fn parse_pythonic_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                 .get(0)
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default(),
+            id: None,
         });
     }
 
@@ -482,6 +574,7 @@ fn collect_calls_from_value(value: &Value, raw: &str, calls: &mut Vec<ParsedTool
                 tool: tool_name,
                 arguments: args.clone(),
                 raw: raw.to_string(),
+                id: None,
             });
             continue;
         }
@@ -494,6 +587,7 @@ fn collect_calls_from_value(value: &Value, raw: &str, calls: &mut Vec<ParsedTool
                 tool,
                 arguments,
                 raw: raw.to_string(),
+                id: None,
             });
         }
     }
@@ -539,6 +633,7 @@ fn parse_tagged_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                         tool,
                         arguments,
                         raw: trimmed.to_string(),
+                        id: None,
                     });
                 }
             }
@@ -577,6 +672,7 @@ pub fn parse_gemini_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                                 .get(0)
                                 .map(|m| m.as_str().to_string())
                                 .unwrap_or_default(),
+                            id: None,
                         });
                     }
                 }
@@ -621,6 +717,7 @@ pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                                 .get(0)
                                 .map(|m| m.as_str().to_string())
                                 .unwrap_or_default(),
+                            id: None,
                         });
                     }
                 } else {
@@ -646,6 +743,7 @@ pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
                                     .get(0)
                                     .map(|m| m.as_str().to_string())
                                     .unwrap_or_default(),
+                                id: None,
                             });
                         }
                     }
@@ -1139,6 +1237,7 @@ Done."#;
             tool: "echo".to_string(),
             arguments: json!({}),
             raw: "".to_string(),
+            id: None,
         };
 
         let result = format_tool_result(&call, "Hello, World!", false, ToolFormat::Hermes);
@@ -1155,6 +1254,7 @@ Done."#;
             tool: "search_catalog".to_string(),
             arguments: json!({}),
             raw: "".to_string(),
+            id: None,
         };
 
         let error_msg = "MCP error -32602: provided parameters were invalid: parameter is required";
@@ -1331,6 +1431,31 @@ The weather is..."#;
                 .and_then(|v| v.as_str()),
             Some("2 + 2")
         );
+    }
+
+    #[test]
+    fn test_parse_pythonic_code_block_sql_select() {
+        // Test Pythonic function call in a plaintext code block (Phi-4 style output)
+        let content = r#"```plaintext
+sql_select("SELECT SUM(total_sale) FROM table WHERE year = 2025", ["bq-123"])
+```"#;
+
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1, "Expected 1 tool call, found {}", calls.len());
+        assert_eq!(calls[0].tool, "sql_select");
+        assert!(calls[0].arguments.get("sql").is_some() || !calls[0].arguments.is_null());
+    }
+
+    #[test]
+    fn test_parse_pythonic_code_block_schema_search() {
+        // Test schema_search in a code block
+        let content = r#"```
+schema_search("customer orders")
+```"#;
+
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "schema_search");
     }
 
     #[test]

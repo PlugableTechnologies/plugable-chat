@@ -70,7 +70,7 @@ impl StreamingToolCalls {
         let mut indexed: Vec<_> = self.calls.into_iter().collect();
         indexed.sort_by_key(|(idx, _)| *idx);
 
-        for (_index, (_id, name, arguments_str)) in indexed {
+        for (_index, (tool_call_id, name, arguments_str)) in indexed {
             // Skip entries without a name (incomplete)
             if name.is_empty() {
                 continue;
@@ -100,11 +100,19 @@ impl StreamingToolCalls {
                 serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
             );
 
+            // Include the native tool call ID if present
+            let id = if tool_call_id.is_empty() {
+                None
+            } else {
+                Some(tool_call_id)
+            };
+
             result.push(ParsedToolCall {
                 server,
                 tool,
                 arguments,
                 raw,
+                id,
             });
         }
 
@@ -339,6 +347,8 @@ mod tests {
             role: "user".to_string(),
             content: "hi there".to_string(),
             system_prompt: None,
+            tool_calls: None,
+            tool_call_id: None,
         }];
         let input = map_messages_to_responses_input(&messages);
         assert_eq!(input.len(), 1);
@@ -746,6 +756,8 @@ impl ModelGatewayActor {
                                     role: "system".to_string(),
                                     content: "You are a helpful AI assistant.".to_string(),
                                     system_prompt: None,
+                                    tool_calls: None,
+                                    tool_call_id: None,
                                 },
                             );
                         } else {
