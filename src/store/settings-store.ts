@@ -78,6 +78,11 @@ export interface AppSettings {
     schema_search_enabled: boolean;
     sql_select_enabled: boolean;
     schema_search_internal_only: boolean;
+    // Relevancy thresholds for state machine
+    rag_chunk_min_relevancy: number;
+    schema_table_min_relevancy: number;
+    sql_enable_min_relevancy: number;
+    rag_dominant_threshold: number;
 }
 
 // Connection status for MCP servers
@@ -130,6 +135,11 @@ interface SettingsState {
     updateSchemaSearchEnabled: (enabled: boolean) => Promise<void>;
     updateSchemaSearchInternalOnly: (enabled: boolean) => Promise<void>;
     updateSqlSelectEnabled: (enabled: boolean) => Promise<void>;
+    // Relevancy thresholds for state machine
+    updateRagChunkMinRelevancy: (value: number) => Promise<void>;
+    updateSchemaTableMinRelevancy: (value: number) => Promise<void>;
+    updateSqlEnableMinRelevancy: (value: number) => Promise<void>;
+    updateRagDominantThreshold: (value: number) => Promise<void>;
     updateDatabaseToolboxConfig: (config: DatabaseToolboxConfig) => Promise<void>;
     addMcpServer: (config: McpServerConfig) => Promise<void>;
     updateMcpServer: (config: McpServerConfig) => Promise<void>;
@@ -339,6 +349,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     schema_search_enabled: false,
                     sql_select_enabled: false,
                     schema_search_internal_only: false,
+                    // Relevancy thresholds defaults
+                    rag_chunk_min_relevancy: 0.3,
+                    schema_table_min_relevancy: 0.2,
+                    sql_enable_min_relevancy: 0.4,
+                    rag_dominant_threshold: 0.6,
                 },
                 pythonAllowedImports: FALLBACK_PYTHON_ALLOWED_IMPORTS,
             });
@@ -653,6 +668,83 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             console.log('[SettingsStore] sql_select_enabled updated:', enabled);
         } catch (e: any) {
             console.error('[SettingsStore] Failed to update sql_select_enabled:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+
+    // Relevancy threshold updates
+    updateRagChunkMinRelevancy: async (value: number) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        set({
+            settings: { ...currentSettings, rag_chunk_min_relevancy: value },
+            error: null
+        });
+        try {
+            await invoke('update_rag_chunk_min_relevancy', { value });
+            console.log('[SettingsStore] rag_chunk_min_relevancy updated:', value);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update rag_chunk_min_relevancy:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+
+    updateSchemaTableMinRelevancy: async (value: number) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        set({
+            settings: { ...currentSettings, schema_table_min_relevancy: value },
+            error: null
+        });
+        try {
+            await invoke('update_schema_table_min_relevancy', { value });
+            console.log('[SettingsStore] schema_table_min_relevancy updated:', value);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update schema_table_min_relevancy:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+
+    updateSqlEnableMinRelevancy: async (value: number) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        set({
+            settings: { ...currentSettings, sql_enable_min_relevancy: value },
+            error: null
+        });
+        try {
+            await invoke('update_sql_enable_min_relevancy', { value });
+            console.log('[SettingsStore] sql_enable_min_relevancy updated:', value);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update sql_enable_min_relevancy:', e);
+            set({
+                settings: currentSettings,
+                error: `Failed to save: ${e.message || e}`
+            });
+        }
+    },
+
+    updateRagDominantThreshold: async (value: number) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        set({
+            settings: { ...currentSettings, rag_dominant_threshold: value },
+            error: null
+        });
+        try {
+            await invoke('update_rag_dominant_threshold', { value });
+            console.log('[SettingsStore] rag_dominant_threshold updated:', value);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to update rag_dominant_threshold:', e);
             set({
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`

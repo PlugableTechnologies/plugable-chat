@@ -1,6 +1,6 @@
 import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName, type DatabaseSourceConfig, type SupportedDatabaseKind, type DatabaseToolboxConfig, type ChatFormatName } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw, RefreshCw, AlertCircle, Download, Cpu, HardDrive, ExternalLink, Zap } from 'lucide-react';
+import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw, RefreshCw, AlertCircle, Download, Cpu, HardDrive, ExternalLink, Zap, GitBranch } from 'lucide-react';
 import { invoke, type FoundryCatalogModel, type FoundryServiceStatus } from '../lib/api';
 import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
 import { useChatStore } from '../store/chat-store';
@@ -1277,6 +1277,111 @@ function ModelsTab() {
     );
 }
 
+// State Preview interface
+interface StatePreview {
+    name: string;
+    description: string;
+    available_tools: string[];
+    prompt_additions: string[];
+    is_possible: boolean;
+}
+
+// State Machine Preview Component
+function StateMachinePreview() {
+    const [states, setStates] = useState<StatePreview[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [expanded, setExpanded] = useState(false);
+
+    const fetchStates = useCallback(() => {
+        setLoading(true);
+        setError(null);
+        invoke<StatePreview[]>('get_state_machine_preview')
+            .then((data) => {
+                setStates(data);
+            })
+            .catch((e) => {
+                console.error('Failed to get state machine preview:', e);
+                setError(e.message || String(e));
+            })
+            .finally(() => setLoading(false));
+    }, []);
+
+    useEffect(() => {
+        fetchStates();
+    }, [fetchStates]);
+
+    return (
+        <div className="border border-gray-200 rounded-xl overflow-hidden">
+            <button
+                onClick={() => setExpanded(!expanded)}
+                className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-sm font-medium text-gray-700"
+            >
+                <span className="flex items-center gap-2">
+                    <GitBranch size={16} />
+                    State Machine Preview
+                    <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">
+                        {states.length} states
+                    </span>
+                </span>
+                {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            </button>
+
+            {expanded && (
+                <div className="p-4 bg-white border-t border-gray-200 space-y-3">
+                    {loading ? (
+                        <div className="flex items-center gap-2 text-sm text-gray-600">
+                            <Loader2 size={16} className="animate-spin" />
+                            Loading states...
+                        </div>
+                    ) : error ? (
+                        <div className="text-sm text-red-700 bg-red-50 px-3 py-2 rounded-lg">{error}</div>
+                    ) : states.length > 0 ? (
+                        <div className="space-y-2">
+                            {states.map((state, idx) => (
+                                <div
+                                    key={idx}
+                                    className={`p-3 rounded-lg border ${state.is_possible ? 'border-green-200 bg-green-50/50' : 'border-gray-200 bg-gray-50'}`}
+                                >
+                                    <div className="flex items-center justify-between mb-1">
+                                        <span className="font-medium text-sm text-gray-900">{state.name}</span>
+                                        {state.is_possible && (
+                                            <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
+                                                possible
+                                            </span>
+                                        )}
+                                    </div>
+                                    <p className="text-xs text-gray-600 mb-2">{state.description}</p>
+                                    {state.available_tools.length > 0 && (
+                                        <div className="flex flex-wrap gap-1">
+                                            {state.available_tools.map((tool, tidx) => (
+                                                <span
+                                                    key={tidx}
+                                                    className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded"
+                                                >
+                                                    {tool}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <p className="text-sm text-gray-500">No states available.</p>
+                    )}
+                    <button
+                        onClick={fetchStates}
+                        className="text-xs text-blue-600 hover:text-blue-700"
+                    >
+                        Refresh
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
+
 // System Prompt Tab
 function SystemPromptTab({
     onDirtyChange,
@@ -1471,6 +1576,9 @@ function SystemPromptTab({
                     </div>
                 )}
             </div>
+
+            {/* State Machine Preview */}
+            <StateMachinePreview />
 
             {error && (
                 <div className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
@@ -1747,6 +1855,10 @@ function BuiltinsTab({
         updateSchemaSearchEnabled,
         updateSchemaSearchInternalOnly,
         updateSqlSelectEnabled,
+        updateRagChunkMinRelevancy,
+        updateSchemaTableMinRelevancy,
+        updateSqlEnableMinRelevancy,
+        updateRagDominantThreshold,
         pythonAllowedImports,
     } = useSettingsStore();
     const allowedImports = (pythonAllowedImports && pythonAllowedImports.length > 0)
@@ -1760,6 +1872,12 @@ function BuiltinsTab({
     const [localToolSearchMaxResults, setLocalToolSearchMaxResults] = useState(settings?.tool_search_max_results ?? 3);
     const [localToolExamplesEnabled, setLocalToolExamplesEnabled] = useState(settings?.tool_use_examples_enabled ?? false);
     const [localToolExamplesMax, setLocalToolExamplesMax] = useState(settings?.tool_use_examples_max ?? 2);
+    
+    // Relevancy thresholds for state machine
+    const [localRagChunkMinRelevancy, setLocalRagChunkMinRelevancy] = useState(settings?.rag_chunk_min_relevancy ?? 0.3);
+    const [localSchemaTableMinRelevancy, setLocalSchemaTableMinRelevancy] = useState(settings?.schema_table_min_relevancy ?? 0.2);
+    const [localSqlEnableMinRelevancy, setLocalSqlEnableMinRelevancy] = useState(settings?.sql_enable_min_relevancy ?? 0.4);
+    const [localRagDominantThreshold, setLocalRagDominantThreshold] = useState(settings?.rag_dominant_threshold ?? 0.6);
 
     const defaultPythonPrompt = [
         "Use python_execution for calling tools, calculations, and data transforms.",
@@ -2275,6 +2393,53 @@ function BuiltinsTab({
                     <span className="text-xs text-gray-600">Internal search only (don't expose tool to model)</span>
                 </div>
 
+                {/* Relevancy Thresholds */}
+                <div className="border-t border-gray-100 pt-3 mt-2 space-y-3">
+                    <div className="text-xs font-semibold text-gray-700">Relevancy Thresholds</div>
+                    
+                    <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs text-gray-600">Min Table Relevancy</span>
+                            <span className="text-xs font-mono text-gray-500">{localSchemaTableMinRelevancy.toFixed(2)}</span>
+                        </div>
+                        <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={localSchemaTableMinRelevancy}
+                            onChange={(e) => {
+                                const value = parseFloat(e.target.value);
+                                setLocalSchemaTableMinRelevancy(value);
+                                updateSchemaTableMinRelevancy(value);
+                            }}
+                            className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                        />
+                        <p className="text-[10px] text-gray-400">Tables below this score are not injected into context</p>
+                    </div>
+
+                    <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs text-gray-600">SQL Enable Threshold</span>
+                            <span className="text-xs font-mono text-gray-500">{localSqlEnableMinRelevancy.toFixed(2)}</span>
+                        </div>
+                        <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={localSqlEnableMinRelevancy}
+                            onChange={(e) => {
+                                const value = parseFloat(e.target.value);
+                                setLocalSqlEnableMinRelevancy(value);
+                                updateSqlEnableMinRelevancy(value);
+                            }}
+                            className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                        />
+                        <p className="text-[10px] text-gray-400">sql_select only available above this relevancy</p>
+                    </div>
+                </div>
+
                 <div className="flex items-center justify-between gap-2 pt-1">
                     <div className="text-xs font-semibold text-gray-900">System prompt (optional)</div>
                     <button
@@ -2335,6 +2500,73 @@ function BuiltinsTab({
                     className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
                     placeholder={defaultSqlSelectPrompt}
                 />
+            </div>
+
+            {/* RAG Document Retrieval card */}
+            <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
+                <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                        <div className="w-10 h-5 flex items-center justify-center">
+                            <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                            </svg>
+                        </div>
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <span className="font-medium text-gray-900">Document Retrieval (RAG)</span>
+                                <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">automatic</span>
+                            </div>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                Contextual retrieval from attached documents
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                {/* RAG Relevancy Thresholds */}
+                <div className="space-y-3 pt-1">
+                    <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs text-gray-600">Min Chunk Relevancy</span>
+                            <span className="text-xs font-mono text-gray-500">{localRagChunkMinRelevancy.toFixed(2)}</span>
+                        </div>
+                        <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={localRagChunkMinRelevancy}
+                            onChange={(e) => {
+                                const value = parseFloat(e.target.value);
+                                setLocalRagChunkMinRelevancy(value);
+                                updateRagChunkMinRelevancy(value);
+                            }}
+                            className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                        />
+                        <p className="text-[10px] text-gray-400">Document chunks below this score are not injected into context</p>
+                    </div>
+
+                    <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs text-gray-600">RAG Dominant Threshold</span>
+                            <span className="text-xs font-mono text-gray-500">{localRagDominantThreshold.toFixed(2)}</span>
+                        </div>
+                        <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={localRagDominantThreshold}
+                            onChange={(e) => {
+                                const value = parseFloat(e.target.value);
+                                setLocalRagDominantThreshold(value);
+                                updateRagDominantThreshold(value);
+                            }}
+                            className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                        />
+                        <p className="text-[10px] text-gray-400">Above this relevancy, SQL context is suppressed to focus the model</p>
+                    </div>
+                </div>
             </div>
         </div>
     );

@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tokio::fs;
 
+use crate::agentic_state::RelevancyThresholds;
+
 // ============ Tool Calling Formats ============
 
 /// Canonical names for tool calling formats shared across backend, frontend, and tests.
@@ -636,6 +638,22 @@ pub struct AppSettings {
     /// Whether schema_search runs internally only (not exposed as a tool to the model).
     #[serde(default)]
     pub schema_search_internal_only: bool,
+    
+    // ============ Relevancy Thresholds for State Machine ============
+    
+    /// Minimum RAG chunk relevancy to inject into context (default: 0.3)
+    #[serde(default = "default_rag_chunk_min_relevancy")]
+    pub rag_chunk_min_relevancy: f32,
+    /// Minimum schema table relevancy to inject into context (default: 0.2)
+    #[serde(default = "default_schema_table_min_relevancy")]
+    pub schema_table_min_relevancy: f32,
+    /// Minimum schema relevancy to enable sql_select (default: 0.4)
+    #[serde(default = "default_sql_enable_min_relevancy")]
+    pub sql_enable_min_relevancy: f32,
+    /// RAG relevancy above which SQL context is suppressed (default: 0.6)
+    #[serde(default = "default_rag_dominant_threshold")]
+    pub rag_dominant_threshold: f32,
+    
     // NOTE: native_tool_calling_enabled has been removed.
     // Native tool calling is now controlled via tool_call_formats (Native format).
     // Old configs with this field will be migrated on load.
@@ -655,6 +673,22 @@ fn default_python_tool_calling_enabled() -> bool {
 
 fn default_tool_use_examples_max() -> usize {
     2
+}
+
+fn default_rag_chunk_min_relevancy() -> f32 {
+    0.3
+}
+
+fn default_schema_table_min_relevancy() -> f32 {
+    0.2
+}
+
+fn default_sql_enable_min_relevancy() -> f32 {
+    0.4
+}
+
+fn default_rag_dominant_threshold() -> f32 {
+    0.6
 }
 
 impl AppSettings {
@@ -694,6 +728,16 @@ impl AppSettings {
             auto_approve_tools: source.auto_approve_tools,
             defer_tools: source.defer_tools,
             python_name: None,
+        }
+    }
+
+    /// Get the relevancy thresholds from settings.
+    pub fn get_relevancy_thresholds(&self) -> RelevancyThresholds {
+        RelevancyThresholds {
+            rag_chunk_min: self.rag_chunk_min_relevancy,
+            schema_table_min: self.schema_table_min_relevancy,
+            sql_enable_min: self.sql_enable_min_relevancy,
+            rag_dominant_threshold: self.rag_dominant_threshold,
         }
     }
 }
@@ -794,6 +838,11 @@ impl Default for AppSettings {
             schema_search_enabled: false,
             sql_select_enabled: false,
             schema_search_internal_only: false,
+            // Relevancy thresholds
+            rag_chunk_min_relevancy: default_rag_chunk_min_relevancy(),
+            schema_table_min_relevancy: default_schema_table_min_relevancy(),
+            sql_enable_min_relevancy: default_sql_enable_min_relevancy(),
+            rag_dominant_threshold: default_rag_dominant_threshold(),
         }
     }
 }

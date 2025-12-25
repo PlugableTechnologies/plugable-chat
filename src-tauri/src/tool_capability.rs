@@ -2,11 +2,16 @@
 //!
 //! Centralizes all logic for determining which tools are available,
 //! which formats to use, and how to present tools to models.
+//!
+//! This module now works in conjunction with the state machine to provide
+//! context-aware tool availability based on the current agentic state.
 
+use crate::agentic_state::Capability;
 use crate::protocol::{ModelInfo, ToolFormat, ToolSchema};
 use crate::settings::{
     AppSettings, DatabaseToolboxConfig, McpServerConfig, ToolCallFormatConfig, ToolCallFormatName,
 };
+use crate::state_machine::AgenticStateMachine;
 use crate::tool_registry::ToolRegistry;
 use std::collections::{HashMap, HashSet};
 
@@ -370,6 +375,79 @@ impl ToolCapabilityResolver {
             ),
             ToolCallFormatName::CodeMode => None, // Code mode has its own prompt section
         }
+    }
+
+    // ============ State Machine Integration ============
+
+    /// Check if a tool is allowed based on the state machine's current state.
+    /// 
+    /// This delegates to the state machine for tool validation, ensuring
+    /// tools are only available when appropriate for the current context.
+    pub fn is_tool_allowed_by_state(
+        state_machine: &AgenticStateMachine,
+        tool_name: &str,
+    ) -> bool {
+        state_machine.is_tool_allowed(tool_name)
+    }
+
+    /// Get the list of allowed tool names from the state machine.
+    pub fn get_allowed_tools_from_state(
+        state_machine: &AgenticStateMachine,
+    ) -> Vec<String> {
+        state_machine.allowed_tool_names()
+    }
+
+    /// Convert state machine capabilities to available builtins set.
+    /// 
+    /// This provides backwards compatibility with code that expects
+    /// the available_builtins HashSet.
+    pub fn capabilities_to_builtins(
+        capabilities: &HashSet<Capability>,
+    ) -> HashSet<String> {
+        let mut builtins = HashSet::new();
+        
+        if capabilities.contains(&Capability::PythonExecution) {
+            builtins.insert(BUILTIN_PYTHON_EXECUTION.to_string());
+        }
+        if capabilities.contains(&Capability::ToolSearch) {
+            builtins.insert(BUILTIN_TOOL_SEARCH.to_string());
+        }
+        if capabilities.contains(&Capability::SchemaSearch) {
+            builtins.insert(BUILTIN_SCHEMA_SEARCH.to_string());
+        }
+        if capabilities.contains(&Capability::SqlQuery) {
+            builtins.insert(BUILTIN_SQL_SELECT.to_string());
+        }
+        
+        builtins
+    }
+
+    /// Update ResolvedToolCapabilities based on state machine.
+    /// 
+    /// This can be used to overlay state machine restrictions on top
+    /// of the standard capability resolution.
+    pub fn apply_state_machine_filter(
+        mut capabilities: ResolvedToolCapabilities,
+        state_machine: &AgenticStateMachine,
+    ) -> ResolvedToolCapabilities {
+        // Filter available builtins based on state
+        let allowed_tools = state_machine.allowed_tool_names();
+        let allowed_set: HashSet<String> = allowed_tools.into_iter().collect();
+        
+        capabilities.available_builtins = capabilities
+            .available_builtins
+            .intersection(&allowed_set)
+            .cloned()
+            .collect();
+        
+        // Filter active MCP tools based on state
+        capabilities.active_mcp_tools = capabilities
+            .active_mcp_tools
+            .into_iter()
+            .filter(|(_, schema)| state_machine.is_tool_allowed(&schema.name))
+            .collect();
+        
+        capabilities
     }
 }
 
