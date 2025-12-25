@@ -850,6 +850,14 @@ const convertLatexDelimiters = (content: string): string => {
     // #region agent log
     const startTs = Date.now();
     // #endregion
+    
+    // Early exit: skip expensive processing if content looks like JSON/code
+    // This prevents catastrophic backtracking on JSON arrays/objects
+    const looksLikeJson = /^\s*[\[{]/.test(content) && /"[^"]*"\s*:/.test(content);
+    if (looksLikeJson) {
+        return content;
+    }
+    
     let result = content;
     
     // Convert \[...\] to $$...$$ (display math)
@@ -866,37 +874,63 @@ const convertLatexDelimiters = (content: string): string => {
     // Handle bare brackets [ ... ] that contain LaTeX (has backslash commands)
     // Be careful not to match markdown links or array-like content
     // Only match if the content has LaTeX patterns like \frac, \text, \times, etc.
-    result = result.replace(/(?<!\[)\[\s*((?:\\[a-zA-Z]+|[^[\]]*)+)\s*\](?!\()/g, (match, inner) => {
-        // Check if content looks like LaTeX (has backslash commands like \frac, \text, etc.)
-        const hasLatexCommands = /\\[a-zA-Z]+/.test(inner);
-        // Also check for common math patterns
-        const hasMathPatterns = /[_^{}]|\\[a-zA-Z]/.test(inner);
-        
-        if (hasLatexCommands || hasMathPatterns) {
-            return `$$${inner.trim()}$$`;
+    // FIXED: Use atomic group simulation to prevent catastrophic backtracking
+    // Instead of complex regex, use simple bracket matching then check content
+    let bracketIdx = 0;
+    while ((bracketIdx = result.indexOf('[', bracketIdx)) !== -1) {
+        // Skip if preceded by another bracket (like [[)
+        if (bracketIdx > 0 && result[bracketIdx - 1] === '[') {
+            bracketIdx++;
+            continue;
         }
-        return match; // Leave as-is if not LaTeX
-    });
+        // Find matching closing bracket (simple, no nesting for LaTeX)
+        const closeIdx = result.indexOf(']', bracketIdx + 1);
+        if (closeIdx === -1) break;
+        // Skip if followed by ( (markdown link)
+        if (result[closeIdx + 1] === '(') {
+            bracketIdx = closeIdx + 1;
+            continue;
+        }
+        const inner = result.substring(bracketIdx + 1, closeIdx);
+        // Only convert if it has LaTeX commands and isn't too long (avoid JSON arrays)
+        const hasLatexCommands = /\\[a-zA-Z]+/.test(inner);
+        const hasMathPatterns = /[_^{}]/.test(inner) && /\\[a-zA-Z]/.test(inner);
+        const isTooLong = inner.length > 500; // Avoid converting large JSON arrays
+        if ((hasLatexCommands || hasMathPatterns) && !isTooLong) {
+            const replacement = `$$${inner.trim()}$$`;
+            result = result.substring(0, bracketIdx) + replacement + result.substring(closeIdx + 1);
+            bracketIdx += replacement.length;
+        } else {
+            bracketIdx = closeIdx + 1;
+        }
+    }
     
     // Handle bare parentheses ( ... ) that contain LaTeX
     // Be more conservative here since parentheses are common
-    // Only convert if content has clear LaTeX commands
-    result = result.replace(/\(\s*((?:[^()]*\\[a-zA-Z]+[^()]*)+)\s*\)/g, (match, inner) => {
-        // Check for any LaTeX command (backslash followed by letters)
+    // FIXED: Use simple iteration instead of backtracking regex
+    let parenIdx = 0;
+    while ((parenIdx = result.indexOf('(', parenIdx)) !== -1) {
+        const closeIdx = result.indexOf(')', parenIdx + 1);
+        if (closeIdx === -1) break;
+        const inner = result.substring(parenIdx + 1, closeIdx);
+        // Check for LaTeX command (backslash followed by letters)
         const hasLatexCommand = /\\[a-zA-Z]{2,}/.test(inner);
         // Also check for subscript/superscript patterns common in math
         const hasMathNotation = /[_^]/.test(inner) && /\\/.test(inner);
         // Scientific notation pattern
         const hasScientificNotation = /\\times\s*10\s*\^/.test(inner);
-        
-        // Exclude things that look like file paths
+        // Exclude things that look like file paths or are too long
         const looksLikePath = /^\/[a-zA-Z]/.test(inner.trim());
+        const isTooLong = inner.length > 500;
         
-        if ((hasLatexCommand || hasMathNotation || hasScientificNotation) && !looksLikePath) {
-            return `$${inner.trim()}$`;
+        if ((hasLatexCommand || hasMathNotation || hasScientificNotation) && !looksLikePath && !isTooLong) {
+            const replacement = `$${inner.trim()}$`;
+            result = result.substring(0, parenIdx) + replacement + result.substring(closeIdx + 1);
+            parenIdx += replacement.length;
+        } else {
+            parenIdx = closeIdx + 1;
         }
-        return match; // Leave as-is if not clearly LaTeX
-    });
+    }
     
     // NEW: Wrap undelimited LaTeX expressions in inline math delimiters
     // This catches cases where LaTeX commands appear in plain text without any delimiters
@@ -917,6 +951,18 @@ const wrapUndelimitedLatex = (content: string): string => {
     // #region agent log
     const startTs = Date.now();
     // #endregion
+    
+    // Early exit: skip if content doesn't have any LaTeX commands
+    if (!content.includes('\\')) {
+        return content;
+    }
+    
+    // Early exit: skip if content looks like JSON/code (prevents backtracking)
+    const looksLikeJson = /^\s*[\[{]/.test(content) && /"[^"]*"\s*:/.test(content);
+    if (looksLikeJson) {
+        return content;
+    }
+    
     // Track positions that are already in math mode or code
     const mathRanges: [number, number][] = [];
     const codeRanges: [number, number][] = [];
