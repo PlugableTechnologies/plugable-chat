@@ -754,15 +754,15 @@ impl McpToolRouterActor {
             }
         }
 
-        // Disconnect servers that are no longer enabled
-        let enabled_ids: Vec<&str> = configs
+        // Disconnect servers that are explicitly provided in the list but disabled
+        let disabled_ids: Vec<&str> = configs
             .iter()
-            .filter(|c| c.enabled)
+            .filter(|c| !c.enabled)
             .map(|c| c.id.as_str())
             .collect();
 
         for connected_id in &connected_ids {
-            if !enabled_ids.contains(&connected_id.as_str()) {
+            if disabled_ids.contains(&connected_id.as_str()) {
                 println!(
                     "McpHostActor: Disconnecting disabled server: {}",
                     connected_id

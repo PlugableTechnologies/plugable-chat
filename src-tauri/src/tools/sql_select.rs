@@ -66,7 +66,16 @@ impl SqlSelectExecutor {
         enabled_sources: &[String],
     ) -> Result<SqlSelectOutput, String> {
         let source_id = match input.source_id {
-            Some(id) if !id.trim().is_empty() => id,
+            Some(id) if !id.trim().is_empty() => {
+                let trimmed_id = id.trim();
+                if !enabled_sources.contains(&trimmed_id.to_string()) {
+                    return Err(format!(
+                        "Database source '{}' is disabled or not found. Enabled sources: {:?}",
+                        trimmed_id, enabled_sources
+                    ));
+                }
+                trimmed_id.to_string()
+            }
             _ => {
                 if enabled_sources.len() == 1 {
                     enabled_sources[0].clone()

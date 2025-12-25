@@ -154,11 +154,23 @@ impl AgenticStateMachine {
         }
 
         // MCP tools (if any servers are enabled)
-        let has_enabled_servers = settings
-            .mcp_servers
+        let mcp_configs = settings.get_all_mcp_configs();
+        let has_enabled_servers = mcp_configs
             .iter()
             .any(|s| s.enabled && filter.server_allowed(&s.id));
-        if has_enabled_servers {
+        
+        // Also check if any built-in tools are enabled that can use the database toolbox
+        let db_usage_enabled = settings.schema_search_enabled 
+            || settings.sql_select_enabled 
+            || settings.schema_search_internal_only
+            || settings.python_execution_enabled;
+        
+        let has_enabled_mcp = has_enabled_servers && (
+            // If it's a database source, we only count it if database tools are on
+            !settings.database_toolbox.enabled || db_usage_enabled || settings.mcp_servers.iter().any(|s| s.enabled)
+        );
+
+        if has_enabled_mcp {
             caps.insert(Capability::McpTools);
         }
 
@@ -621,19 +633,34 @@ impl AgenticStateMachine {
 
             AgenticState::SqlRetrieval { discovered_tables, max_table_relevancy } => {
                 let table_list = self.format_table_list(discovered_tables);
-                Some(format!(
+                let base_sql_instructions = 
+                    "Use the `sql_select` tool to query these tables. Execute queries directly - do NOT show SQL code to the user.\n\n\
+                    **CRITICAL REQUIREMENTS**:\n\
+                    - Execute queries to answer data questions - do NOT return SQL code\n\
+                    - ONLY use columns explicitly listed in the schema above\n\
+                    - Prefer aggregation (SUM, COUNT, etc.) to get final answers directly";
+                
+                let mut section = format!(
                     "## Database Context\n\n\
                     The following database tables are relevant to the user's question (max relevancy: {:.2}):\n\n\
                     {}\n\n\
                     ## SQL Execution\n\n\
-                    Use the `sql_select` tool to query these tables. Execute queries directly - do NOT show SQL code to the user.\n\n\
-                    **CRITICAL REQUIREMENTS**:\n\
-                    - Execute queries to answer data questions - do NOT return SQL code\n\
-                    - ONLY use columns explicitly listed in the schema above\n\
-                    - Prefer aggregation (SUM, COUNT, etc.) to get final answers directly",
+                    {}",
                     max_table_relevancy,
-                    table_list
-                ))
+                    table_list,
+                    base_sql_instructions
+                );
+
+                // Add custom sql_select prompt if available
+                if let Some(custom) = self.custom_tool_prompts.get("builtin::sql_select") {
+                    let trimmed = custom.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str("\n\n**Additional SQL Instructions**:\n");
+                        section.push_str(trimmed);
+                    }
+                }
+
+                Some(section)
             }
 
             AgenticState::ToolOrchestration { materialized_tools } => {
@@ -693,9 +720,17 @@ impl AgenticStateMachine {
             AgenticState::SchemaContextInjected { tables, max_relevancy, sql_enabled } => {
                 let table_list = self.format_table_list(tables);
                 let sql_instructions = if *sql_enabled {
-                    "Use the `sql_select` tool to query these tables. Execute queries directly - do NOT show SQL code to the user."
+                    let mut instr = "Use the `sql_select` tool to query these tables. Execute queries directly - do NOT show SQL code to the user.".to_string();
+                    if let Some(custom) = self.custom_tool_prompts.get("builtin::sql_select") {
+                        let trimmed = custom.trim();
+                        if !trimmed.is_empty() {
+                            instr.push_str("\n\n**Additional SQL Instructions**:\n");
+                            instr.push_str(trimmed);
+                        }
+                    }
+                    instr
                 } else {
-                    "Note: SQL execution is not available for this query (relevancy below threshold)."
+                    "Note: SQL execution is not available for this query (relevancy below threshold).".to_string()
                 };
                 Some(format!(
                     "## Discovered Database Tables\n\n\
@@ -810,6 +845,15 @@ impl AgenticStateMachine {
                         tool_desc.push_str(&format!(": {}", desc));
                     }
                     parts.push(tool_desc);
+
+                    // Add custom tool prompt if available
+                    let prompt_key = format!("{}::{}", server_id, tool.name);
+                    if let Some(custom_prompt) = self.custom_tool_prompts.get(&prompt_key) {
+                        let trimmed = custom_prompt.trim();
+                        if !trimmed.is_empty() {
+                            parts.push(format!("  *Instruction*: {}", trimmed));
+                        }
+                    }
                     
                     // Add parameter info if available
                     if let Some(schema) = &tool.parameters_schema {
@@ -882,6 +926,14 @@ impl AgenticStateMachine {
             );
         }
 
+        // Add custom python_execution prompt if available
+        if let Some(custom) = self.custom_tool_prompts.get("builtin::python_execution") {
+            let trimmed = custom.trim();
+            if !trimmed.is_empty() {
+                parts.push(format!("**Additional Instructions**:\n{}", trimmed));
+            }
+        }
+
         parts.join("\n\n")
     }
 
@@ -903,7 +955,7 @@ impl AgenticStateMachine {
             format!("Available tools: {}", available_tools.join(", "))
         };
 
-        format!(
+        let mut prompt = format!(
             "## Python Execution\n\n\
             You must return exactly one runnable Python program. Do not return explanations or multiple blocks.\n\n\
             Output format: a single ```python ... ``` block. We will execute it and surface any print output directly to the user.\n\n\
@@ -916,7 +968,18 @@ impl AgenticStateMachine {
             {}\n\n\
             Keep code concise and runnable; include prints for results the user should see.",
             tools_section
-        )
+        );
+
+        // Add custom python_execution prompt if available
+        if let Some(custom) = self.custom_tool_prompts.get("builtin::python_execution") {
+            let trimmed = custom.trim();
+            if !trimmed.is_empty() {
+                prompt.push_str("\n\n**Additional Python Instructions**:\n");
+                prompt.push_str(trimmed);
+            }
+        }
+
+        prompt
     }
 
     /// Format a list of tables for the prompt.

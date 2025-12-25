@@ -551,6 +551,16 @@ impl ToolRegistry {
         }
     }
 
+    /// Clear all domain tools (for a fresh start or when servers change)
+    pub fn clear_domain_tools(&mut self) {
+        self.domain_tools.clear();
+        self.tool_embeddings.clear();
+        self.materialized_tools.clear();
+        self.server_python_names.clear();
+        self.python_name_to_server.clear();
+        println!("[ToolRegistry] Cleared all domain tools");
+    }
+
     /// Clear all materialized tools (for a new conversation)
     pub fn clear_materialized(&mut self) {
         self.materialized_tools.clear();

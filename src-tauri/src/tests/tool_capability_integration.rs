@@ -7,27 +7,15 @@
 //! - Foundry Local must be running
 //! - A model must be loaded (e.g., Phi-4)
 
-use crate::protocol::{ChatMessage, ModelInfo, ToolFormat};
-use crate::settings::{AppSettings, ToolCallFormatConfig, ToolCallFormatName};
+use crate::protocol::{ModelInfo, ToolFormat};
+use crate::settings::{AppSettings, ToolCallFormatName};
 use crate::tool_capability::{ToolCapabilityResolver, ToolLaunchFilter};
 use crate::tool_registry::ToolRegistry;
-use std::collections::HashSet;
-use std::time::Duration;
 
 /// Test harness for tool capability integration tests
-struct ToolCapabilityTestHarness {
-    /// Timeout for test operations
-    #[allow(dead_code)]
-    test_timeout: Duration,
-}
+struct ToolCapabilityTestHarness;
 
 impl ToolCapabilityTestHarness {
-    fn new() -> Self {
-        Self {
-            test_timeout: Duration::from_secs(30),
-        }
-    }
-
     /// Create a minimal model info for testing
     fn create_test_model_info(supports_native: bool, tool_format: ToolFormat) -> ModelInfo {
         ModelInfo {

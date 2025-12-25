@@ -252,58 +252,58 @@ impl ToolCapabilityResolver {
     /// Categorize MCP tools into active (materialized) and deferred
     /// All MCP tools are deferred by default - only materialized ones are active
     fn categorize_mcp_tools(
-        visible_tools: &[(String, ToolSchema)],
+        _visible_tools: &[(String, ToolSchema)],
         tool_registry: &ToolRegistry,
         server_configs: &[McpServerConfig],
         filter: &ToolLaunchFilter,
     ) -> (Vec<(String, ToolSchema)>, Vec<(String, ToolSchema)>) {
         let mut active = Vec::new();
         let mut deferred = Vec::new();
-        
+
         // Build server config lookup
         let server_map: HashMap<String, &McpServerConfig> = server_configs
             .iter()
             .map(|c| (c.id.clone(), c))
             .collect();
-        
-        // Get all deferred tools from registry
+
+        // Get all deferred tool keys from registry (for checking materialization)
         let deferred_tool_keys: HashSet<String> = tool_registry
             .get_deferred_tools()
             .iter()
             .map(|(key, _)| (*key).clone())
             .collect();
-        
-        for (server_id, schema) in visible_tools {
-            // Skip built-in tools
-            if server_id == "builtin" {
-                continue;
-            }
-            
+
+        // Iterate over ALL domain tools in the registry, not just visible ones
+        for (key, schema) in tool_registry.get_all_domain_tools() {
+            // key format: server_id___tool_name
+            let server_id = key.splitn(2, "___").next().unwrap_or("unknown");
+
             // Check server is enabled and allowed
-            let _server_config = match server_map.get(server_id) {
+            let server_config = match server_map.get(server_id) {
                 Some(c) if c.enabled && filter.server_allowed(server_id) => c,
                 _ => continue,
             };
-            
+
             // Check tool is allowed
             if !filter.tool_allowed(server_id, &schema.name) {
                 continue;
             }
-            
+
             // Check if tool is materialized (visible but was originally deferred)
-            let tool_key = format!("{}___{}", server_id, schema.name);
-            if deferred_tool_keys.contains(&tool_key) {
+            let is_materialized = tool_registry.is_tool_visible(server_id, &schema.name) && deferred_tool_keys.contains(key);
+
+            if is_materialized {
                 // This tool was deferred but is now visible (materialized)
-                active.push((server_id.clone(), schema.clone()));
-            } else if schema.defer_loading {
+                active.push((server_id.to_string(), schema.clone()));
+            } else if schema.defer_loading && server_config.defer_tools {
                 // Still deferred
-                deferred.push((server_id.clone(), schema.clone()));
+                deferred.push((server_id.to_string(), schema.clone()));
             } else {
-                // Non-deferred tool (shouldn't happen with new architecture, but handle gracefully)
-                active.push((server_id.clone(), schema.clone()));
+                // Active tool (non-deferred or forced active by server config)
+                active.push((server_id.to_string(), schema.clone()));
             }
         }
-        
+
         (active, deferred)
     }
     

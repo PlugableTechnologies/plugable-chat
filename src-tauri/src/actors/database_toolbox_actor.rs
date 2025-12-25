@@ -207,13 +207,29 @@ impl DatabaseToolboxActor {
             .map(|src| (src.id.clone(), src.name.clone()))
             .collect();
 
-        // Sync enabled servers via the MCP host actor
-        let mcp_configs: Vec<McpServerConfig> = config
+        // Build the list of sources to sync
+        let mut mcp_configs: Vec<McpServerConfig> = config
             .sources
             .iter()
             .cloned()
             .map(|src| self.source_to_mcp_config(&src))
             .collect();
+
+        // Also include any sources that were in the OLD config but are NOT in the NEW config,
+        // marking them as disabled so they are correctly disconnected.
+        {
+            let state = self.state.read().await;
+            if let Some(old_config) = &state.config {
+                for old_source in &old_config.sources {
+                    if !config.sources.iter().any(|s| s.id == old_source.id) {
+                        println!("[DatabaseToolboxActor] Source {} removed, marking for disconnection", old_source.id);
+                        let mut mcp_config = self.source_to_mcp_config(old_source);
+                        mcp_config.enabled = false;
+                        mcp_configs.push(mcp_config);
+                    }
+                }
+            }
+        }
 
         let (tx, rx) = oneshot::channel();
         self.mcp_host_tx
@@ -465,17 +481,33 @@ impl DatabaseToolboxActor {
 
     /// Stop all database MCP servers (disconnect)
     async fn stop_toolbox(&mut self) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        self.mcp_host_tx
-            .send(McpHostMsg::SyncEnabledServers {
-                configs: vec![],
-                respond_to: tx,
-            })
-            .await
-            .map_err(|e| format!("Failed to send stop message: {}", e))?;
-        let _ = rx
-            .await
-            .map_err(|_| "MCP host unavailable while stopping database servers".to_string())?;
+        let mut configs = Vec::new();
+        
+        // Get known sources from state and mark them as disabled for sync
+        {
+            let state = self.state.read().await;
+            if let Some(config) = &state.config {
+                for source in &config.sources {
+                    let mut mcp_config = self.source_to_mcp_config(source);
+                    mcp_config.enabled = false;
+                    configs.push(mcp_config);
+                }
+            }
+        }
+
+        if !configs.is_empty() {
+            let (tx, rx) = oneshot::channel();
+            self.mcp_host_tx
+                .send(McpHostMsg::SyncEnabledServers {
+                    configs,
+                    respond_to: tx,
+                })
+                .await
+                .map_err(|e| format!("Failed to send stop message: {}", e))?;
+            let _ = rx
+                .await
+                .map_err(|_| "MCP host unavailable while stopping database servers".to_string())?;
+        }
 
         {
             let mut state = self.state.write().await;

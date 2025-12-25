@@ -2059,10 +2059,13 @@ async fn run_agentic_loop(
                         );
 
                         match executor.execute(input).await {
-                            Ok(output) => {
+                            Ok(mut output) => {
+                                // Filter tables by enabled database sources
+                                output.tables.retain(|t| enabled_db_sources.contains(&t.source_id));
+
                                 let elapsed = exec_start.elapsed();
                                 println!(
-                                    "[AgenticLoop] ✅ schema_search completed in {:.2}s: {} tables found",
+                                    "[AgenticLoop] ✅ schema_search completed in {:.2}s: {} tables found (after filtering)",
                                     elapsed.as_secs_f64(),
                                     output.tables.len()
                                 );
@@ -3890,9 +3893,19 @@ async fn auto_schema_search_for_prompt(
     }
 
     match search_result {
-        Ok(output) => {
+        Ok(mut output) => {
+            // Filter tables by enabled database sources
+            let enabled_sources: std::collections::HashSet<String> = toolbox_config
+                .sources
+                .iter()
+                .filter(|s| s.enabled)
+                .map(|s| s.id.clone())
+                .collect();
+
+            output.tables.retain(|t| enabled_sources.contains(&t.source_id));
+
             println!(
-                "[Chat] Auto schema_search found {} table(s) matching prompt",
+                "[Chat] Auto schema_search found {} table(s) matching prompt (after filtering)",
                 output.tables.len()
             );
             if output.tables.is_empty() {
@@ -4022,12 +4035,32 @@ async fn chat(
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
     let database_toolbox_config = settings.database_toolbox.clone();
-    let enabled_db_sources: Vec<String> = database_toolbox_config
-        .sources
-        .iter()
-        .filter(|s| s.enabled)
-        .map(|s| s.id.clone())
-        .collect();
+
+    println!(
+        "[Chat] Settings: python_execution={}, tool_search={}, schema_search={}, sql_select={}",
+        python_execution_enabled,
+        tool_search_enabled,
+        schema_search_enabled,
+        sql_select_enabled
+    );
+
+    let mut enabled_db_sources = Vec::new();
+    let db_tools_available = schema_search_enabled || sql_select_enabled || schema_search_internal_only || python_execution_enabled;
+    
+    if settings.database_toolbox.enabled && db_tools_available {
+        enabled_db_sources = settings
+            .database_toolbox
+            .sources
+            .iter()
+            .filter(|s| s.enabled)
+            .map(|s| s.id.clone())
+            .collect();
+        if !enabled_db_sources.is_empty() {
+            println!("[Chat] Enabled database sources: {:?}", enabled_db_sources);
+        }
+    } else if settings.database_toolbox.enabled && !db_tools_available {
+        println!("[Chat] Database toolbox is ON but no database tools are enabled; sources will be treated as disabled.");
+    }
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
     let tool_system_prompts = settings.tool_system_prompts.clone();
@@ -4152,10 +4185,19 @@ async fn chat(
         .await
         .map_err(|_| "MCP Host actor died".to_string())?;
 
-    // Apply launch-time filters
+    // Apply launch-time filters and check enabled status
     let filtered_tool_descriptions: Vec<(String, Vec<McpTool>)> = tool_descriptions
         .into_iter()
         .filter_map(|(server_id, tools)| {
+            // Check if server is enabled in settings
+            let is_enabled = server_configs
+                .iter()
+                .any(|c| c.id == server_id && c.enabled);
+
+            if !is_enabled {
+                return None;
+            }
+
             if !tool_filter.server_allowed(&server_id) {
                 return None;
             }
@@ -4243,8 +4285,8 @@ async fn chat(
     {
         let mut registry = tool_registry_state.registry.write().await;
 
-        // Clear any previously materialized tools (fresh start for this chat)
-        registry.clear_materialized();
+        // Clear any previously registered tools (fresh start for this chat)
+        registry.clear_domain_tools();
 
         for (server_id, tools) in &filtered_tool_descriptions {
             // Get the server config to extract defer_tools and python_name
@@ -4965,6 +5007,7 @@ async fn update_mcp_server(
 async fn remove_mcp_server(
     server_id: String,
     settings_state: State<'_, SettingsState>,
+    handles: State<'_, ActorHandles>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
 
@@ -4977,6 +5020,18 @@ async fn remove_mcp_server(
 
     if guard.mcp_servers.len() < initial_len {
         settings::save_settings(&guard).await?;
+
+        // Explicitly disconnect the removed server
+        let (tx, rx) = oneshot::channel();
+        let _ = handles
+            .mcp_host_tx
+            .send(McpHostMsg::DisconnectServer {
+                server_id: server_id.clone(),
+                respond_to: tx,
+            })
+            .await;
+        let _ = rx.await;
+
         Ok(())
     } else {
         Err(format!("Server with ID '{}' not found", server_id))
@@ -5252,6 +5307,15 @@ async fn update_database_toolbox_config(
     settings::save_settings(&guard).await?;
     println!("[Settings] database_toolbox config updated");
     drop(guard);
+
+    // If toolbox is disabled or has no enabled sources, ensure it's stopped
+    if !config.enabled || config.sources.iter().all(|s| !s.enabled) {
+        let (tx, rx) = oneshot::channel();
+        let _ = handles.database_toolbox_tx.send(DatabaseToolboxMsg::Stop { reply_to: tx }).await;
+        let _ = rx.await;
+        println!("[Settings] database_toolbox stopped because it is disabled");
+        return Ok(());
+    }
 
     let refresh_summary =
         refresh_database_schemas_for_config(&handles, &embedding_state, &config).await?;
@@ -6055,6 +6119,15 @@ async fn sync_mcp_servers(
         deferred_count
     );
 
+    if enabled_count > 0 {
+        let enabled_names: Vec<String> = configs
+            .iter()
+            .filter(|c| c.enabled)
+            .map(|c| format!("{} ({})", c.name, c.id))
+            .collect();
+        println!("[MCP] Enabled servers: {}", enabled_names.join(", "));
+    }
+
     let (tx, rx) = oneshot::channel();
     handles
         .mcp_host_tx
@@ -6291,6 +6364,15 @@ async fn get_system_prompt_preview(
     let filtered_tool_descriptions: Vec<(String, Vec<McpTool>)> = tool_descriptions
         .into_iter()
         .filter_map(|(server_id, tools)| {
+            // Check if server is enabled in settings
+            let is_enabled = server_configs
+                .iter()
+                .any(|c| c.id == server_id && c.enabled);
+
+            if !is_enabled {
+                return None;
+            }
+
             if !tool_filter.server_allowed(&server_id) {
                 return None;
             }
@@ -6502,6 +6584,15 @@ async fn get_system_prompt_layers(
     let filtered_tool_descriptions: Vec<(String, Vec<McpTool>)> = tool_descriptions
         .into_iter()
         .filter_map(|(server_id, tools)| {
+            // Check if server is enabled in settings
+            let is_enabled = server_configs
+                .iter()
+                .any(|c| c.id == server_id && c.enabled);
+
+            if !is_enabled {
+                return None;
+            }
+
             if !tool_filter.server_allowed(&server_id) {
                 return None;
             }
@@ -7137,10 +7228,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod inline_tests {
-    use super::tool_capability::{ResolvedToolCapabilities};
+    use super::tool_capability::ResolvedToolCapabilities;
     use crate::settings::ToolCallFormatName;
     use crate::protocol::ToolFormat;
-    use std::collections::HashSet;
 
     // Helper to create test ResolvedToolCapabilities
     fn create_test_capabilities(
