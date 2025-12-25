@@ -308,6 +308,7 @@ impl DatabaseToolboxActor {
             auto_approve_tools: source.auto_approve_tools,
             defer_tools: source.defer_tools,
             python_name: None,
+            is_database_source: true,
         }
     }
 

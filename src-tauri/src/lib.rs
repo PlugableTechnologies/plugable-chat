@@ -4235,10 +4235,11 @@ async fn chat(
     let filtered_tool_descriptions: Vec<(String, Vec<McpTool>)> = tool_descriptions
         .into_iter()
         .filter_map(|(server_id, tools)| {
-            // Check if server is enabled in settings
+            // Check if server is enabled in settings and NOT a database source
+            // (Database tools are handled separately via sql_select/schema_search)
             let is_enabled = server_configs
                 .iter()
-                .any(|c| c.id == server_id && c.enabled);
+                .any(|c| c.id == server_id && c.enabled && !c.is_database_source);
 
             if !is_enabled {
                 return None;
@@ -4556,15 +4557,6 @@ async fn chat(
         );
     }
 
-    let base_system_prompt = if auto_context_sections.is_empty() {
-        configured_system_prompt.clone()
-    } else {
-        let mut composed = configured_system_prompt.clone();
-        composed.push_str("\n\n## Auto-discovered context\n");
-        composed.push_str(&auto_context_sections.join("\n\n"));
-        composed
-    };
-
     let prompt_tuning = PromptTuningOptions {
         include_examples: tool_use_examples_enabled,
         examples_max_per_tool: tool_use_examples_max.max(1),
@@ -4607,9 +4599,9 @@ async fn chat(
         &server_configs,
     );
     
-    // Build prompt context
+    // Build prompt context - use the raw system prompt, let state machine add context
     let prompt_context = agentic_state::PromptContext {
-        base_prompt: base_system_prompt.clone(),
+        base_prompt: configured_system_prompt.clone(),
         has_attachments,
         mcp_context,
         tool_call_format: primary_format_for_prompt,
@@ -4620,16 +4612,57 @@ async fn chat(
     // Create state machine using three-tier hierarchy:
     // Tier 1 (SettingsStateMachine) provides capabilities and thresholds
     // Tier 2 (AgenticStateMachine) manages turn-level state
-    let initial_state_machine = {
+    let mut initial_state_machine = {
         let settings_sm_guard = settings_sm_state.machine.read().await;
         state_machine::AgenticStateMachine::new_from_settings_sm(
             &settings_sm_guard,
             prompt_context,
         )
     };
+
+    // Update state machine with auto-discovery results
+    let schema_relevancy = auto_discovery.schema_search_output.as_ref()
+        .map(|o| o.tables.iter().map(|t| t.relevance).fold(0.0f32, f32::max))
+        .unwrap_or(0.0);
+    
+    let discovered_tables = auto_discovery.schema_search_output.as_ref()
+        .map(|o| o.tables.iter().map(|t| agentic_state::TableInfo {
+            fully_qualified_name: t.table_name.clone(),
+            source_id: t.source_id.clone(),
+            sql_dialect: t.sql_dialect.clone(),
+            relevancy: t.relevance,
+            description: t.description.clone(),
+            columns: t.relevant_columns.iter().map(|c| agentic_state::ColumnInfo {
+                name: c.name.clone(),
+                data_type: c.data_type.clone(),
+                nullable: true, // Default to true if not known
+                description: None,
+            }).collect(),
+        }).collect())
+        .unwrap_or_default();
+
+    // Initialize state based on discovery results
+    initial_state_machine.compute_initial_state(
+        0.0, // RAG relevancy (not yet searched at turn start)
+        schema_relevancy,
+        discovered_tables,
+        Vec::new(), // RAG chunks
+    );
     
     // Build system prompt from state machine (single source of truth)
-    let system_prompt = initial_state_machine.build_system_prompt();
+    let mut system_prompt = initial_state_machine.build_system_prompt();
+
+    // If auto-discovery had results, we still want to include the strong "ACTION REQUIRED" 
+    // guidance from rendered sections if they were present, as they help smaller models.
+    // However, we avoid the redundancy of the table list if the state machine already added it.
+    if !auto_context_sections.is_empty() {
+        let mut extra_guidance = String::new();
+        extra_guidance.push_str("\n\n## Auto-discovered context\n");
+        extra_guidance.push_str(&auto_context_sections.join("\n\n"));
+        
+        // Append after state machine's prompt
+        system_prompt.push_str(&extra_guidance);
+    }
     
     // Log operational mode from Tier 1
     let operational_mode_name = {
@@ -6431,10 +6464,11 @@ async fn get_system_prompt_preview(
     let filtered_tool_descriptions: Vec<(String, Vec<McpTool>)> = tool_descriptions
         .into_iter()
         .filter_map(|(server_id, tools)| {
-            // Check if server is enabled in settings
+            // Check if server is enabled in settings and NOT a database source
+            // (Database tools are handled separately via sql_select/schema_search)
             let is_enabled = server_configs
                 .iter()
-                .any(|c| c.id == server_id && c.enabled);
+                .any(|c| c.id == server_id && c.enabled && !c.is_database_source);
 
             if !is_enabled {
                 return None;
@@ -6651,10 +6685,11 @@ async fn get_system_prompt_layers(
     let filtered_tool_descriptions: Vec<(String, Vec<McpTool>)> = tool_descriptions
         .into_iter()
         .filter_map(|(server_id, tools)| {
-            // Check if server is enabled in settings
+            // Check if server is enabled in settings and NOT a database source
+            // (Database tools are handled separately via sql_select/schema_search)
             let is_enabled = server_configs
                 .iter()
-                .any(|c| c.id == server_id && c.enabled);
+                .any(|c| c.id == server_id && c.enabled && !c.is_database_source);
 
             if !is_enabled {
                 return None;

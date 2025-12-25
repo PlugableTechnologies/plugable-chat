@@ -547,6 +547,7 @@ impl McpServerConfig {
             auto_approve_tools: false,
             defer_tools: true,
             python_name: None,
+            is_database_source: false,
         }
     }
 
@@ -819,6 +820,7 @@ pub fn default_mcp_test_server() -> McpServerConfig {
             auto_approve_tools: true, // Auto-approve for dev testing
             defer_tools: false,       // Expose tools immediately for quick testing
             python_name: None,
+            is_database_source: false,
         }
     } else {
         // Fall back to cargo run if binary not found
@@ -841,6 +843,7 @@ pub fn default_mcp_test_server() -> McpServerConfig {
             auto_approve_tools: true, // Auto-approve for dev testing
             defer_tools: false,       // Expose tools immediately for quick testing
             python_name: None,
+            is_database_source: false,
         }
     };
     enforce_python_name(&mut base);
@@ -1011,6 +1014,7 @@ mod tests {
             auto_approve_tools: false,
             defer_tools: true,
             python_name: Some("test_server".to_string()),
+            is_database_source: false,
         });
 
         let json = serde_json::to_string(&settings).unwrap();
