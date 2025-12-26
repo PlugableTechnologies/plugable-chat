@@ -102,8 +102,7 @@ impl AgenticStateMachine {
         let enabled_capabilities = settings_sm.enabled_capabilities().clone();
         let thresholds = RelevancyThresholds {
             rag_chunk_min: settings_sm.relevancy_thresholds().rag_chunk_min,
-            schema_table_min: settings_sm.relevancy_thresholds().schema_table_min,
-            sql_enable_min: settings_sm.relevancy_thresholds().sql_enable_min,
+            schema_relevancy: settings_sm.relevancy_thresholds().schema_relevancy,
             rag_dominant_threshold: settings_sm.relevancy_thresholds().rag_dominant_threshold,
         };
         
@@ -219,9 +218,9 @@ impl AgenticStateMachine {
     ) {
         let rag_passes = rag_relevancy >= self.thresholds.rag_chunk_min
             && self.enabled_capabilities.contains(&Capability::Rag);
-        let schema_passes = schema_relevancy >= self.thresholds.schema_table_min
+        let schema_passes = schema_relevancy >= self.thresholds.schema_relevancy
             && self.enabled_capabilities.contains(&Capability::SchemaSearch);
-        let sql_enabled = schema_relevancy >= self.thresholds.sql_enable_min
+        let sql_enabled = schema_relevancy >= self.thresholds.schema_relevancy
             && self.enabled_capabilities.contains(&Capability::SqlQuery);
         let rag_dominant = rag_relevancy >= self.thresholds.rag_dominant_threshold;
 
@@ -322,7 +321,7 @@ impl AgenticStateMachine {
                 tables,
                 max_relevancy,
             } => {
-                let sql_enabled = max_relevancy >= self.thresholds.sql_enable_min
+                let sql_enabled = max_relevancy >= self.thresholds.schema_relevancy
                     && self.enabled_capabilities.contains(&Capability::SqlQuery);
                 AgenticState::SchemaContextInjected {
                     tables,
@@ -537,14 +536,15 @@ impl AgenticStateMachine {
     /// Build the system prompt as a list of sections.
     pub fn build_system_prompt_sections(&self) -> Vec<String> {
         let mut sections: Vec<String> = vec![self.base_prompt.clone()];
+        let active_capabilities = self.current_state.active_capabilities();
 
-        // 1. Capabilities section (based on enabled_capabilities)
-        if let Some(caps) = self.build_capabilities_section() {
+        // 1. Capabilities section (based on active capabilities)
+        if let Some(caps) = self.build_capabilities_section(&active_capabilities) {
             sections.push(caps);
         }
 
-        // 2. Factual grounding (only if we have data retrieval tools)
-        if self.has_data_retrieval_tools() {
+        // 2. Factual grounding (only if we have active data retrieval tools)
+        if self.has_active_data_retrieval_tools() {
             sections.push(self.build_factual_grounding_section());
         }
 
@@ -571,7 +571,7 @@ impl AgenticStateMachine {
         }
 
         // 7. Python execution section (if enabled and in code mode)
-        if self.python_primary && self.enabled_capabilities.contains(&Capability::PythonExecution) {
+        if self.python_primary && active_capabilities.contains(&Capability::PythonExecution) {
             sections.push(self.build_python_section());
         }
 
@@ -580,22 +580,24 @@ impl AgenticStateMachine {
 
     // ============ Prompt Section Builders ============
 
-    /// Build the Capabilities section based on enabled_capabilities.
-    fn build_capabilities_section(&self) -> Option<String> {
-        system_prompt::build_capabilities_section(&self.enabled_capabilities, self.has_attachments)
+    /// Build the Capabilities section based on active capabilities.
+    fn build_capabilities_section(&self, active_capabilities: &HashSet<Capability>) -> Option<String> {
+        system_prompt::build_capabilities_section(active_capabilities, self.has_attachments)
     }
 
-    /// Check if we have data retrieval tools enabled.
-    fn has_data_retrieval_tools(&self) -> bool {
-        self.enabled_capabilities.contains(&Capability::SqlQuery)
-            || self.enabled_capabilities.contains(&Capability::McpTools)
-            || self.enabled_capabilities.contains(&Capability::ToolSearch)
+    /// Check if we have active data retrieval tools.
+    fn has_active_data_retrieval_tools(&self) -> bool {
+        let active = self.current_state.active_capabilities();
+        active.contains(&Capability::SqlQuery)
+            || active.contains(&Capability::McpTools)
+            || active.contains(&Capability::ToolSearch)
             || self.has_attachments
     }
 
     /// Build the Factual Grounding section based on enabled tools.
     fn build_factual_grounding_section(&self) -> String {
-        system_prompt::build_factual_grounding(&self.enabled_capabilities, self.has_attachments)
+        let active = self.current_state.active_capabilities();
+        system_prompt::build_factual_grounding(&active, self.has_attachments)
     }
 
     /// Build the state-specific context section.
@@ -725,7 +727,16 @@ impl AgenticStateMachine {
         // Auto schema search results (only if state doesn't already have schema context)
         if !self.current_state.has_schema_context() {
             if let Some(ref output) = self.auto_schema_search {
-                if let Some(section) = system_prompt::build_auto_schema_search_section(&output.tables, &output.summary, self.has_attachments) {
+                let sql_enabled = self.enabled_capabilities.contains(&Capability::SqlQuery) 
+                    && output.tables.iter().map(|t| t.relevance).fold(0.0f32, f32::max) >= self.thresholds.schema_relevancy;
+                
+                if let Some(section) = system_prompt::build_auto_schema_search_section(
+                    &output.tables, 
+                    &output.summary, 
+                    self.has_attachments,
+                    sql_enabled,
+                    self.tool_call_format
+                ) {
                     sections.push(section);
                 }
             }

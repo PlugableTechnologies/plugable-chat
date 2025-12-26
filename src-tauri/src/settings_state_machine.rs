@@ -192,8 +192,7 @@ pub struct SettingsStateMachine {
 #[derive(Debug, Clone, Default)]
 pub struct RelevancyThresholds {
     pub rag_chunk_min: f32,
-    pub schema_table_min: f32,
-    pub sql_enable_min: f32,
+    pub schema_relevancy: f32,
     pub rag_dominant_threshold: f32,
 }
 
@@ -201,8 +200,7 @@ impl From<&AppSettings> for RelevancyThresholds {
     fn from(settings: &AppSettings) -> Self {
         Self {
             rag_chunk_min: settings.rag_chunk_min_relevancy,
-            schema_table_min: settings.schema_table_min_relevancy,
-            sql_enable_min: settings.sql_enable_min_relevancy,
+            schema_relevancy: settings.schema_relevancy_threshold,
             rag_dominant_threshold: settings.rag_dominant_threshold,
         }
     }

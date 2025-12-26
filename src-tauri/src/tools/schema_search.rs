@@ -37,7 +37,7 @@ fn default_max_columns() -> usize {
 }
 
 fn default_min_score() -> f32 {
-    0.3
+    0.4
 }
 
 /// A table match result for output
@@ -114,8 +114,8 @@ impl SchemaSearchExecutor {
 
     /// Execute a schema search
     pub async fn execute(&self, input: SchemaSearchInput) -> Result<SchemaSearchOutput, String> {
-        // Ensure min_relevance is at least 0.3
-        let min_relevance = input.min_relevance.max(0.3);
+        // Use the input min_relevance directly
+        let min_relevance = input.min_relevance;
 
         println!(
             "[SchemaSearch] Executing search: '{}' (max_tables={}, min_relevance={})",

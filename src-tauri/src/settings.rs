@@ -648,12 +648,9 @@ pub struct AppSettings {
     /// Minimum RAG chunk relevancy to inject into context (default: 0.3)
     #[serde(default = "default_rag_chunk_min_relevancy")]
     pub rag_chunk_min_relevancy: f32,
-    /// Minimum schema table relevancy to inject into context (default: 0.2)
-    #[serde(default = "default_schema_table_min_relevancy")]
-    pub schema_table_min_relevancy: f32,
-    /// Minimum schema relevancy to enable sql_select (default: 0.4)
-    #[serde(default = "default_sql_enable_min_relevancy")]
-    pub sql_enable_min_relevancy: f32,
+    /// Minimum schema relevancy to enable sql_select and inject into context (default: 0.4)
+    #[serde(default = "default_schema_relevancy_threshold", alias = "sql_enable_min_relevancy")]
+    pub schema_relevancy_threshold: f32,
     /// RAG relevancy above which SQL context is suppressed (default: 0.6)
     #[serde(default = "default_rag_dominant_threshold")]
     pub rag_dominant_threshold: f32,
@@ -683,11 +680,7 @@ fn default_rag_chunk_min_relevancy() -> f32 {
     0.3
 }
 
-fn default_schema_table_min_relevancy() -> f32 {
-    0.2
-}
-
-fn default_sql_enable_min_relevancy() -> f32 {
+fn default_schema_relevancy_threshold() -> f32 {
     0.4
 }
 
@@ -765,8 +758,7 @@ impl AppSettings {
     pub fn get_relevancy_thresholds(&self) -> RelevancyThresholds {
         RelevancyThresholds {
             rag_chunk_min: self.rag_chunk_min_relevancy,
-            schema_table_min: self.schema_table_min_relevancy,
-            sql_enable_min: self.sql_enable_min_relevancy,
+            schema_relevancy: self.schema_relevancy_threshold,
             rag_dominant_threshold: self.rag_dominant_threshold,
         }
     }
@@ -873,8 +865,7 @@ impl Default for AppSettings {
             // from sql_select_enabled && !schema_search_enabled
             // Relevancy thresholds
             rag_chunk_min_relevancy: default_rag_chunk_min_relevancy(),
-            schema_table_min_relevancy: default_schema_table_min_relevancy(),
-            sql_enable_min_relevancy: default_sql_enable_min_relevancy(),
+            schema_relevancy_threshold: default_schema_relevancy_threshold(),
             rag_dominant_threshold: default_rag_dominant_threshold(),
         }
     }

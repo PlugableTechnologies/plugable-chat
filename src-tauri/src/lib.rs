@@ -401,6 +401,8 @@ async fn sync_registry_database_tools(
 async fn auto_enable_sql_select(
     registry: &SharedToolRegistry,
     settings_state: &State<'_, SettingsState>,
+    settings_sm_state: &State<'_, SettingsStateMachineState>,
+    launch_config: &State<'_, LaunchConfigState>,
     reason: &str,
 ) {
     {
@@ -411,6 +413,11 @@ async fn auto_enable_sql_select(
     let mut settings_guard = settings_state.settings.write().await;
     if !settings_guard.sql_select_enabled {
         settings_guard.sql_select_enabled = true;
+        
+        // Refresh the SettingsStateMachine (Tier 1)
+        let mut sm_guard = settings_sm_state.machine.write().await;
+        sm_guard.refresh(&settings_guard, &launch_config.tool_filter);
+
         if let Err(e) = settings::save_settings(&settings_guard).await {
             println!(
                 "[Chat] Failed to persist sql_select_enabled ({}): {}",
@@ -3222,6 +3229,7 @@ async fn auto_tool_search_for_prompt(
 async fn auto_schema_search_for_prompt(
     prompt: &str,
     schema_search_enabled: bool,
+    min_relevance: f32,
     toolbox_config: &DatabaseToolboxConfig,
     schema_tx: mpsc::Sender<SchemaVectorMsg>,
     embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
@@ -3266,7 +3274,7 @@ async fn auto_schema_search_for_prompt(
         query: prompt.to_string(),
         max_tables: AUTO_SCHEMA_SEARCH_MAX_TABLES,
         max_columns_per_table: 25,
-        min_relevance: 0.2, // Lower threshold for auto-discovery to be more helpful
+        min_relevance, 
     };
 
     let mut search_result = executor.execute(input.clone()).await;
@@ -3326,6 +3334,7 @@ async fn perform_auto_discovery_for_prompt(
     tool_search_max_results: usize,
     has_mcp_tools: bool,
     schema_search_enabled: bool,
+    schema_relevancy_threshold: f32,
     toolbox_config: &DatabaseToolboxConfig,
     filtered_tool_descriptions: &[(String, Vec<McpTool>)],
     registry: SharedToolRegistry,
@@ -3348,6 +3357,7 @@ async fn perform_auto_discovery_for_prompt(
     let schema_search_output = auto_schema_search_for_prompt(
         prompt,
         schema_search_enabled,
+        schema_relevancy_threshold,
         toolbox_config,
         schema_tx,
         embedding_model,
@@ -3754,6 +3764,7 @@ async fn chat(
         tool_search_max_results,
         has_mcp_tools,
         schema_search_enabled || internal_schema_search || sql_select_enabled,
+        settings_state.settings.read().await.schema_relevancy_threshold,
         &database_toolbox_config,
         &filtered_tool_descriptions,
         tool_registry_state.registry.clone(),
@@ -3778,14 +3789,18 @@ async fn chat(
         }
     };
 
-    // If we already performed schema search for this prompt, surface sql_select immediately
-    if auto_discovery.schema_search_output.is_some() {
-        auto_enable_sql_select(
-            &tool_registry_state.registry,
-            &settings_state,
-            "auto schema_search",
-        )
-        .await;
+    // If we already performed schema search for this prompt and found tables, surface sql_select immediately
+    if let Some(ref output) = auto_discovery.schema_search_output {
+        if !output.tables.is_empty() {
+            auto_enable_sql_select(
+                &tool_registry_state.registry,
+                &settings_state,
+                &settings_sm_state,
+                &launch_config,
+                "auto schema_search",
+            )
+            .await;
+        }
     }
 
     // Resolve tool capabilities using centralized resolver
@@ -4391,6 +4406,8 @@ async fn save_app_settings(
 async fn add_mcp_server(
     mut config: McpServerConfig,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     enforce_python_name(&mut config);
 
@@ -4404,6 +4421,10 @@ async fn add_mcp_server(
     guard.mcp_servers.push(config);
     settings::save_settings(&guard).await?;
 
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     Ok(())
 }
 
@@ -4411,6 +4432,8 @@ async fn add_mcp_server(
 async fn update_mcp_server(
     mut config: McpServerConfig,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
     handles: State<'_, ActorHandles>,
 ) -> Result<(), String> {
     enforce_python_name(&mut config);
@@ -4423,6 +4446,10 @@ async fn update_mcp_server(
             *server = config;
             settings::save_settings(&guard).await?;
             all_configs_for_sync = guard.get_all_mcp_configs();
+
+            // Refresh the SettingsStateMachine (Tier 1)
+            let mut sm_guard = settings_sm_state.machine.write().await;
+            sm_guard.refresh(&guard, &launch_config.tool_filter);
         } else {
             return Err(format!("Server with ID '{}' not found", config.id));
         }
@@ -4454,6 +4481,8 @@ async fn update_mcp_server(
 async fn remove_mcp_server(
     server_id: String,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
     handles: State<'_, ActorHandles>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
@@ -4467,6 +4496,10 @@ async fn remove_mcp_server(
 
     if guard.mcp_servers.len() < initial_len {
         settings::save_settings(&guard).await?;
+
+        // Refresh the SettingsStateMachine (Tier 1)
+        let mut sm_guard = settings_sm_state.machine.write().await;
+        sm_guard.refresh(&guard, &launch_config.tool_filter);
 
         // Explicitly disconnect the removed server
         let (tx, rx) = oneshot::channel();
@@ -4489,10 +4522,17 @@ async fn remove_mcp_server(
 async fn update_system_prompt(
     prompt: String,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
     guard.system_prompt = prompt;
     settings::save_settings(&guard).await?;
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     Ok(())
 }
 
@@ -4502,6 +4542,8 @@ async fn update_tool_system_prompt(
     tool_name: String,
     prompt: String,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
     let key = tool_prompt_key(&server_id, &tool_name);
@@ -4513,6 +4555,11 @@ async fn update_tool_system_prompt(
     }
 
     settings::save_settings(&guard).await?;
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     Ok(())
 }
 
@@ -4520,12 +4567,19 @@ async fn update_tool_system_prompt(
 async fn update_tool_call_formats(
     config: ToolCallFormatConfig,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut normalized = config;
     normalized.normalize();
     let mut guard = settings_state.settings.write().await;
     guard.tool_call_formats = normalized.clone();
     settings::save_settings(&guard).await?;
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     println!(
         "[Settings] tool_call_formats updated: primary={:?}, enabled={:?}",
         normalized.primary, normalized.enabled
@@ -4538,6 +4592,8 @@ async fn update_chat_format(
     model_id: String,
     format: ChatFormatName,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
 
@@ -4549,6 +4605,11 @@ async fn update_chat_format(
     }
 
     settings::save_settings(&guard).await?;
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     println!(
         "[Settings] chat_format updated: model_id={} format={:?}",
         model_id, format
@@ -4560,10 +4621,17 @@ async fn update_chat_format(
 async fn update_python_execution_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
     guard.python_execution_enabled = enabled;
     settings::save_settings(&guard).await?;
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     println!(
         "[Settings] python_execution_enabled updated to: {}",
         enabled
@@ -4575,6 +4643,8 @@ async fn update_python_execution_enabled(
 async fn update_native_tool_calling_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
     // Update the format config to add/remove Native format
@@ -4606,6 +4676,11 @@ async fn update_native_tool_calling_enabled(
     }
     guard.tool_call_formats.normalize();
     settings::save_settings(&guard).await?;
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     println!(
         "[Settings] Native tool calling updated to: {} (primary={:?}, enabled={:?})",
         enabled, guard.tool_call_formats.primary, guard.tool_call_formats.enabled
@@ -4617,10 +4692,17 @@ async fn update_native_tool_calling_enabled(
 async fn update_tool_search_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
     guard.tool_search_enabled = enabled;
     settings::save_settings(&guard).await?;
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     println!("[Settings] tool_search_enabled updated to: {}", enabled);
     Ok(())
 }
@@ -4629,6 +4711,8 @@ async fn update_tool_search_enabled(
 async fn update_schema_search_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
     tool_registry_state: State<'_, ToolRegistryState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
@@ -4638,6 +4722,11 @@ async fn update_schema_search_enabled(
         let mut registry = tool_registry_state.registry.write().await;
         registry.set_schema_search_enabled(enabled);
     }
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     println!("[Settings] schema_search_enabled updated to: {}", enabled);
     Ok(())
 }
@@ -4649,6 +4738,8 @@ async fn update_schema_search_enabled(
 async fn update_sql_select_enabled(
     enabled: bool,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
     tool_registry_state: State<'_, ToolRegistryState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
@@ -4658,6 +4749,11 @@ async fn update_sql_select_enabled(
         let mut registry = tool_registry_state.registry.write().await;
         registry.set_sql_select_enabled(enabled);
     }
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     println!("[Settings] sql_select_enabled updated to: {}", enabled);
     Ok(())
 }
@@ -4668,35 +4764,37 @@ async fn update_sql_select_enabled(
 async fn update_rag_chunk_min_relevancy(
     value: f32,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
     guard.rag_chunk_min_relevancy = value;
     settings::save_settings(&guard).await?;
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     println!("[Settings] rag_chunk_min_relevancy updated to: {}", value);
     Ok(())
 }
 
 #[tauri::command]
-async fn update_schema_table_min_relevancy(
+async fn update_schema_relevancy_threshold(
     value: f32,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
-    guard.schema_table_min_relevancy = value;
+    guard.schema_relevancy_threshold = value;
     settings::save_settings(&guard).await?;
-    println!("[Settings] schema_table_min_relevancy updated to: {}", value);
-    Ok(())
-}
 
-#[tauri::command]
-async fn update_sql_enable_min_relevancy(
-    value: f32,
-    settings_state: State<'_, SettingsState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.sql_enable_min_relevancy = value;
-    settings::save_settings(&guard).await?;
-    println!("[Settings] sql_enable_min_relevancy updated to: {}", value);
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
+    println!("[Settings] schema_relevancy_threshold updated to: {}", value);
     Ok(())
 }
 
@@ -4704,10 +4802,17 @@ async fn update_sql_enable_min_relevancy(
 async fn update_rag_dominant_threshold(
     value: f32,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
     guard.rag_dominant_threshold = value;
     settings::save_settings(&guard).await?;
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     println!("[Settings] rag_dominant_threshold updated to: {}", value);
     Ok(())
 }
@@ -4751,12 +4856,19 @@ async fn get_state_machine_preview(
 async fn update_database_toolbox_config(
     config: settings::DatabaseToolboxConfig,
     settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
     handles: State<'_, ActorHandles>,
     embedding_state: State<'_, EmbeddingModelState>,
 ) -> Result<(), String> {
     let mut guard = settings_state.settings.write().await;
     guard.database_toolbox = config.clone();
     settings::save_settings(&guard).await?;
+
+    // Refresh the SettingsStateMachine (Tier 1)
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
     println!("[Settings] database_toolbox config updated");
     drop(guard);
 
@@ -5851,6 +5963,7 @@ async fn get_system_prompt_preview(
         tool_search_max_results,
         has_mcp_tools,
         schema_search_enabled,
+        settings_for_resolver.schema_relevancy_threshold,
         &database_toolbox_config,
         &filtered_tool_descriptions,
         tool_registry_state.registry.clone(),
@@ -6637,8 +6750,7 @@ pub fn run() {
             update_schema_search_enabled,
             update_sql_select_enabled,
             update_rag_chunk_min_relevancy,
-            update_schema_table_min_relevancy,
-            update_sql_enable_min_relevancy,
+            update_schema_relevancy_threshold,
             update_rag_dominant_threshold,
             get_state_machine_preview,
             update_database_toolbox_config,

@@ -1855,8 +1855,7 @@ function BuiltinsTab({
         updateSchemaSearchEnabled,
         updateSqlSelectEnabled,
         updateRagChunkMinRelevancy,
-        updateSchemaTableMinRelevancy,
-        updateSqlEnableMinRelevancy,
+        updateSchemaRelevancyThreshold,
         updateRagDominantThreshold,
         pythonAllowedImports,
     } = useSettingsStore();
@@ -1874,8 +1873,7 @@ function BuiltinsTab({
     
     // Relevancy thresholds for state machine
     const [localRagChunkMinRelevancy, setLocalRagChunkMinRelevancy] = useState(settings?.rag_chunk_min_relevancy ?? 0.3);
-    const [localSchemaTableMinRelevancy, setLocalSchemaTableMinRelevancy] = useState(settings?.schema_table_min_relevancy ?? 0.2);
-    const [localSqlEnableMinRelevancy, setLocalSqlEnableMinRelevancy] = useState(settings?.sql_enable_min_relevancy ?? 0.4);
+    const [localSchemaRelevancyThreshold, setLocalSchemaRelevancyThreshold] = useState(settings?.schema_relevancy_threshold ?? 0.4);
     const [localRagDominantThreshold, setLocalRagDominantThreshold] = useState(settings?.rag_dominant_threshold ?? 0.6);
 
     const defaultPythonPrompt = [
@@ -2377,44 +2375,23 @@ function BuiltinsTab({
                     
                     <div className="space-y-1">
                         <div className="flex items-center justify-between">
-                            <span className="text-xs text-gray-600">Min Table Relevancy</span>
-                            <span className="text-xs font-mono text-gray-500">{localSchemaTableMinRelevancy.toFixed(2)}</span>
+                            <span className="text-xs text-gray-600">Schema Relevancy Threshold</span>
+                            <span className="text-xs font-mono text-gray-500">{localSchemaRelevancyThreshold.toFixed(2)}</span>
                         </div>
                         <input
                             type="range"
                             min="0"
                             max="1"
                             step="0.05"
-                            value={localSchemaTableMinRelevancy}
+                            value={localSchemaRelevancyThreshold}
                             onChange={(e) => {
                                 const value = parseFloat(e.target.value);
-                                setLocalSchemaTableMinRelevancy(value);
-                                updateSchemaTableMinRelevancy(value);
+                                setLocalSchemaRelevancyThreshold(value);
+                                updateSchemaRelevancyThreshold(value);
                             }}
                             className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
                         />
-                        <p className="text-[10px] text-gray-400">Tables below this score are not injected into context</p>
-                    </div>
-
-                    <div className="space-y-1">
-                        <div className="flex items-center justify-between">
-                            <span className="text-xs text-gray-600">SQL Enable Threshold</span>
-                            <span className="text-xs font-mono text-gray-500">{localSqlEnableMinRelevancy.toFixed(2)}</span>
-                        </div>
-                        <input
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.05"
-                            value={localSqlEnableMinRelevancy}
-                            onChange={(e) => {
-                                const value = parseFloat(e.target.value);
-                                setLocalSqlEnableMinRelevancy(value);
-                                updateSqlEnableMinRelevancy(value);
-                            }}
-                            className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                        />
-                        <p className="text-[10px] text-gray-400">sql_select only available above this relevancy</p>
+                        <p className="text-[10px] text-gray-400">Minimum score to inject tables into context and enable sql_select</p>
                     </div>
                 </div>
 

@@ -87,31 +87,6 @@ pub fn build_sql_instructions(format: ToolCallFormatName, table_name: Option<&st
     )
 }
 
-/// Build the SQL auto-discovery action block.
-pub fn build_sql_auto_discovery_instructions(table_name: Option<&str>) -> String {
-    let sql = match table_name {
-        Some(name) => format!("SELECT * FROM {} LIMIT 25", name),
-        None => "SELECT ...".to_string(),
-    };
-    format!(
-        "**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n\
-        1. Write a SQL query using ONLY the table and columns listed above. Do NOT assume other columns exist.\n\
-        2. Execute the query using `sql_select` with the tool-call format:\n\
-        ```\n\
-        <tool_call>{{\"name\": \"sql_select\", \"arguments\": {{\"sql\": \"{}\"}}}}</tool_call>\n\
-        ```\n\
-        The `source_id` is optional when only one database is enabled.\n\
-        3. **AGGREGATION PREFERRED**: Use SQL aggregation (SUM, COUNT, AVG, etc.) of numeric columns to get final answers directly.\n\
-        4. **ROW LIMIT**: Limit results to 25 rows or less through the design of the query.\n\
-        5. **AVOID TO_CHAR**: Use CAST(column AS STRING) instead of TO_CHAR.\n\
-        6. **COLUMNS & DATES**: Check listed columns for date/time fields. If none listed, use `schema_search` first.\n\n\
-        **CRITICAL - NO HALLUCINATIONS**:\n\
-        {}",
-        sql,
-        SQL_NO_HALLUCINATION
-    )
-}
-
 /// Build the Python execution prompt section.
 pub fn build_python_prompt(available_tools: &[String], has_attachments: bool) -> String {
     let tools_section = if available_tools.is_empty() {
@@ -364,6 +339,8 @@ pub fn build_auto_schema_search_section(
     tables: &[crate::tools::schema_search::TableMatchOutput],
     summary: &str,
     has_attachments: bool,
+    sql_enabled: bool,
+    format: ToolCallFormatName,
 ) -> Option<String> {
     if tables.is_empty() {
         if summary.contains("WARNING") {
@@ -380,6 +357,14 @@ pub fn build_auto_schema_search_section(
             "[system_prompt] Auto schema_search suppressed: RAG available and max SQL score ({:.2}) <= 0.40",
             max_score
         );
+        return None;
+    }
+
+    // Only show tables if they are above threshold (sql_enabled == true)
+    if !sql_enabled {
+        if summary.contains("WARNING") {
+            return Some(format!("### Auto schema search\n{}", summary));
+        }
         return None;
     }
 
@@ -410,8 +395,10 @@ pub fn build_auto_schema_search_section(
         }
         body.push_str(&line);
     }
+
     let first_table = tables.first().map(|t| t.table_name.as_str());
-    body.push_str(&format!("\n\n{}", build_sql_auto_discovery_instructions(first_table)));
+    body.push_str(&format!("\n\n{}", build_sql_instructions(format, first_table)));
+
     Some(format!("### Auto schema search\n{}", body))
 }
 

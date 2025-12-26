@@ -181,10 +181,8 @@ impl Default for PromptContext {
 pub struct RelevancyThresholds {
     /// Minimum RAG chunk relevancy to inject into context (default: 0.3)
     pub rag_chunk_min: f32,
-    /// Minimum schema table relevancy to inject into context (default: 0.2)
-    pub schema_table_min: f32,
-    /// Minimum schema relevancy to enable sql_select (default: 0.4)
-    pub sql_enable_min: f32,
+    /// Minimum schema relevancy to enable sql_select and inject into context (default: 0.4)
+    pub schema_relevancy: f32,
     /// RAG relevancy above which SQL context is suppressed (default: 0.6)
     pub rag_dominant_threshold: f32,
 }
@@ -193,8 +191,7 @@ impl Default for RelevancyThresholds {
     fn default() -> Self {
         Self {
             rag_chunk_min: 0.3,
-            schema_table_min: 0.2,
-            sql_enable_min: 0.4,
+            schema_relevancy: 0.4,
             rag_dominant_threshold: 0.6,
         }
     }
@@ -548,8 +545,7 @@ mod tests {
     fn test_default_thresholds() {
         let thresholds = RelevancyThresholds::default();
         assert!((thresholds.rag_chunk_min - 0.3).abs() < 0.001);
-        assert!((thresholds.schema_table_min - 0.2).abs() < 0.001);
-        assert!((thresholds.sql_enable_min - 0.4).abs() < 0.001);
+        assert!((thresholds.schema_relevancy - 0.4).abs() < 0.001);
         assert!((thresholds.rag_dominant_threshold - 0.6).abs() < 0.001);
     }
 
