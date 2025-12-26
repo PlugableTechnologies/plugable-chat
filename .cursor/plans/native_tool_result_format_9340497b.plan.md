@@ -198,10 +198,3 @@ flowchart TD
     D --> H[Assistant Message content only]
     D --> I[User Message with combined tool_results text]
 ```
-
-
-
-## Backward Compatibility
-
-- Existing `ChatMessage` objects without the new fields will deserialize correctly (they're `Option`)
-- Non-native-capable models continue using text-based format in user messages

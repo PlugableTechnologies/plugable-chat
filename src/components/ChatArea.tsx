@@ -336,10 +336,151 @@ const formatDurationMs = (ms?: number): string => {
     return `${mins}m ${secs}s`;
 };
 
+// SQL Result structure from sql_select tool
+interface SqlResult {
+    success: boolean;
+    columns: string[];
+    rows: (string | number | boolean | null)[][];
+    row_count: number;
+    rows_affected: number | null;
+    error: string | null;
+    sql_executed: string;
+}
+
+// Parse and validate SQL result from tool call result string
+function parseSqlResult(resultStr: string): SqlResult | null {
+    try {
+        const parsed = JSON.parse(resultStr);
+        // Check for required SQL result fields
+        if (
+            typeof parsed === 'object' &&
+            parsed !== null &&
+            'success' in parsed &&
+            'columns' in parsed &&
+            'rows' in parsed &&
+            Array.isArray(parsed.columns) &&
+            Array.isArray(parsed.rows)
+        ) {
+            return parsed as SqlResult;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+// Format a cell value for display
+function formatSqlCellValue(value: string | number | boolean | null): string {
+    if (value === null) return '—';
+    if (typeof value === 'boolean') return value ? 'true' : 'false';
+    if (typeof value === 'number') {
+        // Format large numbers with commas, preserve decimals up to 2 places for currency-like values
+        if (Number.isInteger(value)) {
+            return value.toLocaleString();
+        }
+        // For decimals, show up to 2 places for cleaner display
+        return value.toLocaleString(undefined, { 
+            minimumFractionDigits: 0,
+            maximumFractionDigits: 2 
+        });
+    }
+    return String(value);
+}
+
+// Determine if a column contains primarily numeric data
+function isNumericColumn(rows: (string | number | boolean | null)[][], colIndex: number): boolean {
+    let numericCount = 0;
+    let totalNonNull = 0;
+    for (const row of rows) {
+        const val = row[colIndex];
+        if (val !== null) {
+            totalNonNull++;
+            if (typeof val === 'number') numericCount++;
+        }
+    }
+    return totalNonNull > 0 && numericCount / totalNonNull > 0.5;
+}
+
+// SQL Result Table component - renders tabular data from sql_select results
+const SqlResultTable = ({ sqlResult }: { sqlResult: SqlResult }) => {
+    const { columns, rows, row_count, sql_executed } = sqlResult;
+    
+    // Pre-compute which columns are numeric for alignment
+    const numericColumns = useMemo(() => {
+        return columns.map((_, idx) => isNumericColumn(rows, idx));
+    }, [columns, rows]);
+    
+    return (
+        <div className="sql-result-table mt-2">
+            {/* Data table */}
+            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                <table className="min-w-full text-xs">
+                    <thead>
+                        <tr className="bg-gray-50 border-b border-gray-200">
+                            {columns.map((col, idx) => (
+                                <th 
+                                    key={idx} 
+                                    className={`px-3 py-2 font-semibold text-gray-700 ${
+                                        numericColumns[idx] ? 'text-right' : 'text-left'
+                                    }`}
+                                >
+                                    {col}
+                                </th>
+                            ))}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((row, rowIdx) => (
+                            <tr 
+                                key={rowIdx} 
+                                className={`border-b border-gray-100 ${
+                                    rowIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'
+                                } hover:bg-blue-50/50 transition-colors`}
+                            >
+                                {row.map((cell, cellIdx) => (
+                                    <td 
+                                        key={cellIdx} 
+                                        className={`px-3 py-2 ${
+                                            numericColumns[cellIdx] ? 'text-right font-mono' : 'text-left'
+                                        } ${cell === null ? 'text-gray-400 italic' : 'text-gray-800'}`}
+                                    >
+                                        {formatSqlCellValue(cell)}
+                                    </td>
+                                ))}
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+            
+            {/* Footer with row count and SQL */}
+            <div className="mt-2 flex flex-col gap-1">
+                <div className="text-xs text-gray-500">
+                    {row_count === 1 ? '1 row' : `${row_count.toLocaleString()} rows`} returned
+                </div>
+                {sql_executed && (
+                    <details className="group">
+                        <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-600">
+                            SQL Executed
+                        </summary>
+                        <pre className="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto text-gray-600 font-mono">
+                            {sql_executed}
+                        </pre>
+                    </details>
+                )}
+            </div>
+        </div>
+    );
+};
+
 // Inline Tool Call Result - shows a single tool call result inline in the message
+// Note: For sql_select, the formatted table is shown OUTSIDE this accordion (in the main chat area)
+// This component shows the raw data inside an expandable accordion
 const InlineToolCallResult = ({ call }: { call: ToolCallRecord }) => {
     const [showArgs, setShowArgs] = useState(false);
     const [argsText, setArgsText] = useState<string | null>(null);
+    const [showResult, setShowResult] = useState(false);
+    const [resultText, setResultText] = useState<string | null>(null);
 
     const handleToggleArgs = useCallback(
         (next: boolean) => {
@@ -361,6 +502,31 @@ const InlineToolCallResult = ({ call }: { call: ToolCallRecord }) => {
             }
         },
         [argsText, call.arguments]
+    );
+
+    const handleToggleResult = useCallback(
+        (next: boolean) => {
+            setShowResult(next);
+            if (next && resultText === null) {
+                // Defer heavy formatting to next tick
+                const run = () => {
+                    try {
+                        // Try to pretty-print if it's JSON
+                        const parsed = JSON.parse(call.result);
+                        setResultText(JSON.stringify(parsed, null, 2));
+                    } catch {
+                        // Not JSON, show as-is
+                        setResultText(call.result);
+                    }
+                };
+                if (typeof requestIdleCallback === 'function') {
+                    requestIdleCallback(run);
+                } else {
+                    setTimeout(run, 0);
+                }
+            }
+        },
+        [resultText, call.result]
     );
 
     return (
@@ -408,16 +574,19 @@ const InlineToolCallResult = ({ call }: { call: ToolCallRecord }) => {
                             </pre>
                         </details>
                     )}
-                    <details className="mt-2">
+                    {/* Always show raw result in accordion (formatted table is shown outside) */}
+                    <details className="mt-2" onToggle={(e) => handleToggleResult((e.target as HTMLDetailsElement).open)}>
                         <summary className={`text-xs cursor-pointer hover:text-gray-700 ${call.isError ? 'text-red-500' : 'text-gray-500'}`}>
-                            {call.isError ? 'Error' : 'Result'}
+                            {call.isError ? 'Error' : 'Response'}
                         </summary>
                         <pre className={`mt-1 text-xs p-2 rounded overflow-x-auto whitespace-pre-wrap ${
                             call.isError ? 'bg-red-50 text-red-700' : 'bg-gray-50 text-gray-700'
                         }`}>
-                            {call.result.length > 2000 
-                                ? call.result.slice(0, 2000) + '\n... (truncated)'
-                                : call.result}
+                            {showResult
+                                ? (resultText 
+                                    ? (resultText.length > 2000 ? resultText.slice(0, 2000) + '\n... (truncated)' : resultText)
+                                    : 'Loading response...')
+                                : 'Expand to view response'}
                         </pre>
                     </details>
                 </div>
@@ -1070,9 +1239,8 @@ const wrapUndelimitedLatex = (content: string): string => {
 const preprocessLaTeX = (content: string) => {
     // #region agent log
     const startTimeMs = Date.now();
+    void startTimeMs; // Reserved for future debugging
     // #endregion
-    const shouldLogLatex = content.length > 4000;
-    const boxedCount = shouldLogLatex ? (content.match(/\\boxed\{/g)?.length || 0) : 0;
     // First strip OpenAI tokens
     let processed = stripOpenAITokens(content);
     
@@ -1312,6 +1480,22 @@ const AssistantMessage = memo(function AssistantMessage({
             if (part.type === 'tool_call') {
                 const toolCallRecord = toolCalls[toolCallIndex];
                 if (toolCallRecord) {
+                    // For sql_select, show accordion THEN formatted table as a single grouped unit
+                    if (toolCallRecord.tool === 'sql_select' && !toolCallRecord.isError) {
+                        const sqlResult = parseSqlResult(toolCallRecord.result);
+                        if (sqlResult && sqlResult.success && sqlResult.columns.length > 0) {
+                            // Wrap in fragment to ensure strict ordering: accordion first, table second
+                            nodes.push(
+                                <div key={`sql-group-${toolCallRecord.id}`} className="sql-tool-call-group">
+                                    <InlineToolCallResult call={toolCallRecord} />
+                                    <SqlResultTable sqlResult={sqlResult} />
+                                </div>
+                            );
+                            toolCallIndex++;
+                            return;
+                        }
+                    }
+                    // Non-SQL tool calls or failed SQL - just show the accordion
                     nodes.push(
                         <InlineToolCallResult key={`toolcall-${toolCallRecord.id}`} call={toolCallRecord} />
                     );

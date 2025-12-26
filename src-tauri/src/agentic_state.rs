@@ -411,6 +411,19 @@ impl AgenticState {
         !self.is_turn_start_state()
     }
 
+    /// Check if this state includes schema context in the system prompt.
+    /// Used to avoid duplicating schema info from auto-discovery.
+    pub fn has_schema_context(&self) -> bool {
+        match self {
+            AgenticState::SqlRetrieval { discovered_tables, .. } => !discovered_tables.is_empty(),
+            AgenticState::SchemaContextInjected { tables, .. } => !tables.is_empty(),
+            AgenticState::Hybrid { active_capabilities, .. } => {
+                active_capabilities.contains(&Capability::SqlQuery)
+            }
+            _ => false,
+        }
+    }
+
     /// Get the capabilities active in this state
     pub fn active_capabilities(&self) -> HashSet<Capability> {
         match self {

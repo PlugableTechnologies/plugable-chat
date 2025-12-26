@@ -856,6 +856,121 @@ fn parse_python_execution_args(arguments: &serde_json::Value) -> CodeExecutionIn
     }
 }
 
+/// Reconstruct SQL from malformed sql_select arguments.
+///
+/// When models call sql_select incorrectly (e.g., positional arguments parsed
+/// as key-value pairs due to '=' in SQL), the arguments may look like:
+/// `{"\"SELECT ... WHERE x": "10 AND y = 20\""}`
+///
+/// This function attempts to reconstruct the original SQL by:
+/// 1. Detecting if keys look like SQL fragments (contain SELECT, WHERE, etc.)
+/// 2. Joining keys and values with '=' to reconstruct the query
+///
+/// Returns None if the arguments don't look like malformed SQL.
+fn reconstruct_sql_from_malformed_args(arguments: &serde_json::Value) -> Option<String> {
+    let obj = arguments.as_object()?;
+    
+    // Skip if it already has the proper sql key with a non-empty value
+    if let Some(sql_val) = obj.get("sql") {
+        if let Some(s) = sql_val.as_str() {
+            if !s.is_empty() {
+                return None;
+            }
+        }
+    }
+    
+    // Look for keys that look like SQL fragments
+    let sql_keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "FROM", "WHERE", "JOIN"];
+    
+    let mut sql_fragments: Vec<(String, String)> = Vec::new();
+    
+    for (key, value) in obj.iter() {
+        // Skip known proper parameter names
+        if key == "sql" || key == "source_id" || key == "parameters" || key == "max_rows" {
+            continue;
+        }
+        
+        let key_upper = key.to_uppercase();
+        
+        // Check if the key looks like it contains SQL
+        let looks_like_sql = sql_keywords.iter().any(|kw| key_upper.contains(kw))
+            || key.contains('(')  // Function calls like EXTRACT(...)
+            || key.contains('"')  // Quoted strings
+            || key.starts_with("\""); // Malformed quoted key
+        
+        if looks_like_sql {
+            let val_str = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => serde_json::to_string(value).unwrap_or_default(),
+            };
+            sql_fragments.push((key.clone(), val_str));
+        }
+    }
+    
+    if sql_fragments.is_empty() {
+        return None;
+    }
+    
+    // Reconstruct the SQL by joining fragments
+    // The malformed parsing typically splits on '=' so we join with '='
+    let mut reconstructed = String::new();
+    for (i, (key, value)) in sql_fragments.iter().enumerate() {
+        // Clean up the key (remove surrounding quotes if present)
+        let clean_key = key
+            .trim_start_matches('"')
+            .trim_end_matches('"')
+            .to_string();
+        
+        // Clean up the value (remove surrounding quotes if present)
+        let clean_value = value
+            .trim_start_matches('"')
+            .trim_end_matches('"')
+            .to_string();
+        
+        if i > 0 {
+            reconstructed.push(' ');
+        }
+        
+        reconstructed.push_str(&clean_key);
+        
+        // Only add '=' if the value is non-empty and doesn't start with common SQL joiners
+        if !clean_value.is_empty() {
+            let value_upper = clean_value.trim().to_uppercase();
+            let needs_equals = !value_upper.starts_with("AND ")
+                && !value_upper.starts_with("OR ")
+                && !value_upper.starts_with("FROM ")
+                && !value_upper.starts_with("WHERE ")
+                && !value_upper.starts_with("GROUP ")
+                && !value_upper.starts_with("ORDER ")
+                && !value_upper.starts_with("LIMIT ");
+            
+            if needs_equals {
+                reconstructed.push_str(" = ");
+            } else {
+                reconstructed.push(' ');
+            }
+            reconstructed.push_str(&clean_value);
+        }
+    }
+    
+    // Basic validation: must start with SELECT/INSERT/UPDATE/DELETE
+    let trimmed_upper = reconstructed.trim().to_uppercase();
+    if !trimmed_upper.starts_with("SELECT")
+        && !trimmed_upper.starts_with("INSERT")
+        && !trimmed_upper.starts_with("UPDATE")
+        && !trimmed_upper.starts_with("DELETE")
+    {
+        println!("[reconstruct_sql_from_malformed_args] Reconstructed text doesn't look like SQL: {}...", 
+            reconstructed.chars().take(50).collect::<String>());
+        return None;
+    }
+    
+    println!("[reconstruct_sql_from_malformed_args] Successfully reconstructed SQL query");
+    Some(reconstructed)
+}
+
 /// Fix missing Python indentation in code lines.
 ///
 /// When models output code as arrays of lines, they often omit indentation.
@@ -1787,6 +1902,7 @@ async fn run_agentic_loop(
                             &format!("Could not find server for tool '{}'. Make sure an MCP server with this tool is connected.", call.tool),
                             true,
                             tool_format,
+                            Some(&original_message),
                         ));
                         continue;
                     }
@@ -1838,6 +1954,7 @@ async fn run_agentic_loop(
                     ),
                     true,
                     tool_format,
+                    Some(&original_message),
                 ));
                 continue;
             }
@@ -1930,6 +2047,7 @@ async fn run_agentic_loop(
                             "Tool execution was rejected by the user.",
                             true,
                             tool_format,
+                            Some(&original_message),
                         ));
                         continue;
                     }
@@ -1940,6 +2058,7 @@ async fn run_agentic_loop(
                             "Tool approval was cancelled.",
                             true,
                             tool_format,
+                            Some(&original_message),
                         ));
                         continue;
                     }
@@ -1950,6 +2069,7 @@ async fn run_agentic_loop(
                             "Tool approval timed out. Tool call was skipped.",
                             true,
                             tool_format,
+                            Some(&original_message),
                         ));
                         continue;
                     }
@@ -2200,21 +2320,36 @@ async fn run_agentic_loop(
                         let _ = std::io::stdout().flush();
                         let exec_start = std::time::Instant::now();
 
-                        // Parse input
+                        // Parse input with fallback to reconstruct malformed SQL arguments
                         let input: tools::SqlSelectInput = 
                             serde_json::from_value(resolved_call.arguments.clone())
                                 .unwrap_or_else(|e| {
-                                    println!("[AgenticLoop] ⚠️ Failed to parse sql_select args: {}, using defaults", e);
+                                    println!("[AgenticLoop] ⚠️ Failed to parse sql_select args: {}, attempting reconstruction", e);
+                                    
+                                    // Try to get sql and source_id from proper keys first
+                                    let mut sql = resolved_call.arguments
+                                        .get("sql")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    
+                                    let source_id = resolved_call.arguments
+                                        .get("source_id")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    
+                                    // If sql is empty or None, try to reconstruct from malformed arguments
+                                    // This handles cases like: {"\"SELECT ... = 10": "AND ...\""}
+                                    if sql.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                                        if let Some(reconstructed) = reconstruct_sql_from_malformed_args(&resolved_call.arguments) {
+                                            println!("[AgenticLoop] 🔧 Reconstructed SQL: {}...", 
+                                                reconstructed.chars().take(100).collect::<String>());
+                                            sql = Some(reconstructed);
+                                        }
+                                    }
+                                    
                                     tools::SqlSelectInput {
-                                        source_id: resolved_call.arguments
-                                            .get("source_id")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string()),
-                                        sql: resolved_call.arguments
-                                            .get("sql")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
+                                        source_id,
+                                        sql: sql.unwrap_or_default(),
                                         parameters: vec![],
                                         max_rows: 100,
                                     }
@@ -2477,6 +2612,9 @@ async fn run_agentic_loop(
             }
 
             // Format and collect tool result using model-appropriate format
+            // Include original user prompt in error cases to help model retry
+            let user_prompt_for_error = if is_error { Some(original_message.as_str()) } else { None };
+            
             if use_native_tool_results {
                 // Native format: create individual tool result messages
                 if let Some(ref tool_call_id) = resolved_call.id {
@@ -2491,6 +2629,7 @@ async fn run_agentic_loop(
                         &result_text,
                         is_error,
                         tool_format,
+                        user_prompt_for_error,
                     ));
                 }
             } else {
@@ -2500,6 +2639,7 @@ async fn run_agentic_loop(
                     &result_text,
                     is_error,
                     tool_format,
+                    user_prompt_for_error,
                 ));
             }
             any_executed = true;
@@ -3247,15 +3387,23 @@ fn collect_tool_prompt_additions(
 
     if capabilities.available_builtins.contains(tool_capability::BUILTIN_SQL_SELECT) {
         let mut body = String::from(
-            "Use `sql_select` to run SQL queries against configured database sources.\n\
-             Parameters: `sql` (SQL statement), `source_id` (optional; found in auto-discovered schema context).\n\
-             Returns query results as rows.\n\n\
+            "Use `sql_select` to execute SQL queries against configured database sources.\n\n\
+             **SYNTAX** (use the tool-calling format described below):\n\
+             ```\n\
+             <tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>\n\
+             ```\n\
+             - `sql` (required): The SQL query to execute\n\
+             - `source_id` (optional): Database source ID - omit if only one database is configured\n\n\
+             **EXAMPLE** - to get October 2025 sales totals:\n\
+             ```\n\
+             <tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT SUM(total_sale) as october_sales FROM sales_table WHERE EXTRACT(MONTH FROM sale_date) = 10 AND EXTRACT(YEAR FROM sale_date) = 2025\"}}</tool_call>\n\
+             ```\n\n\
              **CRITICAL REQUIREMENTS**:\n\
-             - Always execute queries to answer data questions using the tool-calling format described below - do NOT return SQL code to the user.\n\
+             - Execute queries using the tool-call format shown above - do NOT return SQL code to the user.\n\
              - NEVER make up, infer, or guess data values. All numbers, dates, totals, and facts MUST come from executing `sql_select`.\n\
              - NEVER display SQL code or query text to the user - only show the actual query results.\n\
-             - NEVER say you cannot access the database or that you don't have the ability to query it. You ARE equipped with tools to do this; use them.\n\
-             - If you cannot execute the query, say so explicitly rather than inventing results.",
+             - NEVER say you cannot access the database. You ARE equipped with this tool; use it.\n\
+             - If the query fails, report the error rather than inventing results.",
         );
         if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "sql_select")) {
             let trimmed = custom.trim();
@@ -3855,6 +4003,11 @@ fn map_tool_search_hits_to_schemas(
     grouped
 }
 
+/// Render auto-discovery sections for system prompt (used by preview function).
+/// 
+/// NOTE: For the main chat flow, the state machine now handles this via
+/// `AgenticStateMachine::build_auto_discovery_section()`. This function is
+/// kept for the preview function which doesn't use the full state machine.
 fn render_auto_context_sections(
     tool_search_output: Option<&ToolSearchOutput>,
     schema_search_output: Option<&SchemaSearchOutput>,
@@ -3899,7 +4052,7 @@ fn render_auto_context_sections(
             let mut body = String::from("Auto-discovered database tables for this prompt:");
             for table in &output.tables {
                 let mut line = format!(
-                    "\n- {} [{} | {}] (score {:.2})",
+                    "\n- {} [{} Syntax | {}] (score {:.2})",
                     table.table_name, table.sql_dialect, table.source_id, table.relevance
                 );
                 if let Some(desc) = table.description.as_deref() {
@@ -3911,13 +4064,36 @@ fn render_auto_context_sections(
                     let cols: Vec<String> = table
                         .relevant_columns
                         .iter()
+                        .take(40) // Show up to 40 columns
                         .map(|c| format!("{} ({})", c.name, c.data_type))
                         .collect();
-                    line.push_str(&format!("\n  cols: {}", cols.join(", ")));
+                    let cols_str = if cols.len() < table.relevant_columns.len() {
+                        format!("{}, ... ({} more)", cols.join(", "), table.relevant_columns.len() - cols.len())
+                    } else {
+                        cols.join(", ")
+                    };
+                    line.push_str(&format!("\n  cols: {}", cols_str));
                 }
                 body.push_str(&line);
             }
-            body.push_str("\n\n**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n1. Use the `sql_select` tool with the `source_id` shown above (e.g., `bq-1765404617532`)\n2. Write a SQL query that answers the user's question using ONLY the table and columns listed above. Do NOT assume any other columns exist.\n3. **COLUMNS & DATES**: Carefully check the listed columns for date/time fields (like 'year', 'created_at', 'sales_date'). If no date column is listed, you may need to use `schema_search` to find more columns.\n4. **AGGREGATION PREFERRED**: Whenever possible, use SQL aggregation functions (SUM, AVG, COUNT, MIN, MAX) to calculate the final answer in the database. Do NOT fetch raw rows if you can calculate the result in SQL.\n5. Execute the query automatically by calling `sql_select(sql=\"...\")` (the `source_id` is optional if only one database is enabled) using the tool-calling format described below - do NOT return SQL code to the user\n6. Return the query results directly to answer the user's question\n\n**CRITICAL - NO HALLUCINATIONS**:\n- ONLY use columns that are explicitly listed in the `cols:` section for each table above.\n- NEVER guess or invent column names (like 'date', 'sales_date', 'user_id') if they are not listed.\n- If a query returns `null` for a sum or calculation, it means the data is missing or all values in that group are null. Do NOT assume the tool failed.\n- NEVER make up, infer, or guess data values. All numbers, dates, and facts MUST come from executing `sql_select`.\n- NEVER display SQL code to the user - only show the actual query results.\n- NEVER say you cannot access the database or that you don't have the ability to query it. You ARE equipped with tools to do this; use them.\n- If you cannot execute the query, say so explicitly rather than inventing results.");
+            body.push_str("\n\n**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n\
+1. Write a SQL query using ONLY the table and columns listed above. Do NOT assume other columns exist.\n\
+2. Execute the query using `sql_select` with the tool-call format:\n\
+   ```\n\
+   <tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>\n\
+   ```\n\
+   The `source_id` is optional when only one database is enabled.\n\
+3. **AGGREGATION PREFERRED**: Use SQL aggregation (SUM, COUNT, AVG, etc.) of numeric columns to get final answers directly.\n\
+4. **ROW LIMIT**: Limit results to 25 rows or less through the design of the query.\n\
+5. **AVOID TO_CHAR**: Use CAST(column AS STRING) instead of TO_CHAR.\n\
+6. **COLUMNS & DATES**: Check listed columns for date/time fields. If none listed, use `schema_search` first.\n\n\
+**CRITICAL - NO HALLUCINATIONS**:\n\
+- ONLY use columns explicitly listed in the `cols:` section above.\n\
+- NEVER guess or invent column names.\n\
+- If a query returns `null`, the data is missing - do NOT assume the tool failed.\n\
+- NEVER make up data values. All facts MUST come from executing `sql_select`.\n\
+- NEVER display SQL code to the user - only show query results.\n\
+- If the query fails, read the error and fix it rather than inventing results.");
             sections.push(format!("### Auto schema search\n{}", body));
         } else if output.summary.contains("WARNING") {
             sections.push(format!("### Auto schema search\n{}", output.summary));
@@ -4533,12 +4709,6 @@ async fn chat(
         }
     };
 
-    let auto_context_sections = render_auto_context_sections(
-        auto_discovery.tool_search_output.as_ref(),
-        auto_discovery.schema_search_output.as_ref(),
-        has_attachments,
-    );
-
     // If we already performed schema search for this prompt, surface sql_select immediately
     if auto_discovery.schema_search_output.is_some() {
         auto_enable_sql_select(
@@ -4768,20 +4938,14 @@ async fn chat(
         Vec::new(), // RAG chunks
     );
     
+    // Pass auto-discovery context to state machine (it owns prompt generation)
+    initial_state_machine.set_auto_discovery_context(
+        auto_discovery.tool_search_output.clone(),
+        auto_discovery.schema_search_output.clone(),
+    );
+    
     // Build system prompt from state machine (single source of truth)
-    let mut system_prompt = initial_state_machine.build_system_prompt();
-
-    // If auto-discovery had results, we still want to include the strong "ACTION REQUIRED" 
-    // guidance from rendered sections if they were present, as they help smaller models.
-    // However, we avoid the redundancy of the table list if the state machine already added it.
-    if !auto_context_sections.is_empty() {
-        let mut extra_guidance = String::new();
-        extra_guidance.push_str("\n\n## Auto-discovered context\n");
-        extra_guidance.push_str(&auto_context_sections.join("\n\n"));
-        
-        // Append after state machine's prompt
-        system_prompt.push_str(&extra_guidance);
-    }
+    let system_prompt = initial_state_machine.build_system_prompt();
     
     // Log operational mode from Tier 1
     let operational_mode_name = {
@@ -8118,7 +8282,7 @@ mod inline_tests {
             ToolCallFormatName::Hermes,
         );
         let calls = unwrap_tool_calls(action);
-        let formatted = format_tool_result(&calls[0], "echo: hi", false, ToolFormat::Hermes);
+        let formatted = format_tool_result(&calls[0], "echo: hi", false, ToolFormat::Hermes, None);
 
         assert!(
             formatted.contains("echo: hi"),

@@ -76,6 +76,13 @@ pub struct AgenticStateMachine {
     python_primary: bool,
     /// Whether user has attached documents
     has_attachments: bool,
+    
+    // === Auto-Discovery Context ===
+    
+    /// Auto-discovered tools from tool_search (for this turn)
+    auto_tool_search: Option<crate::tools::tool_search::ToolSearchOutput>,
+    /// Auto-discovered schema from schema_search (for this turn)
+    auto_schema_search: Option<crate::tools::schema_search::SchemaSearchOutput>,
 }
 
 impl AgenticStateMachine {
@@ -117,6 +124,8 @@ impl AgenticStateMachine {
             custom_tool_prompts: prompt_context.custom_tool_prompts,
             python_primary: prompt_context.python_primary,
             has_attachments: prompt_context.has_attachments,
+            auto_tool_search: None,
+            auto_schema_search: None,
         }
     }
 
@@ -193,6 +202,8 @@ impl AgenticStateMachine {
             custom_tool_prompts: HashMap::new(),
             python_primary: settings.python_execution_enabled,
             has_attachments: false,
+            auto_tool_search: None,
+            auto_schema_search: None,
         }
     }
 
@@ -223,6 +234,8 @@ impl AgenticStateMachine {
             custom_tool_prompts: prompt_context.custom_tool_prompts,
             python_primary: prompt_context.python_primary,
             has_attachments: prompt_context.has_attachments,
+            auto_tool_search: None,
+            auto_schema_search: None,
         }
     }
     
@@ -368,6 +381,20 @@ impl AgenticStateMachine {
         };
 
         self.transition_to(new_state);
+    }
+
+    /// Set auto-discovery context for this turn.
+    /// 
+    /// This sets the results from automatic tool_search and schema_search
+    /// that ran before the model's first response. The state machine will
+    /// include this context in the system prompt it generates.
+    pub fn set_auto_discovery_context(
+        &mut self,
+        tool_search: Option<crate::tools::tool_search::ToolSearchOutput>,
+        schema_search: Option<crate::tools::schema_search::SchemaSearchOutput>,
+    ) {
+        self.auto_tool_search = tool_search;
+        self.auto_schema_search = schema_search;
     }
 
     /// Transition to a new state, recording history.
@@ -625,19 +652,24 @@ impl AgenticStateMachine {
             sections.push(state_ctx);
         }
 
-        // 4. Tool format instructions (if not in Python primary mode)
+        // 4. Auto-discovery context (tool_search and schema_search results)
+        if let Some(auto_ctx) = self.build_auto_discovery_section() {
+            sections.push(auto_ctx);
+        }
+
+        // 5. Tool format instructions (if not in Python primary mode)
         if !self.python_primary {
             if let Some(format) = self.build_format_instructions() {
                 sections.push(format);
             }
         }
 
-        // 5. MCP tool sections (active and deferred)
+        // 6. MCP tool sections (active and deferred)
         if let Some(mcp) = self.build_mcp_tool_section() {
             sections.push(mcp);
         }
 
-        // 6. Python execution section (if enabled and in code mode)
+        // 7. Python execution section (if enabled and in code mode)
         if self.python_primary && self.enabled_capabilities.contains(&Capability::PythonExecution) {
             sections.push(self.build_python_section());
         }
@@ -753,12 +785,34 @@ impl AgenticStateMachine {
 
             AgenticState::SqlRetrieval { discovered_tables, max_table_relevancy } => {
                 let table_list = self.format_table_list(discovered_tables);
-                let base_sql_instructions = 
-                    "Use the `sql_select` tool to query these tables. Execute queries directly - do NOT show SQL code to the user.\n\n\
+                
+                // Get the appropriate tool call format syntax
+                let tool_call_syntax = match self.tool_call_format {
+                    ToolCallFormatName::Native => "<tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>".to_string(),
+                    ToolCallFormatName::Hermes => "<tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>".to_string(),
+                    ToolCallFormatName::Mistral => "[TOOL_CALLS] [{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}]".to_string(),
+                    ToolCallFormatName::Pythonic => "sql_select(sql=\"SELECT ...\")".to_string(),
+                    ToolCallFormatName::PureJson => "{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}".to_string(),
+                    ToolCallFormatName::CodeMode => "sql_select(sql=\"SELECT ...\")".to_string(),
+                };
+                
+                let base_sql_instructions = format!(
+                    "Use the `sql_select` tool to query these tables.\n\n\
+                    **ACTION REQUIRED**: Execute queries using the tool-call format:\n\
+                    ```\n\
+                    {}\n\
+                    ```\n\n\
                     **CRITICAL REQUIREMENTS**:\n\
                     - Execute queries to answer data questions - do NOT return SQL code\n\
                     - ONLY use columns explicitly listed in the schema above\n\
-                    - Prefer aggregation (SUM, COUNT, etc.) to get final answers directly";
+                    - NEVER guess column names - if not listed, it doesn't exist\n\
+                    - Prefer aggregation (SUM, COUNT, AVG, etc.) of numeric columns to get final answers directly\n\
+                    - Limit results to 25 rows or less through the design of the query\n\
+                    - Avoid TO_CHAR function; use CAST(column AS STRING) instead\n\
+                    - NEVER display SQL code to the user - only show query results\n\
+                    - If a query fails, read the error and fix it rather than inventing results",
+                    tool_call_syntax
+                );
                 
                 let mut section = format!(
                     "## Database Context\n\n\
@@ -840,7 +894,31 @@ impl AgenticStateMachine {
             AgenticState::SchemaContextInjected { tables, max_relevancy, sql_enabled } => {
                 let table_list = self.format_table_list(tables);
                 let sql_instructions = if *sql_enabled {
-                    let mut instr = "Use the `sql_select` tool to query these tables. Execute queries directly - do NOT show SQL code to the user.".to_string();
+                    // Get the appropriate tool call format syntax
+                    let tool_call_syntax = match self.tool_call_format {
+                        ToolCallFormatName::Native => "<tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>".to_string(),
+                        ToolCallFormatName::Hermes => "<tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>".to_string(),
+                        ToolCallFormatName::Mistral => "[TOOL_CALLS] [{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}]".to_string(),
+                        ToolCallFormatName::Pythonic => "sql_select(sql=\"SELECT ...\")".to_string(),
+                        ToolCallFormatName::PureJson => "{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}".to_string(),
+                        ToolCallFormatName::CodeMode => "sql_select(sql=\"SELECT ...\")".to_string(),
+                    };
+                    
+                    let mut instr = format!(
+                        "Use the `sql_select` tool to query these tables.\n\n\
+                        **ACTION REQUIRED**: Execute queries using the tool-call format:\n\
+                        ```\n\
+                        {}\n\
+                        ```\n\n\
+                        **CRITICAL REQUIREMENTS**:\n\
+                        - Execute queries to answer data questions - do NOT return SQL code\n\
+                        - ONLY use columns explicitly listed in the schema above\n\
+                        - NEVER guess column names - if not listed, it doesn't exist\n\
+                        - Prefer aggregation (SUM, COUNT, AVG, etc.) of numeric columns to get final answers directly\n\
+                        - Limit results to 25 rows or less through the design of the query\n\
+                        - Avoid TO_CHAR function; use CAST(column AS STRING) or FORMAT_DATE instead",
+                        tool_call_syntax
+                    );
                     if let Some(custom) = self.custom_tool_prompts.get("builtin::sql_select") {
                         let trimmed = custom.trim();
                         if !trimmed.is_empty() {
@@ -900,6 +978,105 @@ impl AgenticStateMachine {
                     schema_summary
                 ))
             }
+        }
+    }
+
+    /// Build the auto-discovery context section.
+    /// 
+    /// This renders the results from automatic tool_search and schema_search
+    /// that ran before the model's first response.
+    fn build_auto_discovery_section(&self) -> Option<String> {
+        let mut sections: Vec<String> = Vec::new();
+
+        // Auto tool search results
+        if let Some(ref output) = self.auto_tool_search {
+            if !output.tools.is_empty() {
+                let mut body = String::from("Auto-discovered MCP tools for this prompt:");
+                for tool in &output.tools {
+                    let desc = tool.description.as_deref().unwrap_or("").trim();
+                    let mut line = format!(
+                        "\n- {}::{} (score {:.2})",
+                        tool.server_id, tool.name, tool.score
+                    );
+                    if !desc.is_empty() {
+                        line.push_str(&format!(" — {}", desc));
+                    }
+                    body.push_str(&line);
+                }
+                sections.push(format!("### Auto tool search\n{}", body));
+            }
+        }
+
+        // Auto schema search results (only if state doesn't already have schema context)
+        if !self.current_state.has_schema_context() {
+            if let Some(ref output) = self.auto_schema_search {
+                if !output.tables.is_empty() {
+                    // Apply rule: if we have RAG results (attachments), only include SQL context
+                    // if the highest relevance score is > 40%.
+                    let max_score = output.tables.iter().map(|t| t.relevance).fold(0.0f32, f32::max);
+                    if self.has_attachments && max_score <= 0.40 {
+                        println!(
+                            "[StateMachine] Auto schema_search suppressed: RAG available and max SQL score ({:.2}) <= 0.40",
+                            max_score
+                        );
+                    } else {
+                        let mut body = String::from("Auto-discovered database tables for this prompt:");
+                        for table in &output.tables {
+                            let mut line = format!(
+                                "\n- {} [{} Syntax | {}] (score {:.2})",
+                                table.table_name, table.sql_dialect, table.source_id, table.relevance
+                            );
+                            if let Some(desc) = table.description.as_deref() {
+                                if !desc.trim().is_empty() {
+                                    line.push_str(&format!(" — {}", desc.trim()));
+                                }
+                            }
+                            if !table.relevant_columns.is_empty() {
+                                let cols: Vec<String> = table
+                                    .relevant_columns
+                                    .iter()
+                                    .take(40) // Show up to 40 columns
+                                    .map(|c| format!("{} ({})", c.name, c.data_type))
+                                    .collect();
+                                let cols_str = if cols.len() < table.relevant_columns.len() {
+                                    format!("{}, ... ({} more)", cols.join(", "), table.relevant_columns.len() - cols.len())
+                                } else {
+                                    cols.join(", ")
+                                };
+                                line.push_str(&format!("\n  cols: {}", cols_str));
+                            }
+                            body.push_str(&line);
+                        }
+                        body.push_str("\n\n**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n\
+1. Write a SQL query using ONLY the table and columns listed above. Do NOT assume other columns exist.\n\
+2. Execute the query using `sql_select` with the tool-call format:\n\
+   ```\n\
+   <tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>\n\
+   ```\n\
+   The `source_id` is optional when only one database is enabled.\n\
+3. **AGGREGATION PREFERRED**: Use SQL aggregation (SUM, COUNT, AVG, etc.) of numeric columns to get final answers directly.\n\
+4. **ROW LIMIT**: Limit results to 25 rows or less through the design of the query.\n\
+5. **AVOID TO_CHAR**: Use CAST(column AS STRING) instead of TO_CHAR.\n\
+6. **COLUMNS & DATES**: Check listed columns for date/time fields. If none listed, use `schema_search` first.\n\n\
+**CRITICAL - NO HALLUCINATIONS**:\n\
+- ONLY use columns explicitly listed in the `cols:` section above.\n\
+- NEVER guess or invent column names.\n\
+- If a query returns `null`, the data is missing - do NOT assume the tool failed.\n\
+- NEVER make up data values. All facts MUST come from executing `sql_select`.\n\
+- NEVER display SQL code to the user - only show query results.\n\
+- If the query fails, read the error and fix it rather than inventing results.");
+                        sections.push(format!("### Auto schema search\n{}", body));
+                    }
+                } else if output.summary.contains("WARNING") {
+                    sections.push(format!("### Auto schema search\n{}", output.summary));
+                }
+            }
+        }
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(format!("## Auto-discovered context\n\n{}", sections.join("\n\n")))
         }
     }
 
@@ -1114,7 +1291,7 @@ impl AgenticStateMachine {
                 let cols: Vec<String> = table
                     .columns
                     .iter()
-                    .take(10) // Limit columns shown
+                    .take(40) // Show up to 40 columns to give model enough context
                     .map(|c| format!("{} ({})", c.name, c.data_type))
                     .collect();
                 let cols_str = if cols.len() < table.columns.len() {
@@ -1123,7 +1300,7 @@ impl AgenticStateMachine {
                     cols.join(", ")
                 };
                 format!(
-                    "- **{}** [{}] (relevancy: {:.2})\n  Columns: {}",
+                    "- **{}** [{} Syntax] (relevancy: {:.2})\n  Columns: {}",
                     table.fully_qualified_name,
                     table.sql_dialect,
                     table.relevancy,
