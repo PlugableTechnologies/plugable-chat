@@ -197,4 +197,5 @@ flowchart TD
     
     D --> H[Assistant Message content only]
     D --> I[User Message with combined tool_results text]
+
 ```

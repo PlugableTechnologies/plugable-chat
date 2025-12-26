@@ -13,6 +13,7 @@
 //! - Granite: <function_call>XML</function_call> format
 
 use crate::protocol::{ModelFamily, OpenAITool, ParsedToolCall, ToolFormat};
+use crate::system_prompt;
 use crate::settings::{ToolCallFormatConfig, ToolCallFormatName};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -956,44 +957,6 @@ pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
 }
 
 /// Success guidance for sql_select - tells model that results have been shown to user
-const SQL_SUCCESS_GUIDANCE: &str = "\n\n**NOTE**: The query results above have already been displayed to the user in a formatted table. \
-Your role now is to provide helpful commentary: summarize key insights, suggest follow-up analyses, \
-or answer any specific questions the user may have about the data. Do NOT repeat the raw data.";
-
-/// Build error guidance string, optionally including the original user prompt
-fn build_error_guidance(tool_name: &str, original_user_prompt: Option<&str>) -> String {
-    let base_guidance = if tool_name == "sql_select" {
-        "**SQL ERROR - RETRY REQUIRED**: The query failed. You MUST retry (up to 3 attempts).\n\n\
-        **STEP 1 - Identify the Error**:\n\
-        Read the error message above carefully. Common issues:\n\
-        - \"Unrecognized name\" = You used a column that doesn't exist. Check the EXACT column names in the schema.\n\
-        - \"Function not found\" = Use database-appropriate functions (use CAST(column AS STRING), not TO_CHAR)\n\
-        - Syntax error = Check SQL dialect compatibility\n\n\
-        **STEP 2 - Review the Schema**:\n\
-        Go back to the 'Database Context' section in this prompt. Look at the 'Columns:' list.\n\
-        ONLY use columns that are EXPLICITLY listed there. Do NOT invent or guess column names.\n\n\
-        **STEP 3 - Retry with Corrected SQL**:\n\
-        Make the fix and try again immediately. Do NOT give up or tell the user you can't help.\n\
-        You have tools available - USE THEM."
-    } else {
-        "**TOOL ERROR - RETRY REQUIRED**: The tool call failed. You MUST retry (up to 3 attempts).\n\n\
-        **STEP 1**: Read the error message carefully to understand what went wrong.\n\
-        **STEP 2**: Review the tool schema for correct parameter names and types.\n\
-        **STEP 3**: Retry with corrected parameters immediately.\n\n\
-        Do NOT give up or tell the user you cannot help. You have the tools - USE THEM."
-    };
-
-    match original_user_prompt {
-        Some(prompt) if !prompt.is_empty() => {
-            format!(
-                "\n\n{}\n\n**REMINDER - Original User Request**: \"{}\"\n\n⚠️ TRY AGAIN NOW with a corrected tool call.",
-                base_guidance, prompt
-            )
-        }
-        _ => format!("\n\n{}\n\n⚠️ TRY AGAIN NOW with a corrected tool call.", base_guidance),
-    }
-}
-
 /// Format a tool result for injection into the chat history based on model format
 /// 
 /// When `is_error` is true and `original_user_prompt` is provided, the error guidance
@@ -1007,9 +970,9 @@ pub fn format_tool_result(
     original_user_prompt: Option<&str>,
 ) -> String {
     let guidance = if is_error {
-        build_error_guidance(&call.tool, original_user_prompt)
+        system_prompt::build_error_guidance(&call.tool, original_user_prompt)
     } else if call.tool == "sql_select" {
-        SQL_SUCCESS_GUIDANCE.to_string()
+        system_prompt::SQL_SUCCESS_GUIDANCE.to_string()
     } else {
         String::new()
     };

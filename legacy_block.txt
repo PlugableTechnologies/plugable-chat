@@ -1,0 +1,286 @@
+    }
+    // #endregion
+}
+
+/// Legacy system prompt builder (kept for reference)
+#[allow(dead_code)]
+fn legacy_build_system_prompt(
+    base_prompt: &str,
+    tool_descriptions: &[(String, Vec<McpTool>)],
+    server_configs: &[McpServerConfig],
+    python_execution_enabled: bool,
+    has_attachments: bool,
+) -> String {
+    let mut prompt = base_prompt.to_string();
+
+    // Categorize servers by defer status
+    let mut active_servers: Vec<(&String, &Vec<McpTool>)> = Vec::new();
+    let mut deferred_servers: Vec<(&String, &Vec<McpTool>)> = Vec::new();
+
+    for (server_id, tools) in tool_descriptions {
+        if tools.is_empty() {
+            continue;
+        }
+        let is_deferred = server_configs
+            .iter()
+            .find(|c| c.id == *server_id)
+            .map(|c| c.defer_tools)
+            .unwrap_or(true); // Default to deferred if config not found
+
+        if is_deferred {
+            deferred_servers.push((server_id, tools));
+        } else {
+            active_servers.push((server_id, tools));
+        }
+    }
+
+    let has_active_tools = !active_servers.is_empty();
+    let has_deferred_tools = !deferred_servers.is_empty();
+    let has_mcp_tools = has_active_tools || has_deferred_tools;
+    let has_any_tools = python_execution_enabled || has_mcp_tools;
+
+    let _active_tool_count: usize = active_servers.iter().map(|(_, t)| t.len()).sum();
+    let _deferred_tool_count: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
+
+    // ===== CRITICAL: Attached Documents (only if python_execution is enabled AND attachments exist) =====
+    if python_execution_enabled && has_attachments {
+        prompt.push_str("\n\n## CRITICAL: How Attached Documents Work\n\n");
+        prompt.push_str("The user has attached files to this chat. Important:\n");
+        prompt.push_str("- The text content is **already extracted** and shown in the user's message as \"Context from attached documents\"\n");
+        prompt.push_str(
+            "- ❌ **You CANNOT access the original files** - no file paths, no file I/O\n",
+        );
+        prompt.push_str("- ✅ **To analyze the content**: Use the text already provided in the conversation\n\n");
+        prompt.push_str("**WRONG:** `with open('document.pdf', 'r') as f: ...`\n");
+        prompt.push_str("**CORRECT:** Use the extracted text directly in python_execution as a string literal.\n\n");
+    }
+
+    // ===== Tool Selection Guide (only if any tools are enabled) =====
+    if has_any_tools {
+        prompt.push_str("## Tool Selection Guide\n\n");
+        prompt.push_str("**IMPORTANT: Before using any tool, first ask yourself: Can I answer this directly from my knowledge?**\n\n");
+        prompt.push_str("Most questions can be answered without tools. Only use tools when they provide a clear advantage.\n\n");
+
+        if python_execution_enabled {
+            prompt.push_str("### 1. `python_execution` (Built-in Python Sandbox)\n");
+            prompt.push_str(
+                "**WHEN TO USE** (only when it provides clear advantage over your knowledge):\n",
+            );
+            prompt.push_str("- Complex arithmetic that's error-prone to compute mentally (e.g., compound interest over 30 years)\n");
+            prompt.push_str(
+                "- Processing/transforming data the user has provided in the conversation\n",
+            );
+            prompt.push_str("- Generating structured output (JSON, CSV) from conversation data\n");
+            prompt.push_str("- Pattern matching or text manipulation on user-provided text\n\n");
+            prompt.push_str("**WHEN NOT TO USE** (just answer directly):\n");
+            prompt.push_str("- Simple math you can do reliably (e.g., \"what's 15% of 80?\")\n");
+            prompt.push_str("- Date/calendar questions (e.g., \"what day is Jan 6, 2026?\") - answer from knowledge\n");
+            prompt.push_str("- Questions about facts, concepts, or explanations\n");
+            prompt.push_str("- Anything where your knowledge is sufficient and reliable\n\n");
+            prompt.push_str("**LIMITATIONS:** \n");
+            prompt.push_str(
+                "- ❌ CANNOT access internet, databases, files, APIs, or any external systems\n",
+            );
+            prompt.push_str("- ❌ CANNOT read or write files - NO filesystem access at all\n");
+            prompt.push_str("- ✅ Available modules: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64\n\n");
+
+            // One-shot example to help smaller models understand they should CALL the tool
+            prompt.push_str("**EXAMPLE - When user says \"calculate\" or \"execute\":**\n\n");
+            prompt
+                .push_str("User: \"Calculate compound interest on $5000 at 6% for 10 years\"\n\n");
+            prompt.push_str("✅ CORRECT - Return a single Python program:\n");
+            prompt.push_str("```python\n");
+            prompt.push_str("principal = 5000\nrate = 0.06\nyears = 10\nresult = principal * (1 + rate) ** years\nprint(f\"Result: ${result:,.2f}\")\n");
+            prompt.push_str("```\n\n");
+            prompt.push_str("❌ WRONG - Don't just describe code without executing it.\n\n");
+        }
+
+        if has_mcp_tools && has_deferred_tools && python_execution_enabled {
+            // Primary workflow: search → execute with Python → repeat
+            prompt.push_str("### 2. External Tools (Databases, APIs, Files, etc.)\n\n");
+            prompt.push_str("**WORKFLOW: Search → Execute → Repeat**\n\n");
+            prompt
+                .push_str("For tasks requiring external data or actions, follow this pattern:\n\n");
+            prompt.push_str(
+                "1. **SEARCH**: Call `tool_search` to find relevant tools for your current step\n",
+            );
+            prompt.push_str("2. **EXECUTE**: Write a Python program using `python_execution` that calls the discovered tools\n");
+            prompt.push_str("3. **REPEAT**: If more steps are needed, search again for the next step's tools\n\n");
+            prompt.push_str("**IMPORTANT**: Tools you discover stay available for this user turn. Re-use them in python_execution without searching again. They reset only when the user sends a new message.\n\n");
+        } else if has_mcp_tools {
+            let section_num = if python_execution_enabled { "2" } else { "1" };
+            prompt.push_str(&format!(
+                "### {}. MCP Tools (External Capabilities)\n",
+                section_num
+            ));
+            prompt.push_str("**USE FOR:** Anything requiring external access - databases, APIs, files, web, etc.\n");
+            prompt.push_str("**HOW TO USE:**\n");
+            if has_deferred_tools {
+                prompt.push_str(
+                    "1. First call `tool_search` to discover available tools for your task\n",
+                );
+                prompt.push_str("2. Then call the discovered tools directly\n\n");
+            } else if has_active_tools {
+                prompt.push_str("- Call active MCP tools directly (listed below)\n\n");
+            }
+        }
+
+        prompt.push_str("### COMMON MISTAKES TO AVOID:\n");
+        prompt.push_str("- ❌ Saying \"I can't do that\" without trying tool_search first\n");
+        prompt.push_str(
+            "- ❌ Making up function names or imports - tools MUST be discovered first\n",
+        );
+        prompt.push_str(
+            "- ❌ Showing code without executing it - USE the tools, don't just describe them\n",
+        );
+        if python_execution_enabled && has_deferred_tools {
+            prompt.push_str("- ❌ Using `python_execution` with undiscovered tools - call `tool_search` first!\n");
+        }
+        prompt.push_str("- ✅ When stuck, call `tool_search` to find what tools are available\n\n");
+
+        // Tool calling format instructions
+        prompt.push_str("## Tool Calling Format\n\n");
+        prompt.push_str("All tool use must happen from inside a single Python program. Do NOT emit <tool_call> tags. Call the provided global functions directly and print results for the user.\n\n");
+    }
+
+    // Python execution details (only if enabled)
+    if python_execution_enabled {
+        prompt.push_str("## python_execution Tool\n\n");
+        prompt.push_str("Sandboxed Python for complex calculations. **Only use when it provides clear advantage over answering directly.**\n");
+        prompt.push_str("You must `import` modules before using them.\n\n");
+        prompt.push_str("**CRITICAL: Do the calculation, don't explain it.**\n");
+        prompt.push_str("If a calculation can be done with the available Python libraries, USE `python_execution` to compute it and return the result.\n");
+        prompt.push_str("❌ WRONG: \"Here's how you could calculate this in Python...\"\n");
+        prompt.push_str("✅ RIGHT: Return a single Python program that performs the calculation and prints the answer.\n\n");
+        prompt.push_str("**Good use case** (complex calculation):\n");
+        prompt.push_str("```python\nimport math\nresult = 10000 * (1 + 0.07) ** 30\nprint(f\"Final amount: ${result:,.2f}\")\n```\n\n");
+        prompt.push_str("**Bad use case** (just answer directly instead):\n");
+        prompt.push_str("- \"What's 15% of 200?\" → Just say \"30\" - no code needed\n");
+        prompt.push_str("- Simple factual questions → Answer from knowledge\n\n");
+    }
+
+    // Tool discovery and execution section
+    if has_deferred_tools && python_execution_enabled {
+        prompt.push_str("## REQUIRED: Search → Execute Workflow\n\n");
+        prompt.push_str("**You MUST call `tool_search` before using any external tools.**\n");
+        prompt.push_str(
+            "Tools are NOT available until discovered. Do NOT guess or make up tool names.\n\n",
+        );
+
+        prompt.push_str("**WRONG - Never do this:**\n");
+        prompt.push_str("```python\n");
+        prompt.push_str(
+            "from some_module import made_up_function  # FAILS - tools must be discovered first!\n",
+        );
+        prompt.push_str("```\n\n");
+
+        prompt.push_str("**CORRECT - Always follow this pattern inside ONE Python program:**\n\n");
+        prompt.push_str("```python\n");
+        prompt.push_str("# Step 1: discover tools\n");
+        prompt.push_str("tools = tool_search(relevant_to=\"list datasets\")\n");
+        prompt.push_str("# Step 2: call discovered tools\n");
+        prompt.push_str("result = list_dataset_ids()\n");
+        prompt.push_str("print(result)\n");
+        prompt.push_str("# Step 3: repeat tool_search if you need more tools\n");
+        prompt.push_str("```\n\n");
+
+        // Count total tools available
+        let total_deferred: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
+        prompt.push_str(&format!("There are {} tools available across {} server(s). Use `tool_search` to find the right ones.\n\n",
+            total_deferred,
+            deferred_servers.len()));
+    } else if has_deferred_tools {
+        prompt.push_str("## Tool Discovery (REQUIRED)\n\n");
+        prompt.push_str("**You MUST call tool_search(relevant_to=\"...\") inside your Python program before using any external tools.**\n\n");
+        prompt.push_str("**Pattern:**\n");
+        prompt.push_str("```python\n");
+        prompt.push_str("tools = tool_search(relevant_to=\"describe what you need\")\n");
+        prompt.push_str("result = some_discovered_tool()\n");
+        prompt.push_str("print(result)\n");
+        prompt.push_str("```\n\n");
+
+        let total_deferred: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
+        prompt.push_str(&format!(
+            "There are {} tools available. Use `tool_search` to find the right ones.\n\n",
+            total_deferred
+        ));
+    }
+
+    // List ACTIVE MCP tools in full detail (these can be called immediately)
+    if has_active_tools {
+        prompt.push_str("## Active MCP Tools (Ready to Use)\n\n");
+        prompt.push_str("These tools can be called immediately without `tool_search`:\n\n");
+
+        for (server_id, tools) in &active_servers {
+            prompt.push_str(&format!("### Server: `{}`\n\n", server_id));
+
+            // Include server environment variables as context for the model
+            if let Some(config) = server_configs.iter().find(|c| c.id == **server_id) {
+                if !config.env.is_empty() {
+                    prompt.push_str(
+                        "**Server Configuration** (use these values for this server's tools):\n",
+                    );
+                    for (key, value) in &config.env {
+                        // Skip sensitive keys
+                        let key_lower = key.to_lowercase();
+                        if key_lower.contains("secret")
+                            || key_lower.contains("password")
+                            || key_lower.contains("token")
+                            || key_lower.contains("key")
+                        {
+                            continue;
+                        }
+                        prompt.push_str(&format!("- `{}`: `{}`\n", key, value));
+                    }
+                    prompt.push_str("\n");
+                }
+            }
+
+            for tool in *tools {
+                prompt.push_str(&format!("**{}**", tool.name));
+                if let Some(desc) = &tool.description {
+                    prompt.push_str(&format!(": {}", desc));
+                }
+                prompt.push('\n');
+
+                if let Some(schema) = &tool.input_schema {
+                    if let Some(properties) = schema.get("properties") {
+                        if let Some(props) = properties.as_object() {
+                            let required_fields: Vec<&str> = schema
+                                .get("required")
+                                .and_then(|r| r.as_array())
+                                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                                .unwrap_or_default();
+
+                            prompt.push_str("  Arguments:\n");
+                            for (name, prop_schema) in props {
+                                let prop_type = prop_schema
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("string");
+                                let prop_desc = prop_schema
+                                    .get("description")
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("");
+                                let is_required = required_fields.contains(&name.as_str());
+                                let req_marker = if is_required { " [REQUIRED]" } else { "" };
+
+                                prompt.push_str(&format!(
+                                    "  - `{}` ({}){}: {}\n",
+                                    name, prop_type, req_marker, prop_desc
+                                ));
+                            }
+                        }
+                    }
+                }
+                prompt.push('\n');
+            }
+        }
+    }
+
+    prompt
+}
+
+#[derive(Clone, Copy)]
+struct PromptTuningOptions {
+    include_examples: bool,

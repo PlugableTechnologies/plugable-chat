@@ -24,9 +24,9 @@ use crate::agentic_state::{
     RagChunk, RelevancyThresholds, StateEvent, TableInfo,
 };
 use crate::protocol::ToolSchema;
-use crate::settings::{AppSettings, ToolCallFormatName};
+use crate::settings::ToolCallFormatName;
 use crate::settings_state_machine::{OperationalMode, SettingsStateMachine};
-use crate::tool_capability::ToolLaunchFilter;
+use crate::system_prompt;
 
 // ============ State Machine ============
 
@@ -178,66 +178,6 @@ impl AgenticStateMachine {
         }
     }
 
-    /// Create a new state machine with minimal context (legacy constructor).
-    /// 
-    /// **Deprecated**: Prefer `new_from_settings_sm()` for the three-tier architecture.
-    pub fn new(
-        settings: &AppSettings,
-        filter: &ToolLaunchFilter,
-        thresholds: RelevancyThresholds,
-        base_prompt: String,
-    ) -> Self {
-        let enabled_capabilities = Self::compute_enabled_capabilities(settings, filter);
-        let initial_state = Self::compute_default_initial_state(&enabled_capabilities);
-        
-        Self {
-            current_state: initial_state,
-            enabled_capabilities,
-            thresholds,
-            state_history: Vec::new(),
-            base_prompt,
-            // Default context (minimal)
-            mcp_context: McpToolContext::default(),
-            tool_call_format: ToolCallFormatName::Hermes,
-            custom_tool_prompts: HashMap::new(),
-            python_primary: settings.python_execution_enabled,
-            has_attachments: false,
-            auto_tool_search: None,
-            auto_schema_search: None,
-        }
-    }
-
-    /// Create a new state machine with full prompt context (legacy constructor).
-    /// 
-    /// **Deprecated**: Prefer `new_from_settings_sm()` for the three-tier architecture.
-    pub fn new_with_context(
-        settings: &AppSettings,
-        filter: &ToolLaunchFilter,
-        thresholds: RelevancyThresholds,
-        prompt_context: PromptContext,
-    ) -> Self {
-        let enabled_capabilities = Self::compute_enabled_capabilities(settings, filter);
-        
-        // Determine initial state based on enabled capabilities.
-        // If no RAG/Schema context is available yet (we don't know relevancy scores),
-        // we should start in a state that allows tool execution based on capabilities.
-        let initial_state = Self::compute_default_initial_state(&enabled_capabilities);
-        
-        Self {
-            current_state: initial_state,
-            enabled_capabilities,
-            thresholds,
-            state_history: Vec::new(),
-            base_prompt: prompt_context.base_prompt,
-            mcp_context: prompt_context.mcp_context,
-            tool_call_format: prompt_context.tool_call_format,
-            custom_tool_prompts: prompt_context.custom_tool_prompts,
-            python_primary: prompt_context.python_primary,
-            has_attachments: prompt_context.has_attachments,
-            auto_tool_search: None,
-            auto_schema_search: None,
-        }
-    }
     
     /// Compute the default initial state based on enabled capabilities.
     /// 
@@ -265,50 +205,6 @@ impl AgenticStateMachine {
         }
     }
 
-    /// Compute which capabilities are enabled based on settings and CLI filter.
-    fn compute_enabled_capabilities(
-        settings: &AppSettings,
-        filter: &ToolLaunchFilter,
-    ) -> HashSet<Capability> {
-        let mut caps = HashSet::new();
-
-        // RAG is always available if we support attachments
-        // (gated by actual attachment presence at runtime)
-        caps.insert(Capability::Rag);
-
-        // Schema search
-        if settings.schema_search_enabled && filter.builtin_allowed("schema_search") {
-            caps.insert(Capability::SchemaSearch);
-        }
-
-        // SQL query
-        if settings.sql_select_enabled && filter.builtin_allowed("sql_select") {
-            caps.insert(Capability::SqlQuery);
-        }
-
-        // Python execution
-        if settings.python_execution_enabled && filter.builtin_allowed("python_execution") {
-            caps.insert(Capability::PythonExecution);
-        }
-
-        // Tool search
-        if settings.tool_search_enabled && filter.builtin_allowed("tool_search") {
-            caps.insert(Capability::ToolSearch);
-        }
-
-        // MCP tools (if any non-database MCP servers are enabled)
-        // Note: We only check standard MCP servers here, NOT database sources.
-        // Database sources are accessed via sql_select/schema_search, not directly as MCP tools.
-        let has_enabled_mcp_servers = settings.mcp_servers
-            .iter()
-            .any(|s| s.enabled && filter.server_allowed(&s.id));
-
-        if has_enabled_mcp_servers {
-            caps.insert(Capability::McpTools);
-        }
-
-        caps
-    }
 
     /// Compute the initial state based on context (RAG and schema search results).
     /// 
@@ -635,6 +531,11 @@ impl AgenticStateMachine {
     /// - Tool sections only show allowed tools
     /// - Format instructions match `tool_call_format`
     pub fn build_system_prompt(&self) -> String {
+        self.build_system_prompt_sections().join("\n\n")
+    }
+
+    /// Build the system prompt as a list of sections.
+    pub fn build_system_prompt_sections(&self) -> Vec<String> {
         let mut sections: Vec<String> = vec![self.base_prompt.clone()];
 
         // 1. Capabilities section (based on enabled_capabilities)
@@ -674,60 +575,14 @@ impl AgenticStateMachine {
             sections.push(self.build_python_section());
         }
 
-        sections.join("\n\n")
+        sections
     }
 
     // ============ Prompt Section Builders ============
 
     /// Build the Capabilities section based on enabled_capabilities.
     fn build_capabilities_section(&self) -> Option<String> {
-        let has_sql = self.enabled_capabilities.contains(&Capability::SqlQuery)
-            || self.enabled_capabilities.contains(&Capability::SchemaSearch);
-        let has_python = self.enabled_capabilities.contains(&Capability::PythonExecution);
-        let has_mcp = self.enabled_capabilities.contains(&Capability::McpTools)
-            || self.enabled_capabilities.contains(&Capability::ToolSearch);
-        let has_rag = self.has_attachments;
-
-        // If no tools are enabled, return None
-        if !has_sql && !has_python && !has_mcp && !has_rag {
-            return None;
-        }
-
-        let mut capability_list: Vec<&str> = Vec::new();
-
-        if has_sql {
-            capability_list.push("execute SQL queries against configured databases");
-        }
-        if has_python {
-            capability_list.push("perform calculations in a Python sandbox");
-        }
-        if has_mcp {
-            capability_list.push("use external tools via MCP servers");
-        }
-        if has_rag {
-            capability_list.push("answer questions from attached documents");
-        }
-
-        if capability_list.is_empty() {
-            return None;
-        }
-
-        let capabilities_str = match capability_list.len() {
-            1 => capability_list[0].to_string(),
-            2 => format!("{} and {}", capability_list[0], capability_list[1]),
-            _ => {
-                let last = capability_list.pop().unwrap();
-                format!("{}, and {}", capability_list.join(", "), last)
-            }
-        };
-
-        Some(format!(
-            "## Capabilities\n\n\
-            You are equipped with specialized tools to {}. \
-            You MUST use these tools whenever the user's request requires factual data or tool execution. \
-            Do NOT claim you cannot perform these tasks; use the tools listed below.",
-            capabilities_str
-        ))
+        system_prompt::build_capabilities_section(&self.enabled_capabilities, self.has_attachments)
     }
 
     /// Check if we have data retrieval tools enabled.
@@ -740,33 +595,7 @@ impl AgenticStateMachine {
 
     /// Build the Factual Grounding section based on enabled tools.
     fn build_factual_grounding_section(&self) -> String {
-        let has_sql = self.enabled_capabilities.contains(&Capability::SqlQuery);
-        let has_mcp = self.enabled_capabilities.contains(&Capability::McpTools)
-            || self.enabled_capabilities.contains(&Capability::ToolSearch);
-
-        // Build tool-specific examples
-        let mut tool_examples: Vec<&str> = Vec::new();
-        if has_sql {
-            tool_examples.push("`sql_select`");
-        }
-        if has_mcp {
-            tool_examples.push("MCP tools");
-        }
-
-        let examples_str = if tool_examples.is_empty() {
-            "the appropriate tools".to_string()
-        } else {
-            tool_examples.join(" or ")
-        };
-
-        format!(
-            "## Factual Grounding\n\n\
-            **CRITICAL**: Never make up, infer, or guess data values. All factual information \
-            (numbers, dates, totals, etc.) MUST come from executing tools like {} or \
-            referencing the provided context. If you need data, use the appropriate tool first. \
-            If you cannot get the data, say so explicitly rather than inventing results.",
-            examples_str
-        )
+        system_prompt::build_factual_grounding(&self.enabled_capabilities, self.has_attachments)
     }
 
     /// Build the state-specific context section.
@@ -774,67 +603,15 @@ impl AgenticStateMachine {
         match &self.current_state {
             AgenticState::Conversational => None,
 
-            AgenticState::RagRetrieval { max_chunk_relevancy, .. } => Some(format!(
-                "## Document Context\n\n\
-                The user has attached documents to this conversation (relevancy score: {:.2}).\n\
-                Answer the user's question using the context provided in their message.\n\
-                The document content has already been extracted and is included above.\n\n\
-                If the provided context doesn't fully answer the question, say so clearly.",
-                max_chunk_relevancy
-            )),
+            AgenticState::RagRetrieval { max_chunk_relevancy, .. } => {
+                Some(system_prompt::build_document_context_summary(*max_chunk_relevancy))
+            }
 
             AgenticState::SqlRetrieval { discovered_tables, max_table_relevancy } => {
                 let table_list = self.format_table_list(discovered_tables);
-                
-                // Get the appropriate tool call format syntax
-                let tool_call_syntax = match self.tool_call_format {
-                    ToolCallFormatName::Native => "<tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>".to_string(),
-                    ToolCallFormatName::Hermes => "<tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>".to_string(),
-                    ToolCallFormatName::Mistral => "[TOOL_CALLS] [{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}]".to_string(),
-                    ToolCallFormatName::Pythonic => "sql_select(sql=\"SELECT ...\")".to_string(),
-                    ToolCallFormatName::PureJson => "{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}".to_string(),
-                    ToolCallFormatName::CodeMode => "sql_select(sql=\"SELECT ...\")".to_string(),
-                };
-                
-                let base_sql_instructions = format!(
-                    "Use the `sql_select` tool to query these tables.\n\n\
-                    **ACTION REQUIRED**: Execute queries using the tool-call format:\n\
-                    ```\n\
-                    {}\n\
-                    ```\n\n\
-                    **CRITICAL REQUIREMENTS**:\n\
-                    - Execute queries to answer data questions - do NOT return SQL code\n\
-                    - ONLY use columns explicitly listed in the schema above\n\
-                    - NEVER guess column names - if not listed, it doesn't exist\n\
-                    - Prefer aggregation (SUM, COUNT, AVG, etc.) of numeric columns to get final answers directly\n\
-                    - Limit results to 25 rows or less through the design of the query\n\
-                    - Avoid TO_CHAR function; use CAST(column AS STRING) instead\n\
-                    - NEVER display SQL code to the user - only show query results\n\
-                    - If a query fails, read the error and fix it rather than inventing results",
-                    tool_call_syntax
-                );
-                
-                let mut section = format!(
-                    "## Database Context\n\n\
-                    The following database tables are relevant to the user's question (max relevancy: {:.2}):\n\n\
-                    {}\n\n\
-                    ## SQL Execution\n\n\
-                    {}",
-                    max_table_relevancy,
-                    table_list,
-                    base_sql_instructions
-                );
-
-                // Add custom sql_select prompt if available
-                if let Some(custom) = self.custom_tool_prompts.get("builtin::sql_select") {
-                    let trimmed = custom.trim();
-                    if !trimmed.is_empty() {
-                        section.push_str("\n\n**Additional SQL Instructions**:\n");
-                        section.push_str(trimmed);
-                    }
-                }
-
-                Some(section)
+                let first_table = discovered_tables.first().map(|t| t.fully_qualified_name.as_str());
+                let base_sql_instructions = system_prompt::build_sql_instructions(self.tool_call_format, first_table);
+                Some(system_prompt::build_retrieved_sql_context(*max_table_relevancy, &table_list, &base_sql_instructions))
             }
 
             AgenticState::ToolOrchestration { materialized_tools } => {
@@ -858,11 +635,7 @@ impl AgenticStateMachine {
             AgenticState::Hybrid { active_capabilities, rag_relevancy, schema_relevancy } => {
                 let mut parts = Vec::new();
                 if active_capabilities.contains(&Capability::Rag) {
-                    parts.push(format!(
-                        "## Document Context (relevancy: {:.2})\n\n\
-                        Document content has been provided in the conversation above.",
-                        rag_relevancy
-                    ));
+                    parts.push(system_prompt::build_document_context_summary(*rag_relevancy));
                 }
                 if active_capabilities.contains(&Capability::SqlQuery) {
                     parts.push(format!(
@@ -880,45 +653,14 @@ impl AgenticStateMachine {
 
             AgenticState::RagContextInjected { chunks, max_relevancy, .. } => {
                 let chunks_text = self.format_rag_chunks(chunks);
-                Some(format!(
-                    "## Retrieved Document Context\n\n\
-                    The following excerpts are relevant to the user's question (max relevancy: {:.2}):\n\n\
-                    {}\n\n\
-                    Answer the user's question using this context. Cite sources when helpful.\n\
-                    If the context doesn't fully answer the question, say so clearly.",
-                    max_relevancy,
-                    chunks_text
-                ))
+                Some(system_prompt::build_retrieved_document_context(*max_relevancy, &chunks_text))
             }
 
             AgenticState::SchemaContextInjected { tables, max_relevancy, sql_enabled } => {
                 let table_list = self.format_table_list(tables);
                 let sql_instructions = if *sql_enabled {
-                    // Get the appropriate tool call format syntax
-                    let tool_call_syntax = match self.tool_call_format {
-                        ToolCallFormatName::Native => "<tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>".to_string(),
-                        ToolCallFormatName::Hermes => "<tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>".to_string(),
-                        ToolCallFormatName::Mistral => "[TOOL_CALLS] [{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}]".to_string(),
-                        ToolCallFormatName::Pythonic => "sql_select(sql=\"SELECT ...\")".to_string(),
-                        ToolCallFormatName::PureJson => "{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}".to_string(),
-                        ToolCallFormatName::CodeMode => "sql_select(sql=\"SELECT ...\")".to_string(),
-                    };
-                    
-                    let mut instr = format!(
-                        "Use the `sql_select` tool to query these tables.\n\n\
-                        **ACTION REQUIRED**: Execute queries using the tool-call format:\n\
-                        ```\n\
-                        {}\n\
-                        ```\n\n\
-                        **CRITICAL REQUIREMENTS**:\n\
-                        - Execute queries to answer data questions - do NOT return SQL code\n\
-                        - ONLY use columns explicitly listed in the schema above\n\
-                        - NEVER guess column names - if not listed, it doesn't exist\n\
-                        - Prefer aggregation (SUM, COUNT, AVG, etc.) of numeric columns to get final answers directly\n\
-                        - Limit results to 25 rows or less through the design of the query\n\
-                        - Avoid TO_CHAR function; use CAST(column AS STRING) or FORMAT_DATE instead",
-                        tool_call_syntax
-                    );
+                    let first_table = tables.first().map(|t| t.fully_qualified_name.as_str());
+                    let mut instr = system_prompt::build_sql_instructions(self.tool_call_format, first_table);
                     if let Some(custom) = self.custom_tool_prompts.get("builtin::sql_select") {
                         let trimmed = custom.trim();
                         if !trimmed.is_empty() {
@@ -930,145 +672,61 @@ impl AgenticStateMachine {
                 } else {
                     "Note: SQL execution is not available for this query (relevancy below threshold).".to_string()
                 };
-                Some(format!(
-                    "## Discovered Database Tables\n\n\
-                    The following tables are relevant to the user's question (max relevancy: {:.2}):\n\n\
-                    {}\n\n\
-                    {}",
-                    max_relevancy,
-                    table_list,
-                    sql_instructions
-                ))
+                Some(system_prompt::build_retrieved_sql_context(*max_relevancy, &table_list, &sql_instructions))
             }
 
-            AgenticState::SqlResultCommentary { row_count, query_context, .. } => Some(format!(
-                "## Query Results Commentary\n\n\
-                The user has received the query results in table form ({} rows, context: {}).\n\n\
-                Your role now is to:\n\
-                1. Provide helpful commentary explaining what the data shows\n\
-                2. Highlight any notable patterns, outliers, or insights\n\
-                3. Suggest potential follow-up queries or next steps if relevant\n\
-                4. Answer the user's original question based on the results\n\n\
-                Do NOT re-display the data - the user already sees it. Focus on interpretation and guidance.",
-                row_count,
+            AgenticState::SqlResultCommentary { query_context, .. } => Some(format!(
+                "## SQL Result Analysis\n\n\
+                The previous tool execution returned: {}. \
+                Summarize these results for the user and answer any follow-up questions.",
                 query_context
             )),
 
             AgenticState::CodeExecutionHandoff { stderr_for_model, .. } => Some(format!(
-                "## Python Execution Handoff\n\n\
-                Your previous Python program produced the following on stderr (handoff channel):\n\
-                ---\n\
+                "## Python Handoff Context\n\n\
+                The previous execution returned data on stderr for your consideration:\n\n\
+                ```\n\
                 {}\n\
-                ---\n\n\
-                The user has already seen the stdout output. Continue processing based on the stderr handoff.\n\
-                If you need to run more code, output another ```python block.\n\
-                If the task is complete, provide a final summary to the user.",
+                ```\n\n\
+                Use this information to continue the task or provide a final answer.",
                 stderr_for_model
             )),
 
             AgenticState::ToolsDiscovered { newly_materialized, available_for_call } => {
-                let tools_str = newly_materialized.join(", ");
-                let schema_summary = self.format_tool_schemas(available_for_call);
+                let newly_str = if newly_materialized.is_empty() {
+                    "No new tools were materialized.".to_string()
+                } else {
+                    format!("Newly materialized tools: {}", newly_materialized.join(", "))
+                };
+                let schemas_text = self.format_tool_schemas(available_for_call);
                 Some(format!(
-                    "## Tools Discovered\n\n\
-                    The following tools are now available: {}\n\n\
+                    "## New Tools Discovered\n\n\
                     {}\n\n\
-                    Call these tools to complete the user's task.",
-                    tools_str,
-                    schema_summary
+                    You can now use these tools in your next Python execution:\n\n\
+                    {}",
+                    newly_str,
+                    schemas_text
                 ))
             }
         }
     }
 
-    /// Build the auto-discovery context section.
-    /// 
-    /// This renders the results from automatic tool_search and schema_search
-    /// that ran before the model's first response.
+    /// Build auto-discovery context (tool_search and schema_search results)
     fn build_auto_discovery_section(&self) -> Option<String> {
         let mut sections: Vec<String> = Vec::new();
 
         // Auto tool search results
         if let Some(ref output) = self.auto_tool_search {
-            if !output.tools.is_empty() {
-                let mut body = String::from("Auto-discovered MCP tools for this prompt:");
-                for tool in &output.tools {
-                    let desc = tool.description.as_deref().unwrap_or("").trim();
-                    let mut line = format!(
-                        "\n- {}::{} (score {:.2})",
-                        tool.server_id, tool.name, tool.score
-                    );
-                    if !desc.is_empty() {
-                        line.push_str(&format!(" — {}", desc));
-                    }
-                    body.push_str(&line);
-                }
-                sections.push(format!("### Auto tool search\n{}", body));
+            if let Some(section) = system_prompt::build_auto_tool_search_section(&output.tools) {
+                sections.push(section);
             }
         }
 
         // Auto schema search results (only if state doesn't already have schema context)
         if !self.current_state.has_schema_context() {
             if let Some(ref output) = self.auto_schema_search {
-                if !output.tables.is_empty() {
-                    // Apply rule: if we have RAG results (attachments), only include SQL context
-                    // if the highest relevance score is > 40%.
-                    let max_score = output.tables.iter().map(|t| t.relevance).fold(0.0f32, f32::max);
-                    if self.has_attachments && max_score <= 0.40 {
-                        println!(
-                            "[StateMachine] Auto schema_search suppressed: RAG available and max SQL score ({:.2}) <= 0.40",
-                            max_score
-                        );
-                    } else {
-                        let mut body = String::from("Auto-discovered database tables for this prompt:");
-                        for table in &output.tables {
-                            let mut line = format!(
-                                "\n- {} [{} Syntax | {}] (score {:.2})",
-                                table.table_name, table.sql_dialect, table.source_id, table.relevance
-                            );
-                            if let Some(desc) = table.description.as_deref() {
-                                if !desc.trim().is_empty() {
-                                    line.push_str(&format!(" — {}", desc.trim()));
-                                }
-                            }
-                            if !table.relevant_columns.is_empty() {
-                                let cols: Vec<String> = table
-                                    .relevant_columns
-                                    .iter()
-                                    .take(40) // Show up to 40 columns
-                                    .map(|c| format!("{} ({})", c.name, c.data_type))
-                                    .collect();
-                                let cols_str = if cols.len() < table.relevant_columns.len() {
-                                    format!("{}, ... ({} more)", cols.join(", "), table.relevant_columns.len() - cols.len())
-                                } else {
-                                    cols.join(", ")
-                                };
-                                line.push_str(&format!("\n  cols: {}", cols_str));
-                            }
-                            body.push_str(&line);
-                        }
-                        body.push_str("\n\n**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n\
-1. Write a SQL query using ONLY the table and columns listed above. Do NOT assume other columns exist.\n\
-2. Execute the query using `sql_select` with the tool-call format:\n\
-   ```\n\
-   <tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>\n\
-   ```\n\
-   The `source_id` is optional when only one database is enabled.\n\
-3. **AGGREGATION PREFERRED**: Use SQL aggregation (SUM, COUNT, AVG, etc.) of numeric columns to get final answers directly.\n\
-4. **ROW LIMIT**: Limit results to 25 rows or less through the design of the query.\n\
-5. **AVOID TO_CHAR**: Use CAST(column AS STRING) instead of TO_CHAR.\n\
-6. **COLUMNS & DATES**: Check listed columns for date/time fields. If none listed, use `schema_search` first.\n\n\
-**CRITICAL - NO HALLUCINATIONS**:\n\
-- ONLY use columns explicitly listed in the `cols:` section above.\n\
-- NEVER guess or invent column names.\n\
-- If a query returns `null`, the data is missing - do NOT assume the tool failed.\n\
-- NEVER make up data values. All facts MUST come from executing `sql_select`.\n\
-- NEVER display SQL code to the user - only show query results.\n\
-- If the query fails, read the error and fix it rather than inventing results.");
-                        sections.push(format!("### Auto schema search\n{}", body));
-                    }
-                } else if output.summary.contains("WARNING") {
-                    sections.push(format!("### Auto schema search\n{}", output.summary));
+                if let Some(section) = system_prompt::build_auto_schema_search_section(&output.tables, &output.summary, self.has_attachments) {
+                    sections.push(section);
                 }
             }
         }
@@ -1081,6 +739,7 @@ impl AgenticStateMachine {
     }
 
     /// Build tool format instructions based on tool_call_format.
+    /// Build tool format instructions based on tool_call_format.
     fn build_format_instructions(&self) -> Option<String> {
         // Don't add format instructions if no tools are available
         if !self.enabled_capabilities.contains(&Capability::SqlQuery)
@@ -1091,30 +750,7 @@ impl AgenticStateMachine {
             return None;
         }
 
-        match self.tool_call_format {
-            ToolCallFormatName::Native => None, // Native tools don't need instructions
-            ToolCallFormatName::Hermes => Some(
-                "## Tool Calling Format\n\n\
-                When you need to use a tool, output ONLY:\n\
-                <tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>".to_string()
-            ),
-            ToolCallFormatName::Mistral => Some(
-                "## Tool Calling Format\n\n\
-                When you need to use a tool, output:\n\
-                [TOOL_CALLS] [{\"name\": \"tool_name\", \"arguments\": {...}}]".to_string()
-            ),
-            ToolCallFormatName::Pythonic => Some(
-                "## Tool Calling Format\n\n\
-                When you need to use a tool, output:\n\
-                tool_name(arg1=\"value\", arg2=123)".to_string()
-            ),
-            ToolCallFormatName::PureJson => Some(
-                "## Tool Calling Format\n\n\
-                When you need to use a tool, output a JSON object:\n\
-                {\"name\": \"tool_name\", \"arguments\": {...}}".to_string()
-            ),
-            ToolCallFormatName::CodeMode => None, // Code mode has its own section
-        }
+        system_prompt::build_format_instructions(self.tool_call_format, None)
     }
 
     /// Build MCP tool section from mcp_context.
@@ -1127,69 +763,27 @@ impl AgenticStateMachine {
 
         // Active tools (can be called immediately)
         if self.mcp_context.has_active_tools() {
-            parts.push("## Active MCP Tools (Ready to Use)\n\nThese tools can be called immediately:".to_string());
-            
-            for (server_id, tools) in &self.mcp_context.active_tools {
-                if tools.is_empty() {
-                    continue;
-                }
-                
-                parts.push(format!("\n### Server: `{}`\n", server_id));
-                
-                for tool in tools {
-                    let mut tool_desc = format!("**{}**", tool.name);
-                    if let Some(desc) = &tool.description {
-                        tool_desc.push_str(&format!(": {}", desc));
-                    }
-                    parts.push(tool_desc);
-
-                    // Add custom tool prompt if available
-                    let prompt_key = format!("{}::{}", server_id, tool.name);
-                    if let Some(custom_prompt) = self.custom_tool_prompts.get(&prompt_key) {
-                        let trimmed = custom_prompt.trim();
-                        if !trimmed.is_empty() {
-                            parts.push(format!("  *Instruction*: {}", trimmed));
-                        }
-                    }
-                    
-                    // Add parameter info if available
-                    if let Some(schema) = &tool.parameters_schema {
-                        if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
-                            let required: Vec<&str> = schema
-                                .get("required")
-                                .and_then(|r| r.as_array())
-                                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-                                .unwrap_or_default();
-                            
-                            parts.push("  Arguments:".to_string());
-                            for (name, prop) in props {
-                                let prop_type = prop.get("type").and_then(|t| t.as_str()).unwrap_or("string");
-                                let is_required = required.contains(&name.as_str());
-                                let req_marker = if is_required { " [REQUIRED]" } else { "" };
-                                parts.push(format!("  - `{}` ({}){}", name, prop_type, req_marker));
-                            }
-                        }
-                    }
-                }
+            if let Some(mcp_section) = system_prompt::build_mcp_tools_documentation(
+                &self.mcp_context.active_tools,
+                &self.mcp_context.servers,
+                &self.custom_tool_prompts,
+            ) {
+                parts.push(mcp_section);
             }
         }
 
         // Deferred tools (require discovery)
         if self.mcp_context.has_deferred_tools() {
-            let count = self.mcp_context.deferred_tool_count();
-            let server_count = self.mcp_context.deferred_tools.len();
-            parts.push(format!(
-                "\n## Deferred MCP Tools\n\n\
-                There are {} tools available across {} server(s). \
-                Use `tool_search` to discover relevant tools before using them.",
-                count, server_count
+            parts.push(system_prompt::build_deferred_mcp_tool_summary(
+                self.mcp_context.deferred_tool_count(),
+                self.mcp_context.deferred_tools.len()
             ));
         }
 
         if parts.is_empty() {
             None
         } else {
-            Some(parts.join("\n"))
+            Some(parts.join("\n\n"))
         }
     }
 
@@ -1234,38 +828,10 @@ impl AgenticStateMachine {
         parts.join("\n\n")
     }
 
-    /// Generate the factual grounding section (anti-hallucination) - legacy version.
-    #[allow(dead_code)]
-    fn factual_grounding_section(&self) -> String {
-        "## Factual Grounding\n\n\
-        **CRITICAL**: Never make up, infer, or guess data values. All factual information \
-        (numbers, dates, totals, sales figures, etc.) MUST come from executing tools or \
-        referencing the provided context. If you need data, use the appropriate tool first. \
-        If you cannot get the data, say so explicitly rather than inventing results.".to_string()
-    }
 
     /// Generate the Python execution prompt section.
     fn python_execution_prompt(&self, available_tools: &[String]) -> String {
-        let tools_section = if available_tools.is_empty() {
-            "Use `tool_search` to discover available tools if needed.".to_string()
-        } else {
-            format!("Available tools: {}", available_tools.join(", "))
-        };
-
-        let mut prompt = format!(
-            "## Python Execution\n\n\
-            You must return exactly one runnable Python program. Do not return explanations or multiple blocks.\n\n\
-            Output format: a single ```python ... ``` block. We will execute it and surface any print output directly to the user.\n\n\
-            **stdout/stderr Semantics**:\n\
-            - Use `print(...)` for user-facing output (shown to user)\n\
-            - Use `sys.stderr.write(...)` for handoff text (triggers continuation)\n\n\
-            **Allowed imports**: math, json, random, re, datetime, collections, itertools, functools, \
-            operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, \
-            statistics, hashlib, base64, binascii, html.\n\n\
-            {}\n\n\
-            Keep code concise and runnable; include prints for results the user should see.",
-            tools_section
-        );
+        let mut prompt = system_prompt::build_python_prompt(available_tools, self.has_attachments);
 
         // Add custom python_execution prompt if available
         if let Some(custom) = self.custom_tool_prompts.get("builtin::python_execution") {
@@ -1279,72 +845,16 @@ impl AgenticStateMachine {
         prompt
     }
 
-    /// Format a list of tables for the prompt.
     fn format_table_list(&self, tables: &[TableInfo]) -> String {
-        if tables.is_empty() {
-            return "No tables discovered.".to_string();
-        }
-
-        tables
-            .iter()
-            .map(|table| {
-                let cols: Vec<String> = table
-                    .columns
-                    .iter()
-                    .take(40) // Show up to 40 columns to give model enough context
-                    .map(|c| format!("{} ({})", c.name, c.data_type))
-                    .collect();
-                let cols_str = if cols.len() < table.columns.len() {
-                    format!("{}, ... ({} more)", cols.join(", "), table.columns.len() - cols.len())
-                } else {
-                    cols.join(", ")
-                };
-                format!(
-                    "- **{}** [{} Syntax] (relevancy: {:.2})\n  Columns: {}",
-                    table.fully_qualified_name,
-                    table.sql_dialect,
-                    table.relevancy,
-                    cols_str
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        system_prompt::format_table_list(tables)
     }
 
-    /// Format RAG chunks for the prompt.
     fn format_rag_chunks(&self, chunks: &[RagChunk]) -> String {
-        if chunks.is_empty() {
-            return "No document chunks available.".to_string();
-        }
-
-        chunks
-            .iter()
-            .map(|chunk| {
-                let preview: String = chunk.content.chars().take(500).collect();
-                let truncated = if chunk.content.len() > 500 { "..." } else { "" };
-                format!(
-                    "### {} (relevancy: {:.2})\n\n{}{}",
-                    chunk.source_file, chunk.relevancy, preview, truncated
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
+        system_prompt::format_rag_chunks(chunks)
     }
 
-    /// Format tool schemas for the prompt.
     fn format_tool_schemas(&self, schemas: &[ToolSchema]) -> String {
-        if schemas.is_empty() {
-            return "".to_string();
-        }
-
-        schemas
-            .iter()
-            .map(|schema| {
-                let desc = schema.description.as_deref().unwrap_or("No description");
-                format!("- **{}**: {}", schema.name, desc)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        system_prompt::format_tool_schemas(schemas)
     }
 }
 
@@ -1484,13 +994,28 @@ mod tests {
         settings
     }
 
+    fn create_test_machine(settings: &AppSettings, _filter: &ToolLaunchFilter, _thresholds: RelevancyThresholds, prompt: String) -> AgenticStateMachine {
+        let settings_sm = SettingsStateMachine::from_settings(settings, &ToolLaunchFilter::default());
+        AgenticStateMachine::new_from_settings_sm(
+            &settings_sm,
+            crate::agentic_state::PromptContext {
+                base_prompt: prompt,
+                mcp_context: crate::agentic_state::McpToolContext::default(),
+                tool_call_format: ToolCallFormatName::Hermes,
+                custom_tool_prompts: HashMap::new(),
+                python_primary: false,
+                has_attachments: false,
+            },
+        )
+    }
+
     #[test]
     fn test_state_machine_creation() {
         let settings = test_settings();
         let filter = ToolLaunchFilter::default();
         let thresholds = RelevancyThresholds::default();
 
-        let machine = AgenticStateMachine::new(&settings, &filter, thresholds, "Test prompt".to_string());
+        let machine = create_test_machine(&settings, &filter, thresholds, "Test prompt".to_string());
 
         assert!(machine
             .enabled_capabilities()
@@ -1510,7 +1035,7 @@ mod tests {
         let thresholds = RelevancyThresholds::default();
 
         let mut machine =
-            AgenticStateMachine::new(&settings, &filter, thresholds, "Test".to_string());
+            create_test_machine(&settings, &filter, thresholds, "Test".to_string());
 
         // RAG relevancy above dominant threshold
         machine.compute_initial_state(0.7, 0.3, vec![], vec![]);
@@ -1534,7 +1059,7 @@ mod tests {
         let thresholds = RelevancyThresholds::default();
 
         let mut machine =
-            AgenticStateMachine::new(&settings, &filter, thresholds, "Test".to_string());
+            create_test_machine(&settings, &filter, thresholds, "Test".to_string());
 
         // Only schema relevancy passes
         machine.compute_initial_state(0.1, 0.5, vec![], vec![]);
@@ -1554,7 +1079,7 @@ mod tests {
         let thresholds = RelevancyThresholds::default();
 
         let mut machine =
-            AgenticStateMachine::new(&settings, &filter, thresholds, "Test".to_string());
+            create_test_machine(&settings, &filter, thresholds, "Test".to_string());
 
         machine.compute_initial_state(0.1, 0.5, vec![], vec![]);
 
@@ -1570,7 +1095,7 @@ mod tests {
         let thresholds = RelevancyThresholds::default();
 
         let mut machine =
-            AgenticStateMachine::new(&settings, &filter, thresholds, "Test".to_string());
+            create_test_machine(&settings, &filter, thresholds, "Test".to_string());
 
         machine.compute_initial_state(0.1, 0.5, vec![], vec![]);
 
@@ -1609,7 +1134,7 @@ mod tests {
         let thresholds = RelevancyThresholds::default();
 
         let mut machine =
-            AgenticStateMachine::new(&settings, &filter, thresholds, "Test".to_string());
+            create_test_machine(&settings, &filter, thresholds, "Test".to_string());
 
         // Start in code execution mode
         machine.compute_initial_state(0.0, 0.0, vec![], vec![]);
@@ -1641,7 +1166,7 @@ mod tests {
         let filter = ToolLaunchFilter::default();
         let thresholds = RelevancyThresholds::default();
 
-        let machine = AgenticStateMachine::new(&settings, &filter, thresholds, "Test".to_string());
+        let machine = create_test_machine(&settings, &filter, thresholds, "Test".to_string());
 
         let previews = machine.get_possible_states();
 

@@ -6,6 +6,7 @@ pub mod protocol;
 pub mod settings;
 pub mod settings_state_machine;
 pub mod state_machine;
+pub mod system_prompt;
 pub mod tool_adapters;
 pub mod tool_capability;
 pub mod tool_registry;
@@ -2830,840 +2831,8 @@ async fn run_agentic_loop(
     // #endregion
 }
 
-/// Legacy system prompt builder (kept for reference)
-#[allow(dead_code)]
-fn legacy_build_system_prompt(
-    base_prompt: &str,
-    tool_descriptions: &[(String, Vec<McpTool>)],
-    server_configs: &[McpServerConfig],
-    python_execution_enabled: bool,
-    has_attachments: bool,
-) -> String {
-    let mut prompt = base_prompt.to_string();
 
-    // Categorize servers by defer status
-    let mut active_servers: Vec<(&String, &Vec<McpTool>)> = Vec::new();
-    let mut deferred_servers: Vec<(&String, &Vec<McpTool>)> = Vec::new();
-
-    for (server_id, tools) in tool_descriptions {
-        if tools.is_empty() {
-            continue;
-        }
-        let is_deferred = server_configs
-            .iter()
-            .find(|c| c.id == *server_id)
-            .map(|c| c.defer_tools)
-            .unwrap_or(true); // Default to deferred if config not found
-
-        if is_deferred {
-            deferred_servers.push((server_id, tools));
-        } else {
-            active_servers.push((server_id, tools));
-        }
-    }
-
-    let has_active_tools = !active_servers.is_empty();
-    let has_deferred_tools = !deferred_servers.is_empty();
-    let has_mcp_tools = has_active_tools || has_deferred_tools;
-    let has_any_tools = python_execution_enabled || has_mcp_tools;
-
-    let _active_tool_count: usize = active_servers.iter().map(|(_, t)| t.len()).sum();
-    let _deferred_tool_count: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
-
-    // ===== CRITICAL: Attached Documents (only if python_execution is enabled AND attachments exist) =====
-    if python_execution_enabled && has_attachments {
-        prompt.push_str("\n\n## CRITICAL: How Attached Documents Work\n\n");
-        prompt.push_str("The user has attached files to this chat. Important:\n");
-        prompt.push_str("- The text content is **already extracted** and shown in the user's message as \"Context from attached documents\"\n");
-        prompt.push_str(
-            "- ❌ **You CANNOT access the original files** - no file paths, no file I/O\n",
-        );
-        prompt.push_str("- ✅ **To analyze the content**: Use the text already provided in the conversation\n\n");
-        prompt.push_str("**WRONG:** `with open('document.pdf', 'r') as f: ...`\n");
-        prompt.push_str("**CORRECT:** Use the extracted text directly in python_execution as a string literal.\n\n");
-    }
-
-    // ===== Tool Selection Guide (only if any tools are enabled) =====
-    if has_any_tools {
-        prompt.push_str("## Tool Selection Guide\n\n");
-        prompt.push_str("**IMPORTANT: Before using any tool, first ask yourself: Can I answer this directly from my knowledge?**\n\n");
-        prompt.push_str("Most questions can be answered without tools. Only use tools when they provide a clear advantage.\n\n");
-
-        if python_execution_enabled {
-            prompt.push_str("### 1. `python_execution` (Built-in Python Sandbox)\n");
-            prompt.push_str(
-                "**WHEN TO USE** (only when it provides clear advantage over your knowledge):\n",
-            );
-            prompt.push_str("- Complex arithmetic that's error-prone to compute mentally (e.g., compound interest over 30 years)\n");
-            prompt.push_str(
-                "- Processing/transforming data the user has provided in the conversation\n",
-            );
-            prompt.push_str("- Generating structured output (JSON, CSV) from conversation data\n");
-            prompt.push_str("- Pattern matching or text manipulation on user-provided text\n\n");
-            prompt.push_str("**WHEN NOT TO USE** (just answer directly):\n");
-            prompt.push_str("- Simple math you can do reliably (e.g., \"what's 15% of 80?\")\n");
-            prompt.push_str("- Date/calendar questions (e.g., \"what day is Jan 6, 2026?\") - answer from knowledge\n");
-            prompt.push_str("- Questions about facts, concepts, or explanations\n");
-            prompt.push_str("- Anything where your knowledge is sufficient and reliable\n\n");
-            prompt.push_str("**LIMITATIONS:** \n");
-            prompt.push_str(
-                "- ❌ CANNOT access internet, databases, files, APIs, or any external systems\n",
-            );
-            prompt.push_str("- ❌ CANNOT read or write files - NO filesystem access at all\n");
-            prompt.push_str("- ✅ Available modules: math, json, random, re, datetime, collections, itertools, functools, statistics, decimal, fractions, hashlib, base64\n\n");
-
-            // One-shot example to help smaller models understand they should CALL the tool
-            prompt.push_str("**EXAMPLE - When user says \"calculate\" or \"execute\":**\n\n");
-            prompt
-                .push_str("User: \"Calculate compound interest on $5000 at 6% for 10 years\"\n\n");
-            prompt.push_str("✅ CORRECT - Return a single Python program:\n");
-            prompt.push_str("```python\n");
-            prompt.push_str("principal = 5000\nrate = 0.06\nyears = 10\nresult = principal * (1 + rate) ** years\nprint(f\"Result: ${result:,.2f}\")\n");
-            prompt.push_str("```\n\n");
-            prompt.push_str("❌ WRONG - Don't just describe code without executing it.\n\n");
-        }
-
-        if has_mcp_tools && has_deferred_tools && python_execution_enabled {
-            // Primary workflow: search → execute with Python → repeat
-            prompt.push_str("### 2. External Tools (Databases, APIs, Files, etc.)\n\n");
-            prompt.push_str("**WORKFLOW: Search → Execute → Repeat**\n\n");
-            prompt
-                .push_str("For tasks requiring external data or actions, follow this pattern:\n\n");
-            prompt.push_str(
-                "1. **SEARCH**: Call `tool_search` to find relevant tools for your current step\n",
-            );
-            prompt.push_str("2. **EXECUTE**: Write a Python program using `python_execution` that calls the discovered tools\n");
-            prompt.push_str("3. **REPEAT**: If more steps are needed, search again for the next step's tools\n\n");
-            prompt.push_str("**IMPORTANT**: Tools you discover stay available for this user turn. Re-use them in python_execution without searching again. They reset only when the user sends a new message.\n\n");
-        } else if has_mcp_tools {
-            let section_num = if python_execution_enabled { "2" } else { "1" };
-            prompt.push_str(&format!(
-                "### {}. MCP Tools (External Capabilities)\n",
-                section_num
-            ));
-            prompt.push_str("**USE FOR:** Anything requiring external access - databases, APIs, files, web, etc.\n");
-            prompt.push_str("**HOW TO USE:**\n");
-            if has_deferred_tools {
-                prompt.push_str(
-                    "1. First call `tool_search` to discover available tools for your task\n",
-                );
-                prompt.push_str("2. Then call the discovered tools directly\n\n");
-            } else if has_active_tools {
-                prompt.push_str("- Call active MCP tools directly (listed below)\n\n");
-            }
-        }
-
-        prompt.push_str("### COMMON MISTAKES TO AVOID:\n");
-        prompt.push_str("- ❌ Saying \"I can't do that\" without trying tool_search first\n");
-        prompt.push_str(
-            "- ❌ Making up function names or imports - tools MUST be discovered first\n",
-        );
-        prompt.push_str(
-            "- ❌ Showing code without executing it - USE the tools, don't just describe them\n",
-        );
-        if python_execution_enabled && has_deferred_tools {
-            prompt.push_str("- ❌ Using `python_execution` with undiscovered tools - call `tool_search` first!\n");
-        }
-        prompt.push_str("- ✅ When stuck, call `tool_search` to find what tools are available\n\n");
-
-        // Tool calling format instructions
-        prompt.push_str("## Tool Calling Format\n\n");
-        prompt.push_str("All tool use must happen from inside a single Python program. Do NOT emit <tool_call> tags. Call the provided global functions directly and print results for the user.\n\n");
-    }
-
-    // Python execution details (only if enabled)
-    if python_execution_enabled {
-        prompt.push_str("## python_execution Tool\n\n");
-        prompt.push_str("Sandboxed Python for complex calculations. **Only use when it provides clear advantage over answering directly.**\n");
-        prompt.push_str("You must `import` modules before using them.\n\n");
-        prompt.push_str("**CRITICAL: Do the calculation, don't explain it.**\n");
-        prompt.push_str("If a calculation can be done with the available Python libraries, USE `python_execution` to compute it and return the result.\n");
-        prompt.push_str("❌ WRONG: \"Here's how you could calculate this in Python...\"\n");
-        prompt.push_str("✅ RIGHT: Return a single Python program that performs the calculation and prints the answer.\n\n");
-        prompt.push_str("**Good use case** (complex calculation):\n");
-        prompt.push_str("```python\nimport math\nresult = 10000 * (1 + 0.07) ** 30\nprint(f\"Final amount: ${result:,.2f}\")\n```\n\n");
-        prompt.push_str("**Bad use case** (just answer directly instead):\n");
-        prompt.push_str("- \"What's 15% of 200?\" → Just say \"30\" - no code needed\n");
-        prompt.push_str("- Simple factual questions → Answer from knowledge\n\n");
-    }
-
-    // Tool discovery and execution section
-    if has_deferred_tools && python_execution_enabled {
-        prompt.push_str("## REQUIRED: Search → Execute Workflow\n\n");
-        prompt.push_str("**You MUST call `tool_search` before using any external tools.**\n");
-        prompt.push_str(
-            "Tools are NOT available until discovered. Do NOT guess or make up tool names.\n\n",
-        );
-
-        prompt.push_str("**WRONG - Never do this:**\n");
-        prompt.push_str("```python\n");
-        prompt.push_str(
-            "from some_module import made_up_function  # FAILS - tools must be discovered first!\n",
-        );
-        prompt.push_str("```\n\n");
-
-        prompt.push_str("**CORRECT - Always follow this pattern inside ONE Python program:**\n\n");
-        prompt.push_str("```python\n");
-        prompt.push_str("# Step 1: discover tools\n");
-        prompt.push_str("tools = tool_search(relevant_to=\"list datasets\")\n");
-        prompt.push_str("# Step 2: call discovered tools\n");
-        prompt.push_str("result = list_dataset_ids()\n");
-        prompt.push_str("print(result)\n");
-        prompt.push_str("# Step 3: repeat tool_search if you need more tools\n");
-        prompt.push_str("```\n\n");
-
-        // Count total tools available
-        let total_deferred: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
-        prompt.push_str(&format!("There are {} tools available across {} server(s). Use `tool_search` to find the right ones.\n\n",
-            total_deferred,
-            deferred_servers.len()));
-    } else if has_deferred_tools {
-        prompt.push_str("## Tool Discovery (REQUIRED)\n\n");
-        prompt.push_str("**You MUST call tool_search(relevant_to=\"...\") inside your Python program before using any external tools.**\n\n");
-        prompt.push_str("**Pattern:**\n");
-        prompt.push_str("```python\n");
-        prompt.push_str("tools = tool_search(relevant_to=\"describe what you need\")\n");
-        prompt.push_str("result = some_discovered_tool()\n");
-        prompt.push_str("print(result)\n");
-        prompt.push_str("```\n\n");
-
-        let total_deferred: usize = deferred_servers.iter().map(|(_, t)| t.len()).sum();
-        prompt.push_str(&format!(
-            "There are {} tools available. Use `tool_search` to find the right ones.\n\n",
-            total_deferred
-        ));
-    }
-
-    // List ACTIVE MCP tools in full detail (these can be called immediately)
-    if has_active_tools {
-        prompt.push_str("## Active MCP Tools (Ready to Use)\n\n");
-        prompt.push_str("These tools can be called immediately without `tool_search`:\n\n");
-
-        for (server_id, tools) in &active_servers {
-            prompt.push_str(&format!("### Server: `{}`\n\n", server_id));
-
-            // Include server environment variables as context for the model
-            if let Some(config) = server_configs.iter().find(|c| c.id == **server_id) {
-                if !config.env.is_empty() {
-                    prompt.push_str(
-                        "**Server Configuration** (use these values for this server's tools):\n",
-                    );
-                    for (key, value) in &config.env {
-                        // Skip sensitive keys
-                        let key_lower = key.to_lowercase();
-                        if key_lower.contains("secret")
-                            || key_lower.contains("password")
-                            || key_lower.contains("token")
-                            || key_lower.contains("key")
-                        {
-                            continue;
-                        }
-                        prompt.push_str(&format!("- `{}`: `{}`\n", key, value));
-                    }
-                    prompt.push_str("\n");
-                }
-            }
-
-            for tool in *tools {
-                prompt.push_str(&format!("**{}**", tool.name));
-                if let Some(desc) = &tool.description {
-                    prompt.push_str(&format!(": {}", desc));
-                }
-                prompt.push('\n');
-
-                if let Some(schema) = &tool.input_schema {
-                    if let Some(properties) = schema.get("properties") {
-                        if let Some(props) = properties.as_object() {
-                            let required_fields: Vec<&str> = schema
-                                .get("required")
-                                .and_then(|r| r.as_array())
-                                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-                                .unwrap_or_default();
-
-                            prompt.push_str("  Arguments:\n");
-                            for (name, prop_schema) in props {
-                                let prop_type = prop_schema
-                                    .get("type")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("string");
-                                let prop_desc = prop_schema
-                                    .get("description")
-                                    .and_then(|d| d.as_str())
-                                    .unwrap_or("");
-                                let is_required = required_fields.contains(&name.as_str());
-                                let req_marker = if is_required { " [REQUIRED]" } else { "" };
-
-                                prompt.push_str(&format!(
-                                    "  - `{}` ({}){}: {}\n",
-                                    name, prop_type, req_marker, prop_desc
-                                ));
-                            }
-                        }
-                    }
-                }
-                prompt.push('\n');
-            }
-        }
-    }
-
-    prompt
-}
-
-#[derive(Clone, Copy)]
-struct PromptTuningOptions {
-    include_examples: bool,
-    examples_max_per_tool: usize,
-    // Note: compact_mode and compact_max_tools were removed.
-    // Now using capabilities.max_mcp_tools_in_prompt instead.
-}
-
-impl Default for PromptTuningOptions {
-    fn default() -> Self {
-        Self {
-            include_examples: false,
-            examples_max_per_tool: 0,
-        }
-    }
-}
-
-/// Build the full system prompt with tool capabilities.
-/// 
-/// **DEPRECATED**: Use `AgenticStateMachine::build_system_prompt()` instead.
-/// The state machine is now the single source of truth for prompt generation.
-/// This function is kept for backward compatibility with preview/test functions.
-#[allow(dead_code)]
-fn build_system_prompt(
-    base_prompt: &str,
-    tool_descriptions: &[(String, Vec<McpTool>)],
-    server_configs: &[McpServerConfig],
-    has_attachments: bool,
-    tool_prompts: &HashMap<String, String>,
-    filter: &ToolLaunchFilter,
-    capabilities: &tool_capability::ResolvedToolCapabilities,
-    tuning: &PromptTuningOptions,
-) -> String {
-    let additions = collect_tool_prompt_additions(
-        tool_descriptions,
-        server_configs,
-        has_attachments,
-        tool_prompts,
-        filter,
-        capabilities,
-        tuning,
-    );
-
-    let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
-    if !additions.is_empty() {
-        // Build dynamic capability description based on what's actually enabled
-        let capabilities_section = build_capabilities_section(capabilities);
-        if !capabilities_section.is_empty() {
-            sections.push(capabilities_section);
-        }
-        
-        // Build dynamic factual grounding based on enabled tools
-        let grounding_section = build_factual_grounding_section(capabilities);
-        if !grounding_section.is_empty() {
-            sections.push(grounding_section);
-        }
-        
-        sections.push("## Additional prompts from tools".to_string());
-        sections.extend(additions);
-    }
-
-    sections.join("\n\n")
-}
-
-/// Build the Capabilities section based on actually enabled tools.
-/// 
-/// **DEPRECATED**: Use `AgenticStateMachine::build_capabilities_section()` instead.
-#[allow(dead_code)]
-fn build_capabilities_section(capabilities: &tool_capability::ResolvedToolCapabilities) -> String {
-    let has_sql = capabilities.available_builtins.contains(tool_capability::BUILTIN_SQL_SELECT);
-    let has_schema_search = capabilities.available_builtins.contains(tool_capability::BUILTIN_SCHEMA_SEARCH);
-    let has_python = capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION);
-    let has_tool_search = capabilities.available_builtins.contains(tool_capability::BUILTIN_TOOL_SEARCH);
-    let has_mcp_tools = !capabilities.active_mcp_tools.is_empty() || !capabilities.deferred_mcp_tools.is_empty();
-    
-    // If no tools are enabled, return empty
-    if !has_sql && !has_schema_search && !has_python && !has_tool_search && !has_mcp_tools {
-        return String::new();
-    }
-    
-    let mut capability_list: Vec<&str> = Vec::new();
-    
-    if has_sql || has_schema_search {
-        capability_list.push("execute SQL queries against configured databases");
-    }
-    if has_python {
-        capability_list.push("perform calculations in a Python sandbox");
-    }
-    if has_mcp_tools || has_tool_search {
-        capability_list.push("use external tools via MCP servers");
-    }
-    
-    if capability_list.is_empty() {
-        return String::new();
-    }
-    
-    let capabilities_str = match capability_list.len() {
-        1 => capability_list[0].to_string(),
-        2 => format!("{} and {}", capability_list[0], capability_list[1]),
-        _ => {
-            let last = capability_list.pop().unwrap();
-            format!("{}, and {}", capability_list.join(", "), last)
-        }
-    };
-    
-    format!(
-        "## Capabilities\n\nYou are equipped with specialized tools to {}. You MUST use these tools whenever the user's request requires factual data or tool execution. Do NOT claim you cannot perform these tasks; use the tools listed below.",
-        capabilities_str
-    )
-}
-
-/// Build the Factual Grounding section based on actually enabled tools.
-/// 
-/// **DEPRECATED**: Use `AgenticStateMachine::build_factual_grounding_section()` instead.
-#[allow(dead_code)]
-fn build_factual_grounding_section(capabilities: &tool_capability::ResolvedToolCapabilities) -> String {
-    let has_sql = capabilities.available_builtins.contains(tool_capability::BUILTIN_SQL_SELECT);
-    let has_python = capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION);
-    let has_tool_search = capabilities.available_builtins.contains(tool_capability::BUILTIN_TOOL_SEARCH);
-    let has_mcp_tools = !capabilities.active_mcp_tools.is_empty() || !capabilities.deferred_mcp_tools.is_empty();
-    
-    // Only include factual grounding if we have tools that retrieve data
-    if !has_sql && !has_mcp_tools && !has_tool_search {
-        // If we only have Python (no data retrieval tools), provide a lighter grounding
-        if has_python {
-            return "## Factual Grounding\n\n**CRITICAL**: Never make up or guess data values. Use available tools to compute or retrieve information. If you cannot get the data, say so explicitly.".to_string();
-        }
-        return String::new();
-    }
-    
-    // Build tool-specific examples
-    let mut tool_examples: Vec<&str> = Vec::new();
-    if has_sql {
-        tool_examples.push("`sql_select`");
-    }
-    if has_mcp_tools || has_tool_search {
-        tool_examples.push("MCP tools");
-    }
-    
-    let examples_str = if tool_examples.is_empty() {
-        "the appropriate tools".to_string()
-    } else {
-        tool_examples.join(" or ")
-    };
-    
-    format!(
-        "## Factual Grounding\n\n**CRITICAL**: Never make up, infer, or guess data values. All factual information (numbers, dates, totals, etc.) MUST come from executing tools like {}. If you need data, you MUST call the appropriate tool first. Do NOT display code to the user - only show the actual results from tool execution.",
-        examples_str
-    )
-}
-
-fn collect_tool_prompt_additions(
-    tool_descriptions: &[(String, Vec<McpTool>)],
-    server_configs: &[McpServerConfig],
-    has_attachments: bool,
-    tool_prompts: &HashMap<String, String>,
-    _filter: &ToolLaunchFilter,
-    capabilities: &tool_capability::ResolvedToolCapabilities,
-    tuning: &PromptTuningOptions,
-) -> Vec<String> {
-    const BUILTIN_SERVER_LABEL: &str = "Built-in Tools";
-    const TOOL_SEARCH_LABEL: &str = "Tool Search";
-
-    let mut additions: Vec<String> = Vec::new();
-    let mut tools_included: usize = 0;
-    // Use max_mcp_tools_in_prompt from capabilities (based on model size)
-    let max_tools = capabilities.max_mcp_tools_in_prompt;
-    let mut tool_search_prompt_added = false;
-
-    // All MCP tools are deferred - check if we have any
-    let has_deferred_tools = !capabilities.deferred_mcp_tools.is_empty();
-    let has_active_tools = !capabilities.active_mcp_tools.is_empty();
-
-    let python_tool_mode = capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION);
-    let has_database_tools = capabilities.available_builtins.contains(tool_capability::BUILTIN_SQL_SELECT)
-        || capabilities.available_builtins.contains(tool_capability::BUILTIN_SCHEMA_SEARCH);
-    let has_any_tools = !tool_descriptions.is_empty() || python_tool_mode || has_database_tools;
-
-    // Built-ins: use resolved capabilities to determine availability
-    let python_prompt_allowed = capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION);
-    if python_prompt_allowed {
-        let tool_search_available = capabilities.available_builtins.contains(tool_capability::BUILTIN_TOOL_SEARCH);
-        let mut body =
-            default_python_prompt(has_attachments, has_deferred_tools, tool_search_available);
-        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "python_execution")) {
-            let trimmed = custom.trim();
-            if !trimmed.is_empty() {
-                body.push_str("\n\n");
-                body.push_str(trimmed);
-            }
-        }
-        additions.push(body.trim().to_string());
-
-        // Only add tool_search prompt if there are deferred tools
-        if tool_search_available && has_deferred_tools {
-            let mut body = default_tool_search_prompt(has_deferred_tools);
-            if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "tool_search")) {
-                let trimmed = custom.trim();
-                if !trimmed.is_empty() {
-                    body.push_str("\n\n");
-                    body.push_str(trimmed);
-                }
-            }
-            additions.push(format!(
-                "### {} ({})\n{}",
-                TOOL_SEARCH_LABEL,
-                BUILTIN_SERVER_LABEL,
-                body.trim()
-            ));
-            tool_search_prompt_added = true;
-        }
-    }
-
-    // Always provide format instructions if we have a known format for this model,
-    // even if using native tools (local models often need the explicit tag to activate).
-    if has_any_tools && !python_prompt_allowed {
-        if let Some(format_prompt) = ToolCapabilityResolver::get_prompt_format_instructions(
-            capabilities.primary_format,
-            capabilities.model_tool_format,
-        ) {
-            additions.push(format_prompt);
-        }
-    }
-
-    // If tool_search is enabled but not yet surfaced (e.g., python disabled), still provide guidance.
-    // Only add if there are deferred tools. Skip text-based examples when using native tools.
-    if !tool_search_prompt_added && capabilities.available_builtins.contains(tool_capability::BUILTIN_TOOL_SEARCH) && has_deferred_tools {
-        let mut body = if capabilities.use_native_tools {
-            // Native tools: simple guidance without format examples
-            String::from(
-                "Call the `tool_search` tool to discover available MCP tools before using them.\n\
-                 Some MCP tools are deferred; run tool_search early to discover them.",
-            )
-        } else {
-            // Text-based format: include format example
-            let mut s = String::from(
-                "Call tool_search to list relevant MCP tools before using them. Example:\n\
-                 <tool_call>{\"server\": \"builtin\", \"tool\": \"tool_search\", \"arguments\": {\"queries\": [\"your goal\"], \"top_k\": 3}}</tool_call>\n\
-                 Then call the returned tools directly.",
-            );
-            s.push_str("\n\nSome MCP tools are deferred; run tool_search early to discover them.");
-            s
-        };
-        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "tool_search")) {
-            let trimmed = custom.trim();
-            if !trimmed.is_empty() {
-                body.push_str("\n\n");
-                body.push_str(trimmed);
-            }
-        }
-        additions.push(format!(
-            "### {} ({})\n{}",
-            TOOL_SEARCH_LABEL, BUILTIN_SERVER_LABEL, body.trim()
-        ));
-    }
-
-    // Database built-in tools: schema_search and sql_select
-    if capabilities.available_builtins.contains(tool_capability::BUILTIN_SCHEMA_SEARCH) {
-        let mut body = String::from(
-            "Use `schema_search` to discover database tables that may help answer the user's question.\n\
-             Parameters: `query` (search term), `max_tables` (max results, default 5).\n\
-             Returns table names, columns, and descriptions relevant to the query.",
-        );
-        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "schema_search")) {
-            let trimmed = custom.trim();
-            if !trimmed.is_empty() {
-                body.push_str("\n\n");
-                body.push_str(trimmed);
-            }
-        }
-        additions.push(format!(
-            "### schema_search ({})\n{}",
-            BUILTIN_SERVER_LABEL, body.trim()
-        ));
-    }
-
-    if capabilities.available_builtins.contains(tool_capability::BUILTIN_SQL_SELECT) {
-        let mut body = String::from(
-            "Use `sql_select` to execute SQL queries against configured database sources.\n\n\
-             **SYNTAX** (use the tool-calling format described below):\n\
-             ```\n\
-             <tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>\n\
-             ```\n\
-             - `sql` (required): The SQL query to execute\n\
-             - `source_id` (optional): Database source ID - omit if only one database is configured\n\n\
-             **EXAMPLE** - to get October 2025 sales totals:\n\
-             ```\n\
-             <tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT SUM(total_sale) as october_sales FROM sales_table WHERE EXTRACT(MONTH FROM sale_date) = 10 AND EXTRACT(YEAR FROM sale_date) = 2025\"}}</tool_call>\n\
-             ```\n\n\
-             **CRITICAL REQUIREMENTS**:\n\
-             - Execute queries using the tool-call format shown above - do NOT return SQL code to the user.\n\
-             - NEVER make up, infer, or guess data values. All numbers, dates, totals, and facts MUST come from executing `sql_select`.\n\
-             - NEVER display SQL code or query text to the user - only show the actual query results.\n\
-             - NEVER say you cannot access the database. You ARE equipped with this tool; use it.\n\
-             - If the query fails, report the error rather than inventing results.",
-        );
-        if let Some(custom) = tool_prompts.get(&tool_prompt_key("builtin", "sql_select")) {
-            let trimmed = custom.trim();
-            if !trimmed.is_empty() {
-                body.push_str("\n\n");
-                body.push_str(trimmed);
-            }
-        }
-        additions.push(format!(
-            "### sql_select ({})\n{}",
-            BUILTIN_SERVER_LABEL, body.trim()
-        ));
-    }
-
-    // MCP tools (skip builtin tools - they're handled separately above)
-    for (server_id, tools) in tool_descriptions {
-        // Skip builtin tools - they don't need "discover with tool_search" messaging
-        // and are documented via python_execution/tool_search sections above
-        if server_id == "builtin" {
-            continue;
-        }
-        let server_config = server_configs.iter().find(|c| c.id == *server_id);
-        
-        // Skip database sources - they are handled via sql_select/schema_search built-ins
-        if let Some(config) = server_config {
-            if config.is_database_source {
-                continue;
-            }
-        }
-
-        let server_name = server_config
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| server_id.clone());
-        let is_deferred = server_config.map(|c| c.defer_tools).unwrap_or(true);
-        let env_vars = server_config
-            .map(|c| c.env.clone())
-            .filter(|env| !env.is_empty());
-
-        for tool in tools {
-            // Limit MCP tools in prompt based on model size (from capabilities)
-            if tools_included >= max_tools {
-                continue;
-            }
-            
-            // Only include active (materialized) MCP tools
-            if !ToolCapabilityResolver::should_include_mcp_tool(server_id, &tool.name, capabilities) {
-                continue;
-            }
-            let mut parts: Vec<String> = Vec::new();
-
-            if let Some(desc) = &tool.description {
-                let trimmed = desc.trim();
-                if !trimmed.is_empty() {
-                    parts.push(trimmed.to_string());
-                }
-            }
-
-            if is_deferred {
-                parts.push("Discover this tool with `tool_search`, then call it directly once listed for this turn.".to_string());
-            } else if has_active_tools {
-                parts.push("Call this MCP tool directly when it fits the task.".to_string());
-            }
-
-            if let Some(custom) = tool_prompts.get(&tool_prompt_key(server_id, &tool.name)) {
-                let trimmed = custom.trim();
-                if !trimmed.is_empty() {
-                    parts.push(trimmed.to_string());
-                }
-            }
-
-            if let Some(env_map) = env_vars.as_ref() {
-                let mut pairs: Vec<String> = env_map
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect();
-                pairs.sort();
-                parts.push(format!(
-                    "Environment variables available to this server: {}",
-                    pairs.join(", ")
-                ));
-            }
-
-            // Include parameter schema details if available
-            if let Some(props) = tool
-                .input_schema
-                .as_ref()
-                .and_then(|s| s.get("properties"))
-                .and_then(|p| p.as_object())
-            {
-                let required: Vec<&str> = tool
-                    .input_schema
-                    .as_ref()
-                    .and_then(|s| s.get("required"))
-                    .and_then(|r| r.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-                    .unwrap_or_default();
-
-                let mut param_lines: Vec<String> = Vec::new();
-                for (name, schema) in props {
-                    let ty = schema.get("type").and_then(|t| t.as_str()).unwrap_or("any");
-                    let desc = schema
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("");
-                    let req = if required.contains(&name.as_str()) {
-                        " (required)"
-                    } else {
-                        ""
-                    };
-                    let mut line = format!("- `{}` (type: {}){}", name, ty, req);
-                    if !desc.is_empty() {
-                        line.push_str(&format!(": {}", desc));
-                    }
-                    param_lines.push(line);
-                }
-
-                // Limit parameter details to avoid token bloat
-                if param_lines.len() > 3 {
-                    param_lines.truncate(3);
-                    param_lines.push("- ...".to_string());
-                }
-
-                if !param_lines.is_empty() {
-                    parts.push(format!("Parameters:\n{}", param_lines.join("\n")));
-                }
-            }
-
-            if tuning.include_examples && tuning.examples_max_per_tool > 0 {
-                if let Some(examples) = tool.input_examples.as_ref() {
-                    let capped_count = examples
-                        .len()
-                        .min(tuning.examples_max_per_tool);
-                    if capped_count > 0 {
-                        let mut example_lines: Vec<String> = Vec::new();
-                        for example in examples.iter().take(capped_count) {
-                            let mut text = serde_json::to_string(example)
-                                .unwrap_or_else(|_| "<example serialization failed>".to_string());
-                            if text.len() > 240 {
-                                text.truncate(240);
-                                text.push_str("...");
-                            }
-                            example_lines.push(format!("- {}", text));
-                        }
-                        if !example_lines.is_empty() {
-                            parts.push(format!(
-                                "Usage examples ({} max):\n{}",
-                                tuning.examples_max_per_tool,
-                                example_lines.join("\n")
-                            ));
-                        }
-                    }
-                }
-            }
-
-            if parts.is_empty() {
-                continue;
-            }
-
-            additions.push(format!(
-                "### {} (server: {})\n{}",
-                tool.name,
-                server_name,
-                parts.join("\n\n")
-            ));
-            tools_included += 1;
-        }
-    }
-
-    additions
-}
-
-#[derive(Clone, serde::Serialize)]
-struct SystemPromptLayers {
-    base_prompt: String,
-    additions: Vec<String>,
-    combined: String,
-}
-
-fn build_system_prompt_layers(
-    base_prompt: &str,
-    tool_descriptions: &[(String, Vec<McpTool>)],
-    server_configs: &[McpServerConfig],
-    has_attachments: bool,
-    tool_prompts: &HashMap<String, String>,
-    filter: &ToolLaunchFilter,
-    capabilities: &tool_capability::ResolvedToolCapabilities,
-    tuning: &PromptTuningOptions,
-) -> SystemPromptLayers {
-    let additions = collect_tool_prompt_additions(
-        tool_descriptions,
-        server_configs,
-        has_attachments,
-        tool_prompts,
-        filter,
-        capabilities,
-        tuning,
-    );
-
-    let mut sections: Vec<String> = vec![base_prompt.trim().to_string()];
-    if !additions.is_empty() {
-        sections.push("## Additional prompts from tools".to_string());
-        sections.extend(additions.clone());
-    }
-
-    let combined = sections.join("\n\n");
-
-    SystemPromptLayers {
-        base_prompt: base_prompt.trim().to_string(),
-        additions,
-        combined,
-    }
-}
-
-fn default_python_prompt(
-    has_attachments: bool,
-    has_deferred_tools: bool,
-    tool_search_enabled: bool,
-) -> String {
-    let mut parts: Vec<String> = vec![
-        "You must return exactly one runnable Python program when python_execution is enabled. Do not return explanations or multiple blocks.".to_string(),
-        "Output format: a single ```python ... ``` block. We will execute it and surface any print output directly to the user.".to_string(),
-        if tool_search_enabled {
-            "Tool calling is only available via Python. Use the provided global functions (including tool_search when available) from inside your program. Do NOT emit <tool_call> tags or JSON tool calls.".to_string()
-        } else {
-            "Tool calling is only available via Python. Use the provided global functions from inside your program. Do NOT emit <tool_call> tags or JSON tool calls.".to_string()
-        },
-        "Use print(...) for user-facing markdown on stdout. Prefer standard library stderr writes (e.g., import sys; sys.stderr.write(\"...\")) for handoff text, which is captured on stderr.".to_string(),
-        "Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.".to_string(),
-        "Keep code concise and runnable; include prints for results the user should see.".to_string(),
-    ];
-
-    if has_attachments {
-        parts.push("Attached files are already summarized in the conversation. Do NOT read files; work with the provided text directly inside python_execution.".to_string());
-    }
-
-    if has_deferred_tools && tool_search_enabled {
-        parts.push("Some MCP tools are deferred; if you need extra capabilities, call the global function tool_search(relevant_to=\"...\") inside your Python program to discover them, then call the returned functions in the same program.".to_string());
-    }
-
-    parts.join("\n\n")
-}
-
-fn default_tool_search_prompt(has_deferred_tools: bool) -> String {
-    let mut parts: Vec<String> = vec![
-        "Call the global function tool_search(relevant_to=\"...\") from inside your Python program to discover relevant MCP tools.".to_string(),
-        "After discovery, call the returned functions directly in the same Python program.".to_string(),
-    ];
-
-    if has_deferred_tools {
-        parts.push("Many MCP tools are deferred: call tool_search first inside your Python code, then call the discovered tools directly in that program.".to_string());
-    }
-
-    parts.join("\n\n")
-}
-
-// Note: tool_calling_format_prompt was removed.
-// Format instructions are now generated via ToolCapabilityResolver::get_prompt_format_instructions()
-
-#[tauri::command]
-async fn search_history(
+#[tauri::command]async fn search_history(
     query: String,
     handles: State<'_, ActorHandles>,
     app_handle: tauri::AppHandle,
@@ -4003,105 +3172,6 @@ fn map_tool_search_hits_to_schemas(
     grouped
 }
 
-/// Render auto-discovery sections for system prompt (used by preview function).
-/// 
-/// NOTE: For the main chat flow, the state machine now handles this via
-/// `AgenticStateMachine::build_auto_discovery_section()`. This function is
-/// kept for the preview function which doesn't use the full state machine.
-fn render_auto_context_sections(
-    tool_search_output: Option<&ToolSearchOutput>,
-    schema_search_output: Option<&SchemaSearchOutput>,
-    has_attachments: bool,
-) -> Vec<String> {
-    let mut sections: Vec<String> = Vec::new();
-
-    if let Some(output) = tool_search_output {
-        if !output.tools.is_empty() {
-            let mut body = String::from("Auto-discovered MCP tools for this prompt:");
-            for tool in &output.tools {
-                let desc = tool.description.as_deref().unwrap_or("").trim();
-                let mut line = format!(
-                    "\n- {}::{} (score {:.2})",
-                    tool.server_id, tool.name, tool.score
-                );
-                if !desc.is_empty() {
-                    line.push_str(&format!(" — {}", desc));
-                }
-                body.push_str(&line);
-            }
-            sections.push(format!("### Auto tool search\n{}", body));
-        }
-    }
-
-    if let Some(output) = schema_search_output {
-        if !output.tables.is_empty() {
-            // Apply rule: if we have RAG results (attachments), only include SQL context
-            // if the highest relevance score is > 40%.
-            if has_attachments {
-                let max_score = output
-                    .tables
-                    .iter()
-                    .map(|t| t.relevance)
-                    .fold(0.0f32, f32::max);
-                if max_score <= 0.40 {
-                    println!("[Chat] Auto schema_search suppressed: RAG available and max SQL score ({:.2}) <= 0.40", max_score);
-                    return sections;
-                }
-            }
-
-            let mut body = String::from("Auto-discovered database tables for this prompt:");
-            for table in &output.tables {
-                let mut line = format!(
-                    "\n- {} [{} Syntax | {}] (score {:.2})",
-                    table.table_name, table.sql_dialect, table.source_id, table.relevance
-                );
-                if let Some(desc) = table.description.as_deref() {
-                    if !desc.trim().is_empty() {
-                        line.push_str(&format!(" — {}", desc.trim()));
-                    }
-                }
-                if !table.relevant_columns.is_empty() {
-                    let cols: Vec<String> = table
-                        .relevant_columns
-                        .iter()
-                        .take(40) // Show up to 40 columns
-                        .map(|c| format!("{} ({})", c.name, c.data_type))
-                        .collect();
-                    let cols_str = if cols.len() < table.relevant_columns.len() {
-                        format!("{}, ... ({} more)", cols.join(", "), table.relevant_columns.len() - cols.len())
-                    } else {
-                        cols.join(", ")
-                    };
-                    line.push_str(&format!("\n  cols: {}", cols_str));
-                }
-                body.push_str(&line);
-            }
-            body.push_str("\n\n**ACTION REQUIRED**: These tables were auto-discovered because the user's question likely requires querying this database. You MUST:\n\
-1. Write a SQL query using ONLY the table and columns listed above. Do NOT assume other columns exist.\n\
-2. Execute the query using `sql_select` with the tool-call format:\n\
-   ```\n\
-   <tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"SELECT ...\"}}</tool_call>\n\
-   ```\n\
-   The `source_id` is optional when only one database is enabled.\n\
-3. **AGGREGATION PREFERRED**: Use SQL aggregation (SUM, COUNT, AVG, etc.) of numeric columns to get final answers directly.\n\
-4. **ROW LIMIT**: Limit results to 25 rows or less through the design of the query.\n\
-5. **AVOID TO_CHAR**: Use CAST(column AS STRING) instead of TO_CHAR.\n\
-6. **COLUMNS & DATES**: Check listed columns for date/time fields. If none listed, use `schema_search` first.\n\n\
-**CRITICAL - NO HALLUCINATIONS**:\n\
-- ONLY use columns explicitly listed in the `cols:` section above.\n\
-- NEVER guess or invent column names.\n\
-- If a query returns `null`, the data is missing - do NOT assume the tool failed.\n\
-- NEVER make up data values. All facts MUST come from executing `sql_select`.\n\
-- NEVER display SQL code to the user - only show query results.\n\
-- If the query fails, read the error and fix it rather than inventing results.");
-            sections.push(format!("### Auto schema search\n{}", body));
-        } else if output.summary.contains("WARNING") {
-            sections.push(format!("### Auto schema search\n{}", output.summary));
-        }
-    }
-
-    sections
-}
 
 async fn auto_tool_search_for_prompt(
     prompt: &str,
@@ -4149,7 +3219,6 @@ async fn auto_tool_search_for_prompt(
         }
     }
 }
-
 async fn auto_schema_search_for_prompt(
     prompt: &str,
     schema_search_enabled: bool,
@@ -4846,16 +3915,12 @@ async fn chat(
         );
     }
 
-    let prompt_tuning = PromptTuningOptions {
-        include_examples: tool_use_examples_enabled,
-        examples_max_per_tool: tool_use_examples_max.max(1),
-    };
 
     // Note: compact_prompt_enabled removed - now using capabilities.max_mcp_tools_in_prompt
     if tool_use_examples_enabled {
         println!(
             "[Chat] Tool examples enabled (max_per_tool={})",
-            prompt_tuning.examples_max_per_tool
+            tool_use_examples_max
         );
     }
     println!(
@@ -6710,10 +5775,10 @@ async fn get_system_prompt_preview(
     let tool_search_enabled = settings.tool_search_enabled;
     let schema_search_enabled = settings.schema_search_enabled;
     let sql_select_enabled = settings.sql_select_enabled;
-    let python_execution_enabled = settings.python_execution_enabled;
+    let _python_execution_enabled = settings.python_execution_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
-    let tool_use_examples_enabled = settings.tool_use_examples_enabled;
-    let tool_use_examples_max = settings.tool_use_examples_max;
+    let _tool_use_examples_enabled = settings.tool_use_examples_enabled;
+    let _tool_use_examples_max = settings.tool_use_examples_max;
     let database_toolbox_config = settings.database_toolbox.clone();
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
@@ -6777,7 +5842,7 @@ async fn get_system_prompt_preview(
         .collect();
     let has_mcp_tools = !filtered_tool_descriptions.is_empty();
     // Deferred tools exist only if tool_search is enabled AND there are MCP tools
-    let has_deferred_mcp_tools = tool_search_enabled && has_mcp_tools;
+    let _has_deferred_mcp_tools = tool_search_enabled && has_mcp_tools;
     // Note: code_mode_possible and python_tool_mode now handled by resolver
     let prompt_for_discovery = user_prompt.unwrap_or_default();
     let auto_discovery = perform_auto_discovery_for_prompt(
@@ -6809,12 +5874,6 @@ async fn get_system_prompt_preview(
             false
         }
     };
-
-    let auto_context_sections = render_auto_context_sections(
-        auto_discovery.tool_search_output.as_ref(),
-        auto_discovery.schema_search_output.as_ref(),
-        has_attachments,
-    );
 
     // Resolve capabilities for prompt building
     let resolved_capabilities = {
@@ -6855,67 +5914,37 @@ async fn get_system_prompt_preview(
         )
     };
 
-    let prompt_tuning = PromptTuningOptions {
-        include_examples: tool_use_examples_enabled,
-        examples_max_per_tool: tool_use_examples_max.max(1),
-    };
-
-    // Visible tools: always include enabled built-ins; defer MCP tools to tool_search unless materialized.
-    let builtin_tools: Vec<(String, Vec<McpTool>)> = {
-        let registry = tool_registry_state.registry.read().await;
-        registry
-            .get_internal_tools()
-            .iter()
-            .filter(|schema| {
-                // Only include python_execution if it's enabled
-                if schema.name == "python_execution" {
-                    python_execution_enabled && tool_filter.builtin_allowed("python_execution")
-                } else if schema.name == "tool_search" {
-                    // Only include tool_search if there are deferred tools to discover
-                    has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
-                } else {
-                    // Other built-ins (schema_search, sql_select) are included if allowed
-                    tool_filter.builtin_allowed(&schema.name)
-                }
-            })
-            .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
-            .collect()
-    };
-
-    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
-        let mut list = builtin_tools;
-        if !auto_discovery.discovered_tool_schemas.is_empty() {
-            list.extend(auto_discovery.discovered_tool_schemas.clone());
-        }
-        list
-    } else {
-        let mut list = builtin_tools;
-        list.extend(filtered_tool_descriptions.clone());
-        list
-    };
-
-    let base_prompt_with_context = if auto_context_sections.is_empty() {
-        base_prompt.clone()
-    } else {
-        let mut composed = base_prompt.clone();
-        composed.push_str("\n\n## Auto-discovered context\n");
-        composed.push_str(&auto_context_sections.join("\n\n"));
-        composed
-    };
-
-    // Build the full system prompt
-    let preview = build_system_prompt(
-        &base_prompt_with_context,
-        &visible_tool_descriptions,
-        &server_configs,
-        has_attachments,
-        &tool_prompts,
-        &tool_filter,
-        &resolved_capabilities,
-        &prompt_tuning,
+    let settings_sm = SettingsStateMachine::from_settings(&settings_for_resolver, &tool_filter);
+    let mut initial_state_machine = AgenticStateMachine::new_from_settings_sm(
+        &settings_sm,
+        crate::agentic_state::PromptContext {
+            base_prompt: base_prompt.clone(),
+            mcp_context: crate::agentic_state::McpToolContext::from_tool_lists(
+                &auto_discovery.discovered_tool_schemas, // Use auto-discovered for preview if tool_search enabled
+                &Vec::new(), // Deferred not used in preview logic currently
+                &server_configs,
+            ),
+            tool_call_format: resolved_capabilities.primary_format,
+            custom_tool_prompts: tool_prompts,
+            python_primary: resolved_capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION),
+            has_attachments,
+        },
     );
 
-    Ok(preview)
+    // Set auto-discovery context after initialization
+    initial_state_machine.set_auto_discovery_context(
+        auto_discovery.tool_search_output,
+        auto_discovery.schema_search_output,
+    );
+
+    Ok(initial_state_machine.build_system_prompt())
+}
+
+#[derive(Clone, serde::Serialize)]
+struct SystemPromptLayers {
+    base_prompt: String,
+    additions: Vec<String>,
+    combined: String,
 }
 
 #[tauri::command]
@@ -6934,8 +5963,8 @@ async fn get_system_prompt_layers(
     let sql_select_enabled = settings.sql_select_enabled;
     let python_execution_enabled = settings.python_execution_enabled;
     // python_tool_calling_enabled now handled by resolver
-    let tool_use_examples_enabled = settings.tool_use_examples_enabled;
-    let tool_use_examples_max = settings.tool_use_examples_max;
+    let _tool_use_examples_enabled = settings.tool_use_examples_enabled;
+    let _tool_use_examples_max = settings.tool_use_examples_max;
     let mut format_config = settings.tool_call_formats.clone();
     format_config.normalize();
     let tool_prompts = settings.tool_system_prompts.clone();
@@ -7084,23 +6113,35 @@ async fn get_system_prompt_layers(
         )
     };
 
-    let prompt_tuning = PromptTuningOptions {
-        include_examples: tool_use_examples_enabled,
-        examples_max_per_tool: tool_use_examples_max.max(1),
-    };
-
-    let layers = build_system_prompt_layers(
-        &base_prompt,
-        &visible_tool_descriptions,
-        &server_configs,
-        has_attachments,
-        &tool_prompts,
-        &tool_filter,
-        &resolved_capabilities,
-        &prompt_tuning,
+    let settings_sm = SettingsStateMachine::from_settings(&settings_for_resolver, &tool_filter);
+    let initial_state_machine = AgenticStateMachine::new_from_settings_sm(
+        &settings_sm,
+        crate::agentic_state::PromptContext {
+            base_prompt: base_prompt.clone(),
+            mcp_context: crate::agentic_state::McpToolContext::from_tool_lists(
+                &visible_tool_descriptions,
+                &Vec::new(),
+                &server_configs,
+            ),
+            tool_call_format: resolved_capabilities.primary_format,
+            custom_tool_prompts: tool_prompts,
+            python_primary: resolved_capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION),
+            has_attachments,
+        },
     );
 
-    Ok(layers)
+    let sections = initial_state_machine.build_system_prompt_sections();
+    let additions = if sections.len() > 1 {
+        sections[1..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    Ok(SystemPromptLayers {
+        base_prompt: base_prompt.clone(),
+        additions,
+        combined: sections.join("\n\n"),
+    })
 }
 
 #[tauri::command]
@@ -7630,29 +6671,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod inline_tests {
-    use super::tool_capability::ResolvedToolCapabilities;
     use crate::settings::ToolCallFormatName;
     use crate::protocol::ToolFormat;
 
     // Helper to create test ResolvedToolCapabilities
-    fn create_test_capabilities(
-        primary_format: ToolCallFormatName,
-        available_builtins: Vec<&str>,
-        use_native: bool,
-        max_mcp_tools: usize,
-    ) -> ResolvedToolCapabilities {
-        ResolvedToolCapabilities {
-            available_builtins: available_builtins.iter().map(|s| s.to_string()).collect(),
-            primary_format,
-            enabled_formats: vec![],
-            use_native_tools: use_native,
-            active_mcp_tools: vec![],
-            deferred_mcp_tools: vec![],
-            model_supports_native: false,
-            model_tool_format: ToolFormat::TextBased,
-            max_mcp_tools_in_prompt: max_mcp_tools,
-        }
-    }
     use super::*;
     use serde_json::json;
 
@@ -7861,289 +6883,58 @@ mod inline_tests {
         assert_eq!(result[1], "print(x)");
     }
 
+
     #[test]
-    fn test_build_system_prompt_layers_with_tool_prompts() {
-        let base_prompt = "Base prompt";
-        let tool = McpTool {
-            name: "tool_a".to_string(),
-            description: Some("Demo tool".to_string()),
-            input_schema: None,
-            input_examples: None,
-            allowed_callers: None,
-        };
-        let tool_descriptions = vec![("srv1".to_string(), vec![tool])];
-
-        let mut server_config = McpServerConfig::new("srv1".to_string(), "Server 1".to_string());
-        server_config.defer_tools = false;
-        let server_configs = vec![server_config];
-
+    fn test_centralized_system_prompt_via_state_machine() {
+        let base_prompt = "Custom system prompt";
         let mut tool_prompts = HashMap::new();
-        tool_prompts.insert("srv1::tool_a".to_string(), "custom prompt".to_string());
+        tool_prompts.insert("srv1::tool_a".to_string(), "Execute with caution".to_string());
 
-        let filter = ToolLaunchFilter::default();
-        let capabilities = create_test_capabilities(
-            ToolCallFormatName::CodeMode,
-            vec!["python_execution"],
-            false,
-            usize::MAX,
-        );
-        // Add active tool for this test
-        let mut capabilities = capabilities;
-        capabilities.active_mcp_tools = vec![(
-            "srv1".to_string(),
-            protocol::ToolSchema {
-                name: "tool_a".to_string(),
-                description: Some("Demo tool".to_string()),
-                parameters: serde_json::json!({}),
-                input_examples: vec![],
-                tool_type: None,
-                allowed_callers: None,
-                defer_loading: false,
-                embedding: None,
+        let mut server_config = McpServerConfig::new("srv1".to_string(), "Server 1".to_string());
+        server_config.enabled = true;
+        server_config.env.insert("API_URL".to_string(), "https://api.example.com".to_string());
+        let server_configs = vec![server_config.clone()];
+
+        let active_tools = vec![("srv1".to_string(), vec![McpTool {
+            name: "tool_a".to_string(),
+            description: Some("Useful tool".to_string()),
+            input_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "param1": {"type": "string", "description": "A parameter"}
+                }
+            })),
+            input_examples: None,
+            allowed_callers: None,
+        }])];
+
+        let mut app_settings = AppSettings::default();
+        app_settings.mcp_servers = server_configs.clone();
+        let settings_sm = SettingsStateMachine::from_settings(&app_settings, &ToolLaunchFilter::default());
+        let sm = AgenticStateMachine::new_from_settings_sm(
+            &settings_sm,
+            crate::agentic_state::PromptContext {
+                base_prompt: base_prompt.to_string(),
+                mcp_context: crate::agentic_state::McpToolContext::from_tool_lists(
+                    &active_tools,
+                    &Vec::new(),
+                    &server_configs,
+                ),
+                tool_call_format: ToolCallFormatName::Hermes,
+                custom_tool_prompts: tool_prompts,
+                python_primary: false,
+                has_attachments: false,
             },
-        )];
-        let layers = build_system_prompt_layers(
-            base_prompt,
-            &tool_descriptions,
-            &server_configs,
-            false,
-            &tool_prompts,
-            &filter,
-            &capabilities,
-            &PromptTuningOptions::default(),
         );
 
-        assert_eq!(layers.base_prompt, "Base prompt");
-        assert!(layers.combined.contains("custom prompt"));
-        assert!(layers.additions.iter().any(|s| s.contains("custom prompt")));
-    }
+        let prompt = sm.build_system_prompt();
 
-    #[test]
-    fn test_build_system_prompt_layers_includes_env_vars() {
-        use std::collections::HashMap;
-
-        let base_prompt = "Base prompt";
-        let tool = McpTool {
-            name: "tool_a".to_string(),
-            description: Some("Demo tool".to_string()),
-            input_schema: None,
-            input_examples: None,
-            allowed_callers: None,
-        };
-        let tool_descriptions = vec![("srv1".to_string(), vec![tool])];
-
-        let mut server_config = McpServerConfig::new("srv1".to_string(), "Server 1".to_string());
-        server_config.defer_tools = false;
-        server_config.env = HashMap::from([
-            (
-                "BIGQUERY_PROJECT".to_string(),
-                "plugabot-colchuck".to_string(),
-            ),
-            ("BQ_DATASET".to_string(), "finance".to_string()),
-        ]);
-        let server_configs = vec![server_config];
-
-        let tool_prompts = HashMap::new();
-        let filter = ToolLaunchFilter::default();
-        let mut capabilities = create_test_capabilities(
-            ToolCallFormatName::CodeMode,
-            vec!["python_execution"],
-            false,
-            usize::MAX,
-        );
-        // Add the tool to active_mcp_tools so it's included in the prompt
-        capabilities.active_mcp_tools = vec![("srv1".to_string(), protocol::ToolSchema {
-            name: "tool_a".to_string(),
-            description: Some("Demo tool".to_string()),
-            parameters: serde_json::json!({}),
-            input_examples: vec![],
-            tool_type: None,
-            allowed_callers: None,
-            defer_loading: false,
-            embedding: None,
-        })];
-        let layers = build_system_prompt_layers(
-            base_prompt,
-            &tool_descriptions,
-            &server_configs,
-            false,
-            &tool_prompts,
-            &filter,
-            &capabilities,
-            &PromptTuningOptions::default(),
-        );
-
-        let addition = layers
-            .additions
-            .iter()
-            .find(|s| s.contains("Environment variables"))
-            .expect("env section missing");
-        assert!(addition.contains("BIGQUERY_PROJECT=plugabot-colchuck"));
-        assert!(addition.contains("BQ_DATASET=finance"));
-    }
-
-    #[test]
-    fn test_build_system_prompt_layers_compact_limits_tools() {
-        let base_prompt = "Base prompt";
-        let tool_a = McpTool {
-            name: "tool_a".to_string(),
-            description: Some("A".to_string()),
-            input_schema: None,
-            input_examples: None,
-            allowed_callers: None,
-        };
-        let tool_b = McpTool {
-            name: "tool_b".to_string(),
-            description: Some("B".to_string()),
-            input_schema: None,
-            input_examples: None,
-            allowed_callers: None,
-        };
-        let tool_descriptions = vec![("srv".to_string(), vec![tool_a, tool_b])];
-
-        let mut server_config = McpServerConfig::new("srv".to_string(), "Server".to_string());
-        server_config.defer_tools = false;
-        let server_configs = vec![server_config];
-        let tool_prompts = HashMap::new();
-        let filter = ToolLaunchFilter::default();
-        let tuning = PromptTuningOptions {
-            include_examples: false,
-            examples_max_per_tool: 1,
-        };
-        let capabilities = create_test_capabilities(
-            ToolCallFormatName::CodeMode,
-            vec![],
-            false,
-            1, // Limit to 1 tool
-        );
-
-        let layers = build_system_prompt_layers(
-            base_prompt,
-            &tool_descriptions,
-            &server_configs,
-            false,
-            &tool_prompts,
-            &filter,
-            &capabilities,
-            &tuning,
-        );
-
-        // Only one tool section should be present due to compact cap
-        assert!(layers.additions.iter().filter(|s| s.contains("###")).count() <= 1);
-    }
-
-    #[test]
-    fn test_build_system_prompt_layers_adds_tool_search_when_deferred_without_python() {
-        let base_prompt = "Base prompt";
-        let tool = McpTool {
-            name: "tool_a".to_string(),
-            description: Some("Demo tool".to_string()),
-            input_schema: None,
-            input_examples: None,
-            allowed_callers: None,
-        };
-        let tool_descriptions = vec![("srv1".to_string(), vec![tool])];
-
-        let mut server_config = McpServerConfig::new("srv1".to_string(), "Server 1".to_string());
-        server_config.defer_tools = true;
-        let server_configs = vec![server_config];
-        let tool_prompts = HashMap::new();
-        let filter = ToolLaunchFilter::default();
-        let tuning = PromptTuningOptions {
-            include_examples: false,
-            examples_max_per_tool: 1,
-        };
-
-        let capabilities = create_test_capabilities(
-            ToolCallFormatName::Hermes,
-            vec!["tool_search"], // tool_search enabled
-            false,
-            usize::MAX,
-        );
-        // Add deferred tools to capabilities for this test
-        let mut capabilities = capabilities;
-        capabilities.deferred_mcp_tools = vec![(
-            "srv1".to_string(),
-            protocol::ToolSchema {
-                name: "tool_a".to_string(),
-                description: Some("Demo tool".to_string()),
-                parameters: serde_json::json!({}),
-                input_examples: vec![],
-                tool_type: None,
-                allowed_callers: None,
-                defer_loading: true,
-                embedding: None,
-            },
-        )];
-        let layers = build_system_prompt_layers(
-            base_prompt,
-            &tool_descriptions,
-            &server_configs,
-            false,
-            &tool_prompts,
-            &filter,
-            &capabilities,
-            &tuning,
-        );
-
-        assert!(
-            layers
-                .combined
-                .contains("Call tool_search to list relevant MCP tools"),
-            "tool_search instructions should be present when deferred tools exist without python"
-        );
-    }
-
-    #[test]
-    fn test_build_system_prompt_layers_skips_tool_search_when_no_deferred_tools() {
-        // Tool search instructions should NOT be added when there are no deferred tools
-        // because there would be nothing to discover
-        let base_prompt = "Base prompt";
-        let tool = McpTool {
-            name: "tool_a".to_string(),
-            description: Some("Demo tool".to_string()),
-            input_schema: None,
-            input_examples: None,
-            allowed_callers: None,
-        };
-        let tool_descriptions = vec![("srv1".to_string(), vec![tool])];
-
-        let mut server_config = McpServerConfig::new("srv1".to_string(), "Server 1".to_string());
-        server_config.defer_tools = false; // No deferred tools
-        let server_configs = vec![server_config];
-        let tool_prompts = HashMap::new();
-        let filter = ToolLaunchFilter::default();
-        let tuning = PromptTuningOptions {
-            include_examples: false,
-            examples_max_per_tool: 1,
-        };
-        // No deferred tools - empty deferred_mcp_tools
-        let capabilities = create_test_capabilities(
-            ToolCallFormatName::Hermes,
-            vec!["tool_search"], // tool_search enabled but no deferred tools
-            false,
-            usize::MAX,
-        );
-        // capabilities.deferred_mcp_tools is empty by default
-
-        let layers = build_system_prompt_layers(
-            base_prompt,
-            &tool_descriptions,
-            &server_configs,
-            false,
-            &tool_prompts,
-            &filter,
-            &capabilities,
-            &tuning,
-        );
-
-        // tool_search instructions should NOT be present when no tools are deferred
-        assert!(
-            !layers
-                .combined
-                .contains("Call tool_search"),
-            "tool_search instructions should NOT be present when no tools are deferred"
-        );
+        assert!(prompt.contains(base_prompt));
+        assert!(prompt.contains("Execute with caution"));
+        assert!(prompt.contains("API_URL=https://api.example.com"));
+        assert!(prompt.contains("tool_a"));
+        assert!(prompt.contains("param1"));
+        assert!(prompt.contains("## Tool Calling Format"));
     }
 
     #[test]
@@ -8293,4 +7084,5 @@ mod inline_tests {
             "Hermes formatting should wrap in tool_response tags"
         );
     }
+
 }

@@ -359,41 +359,7 @@ impl ToolCapabilityResolver {
         primary_format: ToolCallFormatName,
         model_tool_format: ToolFormat,
     ) -> Option<String> {
-        // Even if primary is Native, we provide instructions if the model family has a preferred tag format.
-        // Local models (like Phi, Qwen, Granite) often need the explicit tag to trigger tool calling.
-        let effective_format = if primary_format == ToolCallFormatName::Native {
-            match model_tool_format {
-                ToolFormat::Hermes => ToolCallFormatName::Hermes,
-                ToolFormat::Granite => ToolCallFormatName::Mistral, // Will add Granite specific below
-                _ => ToolCallFormatName::Native,
-            }
-        } else {
-            primary_format
-        };
-
-        match effective_format {
-            ToolCallFormatName::Native => None, // Truly native models (like GPT-4) don't need instructions
-            ToolCallFormatName::Hermes => Some(
-                "## Tool Calling Format\n\nWhen you need to use a tool, output ONLY:\n<tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>".to_string(),
-            ),
-            ToolCallFormatName::Mistral => {
-                match model_tool_format {
-                    ToolFormat::Granite => Some(
-                        "## Function Calling Format\n\nWhen you need to call a function, output:\n<function_call>{\"name\": \"function_name\", \"arguments\": {...}}</function_call>".to_string()
-                    ),
-                    _ => Some(
-                        "## Tool Calling Format\n\nWhen you need to use a tool, output:\n[TOOL_CALLS] [{\"name\": \"tool_name\", \"arguments\": {...}}]".to_string(),
-                    )
-                }
-            },
-            ToolCallFormatName::Pythonic => Some(
-                "## Tool Calling Format\n\nWhen you need to use a tool, output:\ntool_name(arg1=\"value\", arg2=123)".to_string(),
-            ),
-            ToolCallFormatName::PureJson => Some(
-                "## Tool Calling Format\n\nWhen you need to use a tool, output a JSON object:\n{\"name\": \"tool_name\", \"arguments\": {...}}".to_string(),
-            ),
-            ToolCallFormatName::CodeMode => None, // Code mode has its own prompt section
-        }
+        crate::system_prompt::build_format_instructions(primary_format, Some(model_tool_format))
     }
 
     // ============ State Machine Integration ============
