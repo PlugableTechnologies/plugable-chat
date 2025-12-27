@@ -1,8 +1,11 @@
 pub mod actors;
 pub mod agentic_state;
+pub mod app_state;
+pub mod cli;
 pub mod mid_turn_state;
 pub mod model_profiles;
 pub mod protocol;
+pub mod python_helpers;
 pub mod settings;
 pub mod settings_state_machine;
 pub mod state_machine;
@@ -22,11 +25,18 @@ use actors::python_actor::{PythonMsg, PythonSandboxActor};
 use actors::rag_actor::RagRetrievalActor;
 use actors::schema_vector_actor::{SchemaVectorStoreActor, SchemaVectorMsg};
 use actors::vector_actor::ChatVectorStoreActor;
+use app_state::{
+    ActorHandles, CancellationState, EmbeddingModelState, HeartbeatState, LaunchConfigState,
+    LoggingPersistence, PendingApprovals, SettingsState, SettingsStateMachineState,
+    SystemPromptEvent, ToolApprovalDecision, ToolApprovalState, TurnProgress, TurnTrackerState,
+    ToolRegistryState,
+};
 use clap::Parser;
+use cli::{apply_cli_overrides, is_builtin_tool, parse_tool_filter, CliArgs};
 use fastembed::TextEmbedding;
+use rustpython_parser::{ast, Parse};
 use mcp_test_server::{
     run_with_args as run_mcp_test_server, CliArgs as McpTestCliArgs,
-    DEFAULT_HOST as MCP_TEST_DEFAULT_HOST, DEFAULT_PORT as MCP_TEST_DEFAULT_PORT,
 };
 use model_profiles::resolve_profile;
 use protocol::{
@@ -37,24 +47,20 @@ use protocol::{
     ToolSchema, VectorMsg,
 };
 use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use serde_json::json;
 use settings::{
-    enforce_python_name, ensure_default_servers, AppSettings, CachedColumnSchema,
-    CachedTableSchema, ChatFormatName, DatabaseSourceConfig, DatabaseToolboxConfig, McpServerConfig,
-    SupportedDatabaseKind, ToolCallFormatConfig, ToolCallFormatName,
+    enforce_python_name, AppSettings, CachedColumnSchema, CachedTableSchema, ChatFormatName,
+    DatabaseSourceConfig, DatabaseToolboxConfig, McpServerConfig, SupportedDatabaseKind,
+    ToolCallFormatConfig, ToolCallFormatName,
 };
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, oneshot};
 use tool_adapters::{detect_python_code, format_tool_result, parse_tool_calls_for_model_profile};
-use tool_capability::{ToolCapabilityResolver, ToolLaunchFilter};
+use tool_capability::ToolCapabilityResolver;
 use tool_registry::{create_shared_registry, SharedToolRegistry, ToolSearchResult};
 use settings_state_machine::SettingsStateMachine;
 use state_machine::{AgenticStateMachine, StatePreview};
@@ -63,121 +69,7 @@ use tools::tool_search::{
     precompute_tool_search_embeddings, ToolSearchExecutor, ToolSearchInput, ToolSearchOutput,
 };
 use tools::schema_search::SchemaSearchOutput;
-use rustpython_parser::{ast, Parse};
 use uuid::Uuid;
-
-/// Approval decision for tool calls
-#[derive(Debug, Clone)]
-pub enum ToolApprovalDecision {
-    Approved,
-    Rejected,
-}
-
-/// Pending tool approval state
-type PendingApprovals = Arc<RwLock<HashMap<String, oneshot::Sender<ToolApprovalDecision>>>>;
-
-// State managed by Tauri
-struct ActorHandles {
-    vector_tx: mpsc::Sender<VectorMsg>,
-    foundry_tx: mpsc::Sender<FoundryMsg>,
-    rag_tx: mpsc::Sender<RagMsg>,
-    mcp_host_tx: mpsc::Sender<McpHostMsg>,
-    python_tx: mpsc::Sender<PythonMsg>,
-    database_toolbox_tx: mpsc::Sender<DatabaseToolboxMsg>,
-    schema_tx: mpsc::Sender<SchemaVectorMsg>,
-    #[allow(dead_code)]
-    logging_persistence: Arc<LoggingPersistence>,
-}
-
-// Shared tool registry state
-struct ToolRegistryState {
-    registry: SharedToolRegistry,
-}
-
-// Shared embedding model for RAG operations
-struct EmbeddingModelState {
-    model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
-}
-
-// Shared settings state
-struct SettingsState {
-    settings: Arc<RwLock<AppSettings>>,
-}
-
-// Shared settings state machine (Tier 1 of the three-tier hierarchy)
-struct SettingsStateMachineState {
-    machine: Arc<RwLock<SettingsStateMachine>>,
-}
-
-// Shared state for persistent logging of prompts and tools to avoid noise
-pub struct LoggingPersistence {
-    pub last_logged_system_prompt: Arc<RwLock<Option<String>>>,
-    pub last_logged_tools_json: Arc<RwLock<Option<String>>>,
-}
-
-impl Default for LoggingPersistence {
-    fn default() -> Self {
-        Self {
-            last_logged_system_prompt: Arc::new(RwLock::new(None)),
-            last_logged_tools_json: Arc::new(RwLock::new(None)),
-        }
-    }
-}
-
-// Pending tool approvals state
-struct ToolApprovalState {
-    pending: PendingApprovals,
-}
-
-// Cancellation state for stream abort
-struct CancellationState {
-    /// Current generation's cancel signal
-    cancel_signal: Arc<RwLock<Option<tokio::sync::watch::Sender<bool>>>>,
-    /// Current generation ID for matching
-    current_generation_id: Arc<RwLock<u32>>,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-struct TurnProgress {
-    chat_id: Option<String>,
-    generation_id: u32,
-    assistant_response: String,
-    last_token_index: usize,
-    finished: bool,
-    had_tool_calls: bool,
-    timestamp_ms: u128,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct SystemPromptEvent {
-    chat_id: String,
-    generation_id: u32,
-    prompt: String,
-}
-
-// Tracks the latest turn progress for reconnect/replay
-struct TurnTrackerState {
-    progress: Arc<RwLock<TurnProgress>>,
-}
-
-#[derive(Clone)]
-struct HeartbeatState {
-    last_frontend_beat: Arc<RwLock<Option<Instant>>>,
-    logged_unresponsive: Arc<RwLock<bool>>,
-    logged_never_seen: Arc<RwLock<bool>>,
-    start_instant: Instant,
-}
-
-impl Default for HeartbeatState {
-    fn default() -> Self {
-        Self {
-            last_frontend_beat: Arc::new(RwLock::new(None)),
-            logged_unresponsive: Arc::new(RwLock::new(false)),
-            logged_never_seen: Arc::new(RwLock::new(false)),
-            start_instant: Instant::now(),
-        }
-    }
-}
 
 /// Global toggle for verbose logging, enabled when LOG_VERBOSE (or PLUGABLE_LOG_VERBOSE)
 /// is set to a truthy value such as 1/true/yes/on/debug.
@@ -197,193 +89,13 @@ pub fn is_verbose_logging_enabled() -> bool {
     })
 }
 
-/// CLI arguments for plugable-chat
-#[derive(Parser, Debug, Clone)]
-#[command(name = "plugable-chat", about = "Plugable Chat desktop app")]
-struct CliArgs {
-    /// Optional model to load on launch (non-persistent)
-    #[arg(long, value_name = "MODEL", env = "PLUGABLE_MODEL")]
-    model: Option<String>,
-    /// Override global system prompt (string or @path/to/file)
-    #[arg(long, value_name = "PROMPT_OR_@FILE", env = "PLUGABLE_SYSTEM_PROMPT")]
-    system_prompt: Option<String>,
-    /// Initial user prompt to send on startup (string or @path/to/file)
-    #[arg(long, value_name = "PROMPT_OR_@FILE", env = "PLUGABLE_INITIAL_PROMPT")]
-    initial_prompt: Option<String>,
-    /// Enable/disable tool_search
-    #[arg(long, value_name = "BOOL", env = "PLUGABLE_TOOL_SEARCH", value_parser = clap::builder::BoolishValueParser::new())]
-    tool_search: Option<bool>,
-    /// Maximum number of tools returned by tool_search (caps auto and explicit searches)
-    #[arg(long, value_name = "INT", env = "PLUGABLE_TOOL_SEARCH_MAX_RESULTS")]
-    tool_search_max_results: Option<usize>,
-    /// Enable/disable python_execution built-in
-    #[arg(long, value_name = "BOOL", env = "PLUGABLE_PYTHON_EXECUTION", value_parser = clap::builder::BoolishValueParser::new())]
-    python_execution: Option<bool>,
-    /// Enable/disable python-driven tool calling
-    #[arg(long, value_name = "BOOL", env = "PLUGABLE_PYTHON_TOOL_CALLING", value_parser = clap::builder::BoolishValueParser::new())]
-    python_tool_calling: Option<bool>,
-    /// Enable/disable native tool calling (OpenAI-compatible) when model supports it
-    #[arg(long, value_name = "BOOL", env = "PLUGABLE_NATIVE_TOOL_CALLING", value_parser = clap::builder::BoolishValueParser::new())]
-    native_tool_calling: Option<bool>,
-    /// Enable/disable inclusion of tool input_examples in prompts
-    #[arg(long, value_name = "BOOL", env = "PLUGABLE_TOOL_EXAMPLES", value_parser = clap::builder::BoolishValueParser::new())]
-    tool_examples: Option<bool>,
-    /// Maximum number of examples per tool when tool_examples is enabled
-    #[arg(long, value_name = "INT", env = "PLUGABLE_TOOL_EXAMPLES_MAX")]
-    tool_examples_max: Option<usize>,
-    /// Enable compact prompt mode for small models
-    #[arg(long, value_name = "BOOL", env = "PLUGABLE_COMPACT_MODE", value_parser = clap::builder::BoolishValueParser::new())]
-    compact_mode: Option<bool>,
-    /// Maximum number of tools to surface in prompts when compact mode is on
-    #[arg(long, value_name = "INT", env = "PLUGABLE_COMPACT_MAX_TOOLS")]
-    compact_max_tools: Option<usize>,
-    /// Override per-server defer_tools setting at launch
-    #[arg(long, value_name = "BOOL", env = "PLUGABLE_DEFER_TOOLS", value_parser = clap::builder::BoolishValueParser::new())]
-    defer_tools: Option<bool>,
-    /// Enable/disable legacy <tool_call> parsing
-    #[arg(long, value_name = "BOOL", env = "PLUGABLE_LEGACY_TOOL_FORMAT", value_parser = clap::builder::BoolishValueParser::new())]
-    legacy_tool_call_format: Option<bool>,
-    /// Comma-separated list of tool call formats to enable (hermes,mistral,pythonic,pure_json,code_mode)
-    #[arg(
-        long = "tool-call-enabled",
-        value_delimiter = ',',
-        value_name = "FORMAT[,FORMAT...]",
-        env = "PLUGABLE_TOOL_CALL_ENABLED"
-    )]
-    tool_call_enabled: Option<Vec<String>>,
-    /// Primary tool call format to prompt
-    #[arg(
-        long = "tool-call-primary",
-        value_name = "FORMAT",
-        env = "PLUGABLE_TOOL_CALL_PRIMARY"
-    )]
-    tool_call_primary: Option<String>,
-    /// Override per-tool system prompts (server_id::tool_name=prompt_or_@file). Use server_id=builtin for built-ins.
-    #[arg(long = "tool-system-prompt", value_name = "KEY=VALUE_OR_@FILE", env = "PLUGABLE_TOOL_SYSTEM_PROMPTS", value_delimiter = None)]
-    tool_system_prompts: Vec<String>,
-    /// Replace MCP server list with JSON configs (inline JSON or @path/to/json)
-    #[arg(long = "mcp-server", value_name = "JSON_OR_@FILE", env = "PLUGABLE_MCP_SERVERS", value_delimiter = None)]
-    mcp_servers: Vec<String>,
-    /// Optional allowlist of tools to expose on launch.
-    /// Built-ins: python_execution, tool_search
-    /// MCP tools: server_id::tool_name
-    /// Servers: server_id (enables all tools from that server)
-    #[arg(long, value_delimiter = ',', env = "PLUGABLE_TOOLS")]
-    tools: Option<Vec<String>>,
-    /// Enable the built-in dev MCP test server (off by default)
-    #[arg(
-        long,
-        value_name = "BOOL",
-        env = "PLUGABLE_ENABLE_MCP_TEST",
-        value_parser = clap::builder::BoolishValueParser::new()
-    )]
-    enable_mcp_test: Option<bool>,
-    /// Run only the dev MCP test server (no app; blocks until exit)
-    #[arg(
-        long,
-        value_name = "BOOL",
-        env = "PLUGABLE_RUN_MCP_TEST_SERVER",
-        default_value_t = false,
-        value_parser = clap::builder::BoolishValueParser::new(),
-        action = clap::ArgAction::Set
-    )]
-    run_mcp_test_server: bool,
-    /// Host for the dev MCP test server when run standalone
-    #[arg(long, value_name = "HOST", default_value = MCP_TEST_DEFAULT_HOST)]
-    mcp_test_host: String,
-    /// Port for the dev MCP test server when run standalone
-    #[arg(long, value_name = "PORT", default_value_t = MCP_TEST_DEFAULT_PORT)]
-    mcp_test_port: u16,
-    /// Auto-run the full MCP test sweep on start (standalone mode)
-    #[arg(
-        long,
-        value_name = "BOOL",
-        default_value_t = false,
-        value_parser = clap::builder::BoolishValueParser::new(),
-        action = clap::ArgAction::Set
-    )]
-    mcp_test_run_all_on_start: bool,
-    /// Serve the MCP test server UI (standalone mode)
-    #[arg(
-        long,
-        value_name = "BOOL",
-        default_value_t = true,
-        value_parser = clap::builder::BoolishValueParser::new(),
-        action = clap::ArgAction::Set
-    )]
-    mcp_test_serve_ui: bool,
-    /// Auto-open the MCP test server UI in a browser (standalone mode)
-    #[arg(
-        long,
-        value_name = "BOOL",
-        default_value_t = true,
-        value_parser = clap::builder::BoolishValueParser::new(),
-        action = clap::ArgAction::Set
-    )]
-    mcp_test_open_ui: bool,
-    /// Print the recommended MCP test prompt to stdout (standalone mode)
-    #[arg(
-        long,
-        value_name = "BOOL",
-        default_value_t = true,
-        value_parser = clap::builder::BoolishValueParser::new(),
-        action = clap::ArgAction::Set
-    )]
-    mcp_test_print_prompt: bool,
-}
-
-#[derive(Debug, Clone, Default)]
-struct LaunchOverrides {
-    model: Option<String>,
-    initial_prompt: Option<String>,
-}
-
-// ToolLaunchFilter moved to tool_capability module
-
-/// Global launch configuration state
-struct LaunchConfigState {
-    tool_filter: ToolLaunchFilter,
-    launch_overrides: LaunchOverrides,
-}
-
 /// Maximum number of tool call iterations before stopping (safety limit)
 const MAX_TOOL_ITERATIONS: usize = 20;
 const PYTHON_EXECUTION_TOOL_TYPE: &str = "python_execution_20251206";
 
-/// Check if a tool call is for a built-in tool (python_execution, tool_search, or database tools)
-fn is_builtin_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "python_execution" | "tool_search" | "schema_search" | "sql_select")
-}
-
 /// Build a consistent key for tool-specific settings
 fn tool_prompt_key(server_id: &str, tool_name: &str) -> String {
     format!("{}::{}", server_id, tool_name)
-}
-
-fn read_value_or_file(raw: &str) -> Result<String, String> {
-    if let Some(path) = raw.strip_prefix('@') {
-        let contents = fs::read_to_string(Path::new(path))
-            .map_err(|e| format!("Failed to read {}: {}", path, e))?;
-        Ok(contents)
-    } else {
-        Ok(raw.to_string())
-    }
-}
-
-fn parse_json_or_file<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
-    let data = read_value_or_file(raw)?;
-    serde_json::from_str(&data).map_err(|e| format!("Failed to parse JSON: {}", e))
-}
-
-fn parse_tool_call_format(name: &str) -> Option<ToolCallFormatName> {
-    match name {
-        "hermes" => Some(ToolCallFormatName::Hermes),
-        "mistral" => Some(ToolCallFormatName::Mistral),
-        "pythonic" => Some(ToolCallFormatName::Pythonic),
-        "pure_json" => Some(ToolCallFormatName::PureJson),
-        "code_mode" => Some(ToolCallFormatName::CodeMode),
-        _ => None,
-    }
 }
 
 /// Keep the shared registry's database built-ins in sync with current settings.
@@ -429,227 +141,6 @@ async fn auto_enable_sql_select(
                 reason
             );
         }
-    }
-}
-
-/// Parse CLI args into a launch-time tool filter
-fn parse_tool_filter(args: &CliArgs) -> ToolLaunchFilter {
-    let mut builtin_set: HashSet<String> = HashSet::new();
-    let mut server_set: HashSet<String> = HashSet::new();
-    let mut tool_set: HashSet<(String, String)> = HashSet::new();
-
-    let mut has_builtin = false;
-    let mut has_server = false;
-    let mut has_tool = false;
-
-    if let Some(entries) = &args.tools {
-        for raw in entries {
-            if let Some((server_id, tool_name)) = raw.split_once("::") {
-                tool_set.insert((server_id.to_string(), tool_name.to_string()));
-                has_tool = true;
-            } else if is_builtin_tool(raw) {
-                builtin_set.insert(raw.to_string());
-                has_builtin = true;
-            } else {
-                server_set.insert(raw.to_string());
-                has_server = true;
-            }
-        }
-    }
-
-    ToolLaunchFilter {
-        allowed_builtins: if has_builtin { Some(builtin_set) } else { None },
-        allowed_servers: if has_server { Some(server_set) } else { None },
-        allowed_tools: if has_tool { Some(tool_set) } else { None },
-    }
-}
-
-/// Apply CLI overrides to settings without persisting them.
-fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> LaunchOverrides {
-    fn resolve_mcp_manifest() -> Option<String> {
-        // Probe current dir and a couple parents for the repo root
-        let mut dir = std::env::current_dir().ok()?;
-        for _ in 0..5 {
-            let candidate = dir.join("mcp-test-server").join("Cargo.toml");
-            if candidate.exists() {
-                return Some(candidate.to_string_lossy().to_string());
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-        None
-    }
-    // System prompt
-    if let Some(raw) = &args.system_prompt {
-        match read_value_or_file(raw) {
-            Ok(prompt) => settings.system_prompt = prompt,
-            Err(e) => println!("[Launch] Failed to apply system_prompt override: {}", e),
-        }
-    }
-
-    // Core toggles
-    if let Some(v) = args.tool_search {
-        settings.tool_search_enabled = v;
-    }
-    if let Some(max_results) = args.tool_search_max_results {
-        let capped = max_results.clamp(1, 20);
-        settings.tool_search_max_results = capped;
-    }
-    if let Some(v) = args.python_execution {
-        settings.python_execution_enabled = v;
-    }
-    if let Some(v) = args.python_tool_calling {
-        settings.python_tool_calling_enabled = v;
-    }
-    if let Some(v) = args.native_tool_calling {
-        // CLI override for native tool calling - add/remove Native format
-        if v {
-            if !settings.tool_call_formats.enabled.contains(&ToolCallFormatName::Native) {
-                settings.tool_call_formats.enabled.insert(0, ToolCallFormatName::Native);
-            }
-            settings.tool_call_formats.primary = ToolCallFormatName::Native;
-        } else {
-            settings.tool_call_formats.enabled.retain(|f| *f != ToolCallFormatName::Native);
-            if settings.tool_call_formats.primary == ToolCallFormatName::Native {
-                settings.tool_call_formats.primary = settings.tool_call_formats.enabled
-                    .first()
-                    .copied()
-                    .unwrap_or(ToolCallFormatName::Hermes);
-            }
-        }
-        settings.tool_call_formats.normalize();
-    }
-    if let Some(v) = args.tool_examples {
-        settings.tool_use_examples_enabled = v;
-    }
-    if let Some(max_examples) = args.tool_examples_max {
-        let capped = max_examples.clamp(1, 5);
-        settings.tool_use_examples_max = capped;
-    }
-    if let Some(defer) = args.defer_tools {
-        for server in &mut settings.mcp_servers {
-            server.defer_tools = defer;
-        }
-    }
-    if let Some(v) = args.legacy_tool_call_format {
-        settings.legacy_tool_call_format_enabled = v;
-    }
-
-    // Tool call formats
-    if let Some(enabled) = &args.tool_call_enabled {
-        let mut parsed: Vec<ToolCallFormatName> = Vec::new();
-        for raw in enabled {
-            if let Some(fmt) = parse_tool_call_format(raw) {
-                parsed.push(fmt);
-            } else {
-                println!("[Launch] Unknown tool_call format '{}', ignoring", raw);
-            }
-        }
-        if !parsed.is_empty() {
-            settings.tool_call_formats.enabled = parsed;
-        }
-    }
-    if let Some(primary) = &args.tool_call_primary {
-        if let Some(fmt) = parse_tool_call_format(primary) {
-            settings.tool_call_formats.primary = fmt;
-        } else {
-            println!("[Launch] Unknown tool_call primary '{}', ignoring", primary);
-        }
-    }
-    settings.tool_call_formats.normalize();
-
-    // Tool system prompts
-    for entry in &args.tool_system_prompts {
-        if let Some((key, raw_val)) = entry.split_once('=') {
-            match read_value_or_file(raw_val) {
-                Ok(value) => {
-                    settings.tool_system_prompts.insert(key.to_string(), value);
-                }
-                Err(e) => println!("[Launch] Failed to apply tool_system_prompt {}: {}", key, e),
-            }
-        } else {
-            println!(
-                "[Launch] Invalid --tool-system-prompt '{}'. Expected server::tool=prompt_or_@file",
-                entry
-            );
-        }
-    }
-
-    // MCP servers
-    if !args.mcp_servers.is_empty() {
-        let mut parsed_servers: Vec<McpServerConfig> = Vec::new();
-        for raw in &args.mcp_servers {
-            match parse_json_or_file::<McpServerConfig>(raw) {
-                Ok(mut cfg) => {
-                    enforce_python_name(&mut cfg);
-                    parsed_servers.push(cfg);
-                }
-                Err(e) => println!("[Launch] Failed to parse MCP server '{}': {}", raw, e),
-            }
-        }
-        if !parsed_servers.is_empty() {
-            settings.mcp_servers = parsed_servers;
-        }
-    }
-
-    // Launch-only overrides
-    let launch_model = args.model.clone();
-    let launch_prompt = match &args.initial_prompt {
-        Some(raw) => match read_value_or_file(raw) {
-            Ok(text) => Some(text),
-            Err(e) => {
-                println!("[Launch] Failed to read initial_prompt: {}", e);
-                None
-            }
-        },
-        None => None,
-    };
-
-    // Enable default dev MCP test server when requested
-    let mut enable_mcp_prompt: Option<String> = None;
-    if args.enable_mcp_test == Some(true) {
-        ensure_default_servers(settings);
-        if let Some(test_server) = settings
-            .mcp_servers
-            .iter_mut()
-            .find(|s| s.id == "mcp-test-server")
-        {
-            test_server.enabled = true;
-            test_server.defer_tools = false;
-
-            // Normalize manifest path to an absolute path if available
-            if test_server.command.as_deref() == Some("cargo") {
-                if let Some(abs_manifest) = resolve_mcp_manifest() {
-                    test_server.args = vec![
-                        "run".to_string(),
-                        "--manifest-path".to_string(),
-                        abs_manifest,
-                        "--release".to_string(),
-                    ];
-                }
-            }
-        }
-
-        // Force deterministic, test-friendly settings:
-        // - Disable tool_search so the test server tools stay active (not deferred)
-        // - Keep native tool calling as the primary path (no python code mode)
-        settings.tool_search_enabled = false;
-        settings.python_execution_enabled = false;
-        settings.python_tool_calling_enabled = false;
-
-        // Auto-populate initial prompt to trigger the dev test suite if none provided
-        if launch_prompt.is_none() {
-            enable_mcp_prompt = Some(
-                "Connect to the dev MCP test server and run all tests. Report red/green for each test, a summary, and any errors or logs you see."
-                    .to_string(),
-            );
-        }
-    }
-
-    LaunchOverrides {
-        model: launch_model,
-        initial_prompt: launch_prompt.or(enable_mcp_prompt),
     }
 }
 
@@ -6785,6 +6276,7 @@ pub fn run() {
 mod inline_tests {
     use crate::settings::ToolCallFormatName;
     use crate::protocol::ToolFormat;
+    use crate::tool_capability::ToolLaunchFilter;
 
     // Helper to create test ResolvedToolCapabilities
     use super::*;

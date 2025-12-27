@@ -3,7 +3,7 @@ use crate::protocol::{
     CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus, ModelFamily,
     ModelInfo, OpenAITool, ParsedToolCall, ReasoningFormat, ToolFormat,
 };
-use crate::LoggingPersistence;
+use crate::app_state::LoggingPersistence;
 use serde::Deserialize;
 use crate::settings::ChatFormatName;
 use crate::tool_adapters::parse_combined_tool_name;

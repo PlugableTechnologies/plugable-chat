@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(input.query, "customer orders");
         assert_eq!(input.max_tables, 5);
         assert_eq!(input.max_columns_per_table, 5);
-        assert!((input.min_relevance - 0.3).abs() < 0.01);
+        assert!((input.min_relevance - 0.4).abs() < 0.01);
     }
 
     #[test]
