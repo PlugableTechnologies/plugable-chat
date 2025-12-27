@@ -4,6 +4,7 @@
 //! Tests require Foundry Local to be running.
 
 pub mod tool_capability_integration;
+pub mod agentic_integration;
 
 
 

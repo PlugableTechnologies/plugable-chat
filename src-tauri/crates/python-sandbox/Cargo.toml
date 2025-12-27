@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 # Need compiler feature for vm.compile() and freeze-stdlib for built-in modules
 rustpython-vm = { version = "0.4", default-features = false, features = ["compiler", "freeze-stdlib"] }
 rustpython-stdlib = { version = "0.4", default-features = false }
+rustpython-pylib = { version = "0.4", default-features = false, features = ["freeze-stdlib"] }
 rustpython-compiler = { version = "0.4", default-features = false }
 rustpython-derive = { version = "0.4" }
 

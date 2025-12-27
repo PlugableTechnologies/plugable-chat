@@ -970,16 +970,16 @@ mod tests {
     #[test]
     fn test_module_not_available_error() {
         // Test that unavailable modules give proper error (not a sandbox escape)
-        let result = exec_code(&["import json"]);
+        let result = exec_code(&["import os"]);
         match result.status {
             ExecutionStatus::Complete => {
-                // Module is available - test passes
+                panic!("Module 'os' should not be available in sandbox");
             }
             ExecutionStatus::Error(ref msg) => {
-                // Module not available - should be ModuleNotFoundError, not ImportError from sandbox
+                // Module not available - should be ImportError from our hook
                 assert!(
-                    msg.contains("ModuleNotFoundError") || msg.contains("No module named"),
-                    "Should be a proper module not found error: {}",
+                    msg.contains("ImportError") || msg.contains("not allowed in the sandbox"),
+                    "Should be a proper import error: {}",
                     msg
                 );
             }

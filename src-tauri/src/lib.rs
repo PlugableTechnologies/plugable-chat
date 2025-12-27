@@ -1029,7 +1029,7 @@ fn should_use_native_tool_results(
 }
 
 /// Run the agentic loop: call model, detect tool calls, execute, repeat
-async fn run_agentic_loop(
+pub(crate) async fn run_agentic_loop(
     foundry_tx: mpsc::Sender<FoundryMsg>,
     mcp_host_tx: mpsc::Sender<McpHostMsg>,
     vector_tx: mpsc::Sender<VectorMsg>,

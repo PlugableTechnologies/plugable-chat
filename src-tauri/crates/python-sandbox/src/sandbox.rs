@@ -176,6 +176,9 @@ pub fn create_sandboxed_interpreter() -> Interpreter {
     settings.import_site = false;
 
     Interpreter::with_init(settings, |vm| {
+        // Add frozen stdlib (required for 'encodings' and other pure-python modules)
+        vm.add_frozen(rustpython_pylib::FROZEN_STDLIB);
+
         // Add stdlib native modules (math, json, random, hashlib, etc.)
         // These are the Rust implementations of Python stdlib modules
         for (name, init) in rustpython_stdlib::get_module_inits() {
