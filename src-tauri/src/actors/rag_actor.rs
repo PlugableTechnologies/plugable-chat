@@ -206,8 +206,35 @@ impl RagRetrievalActor {
             
             // Check schema
             let existing_schema = table.schema().await.map_err(|e| e.to_string())?;
-            if existing_schema.fields().len() != schema.fields().len() {
-                println!("RagActor: Schema mismatch for {}. Recreating table...", table_name);
+            let existing_field_count = existing_schema.fields().len();
+            let expected_field_count = schema.fields().len();
+
+            // Check vector dimension if it exists
+            let existing_dim = existing_schema
+                .field_with_name("vector")
+                .ok()
+                .and_then(|f| match f.data_type() {
+                    DataType::FixedSizeList(_, dim) => Some(*dim),
+                    _ => None,
+                });
+
+            let expected_dim = schema
+                .field_with_name("vector")
+                .ok()
+                .and_then(|f| match f.data_type() {
+                    DataType::FixedSizeList(_, dim) => Some(*dim),
+                    _ => None,
+                });
+
+            if existing_field_count != expected_field_count || existing_dim != expected_dim {
+                println!(
+                    "RagActor: Schema mismatch for {}. Dim: {:?} -> {:?}, Fields: {} -> {}. Recreating table...",
+                    table_name,
+                    existing_dim,
+                    expected_dim,
+                    existing_field_count,
+                    expected_field_count
+                );
                 let _ = db.drop_table(table_name).await;
                 let batch = RecordBatch::new_empty(schema.clone());
                 db.create_table(
@@ -243,7 +270,7 @@ impl RagRetrievalActor {
             Field::new("chunk_index", DataType::Int64, false),
             Field::new(
                 "vector",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 384),
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 768),
                 true,
             ),
         ]))
@@ -775,7 +802,7 @@ impl RagRetrievalActor {
         
         let vector_arr = Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
             vectors,
-            384,
+            768,
         ));
 
         let batch = RecordBatch::try_new(

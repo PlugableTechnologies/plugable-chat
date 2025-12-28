@@ -51,7 +51,7 @@ impl ChatVectorStoreActor {
                         let _ = respond_to.send(search_results);
                     }
                     VectorMsg::FetchAllChats { respond_to } => {
-                        let zero_embedding_vector = vec![0.0; 384];
+                        let zero_embedding_vector = vec![0.0; 768];
                         let search_results =
                             search_chats_by_embedding(chat_table, zero_embedding_vector, 100)
                                 .await;
@@ -259,7 +259,7 @@ fn expected_chats_table_schema() -> Arc<Schema> {
         Field::new("model", DataType::Utf8, true),
         Field::new(
             "vector",
-            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 384),
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 768),
             true,
         ),
     ]))
@@ -267,7 +267,6 @@ fn expected_chats_table_schema() -> Arc<Schema> {
 
 async fn ensure_chats_table_schema(db_connection: &Connection) -> Table {
     let expected_schema = expected_chats_table_schema();
-    let expected_field_count = expected_schema.fields().len();
 
     // Try to open existing table
     let result = db_connection.open_table("chats").execute().await;
@@ -278,9 +277,27 @@ async fn ensure_chats_table_schema(db_connection: &Connection) -> Table {
             match table.schema().await {
                 Ok(existing_schema) => {
                     let existing_field_count = existing_schema.fields().len();
-                    if existing_field_count != expected_field_count {
-                        println!("VectorActor: Schema mismatch detected! Table has {} fields, expected {}. Recreating table...", 
-                            existing_field_count, expected_field_count);
+                    let expected_field_count = expected_schema.fields().len();
+
+                    // Check vector field dimension specifically
+                    let existing_dim = existing_schema
+                        .field_with_name("vector")
+                        .ok()
+                        .and_then(|f| match f.data_type() {
+                            DataType::FixedSizeList(_, dim) => Some(*dim),
+                            _ => None,
+                        });
+
+                    let expected_dim = Some(768i32);
+
+                    if existing_field_count != expected_field_count || existing_dim != expected_dim {
+                        println!(
+                            "VectorActor: Schema mismatch detected! Dim: {:?} -> {:?}, Fields: {} -> {}. Recreating table...",
+                            existing_dim,
+                            expected_dim,
+                            existing_field_count,
+                            expected_field_count
+                        );
 
                         // Drop and recreate the table
                         if let Err(e) = db_connection.drop_table("chats").await {
@@ -288,16 +305,17 @@ async fn ensure_chats_table_schema(db_connection: &Connection) -> Table {
                         }
 
                         let batch = RecordBatch::new_empty(expected_schema.clone());
-                        db_connection.create_table(
-                            "chats",
-                            RecordBatchIterator::new(
-                                vec![batch].into_iter().map(Ok),
-                                expected_schema,
-                            ),
-                        )
-                        .execute()
-                        .await
-                        .expect("Failed to create chats table after schema migration")
+                        db_connection
+                            .create_table(
+                                "chats",
+                                RecordBatchIterator::new(
+                                    vec![batch].into_iter().map(Ok),
+                                    expected_schema,
+                                ),
+                            )
+                            .execute()
+                            .await
+                            .expect("Failed to create chats table after schema migration")
                     } else {
                         table
                     }
@@ -313,19 +331,17 @@ async fn ensure_chats_table_schema(db_connection: &Connection) -> Table {
         }
         Err(_) => {
             // Create the table if it doesn't exist
-            println!(
-                "VectorActor: Creating new chats table with {} fields",
-                expected_field_count
-            );
+            println!("VectorActor: Creating new chats table");
             let batch = RecordBatch::new_empty(expected_schema.clone());
 
-            db_connection.create_table(
-                "chats",
-                RecordBatchIterator::new(vec![batch].into_iter().map(Ok), expected_schema),
-            )
-            .execute()
-            .await
-            .expect("Failed to create chats table")
+            db_connection
+                .create_table(
+                    "chats",
+                    RecordBatchIterator::new(vec![batch].into_iter().map(Ok), expected_schema),
+                )
+                .execute()
+                .await
+                .expect("Failed to create chats table")
         }
     }
 }
@@ -375,7 +391,7 @@ async fn upsert_chat_record_with_embedding(
                 .map(|v| Some(*v))
                 .collect::<Vec<_>>(),
         )],
-        384,
+        768,
     );
 
     let batch = match RecordBatch::try_new(

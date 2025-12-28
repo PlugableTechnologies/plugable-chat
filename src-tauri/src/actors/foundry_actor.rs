@@ -7,7 +7,8 @@ use crate::app_state::LoggingPersistence;
 use serde::Deserialize;
 use crate::settings::ChatFormatName;
 use crate::tool_adapters::parse_combined_tool_name;
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{EmbeddingModel, ExecutionProviderDispatch, InitOptions, TextEmbedding};
+use ort::execution_providers::{CUDAExecutionProvider, CoreMLExecutionProvider, DirectMLExecutionProvider};
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
@@ -19,7 +20,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::time::{sleep, timeout};
 
 /// Target embedding dimension (must match LanceDB schema)
-const EMBEDDING_DIM: usize = 384;
+const EMBEDDING_DIM: usize = 768;
 
 /// Accumulator for OpenAI-style streaming tool calls.
 ///
@@ -470,8 +471,8 @@ impl ModelGatewayActor {
         // Initialize embedding model after detecting available execution providers
         // Note: fastembed uses ort internally, which will automatically use GPU if
         // available (since ort is compiled with GPU features). We log GPU detection
-        // for user awareness, but don't need to explicitly configure execution providers.
-        println!("FoundryActor: Initializing local embedding model (all-MiniLM-L6-v2)...");
+        // for user awareness, and explicitly configure execution providers for best performance.
+        println!("FoundryActor: Initializing local embedding model (BGE-Base-EN-v1.5)...");
         
         let has_gpu = Self::has_gpu_eps(&self.valid_eps);
         if has_gpu {
@@ -485,32 +486,68 @@ impl ModelGatewayActor {
         }
 
         let shared_model = Arc::clone(&self.shared_embedding_model);
-        match tokio::task::spawn_blocking(move || {
-            let mut options = InitOptions::default();
-            options.model_name = EmbeddingModel::AllMiniLML6V2;
-            options.show_download_progress = true;
-            // Note: execution_providers field may not be available in fastembed v4
-            // The ort crate (used by fastembed) will automatically use GPU if compiled
-            // with GPU features and GPU is available
-            TextEmbedding::try_new(options)
-        })
-        .await
-        {
-            Ok(Ok(model)) => {
-                println!("FoundryActor: Embedding model loaded successfully");
-                let mut guard = shared_model.write().await;
-                *guard = Some(Arc::new(model));
+        let valid_eps_clone = self.valid_eps.clone();
+        let app_handle_clone = self.app_handle.clone();
+        
+        // Initialize embedding model in a separate task to avoid blocking the actor message loop
+        tokio::spawn(async move {
+            let _ = app_handle_clone.emit("embedding-init-progress", json!({
+                "message": "Initializing local embedding model (BGE-Base-EN-v1.5)...",
+                "is_complete": false
+            }));
+
+            match tokio::task::spawn_blocking(move || {
+                let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
+                options.show_download_progress = true;
+                
+                // Map detected Foundry EPs to fastembed ExecutionProviderDispatch
+                let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
+                for ep_str in &valid_eps_clone {
+                    match ep_str.as_str() {
+                        s if s.contains("CUDA") => eps.push(CUDAExecutionProvider::default().into()),
+                        s if s.contains("CoreML") => eps.push(CoreMLExecutionProvider::default().into()),
+                        s if s.contains("DirectML") => eps.push(DirectMLExecutionProvider::default().into()),
+                        _ => {}
+                    }
+                }
+                if !eps.is_empty() {
+                    options.execution_providers = eps;
+                }
+                
+                TextEmbedding::try_new(options)
+            })
+            .await
+            {
+                Ok(Ok(model)) => {
+                    println!("FoundryActor: Embedding model loaded successfully");
+                    let mut guard = shared_model.write().await;
+                    *guard = Some(Arc::new(model));
+                    let _ = app_handle_clone.emit("embedding-init-progress", json!({
+                        "message": "Embedding model loaded",
+                        "is_complete": true
+                    }));
+                }
+                Ok(Err(e)) => {
+                    println!("FoundryActor ERROR: Failed to load embedding model: {}", e);
+                    let _ = app_handle_clone.emit("embedding-init-progress", json!({
+                        "message": format!("Failed to load embedding model: {}", e),
+                        "is_complete": true,
+                        "error": true
+                    }));
+                }
+                Err(e) => {
+                    println!(
+                        "FoundryActor ERROR: Embedding model initialization task panicked: {}",
+                        e
+                    );
+                    let _ = app_handle_clone.emit("embedding-init-progress", json!({
+                        "message": "Embedding model initialization task panicked",
+                        "is_complete": true,
+                        "error": true
+                    }));
+                }
             }
-            Ok(Err(e)) => {
-                println!("FoundryActor ERROR: Failed to load embedding model: {}", e);
-            }
-            Err(e) => {
-                println!(
-                    "FoundryActor ERROR: Embedding model initialization task panicked: {}",
-                    e
-                );
-            }
-        }
+        });
 
         let client = reqwest::Client::new();
 

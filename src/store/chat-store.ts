@@ -322,6 +322,7 @@ let unlistenServiceRestartStarted: (() => void) | undefined;
 let unlistenServiceRestartComplete: (() => void) | undefined;
 let unlistenSystemPrompt: (() => void) | undefined;
 let unlistenRagProgress: (() => void) | undefined;
+let unlistenEmbeddingInit: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
 let modelFetchPromise: Promise<void> | null = null;
@@ -1348,6 +1349,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
             });
 
+            // Embedding model init progress listener
+            const embeddingInitListener = await listen<{ message: string; is_complete: boolean; error?: boolean }>('embedding-init-progress', (event) => {
+                const { message, is_complete, error } = event.payload;
+                console.log(`[ChatStore] Embedding init: ${message} (complete=${is_complete})`);
+                
+                set((state) => ({
+                    operationStatus: {
+                        type: 'loading',
+                        message,
+                        completed: is_complete,
+                        startTime: state.operationStatus?.startTime || Date.now(),
+                    }
+                }));
+
+                if (is_complete) {
+                    setTimeout(() => {
+                        const state = get();
+                        // Only clear if it's still showing the embedding message or was an error
+                        if (state.operationStatus?.completed && (state.operationStatus?.message?.includes('Embedding model') || error)) {
+                            set({ operationStatus: null });
+                        }
+                    }, error ? 10000 : 3000);
+                }
+            });
+
             const modelSelectedListener = await listen<string>('model-selected', (event) => {
                 set({ currentModel: event.payload });
             });
@@ -1676,6 +1702,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 serviceStartCompleteListener();
                 serviceRestartStartedListener();
                 serviceRestartCompleteListener();
+                embeddingInitListener();
                 isSettingUp = false;
                 return;
             }
@@ -1696,6 +1723,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenDownloadProgress = downloadProgressListener;
             unlistenLoadComplete = loadCompleteListener;
             unlistenRagProgress = ragProgressListener;
+            unlistenEmbeddingInit = embeddingInitListener;
             unlistenServiceStopStarted = serviceStopStartedListener;
             unlistenServiceStopComplete = serviceStopCompleteListener;
             unlistenServiceStartStarted = serviceStartStartedListener;
@@ -1777,6 +1805,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenRagProgress) {
             unlistenRagProgress();
             unlistenRagProgress = undefined;
+        }
+        if (unlistenEmbeddingInit) {
+            unlistenEmbeddingInit();
+            unlistenEmbeddingInit = undefined;
         }
         if (unlistenServiceStopStarted) {
             unlistenServiceStopStarted();

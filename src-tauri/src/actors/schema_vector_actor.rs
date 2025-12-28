@@ -21,8 +21,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::is_verbose_logging_enabled;
 use crate::settings::{CachedColumnSchema, CachedTableSchema, SupportedDatabaseKind};
 
-/// Embedding dimension (matches fastembed all-MiniLM-L6-v2)
-pub const SCHEMA_EMBEDDING_DIM: i32 = 384;
+/// Embedding dimension (matches fastembed BGE-Base-EN-v1.5)
+pub const SCHEMA_EMBEDDING_DIM: i32 = 768;
 
 /// Messages for the Schema Vector Store Actor
 #[derive(Debug)]
@@ -299,10 +299,28 @@ async fn ensure_tables_table_schema(db_connection: &Connection) -> Table {
             // Check schema compatibility
             match table.schema().await {
                 Ok(existing) => {
-                    if existing.fields().len() != expected_schema.fields().len() {
+                    let existing_field_count = existing.fields().len();
+                    let expected_field_count = expected_schema.fields().len();
+
+                    // Check vector dimension
+                    let existing_dim = existing
+                        .field_with_name("vector")
+                        .ok()
+                        .and_then(|f| match f.data_type() {
+                            DataType::FixedSizeList(_, dim) => Some(*dim),
+                            _ => None,
+                        });
+
+                    let expected_dim = Some(SCHEMA_EMBEDDING_DIM);
+
+                    if existing_field_count != expected_field_count || existing_dim != expected_dim {
                         println!(
-                            "[SchemaVectorActor] Table '{}' schema mismatch, recreating...",
-                            table_name
+                            "[SchemaVectorActor] Table '{}' schema mismatch (Dim: {:?} -> {:?}, Fields: {} -> {}), recreating...",
+                            table_name,
+                            existing_dim,
+                            expected_dim,
+                            existing_field_count,
+                            expected_field_count
                         );
                         let _ = db_connection.drop_table(table_name).await;
                         create_empty_table(db_connection, table_name, expected_schema).await
@@ -325,10 +343,28 @@ async fn ensure_columns_table_schema(db_connection: &Connection) -> Table {
         Ok(table) => {
             match table.schema().await {
                 Ok(existing) => {
-                    if existing.fields().len() != expected_schema.fields().len() {
+                    let existing_field_count = existing.fields().len();
+                    let expected_field_count = expected_schema.fields().len();
+
+                    // Check vector dimension
+                    let existing_dim = existing
+                        .field_with_name("vector")
+                        .ok()
+                        .and_then(|f| match f.data_type() {
+                            DataType::FixedSizeList(_, dim) => Some(*dim),
+                            _ => None,
+                        });
+
+                    let expected_dim = Some(SCHEMA_EMBEDDING_DIM);
+
+                    if existing_field_count != expected_field_count || existing_dim != expected_dim {
                         println!(
-                            "[SchemaVectorActor] Table '{}' schema mismatch, recreating...",
-                            table_name
+                            "[SchemaVectorActor] Table '{}' schema mismatch (Dim: {:?} -> {:?}, Fields: {} -> {}), recreating...",
+                            table_name,
+                            existing_dim,
+                            expected_dim,
+                            existing_field_count,
+                            expected_field_count
                         );
                         let _ = db_connection.drop_table(table_name).await;
                         create_empty_table(db_connection, table_name, expected_schema).await

@@ -986,14 +986,11 @@ async fn run_all_handler(AxumState(state): AxumState<Arc<SharedState>>) -> Json<
     let state_clone = state.clone();
     tokio::spawn(async move {
         println!("[mcp-test-server] run-all task spawned");
-        match run_all_tests(state_clone, TriggerSource::Http).await {
-            summary => {
-                println!(
-                    "[mcp-test-server] run-all task finished: total={}, passed={}, failed={}, duration_ms={}",
-                    summary.total, summary.passed, summary.failed, summary.duration_ms
-                );
-            }
-        }
+        let summary = run_all_tests(state_clone, TriggerSource::Http).await;
+        println!(
+            "[mcp-test-server] run-all task finished: total={}, passed={}, failed={}, duration_ms={}",
+            summary.total, summary.passed, summary.failed, summary.duration_ms
+        );
     });
     Json(json!({"status": "accepted"}))
 }

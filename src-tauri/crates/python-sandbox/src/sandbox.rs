@@ -80,7 +80,7 @@ pub fn generate_tool_module_code() -> String {
             let func_code = generate_global_tool_function(&func.name, &func.description);
             code.push_str(&func_code);
         }
-        code.push_str("\n");
+        code.push('\n');
     }
 
     // Create namespace classes for module-style imports (e.g., from bigquery import list_dataset_ids)
@@ -101,7 +101,7 @@ pub fn generate_tool_module_code() -> String {
                 func.name, func.name
             ));
         }
-        code.push_str("\n");
+        code.push('\n');
 
         // Register in sys.modules (use class, not instance, to avoid method binding issues)
         code.push_str(&format!(
