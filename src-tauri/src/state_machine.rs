@@ -99,12 +99,20 @@ impl AgenticStateMachine {
         settings_sm: &SettingsStateMachine,
         prompt_context: PromptContext,
     ) -> Self {
-        let enabled_capabilities = settings_sm.enabled_capabilities().clone();
+        let mut enabled_capabilities = settings_sm.enabled_capabilities().clone();
         let thresholds = RelevancyThresholds {
             rag_chunk_min: settings_sm.relevancy_thresholds().rag_chunk_min,
             schema_relevancy: settings_sm.relevancy_thresholds().schema_relevancy,
             rag_dominant_threshold: settings_sm.relevancy_thresholds().rag_dominant_threshold,
         };
+        
+        // When RAG documents are attached, disable SQL tools to avoid confusing the model.
+        // We don't support simultaneous SQL and RAG - user-attached documents take priority.
+        if prompt_context.has_attachments {
+            enabled_capabilities.remove(&Capability::SqlQuery);
+            enabled_capabilities.remove(&Capability::SchemaSearch);
+            println!("[StateMachine] RAG attachments present - SQL tools disabled to focus on attached documents");
+        }
         
         // Determine initial state based on operational mode
         let initial_state = Self::compute_initial_state_from_mode(

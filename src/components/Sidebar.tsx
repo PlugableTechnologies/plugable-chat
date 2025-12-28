@@ -197,7 +197,11 @@ export function Sidebar({ className = "" }: SidebarProps) {
             <div className="sidebar-scroll-region flex-1 overflow-y-auto scrollbar-hide px-3 pt-4">
                 {/* New Chat Button */}
                 <button
-                    onClick={() => {
+                    onClick={async () => {
+                        // Clear RAG context first - new chats shouldn't inherit attached documents
+                        // This matches ChatGPT/Claude behavior where each new conversation is fresh
+                        await useChatStore.getState().clearRagContext();
+                        
                         useChatStore.setState({
                             chatMessages: [],
                             chatInputValue: '',
