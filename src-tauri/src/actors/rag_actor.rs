@@ -678,6 +678,15 @@ impl RagRetrievalActor {
         println!("RagActor: {} chunks need processing", total_pending_chunks);
 
         if total_pending_chunks == 0 {
+            // FIX: Emit rag-progress with is_complete=true so frontend clears status bar
+            if let Some(ref handle) = self.app_handle {
+                let _ = handle.emit("rag-progress", RagProgressEvent {
+                    total_chunks: 0,
+                    processed_chunks: 0,
+                    current_file: String::new(),
+                    is_complete: true,
+                });
+            }
             return Ok(RagIndexResult {
                 total_chunks: total_chunks_in_index,
                 files_processed: files_processed_count,
@@ -747,6 +756,16 @@ impl RagRetrievalActor {
                         is_complete: final_chunks.len() == total_pending_chunks,
                     });
                 }
+            }
+        } else if !final_chunks.is_empty() {
+            // FIX: All embeddings were cached, emit progress event with is_complete=true
+            if let Some(ref handle) = self.app_handle {
+                let _ = handle.emit("rag-progress", RagProgressEvent {
+                    total_chunks: final_chunks.len(),
+                    processed_chunks: final_chunks.len(),
+                    current_file: final_chunks.last().map(|c| c.source_file.clone()).unwrap_or_default(),
+                    is_complete: true,
+                });
             }
         }
 

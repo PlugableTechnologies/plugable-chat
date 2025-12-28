@@ -1016,10 +1016,6 @@ const LATEX_COMMAND_PATTERN = new RegExp(
 
 // Convert LaTeX bracket/paren delimiters to dollar signs for remark-math
 const convertLatexDelimiters = (content: string): string => {
-    // #region agent log
-    const startTs = Date.now();
-    // #endregion
-    
     // Early exit: skip expensive processing if content looks like JSON/code
     // This prevents catastrophic backtracking on JSON arrays/objects
     const looksLikeJson = /^\s*[\[{]/.test(content) && /"[^"]*"\s*:/.test(content);
@@ -1105,22 +1101,12 @@ const convertLatexDelimiters = (content: string): string => {
     // This catches cases where LaTeX commands appear in plain text without any delimiters
     result = wrapUndelimitedLatex(result);
     
-    // #region agent log
-    const durMs = Date.now() - startTs;
-    if (durMs > 30 || content.length > 2000) {
-        fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H3b',location:'ChatArea.tsx:convertLatexDelimiters',message:'convertLatexDelimiters_duration',data:{inputLen:content.length,outputLen:result.length,durationMs:durMs},timestamp:Date.now()})}).catch(()=>{});
-    }
-    // #endregion
     return result;
 };
 
 // Wrap undelimited LaTeX expressions in $ delimiters
 // This handles cases where the model outputs LaTeX without proper math delimiters
 const wrapUndelimitedLatex = (content: string): string => {
-    // #region agent log
-    const startTs = Date.now();
-    // #endregion
-    
     // Early exit: skip if content doesn't have any LaTeX commands
     if (!content.includes('\\')) {
         return content;
@@ -1226,21 +1212,11 @@ const wrapUndelimitedLatex = (content: string): string => {
         result = result.slice(0, start) + text + result.slice(end);
     }
     
-    // #region agent log
-    const durMs = Date.now() - startTs;
-    if (durMs > 30 || content.length > 3000) {
-        fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H3a',location:'ChatArea.tsx:wrapUndelimitedLatex',message:'wrapUndelimitedLatex_duration',data:{contentLen:content.length,replacementsCount:replacements.length,durationMs:durMs},timestamp:Date.now()})}).catch(()=>{});
-    }
-    // #endregion
     return result;
 };
 
 // Helper to wrap raw \boxed{} in math delimiters to ensure they render
 const preprocessLaTeX = (content: string) => {
-    // #region agent log
-    const startTimeMs = Date.now();
-    void startTimeMs; // Reserved for future debugging
-    // #endregion
     // First strip OpenAI tokens
     let processed = stripOpenAITokens(content);
     
@@ -1358,12 +1334,6 @@ const preprocessLaTeX = (content: string) => {
         result += processed[i];
         i++;
     }
-    // #region agent log
-    const durationMs = Date.now() - startTimeMs;
-    if (durationMs > 50 || content.length > 2000) {
-        fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H5',location:'ChatArea.tsx:preprocessLaTeX',message:'preprocessLaTeX_duration',data:{inputLen:content.length,outputLen:result.length,durationMs},timestamp:Date.now()})}).catch(()=>{});
-    }
-    // #endregion
     return result;
 };
 
@@ -1843,10 +1813,6 @@ export function ChatArea() {
             pinned: summaryPinned,
             model: storeState.currentModel
         });
-
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ed1dd551-d0f1-4880-9a65-c463a4dc7c0d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H1',location:'ChatArea.tsx:1555',message:'handle_send_start',data:{chatId,isNewChat,promptLength:trimmedText.length,ragChunkCount:storeState.ragChunkCount,model:storeState.currentModel,generationCounter:storeState.chatGenerationCounter},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
 
         // Add user message (show original text to user)
         appendChatMessage({

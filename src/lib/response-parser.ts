@@ -223,9 +223,6 @@ function parsePlainText(content: string): MessagePart[] {
  * Tool calls have "name" field with a known tool name pattern
  */
 function looksLikeToolCallJson(jsonStr: string): boolean {
-    // #region agent log
-    const startTs = Date.now();
-    // #endregion
     // Known tool names or structural markers that should be treated as tool calls
     const toolPatterns = [
         '"name"\\s*:\\s*"python_execution"',
@@ -248,12 +245,6 @@ function looksLikeToolCallJson(jsonStr: string): boolean {
     const hasServerToolPair = /"server"\s*:\s*"/.test(jsonStr) && /"tool"\s*:\s*"/.test(jsonStr);
     
     const result = hasServerToolPair || toolPatterns.some(pattern => new RegExp(pattern, 'i').test(jsonStr));
-    // #region agent log
-    const durMs = Date.now() - startTs;
-    if (durMs > 20 || jsonStr.length > 5000) {
-        fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H2',location:'response-parser.ts:looksLikeToolCallJson',message:'looksLikeToolCallJson_duration',data:{jsonLen:jsonStr.length,durationMs:durMs,hasServerToolPair,result},timestamp:Date.now()})}).catch(()=>{});
-    }
-    // #endregion
     return result;
 }
 
@@ -268,10 +259,6 @@ function looksLikeToolCallJson(jsonStr: string): boolean {
  * Returns an array of MessageParts with tool_call extracted from text.
  */
 function extractToolCalls(parts: MessagePart[]): MessagePart[] {
-    // #region agent log
-    const startTs = Date.now();
-    const totalLen = parts.reduce((acc, p) => acc + p.content.length, 0);
-    // #endregion
     const result: MessagePart[] = [];
     
     for (const part of parts) {
@@ -378,12 +365,6 @@ function extractToolCalls(parts: MessagePart[]): MessagePart[] {
         }
     }
     
-    // #region agent log
-    const durMs = Date.now() - startTs;
-    if (durMs > 50 || totalLen > 5000) {
-        fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H1',location:'response-parser.ts:extractToolCalls',message:'extractToolCalls_duration',data:{totalLen,partsCount:parts.length,durationMs:durMs},timestamp:Date.now()})}).catch(()=>{});
-    }
-    // #endregion
     return result;
 }
 
@@ -396,9 +377,6 @@ function extractToolCalls(parts: MessagePart[]): MessagePart[] {
  * @returns Array of MessagePart objects with normalized type and content
  */
 export function parseMessageContent(content: string, modelFamily?: ModelFamily): MessagePart[] {
-    // #region agent log
-    const startTs = Date.now();
-    // #endregion
     // First, strip any leaked OpenAI special tokens
     const cleanedContent = stripOpenAITokens(content);
     
@@ -436,12 +414,6 @@ export function parseMessageContent(content: string, modelFamily?: ModelFamily):
     // Post-process to extract tool_call blocks from text parts
     // This handles <tool_call> and <function_call> tags that can appear in any format
     const result = extractToolCalls(parts);
-    // #region agent log
-    const durMs = Date.now() - startTs;
-    if (durMs > 50 || content.length > 3000) {
-        fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'H4',location:'response-parser.ts:parseMessageContent',message:'parseMessageContent_duration',data:{contentLen:content.length,partsCount:result.length,format,durationMs:durMs},timestamp:Date.now()})}).catch(()=>{});
-    }
-    // #endregion
     return result;
 }
 
