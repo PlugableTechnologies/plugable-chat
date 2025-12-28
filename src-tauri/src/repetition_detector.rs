@@ -12,7 +12,7 @@ impl RepetitionDetector {
     pub fn new() -> Self {
         Self {
             buffer: String::new(),
-            max_buffer_size: 1000,
+            max_buffer_size: 2000, // Increased from 1000 to catch longer loops
             score_threshold: 100,
             min_repetitions: 3,
         }
@@ -38,51 +38,75 @@ impl RepetitionDetector {
 
     /// Returns (pattern, repetitions) if a loop is detected, None otherwise.
     pub fn detect_loop(&self) -> Option<(String, usize)> {
-        let buf = &self.buffer;
-        let buf_len = buf.len();
+        // 1. Try exact match detection first (fastest)
+        if let Some(res) = self.detect_in_string(&self.buffer) {
+            return Some(res);
+        }
+
+        // 2. Try normalized detection (no whitespace, lowercase)
+        // This catches loops where the model varies spacing or capitalization
+        let normalized: String = self.buffer
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(|c| c.to_lowercase())
+            .collect();
         
-        if buf_len < self.min_repetitions {
+        if let Some((pattern, reps)) = self.detect_in_string(&normalized) {
+            // Return a snippet of the normalized pattern to indicate what was found
+            let preview = if pattern.len() > 50 {
+                format!("{}...", &pattern[..47])
+            } else {
+                pattern
+            };
+            return Some((format!("{} (normalized)", preview), reps));
+        }
+
+        None
+    }
+
+    /// Core detection logic using period analysis.
+    /// This is robust against trailing "noise" (partial repetitions at the end).
+    fn detect_in_string(&self, s: &str) -> Option<(String, usize)> {
+        let n = s.len();
+        if n < self.min_repetitions {
             return None;
         }
 
-        // Try pattern lengths from 1 up to buf_len / min_reps.
-        // We start from 1 to catch single character repetition quickly.
-        for pattern_len in 1..=(buf_len / self.min_repetitions) {
-            let pattern_end = buf_len;
-            let pattern_start = buf_len - pattern_len;
-            
-            // Check if pattern_start is a valid char boundary
-            if !buf.is_char_boundary(pattern_start) {
+        let bytes = s.as_bytes();
+        
+        // We look for a period L such that s[i] == s[i-L] for a significant stretch.
+        // We try all possible periods L from 1 up to n/3.
+        for l in 1..=(n / self.min_repetitions) {
+            // Check if n-l is a valid char boundary to safely slice the pattern later
+            if !s.is_char_boundary(n - l) {
                 continue;
             }
-            
-            let pattern = &buf[pattern_start..pattern_end];
-            let mut reps = 1;
-            let mut pos = pattern_start;
-            
-            // Count consecutive occurrences backwards.
-            while pos >= pattern_len {
-                let prev_pos = pos - pattern_len;
-                if !buf.is_char_boundary(prev_pos) {
-                    break;
-                }
-                
-                if &buf[prev_pos..pos] == pattern {
-                    reps += 1;
-                    pos = prev_pos;
+
+            let mut matching_bytes = 0;
+            // Count backwards how many bytes match their counterpart one period ago
+            for i in (l..n).rev() {
+                if bytes[i] == bytes[i - l] {
+                    matching_bytes += 1;
                 } else {
                     break;
                 }
             }
             
-            // Formula: pattern_length * repetitions > score_threshold AND repetitions >= min_repetitions
-            // Using chars().count() for length to be more accurate with multi-byte chars, 
-            // though byte length is usually fine for these thresholds.
-            let pattern_char_len = pattern.chars().count();
-            if reps >= self.min_repetitions && pattern_char_len * reps > self.score_threshold {
-                return Some((pattern.to_string(), reps));
+            // Total repetitions = (matching stretch / period) + 1
+            let reps = (matching_bytes / l) + 1;
+            
+            if reps >= self.min_repetitions {
+                // Period pattern is the segment of length L at the end
+                let pattern = &s[n - l..n];
+                let pattern_char_len = pattern.chars().count();
+                
+                // Trigger based on total "meat" of the repetition
+                if pattern_char_len * reps > self.score_threshold {
+                    return Some((pattern.to_string(), reps));
+                }
             }
         }
+        
         None
     }
     
