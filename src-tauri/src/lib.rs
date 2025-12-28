@@ -3068,6 +3068,10 @@ async fn chat(
         }
     };
 
+    // Resolve model profile to get tool call format preference
+    let profile = model_profiles::resolve_profile(&model);
+    let resolved_model_tool_format = Some(profile.tool_call_format);
+
     // Native tool calling is only available if: format is enabled AND model supports it
     let native_tool_calling_enabled =
         format_config.native_enabled() && model_supports_native_tools;
@@ -3324,7 +3328,7 @@ async fn chat(
 
     // Resolve tool capabilities using centralized resolver
     // NOTE: Must be after auto_enable_sql_select so database tools are included
-    let resolved_capabilities = {
+    let (resolved_capabilities, _model_tool_format) = {
         // Refresh settings to pick up any auto-enabled tools (like sql_select after schema search)
         let fresh_settings = settings_state.settings.read().await;
         let settings_for_resolver = fresh_settings.clone();
@@ -3347,13 +3351,14 @@ async fn chat(
             supports_reasoning_effort: false,
         };
         let model_info = current_model_info.as_ref().unwrap_or(&default_model_info);
-        ToolCapabilityResolver::resolve(
+        let caps = ToolCapabilityResolver::resolve(
             &settings_for_resolver,
             model_info,
             &tool_filter,
             &server_configs,
             &registry,
-        )
+        );
+        (caps, Some(model_info.tool_format))
     };
 
     println!(
@@ -3493,6 +3498,7 @@ async fn chat(
         has_attachments,
         mcp_context,
         tool_call_format: primary_format_for_prompt,
+        model_tool_format: resolved_model_tool_format,
         custom_tool_prompts: tool_system_prompts.clone(),
         python_primary: python_tool_mode,
     };
@@ -4353,6 +4359,7 @@ async fn get_state_machine_preview(
         has_attachments: false,
         mcp_context: agentic_state::McpToolContext::default(),
         tool_call_format: guard.tool_call_formats.primary,
+        model_tool_format: None,
         custom_tool_prompts: guard.tool_system_prompts.clone(),
         python_primary: guard.python_execution_enabled,
     };
@@ -5508,7 +5515,7 @@ async fn get_system_prompt_preview(
     };
 
     // Resolve capabilities for prompt building
-    let resolved_capabilities = {
+    let (resolved_capabilities, model_tool_format) = {
         let registry = tool_registry_state.registry.read().await;
         let (tx, rx) = oneshot::channel();
         let fetched_model_info = if handles
@@ -5537,13 +5544,14 @@ async fn get_system_prompt_preview(
             supports_reasoning_effort: false,
         };
         let model_info = fetched_model_info.as_ref().unwrap_or(&default_model_info);
-        ToolCapabilityResolver::resolve(
+        let caps = ToolCapabilityResolver::resolve(
             &settings_for_resolver,
             model_info,
             &tool_filter,
             &server_configs,
             &registry,
-        )
+        );
+        (caps, Some(model_info.tool_format))
     };
 
     let settings_sm = SettingsStateMachine::from_settings(&settings_for_resolver, &tool_filter);
@@ -5557,6 +5565,7 @@ async fn get_system_prompt_preview(
                 &server_configs,
             ),
             tool_call_format: resolved_capabilities.primary_format,
+            model_tool_format,
             custom_tool_prompts: tool_prompts,
             python_primary: resolved_capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION),
             has_attachments,
@@ -5707,7 +5716,7 @@ async fn get_system_prompt_layers(
     };
 
     // Resolve capabilities for prompt building
-    let resolved_capabilities = {
+    let (resolved_capabilities, model_tool_format) = {
         let registry = tool_registry_state.registry.read().await;
         let (tx, rx) = oneshot::channel();
         let fetched_model_info = if handles
@@ -5736,13 +5745,14 @@ async fn get_system_prompt_layers(
             supports_reasoning_effort: false,
         };
         let model_info = fetched_model_info.as_ref().unwrap_or(&default_model_info);
-        ToolCapabilityResolver::resolve(
+        let caps = ToolCapabilityResolver::resolve(
             &settings_for_resolver,
             model_info,
             &tool_filter,
             &server_configs,
             &registry,
-        )
+        );
+        (caps, Some(model_info.tool_format))
     };
 
     let settings_sm = SettingsStateMachine::from_settings(&settings_for_resolver, &tool_filter);
@@ -5756,6 +5766,7 @@ async fn get_system_prompt_layers(
                 &server_configs,
             ),
             tool_call_format: resolved_capabilities.primary_format,
+            model_tool_format,
             custom_tool_prompts: tool_prompts,
             python_primary: resolved_capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION),
             has_attachments,
@@ -6553,6 +6564,7 @@ mod inline_tests {
                     &server_configs,
                 ),
                 tool_call_format: ToolCallFormatName::Hermes,
+                model_tool_format: None,
                 custom_tool_prompts: tool_prompts,
                 python_primary: false,
                 has_attachments: false,

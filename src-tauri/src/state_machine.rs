@@ -23,7 +23,7 @@ use crate::agentic_state::{
     AgenticState, Capability, McpToolContext, PromptContext, 
     RagChunk, RelevancyThresholds, StateEvent, TableInfo,
 };
-use crate::protocol::ToolSchema;
+use crate::protocol::{ToolSchema, ToolFormat};
 use crate::settings::ToolCallFormatName;
 use crate::settings_state_machine::{OperationalMode, SettingsStateMachine};
 use crate::system_prompt;
@@ -70,6 +70,8 @@ pub struct AgenticStateMachine {
     mcp_context: McpToolContext,
     /// Tool call format to use for instructions
     tool_call_format: ToolCallFormatName,
+    /// Model-specific tool format preference
+    model_tool_format: Option<ToolFormat>,
     /// Custom prompts per tool (key: "server_id::tool_name")
     custom_tool_prompts: HashMap<String, String>,
     /// Whether Python is the primary tool calling mode (Code Mode)
@@ -128,6 +130,7 @@ impl AgenticStateMachine {
             base_prompt: prompt_context.base_prompt,
             mcp_context: prompt_context.mcp_context,
             tool_call_format: prompt_context.tool_call_format,
+            model_tool_format: prompt_context.model_tool_format,
             custom_tool_prompts: prompt_context.custom_tool_prompts,
             python_primary: prompt_context.python_primary,
             has_attachments: prompt_context.has_attachments,
@@ -630,7 +633,11 @@ impl AgenticStateMachine {
             AgenticState::SqlRetrieval { discovered_tables, max_table_relevancy } => {
                 let table_list = self.format_table_list(discovered_tables);
                 let first_table = discovered_tables.first().map(|t| t.fully_qualified_name.as_str());
-                let base_sql_instructions = system_prompt::build_sql_instructions(self.tool_call_format, first_table);
+                let base_sql_instructions = system_prompt::build_sql_instructions(
+                    self.tool_call_format,
+                    self.model_tool_format,
+                    first_table,
+                );
                 Some(system_prompt::build_retrieved_sql_context(*max_table_relevancy, &table_list, &base_sql_instructions))
             }
 
@@ -680,7 +687,11 @@ impl AgenticStateMachine {
                 let table_list = self.format_table_list(tables);
                 let sql_instructions = if *sql_enabled {
                     let first_table = tables.first().map(|t| t.fully_qualified_name.as_str());
-                    let mut instr = system_prompt::build_sql_instructions(self.tool_call_format, first_table);
+                    let mut instr = system_prompt::build_sql_instructions(
+                        self.tool_call_format,
+                        self.model_tool_format,
+                        first_table,
+                    );
                     if let Some(custom) = self.custom_tool_prompts.get("builtin::sql_select") {
                         let trimmed = custom.trim();
                         if !trimmed.is_empty() {
@@ -754,7 +765,8 @@ impl AgenticStateMachine {
                     &output.summary, 
                     self.has_attachments,
                     sql_enabled,
-                    self.tool_call_format
+                    self.tool_call_format,
+                    self.model_tool_format
                 ) {
                     sections.push(section);
                 }
@@ -780,7 +792,7 @@ impl AgenticStateMachine {
             return None;
         }
 
-        system_prompt::build_format_instructions(self.tool_call_format, None)
+        system_prompt::build_format_instructions(self.tool_call_format, self.model_tool_format)
     }
 
     /// Build MCP tool section from mcp_context.

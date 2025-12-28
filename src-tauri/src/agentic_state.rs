@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::protocol::ToolSchema;
+use crate::protocol::{ToolSchema, ToolFormat};
 use crate::settings::ToolCallFormatName;
 
 // ============ MCP Tool Context ============
@@ -153,6 +153,8 @@ pub struct PromptContext {
     pub mcp_context: McpToolContext,
     /// Tool call format to use
     pub tool_call_format: ToolCallFormatName,
+    /// Model-specific tool format preference
+    pub model_tool_format: Option<ToolFormat>,
     /// Custom prompts per tool (key: "server_id::tool_name")
     pub custom_tool_prompts: HashMap<String, String>,
     /// Whether this is a Python-primary mode (Code Mode)
@@ -166,6 +168,7 @@ impl Default for PromptContext {
             has_attachments: false,
             mcp_context: McpToolContext::default(),
             tool_call_format: ToolCallFormatName::Hermes,
+            model_tool_format: None,
             custom_tool_prompts: HashMap::new(),
             python_primary: false,
         }

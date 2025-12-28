@@ -11,25 +11,13 @@ use crate::tool_registry::ToolSearchResult;
 
 // ============ SQL Guidance Constants ============
 
-/// Core SQL execution rules
-pub const SQL_CORE_RULES: &str = "\
-- Execute queries to answer data questions - do NOT return SQL code
-- ONLY use columns explicitly listed in the schema above
-- NEVER guess column names - if not listed, it doesn't exist
-- Prefer aggregation (SUM, COUNT, AVG, etc.) of numeric columns to get final answers directly
-- Limit results to 25 rows or less through the design of the query
-- Avoid TO_CHAR function; use CAST(column AS STRING) instead
-- NEVER display SQL code to the user - only show query results
-- If a query fails, read the error and fix it rather than inventing results";
-
-/// Anti-hallucination rules for SQL
-pub const SQL_NO_HALLUCINATION: &str = "\
-- ONLY use columns explicitly listed in the `cols:` section above.
-- NEVER guess or invent column names.
-- If a query returns `null`, the data is missing - do NOT assume the tool failed.
-- NEVER make up data values. All facts MUST come from executing `sql_select`.
-- NEVER display SQL code to the user - only show query results.
-- If the query fails, read the error and fix it rather than inventing results.";
+/// Core SQL execution rules (consolidated)
+pub const SQL_RULES: &str = "\
+- Execute queries to answer data questions - NEVER display SQL code to the user
+- ONLY use columns explicitly listed in the schema - if not listed, it does not exist
+- Prefer aggregation (SUM, COUNT, AVG) for direct answers; limit to 25 rows max
+- Use CAST(column AS STRING) instead of TO_CHAR
+- If a query fails, read the error and retry - never invent results";
 
 /// Success guidance for sql_select (post-execution)
 pub const SQL_SUCCESS_GUIDANCE: &str = "\n\n**NOTE**: The query results above have already been displayed to the user in a formatted table. \
@@ -55,14 +43,40 @@ pub const PYTHON_SANDBOX_RULES: &str = "\
 
 // ============ Builders ============
 
+/// Resolve the effective tool call format based on primary format and model preference.
+/// Local models often need explicit tags even when Native mode is active.
+pub fn resolve_effective_format(
+    primary_format: ToolCallFormatName,
+    model_tool_format: Option<ToolFormat>,
+) -> ToolCallFormatName {
+    if primary_format == ToolCallFormatName::Native {
+        match model_tool_format {
+            Some(ToolFormat::Hermes) => ToolCallFormatName::Hermes,
+            Some(ToolFormat::Granite) => ToolCallFormatName::Mistral,
+            _ => ToolCallFormatName::Native,
+        }
+    } else {
+        primary_format
+    }
+}
+
 /// Get the tool call syntax for a specific format and tool.
-pub fn tool_call_syntax(format: ToolCallFormatName, tool_name: &str, table_name: Option<&str>) -> String {
+pub fn tool_call_syntax(
+    primary_format: ToolCallFormatName,
+    model_tool_format: Option<ToolFormat>,
+    tool_name: &str,
+    table_name: Option<&str>,
+) -> String {
+    let effective_format = resolve_effective_format(primary_format, model_tool_format);
     let sql = match table_name {
         Some(name) => format!("SELECT * FROM {} LIMIT 25", name),
         None => "SELECT ...".to_string(),
     };
-    match format {
-        ToolCallFormatName::Native => format!("<tool_call>{{\"name\": \"{}\", \"arguments\": {{\"sql\": \"{}\"}}}}</tool_call>", tool_name, sql),
+    match effective_format {
+        ToolCallFormatName::Native => format!(
+            "Trigger the `{}` tool with your query. Example: sql=\"{}\"",
+            tool_name, sql
+        ),
         ToolCallFormatName::Hermes => format!("<tool_call>{{\"name\": \"{}\", \"arguments\": {{\"sql\": \"{}\"}}}}</tool_call>", tool_name, sql),
         ToolCallFormatName::Mistral => format!("[TOOL_CALLS] [{{\"name\": \"{}\", \"arguments\": {{\"sql\": \"{}\"}}}}] ", tool_name, sql),
         ToolCallFormatName::Pythonic => format!("{}(sql=\"{}\")", tool_name, sql),
@@ -72,19 +86,35 @@ pub fn tool_call_syntax(format: ToolCallFormatName, tool_name: &str, table_name:
 }
 
 /// Build the SQL action instructions for a given tool call format.
-pub fn build_sql_instructions(format: ToolCallFormatName, table_name: Option<&str>) -> String {
-    let syntax = tool_call_syntax(format, "sql_select", table_name);
-    format!(
-        "Use the `sql_select` tool to query these tables.\n\n\
-        **ACTION REQUIRED**: Execute queries using the tool-call format:\n\
-        ```\n\
-        {}\n\
-        ```\n\n\
-        **CRITICAL REQUIREMENTS**:\n\
-        {}",
-        syntax,
-        SQL_CORE_RULES
-    )
+pub fn build_sql_instructions(
+    primary_format: ToolCallFormatName,
+    model_tool_format: Option<ToolFormat>,
+    table_name: Option<&str>,
+) -> String {
+    let effective_format = resolve_effective_format(primary_format, model_tool_format);
+    let syntax = tool_call_syntax(primary_format, model_tool_format, "sql_select", table_name);
+
+    let mut prompt = format!(
+        "### Tool: `sql_select`\n\
+         Execute SQL queries against the database.\n\
+         - **Arguments**: `sql` (string) [REQUIRED]: The SQL query to execute.\n\n\
+         **ACTION REQUIRED**: "
+    );
+
+    if effective_format == ToolCallFormatName::Native {
+        prompt.push_str(&format!("{}.\n\n", syntax));
+    } else {
+        prompt.push_str(&format!(
+            "Execute the tool call now using this format:\n\
+            ```\n\
+            {}\n\
+            ```\n\n",
+            syntax
+        ));
+    }
+
+    prompt.push_str(&format!("**REQUIREMENTS**:\n{}", SQL_RULES));
+    prompt
 }
 
 /// Build the Python execution prompt section.
@@ -224,13 +254,21 @@ pub fn build_capabilities_section(enabled_capabilities: &HashSet<Capability>, ha
         }
     };
 
-    Some(format!(
-        "## Capabilities\n\n\
-        You are equipped with specialized tools to {}. \
-        You MUST use these tools whenever the user's request requires factual data or tool execution. \
-        Do NOT claim you cannot perform these tasks; use the tools listed below.",
-        capabilities_str
-    ))
+    let intro = if has_sql && !has_python && !has_mcp && !has_rag {
+        "You are a data analyst assistant. Your task is to query the database tables below to answer the user's question. \
+         You MUST execute SQL queries using the `sql_select` tool - do NOT claim you cannot access data. \
+         If you need data, call the tool now instead of explaining what you would do."
+            .to_string()
+    } else {
+        format!(
+            "You are equipped with specialized tools to {}. \
+             You MUST use these tools whenever the user's request requires factual data or tool execution. \
+             Do NOT claim you cannot perform these tasks; use the tools listed below.",
+            capabilities_str
+        )
+    };
+
+    Some(format!("## Capabilities\n\n{}", intro))
 }
 
 /// Build the Factual Grounding section based on enabled tools.
@@ -267,17 +305,7 @@ pub fn build_format_instructions(
     primary_format: ToolCallFormatName,
     model_tool_format: Option<ToolFormat>,
 ) -> Option<String> {
-    // Even if primary is Native, we provide instructions if the model family has a preferred tag format.
-    // Local models (like Phi, Qwen, Granite) often need the explicit tag to trigger tool calling.
-    let effective_format = if primary_format == ToolCallFormatName::Native {
-        match model_tool_format {
-            Some(ToolFormat::Hermes) => ToolCallFormatName::Hermes,
-            Some(ToolFormat::Granite) => ToolCallFormatName::Mistral, // Will handle Granite specific below
-            _ => ToolCallFormatName::Native,
-        }
-    } else {
-        primary_format
-    };
+    let effective_format = resolve_effective_format(primary_format, model_tool_format);
 
     match effective_format {
         ToolCallFormatName::Native => None, // Truly native models (like GPT-4) don't need instructions
@@ -340,7 +368,8 @@ pub fn build_auto_schema_search_section(
     summary: &str,
     has_attachments: bool,
     sql_enabled: bool,
-    format: ToolCallFormatName,
+    primary_format: ToolCallFormatName,
+    model_tool_format: Option<ToolFormat>,
 ) -> Option<String> {
     if tables.is_empty() {
         if summary.contains("WARNING") {
@@ -396,11 +425,11 @@ pub fn build_auto_schema_search_section(
         body.push_str(&line);
     }
 
-    // Add column guidance after table list
-    body.push_str("\n\n**IMPORTANT**: ONLY use columns explicitly listed in the `cols:` lines above. Do NOT speculate about or invent column names.");
-
     let first_table = tables.first().map(|t| t.table_name.as_str());
-    body.push_str(&format!("\n\n{}", build_sql_instructions(format, first_table)));
+    body.push_str(&format!(
+        "\n\n{}",
+        build_sql_instructions(primary_format, model_tool_format, first_table)
+    ));
 
     Some(format!("### Auto schema search\n{}", body))
 }
@@ -516,7 +545,6 @@ pub fn build_retrieved_sql_context(relevancy: f32, table_list: &str, sql_instruc
         "## Retrieved Database Context\n\n\
         The following database tables are relevant to the user's question and can be queried using the `sql_select` tool (max relevancy: {:.2}):\n\n\
         {}\n\n\
-        **IMPORTANT**: ONLY use columns explicitly listed in the schema above. Do NOT speculate about or invent column names.\n\n\
         ## SQL Execution Guidance\n\n\
         {}",
         relevancy,
