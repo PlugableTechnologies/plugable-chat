@@ -97,7 +97,15 @@ const getOperationIcon = (status: OperationStatus) => {
 };
 
 export function StatusBar() {
-    const { operationStatus, statusBarDismissed, dismissStatusBar, heartbeatWarningStart, heartbeatWarningMessage } = useChatStore();
+    const { 
+        operationStatus, 
+        statusBarDismissed, 
+        dismissStatusBar, 
+        heartbeatWarningStart, 
+        heartbeatWarningMessage,
+        modelStuckWarning,
+        setModelStuck
+    } = useChatStore();
     const [elapsed, setElapsed] = useState(0);
     const [heartbeatElapsed, setHeartbeatElapsed] = useState(0);
     
@@ -136,6 +144,7 @@ export function StatusBar() {
     }
 
     const heartbeatActive = !!heartbeatWarningStart;
+    const modelStuckActive = !!modelStuckWarning;
     const colors = operationStatus ? getStatusBarColors(operationStatus) : null;
     const icon = operationStatus ? getOperationIcon(operationStatus) : null;
 
@@ -156,6 +165,24 @@ export function StatusBar() {
                         onClick={dismissStatusBar}
                         className="flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors text-red-600"
                         aria-label="Dismiss heartbeat warning"
+                    >
+                        <X size={16} />
+                    </button>
+                </div>
+            )}
+
+            {modelStuckActive && (
+                <div className="model-stuck-bar flex items-center justify-between px-4 py-2 bg-amber-50 border-b border-amber-200 text-amber-800">
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <span className="text-lg">🛑</span>
+                        <span className="text-sm font-medium">
+                            {modelStuckWarning}
+                        </span>
+                    </div>
+                    <button
+                        onClick={() => setModelStuck(null)}
+                        className="flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors text-amber-600"
+                        aria-label="Dismiss stuck warning"
                     >
                         <X size={16} />
                     </button>

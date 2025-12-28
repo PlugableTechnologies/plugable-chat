@@ -6,6 +6,7 @@ pub mod mid_turn_state;
 pub mod model_profiles;
 pub mod protocol;
 pub mod python_helpers;
+pub mod repetition_detector;
 pub mod settings;
 pub mod settings_state_machine;
 pub mod state_machine;
@@ -39,13 +40,14 @@ use mcp_test_server::{
     run_with_args as run_mcp_test_server, CliArgs as McpTestCliArgs,
 };
 use model_profiles::resolve_profile;
-use protocol::{
+use crate::protocol::{
     parse_tool_calls, CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus,
     McpHostMsg, ModelFamily, ModelInfo, OpenAITool, OpenAIToolCall, OpenAIToolCallFunction,
     ParsedToolCall, RagChunk, RagIndexResult, RagMsg, RemoveFileResult, ToolCallsPendingEvent,
     ToolExecutingEvent, ToolFormat, ToolHeartbeatEvent, ToolLoopFinishedEvent, ToolResultEvent,
     ToolSchema, VectorMsg,
 };
+use crate::repetition_detector::RepetitionDetector;
 use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
 use serde_json::json;
 use settings::{
@@ -1132,7 +1134,7 @@ pub(crate) async fn run_agentic_loop(
         });
 
         // Create channel for this iteration
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
         // Send chat request to Foundry
         println!("[AgenticLoop] 📤 Sending chat request to Foundry...");
@@ -1175,6 +1177,7 @@ pub(crate) async fn run_agentic_loop(
         let mut token_count: usize = 0;
         let mut first_token_time: Option<std::time::Instant> = None;
         let mut last_progress_log = std::time::Instant::now();
+        let mut repetition_detector = RepetitionDetector::new();
 
         loop {
             tokio::select! {
@@ -1202,6 +1205,31 @@ pub(crate) async fn run_agentic_loop(
                             }
                             token_count += 1;
                             assistant_response.push_str(&token);
+                            repetition_detector.push(&token);
+
+                            // Check for repetition loop
+                            if let Some((pattern, reps)) = repetition_detector.detect_loop() {
+                                let preview: String = pattern.chars().take(50).collect();
+                                println!(
+                                    "[AgenticLoop] 🛑 LOOP DETECTED: \"{}{}\" repeated {} times (score: {})",
+                                    preview,
+                                    if pattern.len() > 50 { "..." } else { "" },
+                                    reps,
+                                    pattern.chars().count() * reps
+                                );
+                                let _ = std::io::stdout().flush();
+                                
+                                // Cancel the stream
+                                let _ = internal_cancel_tx.send(true);
+                                
+                                // Notify frontend
+                                let _ = app_handle.emit("model-stuck", serde_json::json!({
+                                    "pattern": preview,
+                                    "repetitions": reps,
+                                    "score": pattern.chars().count() * reps,
+                                }));
+                            }
+
                             let _ = app_handle.emit("chat-token", token.clone());
                             {
                                 let mut progress = turn_progress.write().await;

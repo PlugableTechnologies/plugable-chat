@@ -203,6 +203,10 @@ interface ChatState {
     heartbeatWarningMessage: string | null;
     setHeartbeatWarning: (startTime: number | null, message?: string | null) => void;
 
+    // Model stuck warning
+    modelStuckWarning: string | null;
+    setModelStuck: (message: string | null) => void;
+
     // Per-chat streaming tracking (streaming continues to original chat on switch)
     streamingChatId: string | null;
     streamingMessages: Message[]; // Messages for the streaming chat (if different from current)
@@ -322,6 +326,7 @@ let unlistenServiceRestartStarted: (() => void) | undefined;
 let unlistenServiceRestartComplete: (() => void) | undefined;
 let unlistenSystemPrompt: (() => void) | undefined;
 let unlistenRagProgress: (() => void) | undefined;
+let unlistenModelStuck: (() => void) | undefined;
 let unlistenEmbeddingInit: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
@@ -601,6 +606,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         heartbeatWarningMessage: message ?? (startTime ? 'Backend unresponsive' : null),
         statusBarDismissed: false,
     }),
+
+    modelStuckWarning: null,
+    setModelStuck: (message) => set({ modelStuckWarning: message, statusBarDismissed: false }),
 
     // Per-chat streaming tracking
     streamingChatId: null,
@@ -1421,6 +1429,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
             });
 
+            // Model stuck listener
+            const modelStuckListener = await listen<{ pattern: string; repetitions: number; score: number }>('model-stuck', (event) => {
+                const { pattern, repetitions } = event.payload;
+                console.warn(`[ChatStore] 🛑 Model stuck in loop: "${pattern}" repeated ${repetitions} times`);
+                set({ 
+                    modelStuckWarning: `Model appeared stuck in a loop (repeated "${pattern}"). Response was automatically cancelled.`,
+                    statusBarDismissed: false
+                });
+                
+                // Auto-clear after 15 seconds
+                setTimeout(() => {
+                    const state = get();
+                    if (state.modelStuckWarning?.includes(pattern)) {
+                        set({ modelStuckWarning: null });
+                    }
+                }, 15000);
+            });
+
             // Tool execution event listeners
             const toolCallsPendingListener = await listen<ToolCallsPendingEvent>('tool-calls-pending', (event) => {
                 console.log(`[ChatStore] Tool calls pending: ${event.payload.approval_key}`, event.payload.calls);
@@ -1720,6 +1746,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenSystemPrompt = systemPromptListener;
             unlistenChatSaved = chatSavedListener;
             unlistenSidebarUpdate = sidebarUpdateListener;
+            unlistenModelStuck = modelStuckListener;
             unlistenDownloadProgress = downloadProgressListener;
             unlistenLoadComplete = loadCompleteListener;
             unlistenRagProgress = ragProgressListener;
@@ -1769,6 +1796,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenSidebarUpdate) {
             unlistenSidebarUpdate();
             unlistenSidebarUpdate = undefined;
+        }
+        if (unlistenModelStuck) {
+            unlistenModelStuck();
+            unlistenModelStuck = undefined;
         }
         if (unlistenToolCallsPending) {
             unlistenToolCallsPending();
