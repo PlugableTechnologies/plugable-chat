@@ -218,8 +218,11 @@ impl AgenticStateMachine {
     ) {
         let rag_passes = rag_relevancy >= self.thresholds.rag_chunk_min
             && self.enabled_capabilities.contains(&Capability::Rag);
+        // schema_passes is true if EITHER SchemaSearch OR SqlQuery capability is enabled
+        // (since auto-schema-search runs for both and provides context for sql_select)
         let schema_passes = schema_relevancy >= self.thresholds.schema_relevancy
-            && self.enabled_capabilities.contains(&Capability::SchemaSearch);
+            && (self.enabled_capabilities.contains(&Capability::SchemaSearch)
+                || self.enabled_capabilities.contains(&Capability::SqlQuery));
         let sql_enabled = schema_relevancy >= self.thresholds.schema_relevancy
             && self.enabled_capabilities.contains(&Capability::SqlQuery);
         let rag_dominant = rag_relevancy >= self.thresholds.rag_dominant_threshold;
@@ -428,7 +431,11 @@ impl AgenticStateMachine {
                 *sql_enabled && tool_name == "sql_select"
             }
 
-            AgenticState::SqlResultCommentary { .. } => false,
+            // Allow sql_select in commentary state for multi-query scenarios
+            // (e.g., "compare nov 2025 and oct 2025 sales" requires 2 queries)
+            AgenticState::SqlResultCommentary { .. } => {
+                tool_name == "sql_select" || tool_name == "schema_search"
+            }
 
             AgenticState::CodeExecutionHandoff { .. } => tool_name == "python_execution",
 
@@ -489,7 +496,10 @@ impl AgenticStateMachine {
                 }
             }
 
-            AgenticState::SqlResultCommentary { .. } => vec![],
+            // Allow sql_select in commentary state for multi-query scenarios
+            AgenticState::SqlResultCommentary { .. } => {
+                vec!["sql_select".to_string(), "schema_search".to_string()]
+            }
 
             AgenticState::CodeExecutionHandoff { .. } => vec!["python_execution".to_string()],
 
@@ -680,7 +690,8 @@ impl AgenticStateMachine {
             AgenticState::SqlResultCommentary { query_context, .. } => Some(format!(
                 "## SQL Result Analysis\n\n\
                 The previous tool execution returned: {}. \
-                Summarize these results for the user and answer any follow-up questions.",
+                If additional queries are needed to fully answer the user's question (e.g., for comparisons), \
+                you may execute more `sql_select` calls. Otherwise, summarize these results for the user.",
                 query_context
             )),
 
@@ -1133,8 +1144,10 @@ mod tests {
             _ => panic!("Expected SqlResultCommentary state"),
         }
 
-        // No tools should be allowed in commentary state
-        assert!(!machine.is_tool_allowed("sql_select"));
+        // SQL tools should still be allowed in commentary state for multi-query scenarios
+        assert!(machine.is_tool_allowed("sql_select"));
+        assert!(machine.is_tool_allowed("schema_search"));
+        assert!(!machine.is_tool_allowed("python_execution"));
         assert!(machine.should_continue_loop());
     }
 

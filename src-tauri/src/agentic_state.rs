@@ -472,7 +472,13 @@ impl AgenticState {
                 caps
             }
             
-            AgenticState::SqlResultCommentary { .. } => HashSet::new(),
+            // Allow SQL continuation for multi-query scenarios
+            AgenticState::SqlResultCommentary { .. } => {
+                let mut caps = HashSet::new();
+                caps.insert(Capability::SqlQuery);
+                caps.insert(Capability::SchemaSearch);
+                caps
+            }
             
             AgenticState::CodeExecutionHandoff { .. } => {
                 let mut caps = HashSet::new();

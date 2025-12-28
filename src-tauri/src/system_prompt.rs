@@ -396,6 +396,9 @@ pub fn build_auto_schema_search_section(
         body.push_str(&line);
     }
 
+    // Add column guidance after table list
+    body.push_str("\n\n**IMPORTANT**: ONLY use columns explicitly listed in the `cols:` lines above. Do NOT speculate about or invent column names.");
+
     let first_table = tables.first().map(|t| t.table_name.as_str());
     body.push_str(&format!("\n\n{}", build_sql_instructions(format, first_table)));
 
@@ -513,6 +516,7 @@ pub fn build_retrieved_sql_context(relevancy: f32, table_list: &str, sql_instruc
         "## Retrieved Database Context\n\n\
         The following database tables are relevant to the user's question and can be queried using the `sql_select` tool (max relevancy: {:.2}):\n\n\
         {}\n\n\
+        **IMPORTANT**: ONLY use columns explicitly listed in the schema above. Do NOT speculate about or invent column names.\n\n\
         ## SQL Execution Guidance\n\n\
         {}",
         relevancy,
