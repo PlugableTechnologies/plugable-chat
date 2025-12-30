@@ -541,6 +541,7 @@ pub async fn get_state_machine_preview(
 /// Update database toolbox configuration
 #[tauri::command]
 pub async fn update_database_toolbox_config(
+    app_handle: tauri::AppHandle,
     config: settings::DatabaseToolboxConfig,
     settings_state: State<'_, SettingsState>,
     settings_sm_state: State<'_, SettingsStateMachineState>,
@@ -574,7 +575,7 @@ pub async fn update_database_toolbox_config(
     }
 
     let refresh_summary =
-        refresh_database_schemas_for_config(&handles, &embedding_state, &config).await?;
+        refresh_database_schemas_for_config(&app_handle, &handles, &embedding_state, &config).await?;
 
     if !refresh_summary.errors.is_empty() {
         let joined = refresh_summary.errors.join("; ");

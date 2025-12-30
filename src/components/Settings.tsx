@@ -1,7 +1,7 @@
 import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName, type DatabaseSourceConfig, type SupportedDatabaseKind, type DatabaseToolboxConfig, type ChatFormatName } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw, RefreshCw, AlertCircle, Download, Cpu, HardDrive, ExternalLink, Zap, GitBranch } from 'lucide-react';
-import { invoke, type FoundryCatalogModel, type FoundryServiceStatus } from '../lib/api';
+import { invoke, listen, type FoundryCatalogModel, type FoundryServiceStatus } from '../lib/api';
 import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
 import { useChatStore } from '../store/chat-store';
 
@@ -2512,6 +2512,63 @@ function ToolsTab({
 }
 
 // Main Settings Modal
+
+interface SchemaRefreshProgress {
+    message: string;
+    source_name: string;
+    current_table: string | null;
+    tables_done: number;
+    tables_total: number;
+    is_complete: boolean;
+    error: string | null;
+}
+
+interface SchemaRefreshStatus extends SchemaRefreshProgress {
+    startTime: number;
+}
+
+function SchemaRefreshStatusBar({ status }: { status: SchemaRefreshStatus }) {
+    const [elapsed, setElapsed] = useState(0);
+
+    useEffect(() => {
+        if (status.is_complete) return;
+        const interval = setInterval(() => {
+            setElapsed(Math.floor((Date.now() - status.startTime) / 1000));
+        }, 1000);
+        return () => clearInterval(interval);
+    }, [status.startTime, status.is_complete]);
+
+    const formatElapsedTime = (seconds: number): string => {
+        if (seconds < 60) return `${seconds}s`;
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins}m ${secs}s`;
+    };
+
+    return (
+        <div className={`flex items-center justify-between px-4 py-2 border rounded-lg transition-colors ${status.error ? 'bg-red-50 border-red-200 text-red-800' : 'bg-blue-50 border-blue-200 text-blue-800'}`}>
+            <div className="flex items-center gap-3 min-w-0">
+                {!status.is_complete && !status.error && <Loader2 className="animate-spin text-blue-600" size={16} />}
+                {status.is_complete && <CheckCircle className="text-green-600" size={16} />}
+                {status.error && <XCircle className="text-red-600" size={16} />}
+                <div className="flex flex-col min-w-0">
+                    <span className="text-sm font-medium truncate">
+                        {status.error ? `Error: ${status.error}` : status.message}
+                    </span>
+                    {status.current_table && !status.is_complete && (
+                        <span className="text-[10px] opacity-70 truncate">{status.current_table}</span>
+                    )}
+                </div>
+            </div>
+            {!status.is_complete && !status.error && (
+                <span className="font-mono text-xs opacity-70 ml-4 flex-shrink-0">
+                    {formatElapsedTime(elapsed)}
+                </span>
+            )}
+        </div>
+    );
+}
+
 // Databases Tab - manage database sources and toolbox config
 function DatabasesTab({
     onDirtyChange,
@@ -2531,6 +2588,24 @@ function DatabasesTab({
     });
     const [saveError, setSaveError] = useState<string | null>(null);
     const [refreshingSources, setRefreshingSources] = useState<Record<string, boolean>>({});
+    const [refreshStatus, setRefreshStatus] = useState<SchemaRefreshStatus | null>(null);
+
+    useEffect(() => {
+        const unlistenPromise = listen<SchemaRefreshProgress>('schema-refresh-progress', (event) => {
+            setRefreshStatus(prev => ({
+                ...event.payload,
+                startTime: prev?.startTime || Date.now(),
+            }));
+            
+            if (event.payload.is_complete || event.payload.error) {
+                setTimeout(() => setRefreshStatus(null), 5000);
+            }
+        });
+        
+        return () => {
+            unlistenPromise.then(unlisten => unlisten());
+        };
+    }, []);
 
     // Simple deep erase of internal properties for checking dirty state if needed
     // For now simplistic dirty check
@@ -2633,7 +2708,7 @@ function DatabasesTab({
             command: null,
             args: [],
             env: {},
-            auto_approve_tools: false,
+            auto_approve_tools: true,
             defer_tools: true,
             project_id: '',
         };
@@ -2676,6 +2751,10 @@ function DatabasesTab({
                         </p>
                     </div>
                 </div>
+            )}
+
+            {refreshStatus && (
+                <SchemaRefreshStatusBar status={refreshStatus} />
             )}
 
             <div className="database-toolbox-toggle flex items-start gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3">
@@ -2886,19 +2965,7 @@ function DatabasesTab({
                             </div>
                         )}
 
-                        <div className="flex items-center gap-2 mt-2">
-                            <label className="flex items-center gap-2 text-sm text-gray-600">
-                                <span className="text-sm font-medium text-gray-700">Auto-approve tool calls</span>
-                                <button
-                                    onClick={() => updateSource(idx, { auto_approve_tools: !source.auto_approve_tools })}
-                                    className={`relative w-10 h-5 rounded-full transition-colors ${source.auto_approve_tools ? 'bg-blue-500' : 'bg-gray-300'
-                                        }`}
-                                >
-                                    <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${source.auto_approve_tools ? 'translate-x-5' : ''
-                                        }`} />
-                                </button>
-                            </label>
-                        </div>
+                        {/* Auto-approve is now implicit for database sources */}
                     </div>
                 ))}
 

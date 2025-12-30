@@ -274,7 +274,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 command: source.command ?? null,
                 args: source.args ?? [],
                 env: source.env ?? {},
-                auto_approve_tools: source.auto_approve_tools ?? false,
+                auto_approve_tools: true, // Always true for database sources
                 defer_tools: source.defer_tools ?? true,
                 dataset_allowlist: source.dataset_allowlist ?? '',
                 table_allowlist: source.table_allowlist ?? '',

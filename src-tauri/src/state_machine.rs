@@ -237,18 +237,29 @@ impl AgenticStateMachine {
         &mut self,
         rag_relevancy: f32,
         schema_relevancy: f32,
-        discovered_tables: Vec<TableInfo>,
+        mut discovered_tables: Vec<TableInfo>,
         _rag_chunks: Vec<RagChunk>,
     ) {
+        // If the user has explicitly attached tables, we prioritize them and 
+        // suppress auto-discovered tables to avoid prompt noise and duplication.
+        if !self.attached_tables.is_empty() {
+            discovered_tables.clear();
+        }
         let rag_passes = rag_relevancy >= self.thresholds.rag_chunk_min
             && self.enabled_capabilities.contains(&Capability::Rag);
-        // schema_passes is true if EITHER SchemaSearch OR SqlQuery capability is enabled
-        // (since auto-schema-search runs for both and provides context for sql_select)
-        let schema_passes = schema_relevancy >= self.thresholds.schema_relevancy
+            
+        // schema_passes is true if:
+        // 1. Relevancy score passes threshold OR
+        // 2. User has explicitly attached tables for this chat
+        let schema_passes = (schema_relevancy >= self.thresholds.schema_relevancy
+            || !self.attached_tables.is_empty())
             && (self.enabled_capabilities.contains(&Capability::SchemaSearch)
                 || self.enabled_capabilities.contains(&Capability::SqlQuery));
-        let sql_enabled = schema_relevancy >= self.thresholds.schema_relevancy
+                
+        let sql_enabled = (schema_relevancy >= self.thresholds.schema_relevancy 
+            || !self.attached_tables.is_empty())
             && self.enabled_capabilities.contains(&Capability::SqlQuery);
+            
         let rag_dominant = rag_relevancy >= self.thresholds.rag_dominant_threshold;
 
         // Determine initial state based on relevancy
@@ -600,7 +611,22 @@ impl AgenticStateMachine {
         // 3b. Turn-specific schema context (from attached tables)
         if let Some(ref config) = self.turn_config {
             if let Some(ref schema_ctx) = config.schema_context {
-                sections.push(schema_ctx.to_string());
+                let mut ctx = schema_ctx.to_string();
+                
+                // If the current state doesn't ALREADY provide SQL execution guidance,
+                // add it here so attached tables are usable.
+                if !self.current_state.has_schema_context() {
+                    let first_table = self.attached_tables.first().map(|t| t.table_fq_name.as_str());
+                    let guidance = system_prompt::build_sql_instructions(
+                        self.tool_call_format,
+                        self.model_tool_format,
+                        first_table,
+                    );
+                    ctx.push_str("\n\n## SQL Execution Guidance\n\n");
+                    ctx.push_str(&guidance);
+                }
+                
+                sections.push(ctx);
             }
         }
 
@@ -661,14 +687,36 @@ impl AgenticStateMachine {
             }
 
             AgenticState::SqlRetrieval { discovered_tables, max_table_relevancy } => {
-                let table_list = self.format_table_list(discovered_tables);
-                let first_table = discovered_tables.first().map(|t| t.fully_qualified_name.as_str());
-                let base_sql_instructions = system_prompt::build_sql_instructions(
-                    self.tool_call_format,
-                    self.model_tool_format,
-                    first_table,
-                );
-                Some(system_prompt::build_retrieved_sql_context(*max_table_relevancy, &table_list, &base_sql_instructions))
+                // Filter out any tables that are already in the attached_tables list
+                // to avoid duplication in the system prompt.
+                let attached_names: HashSet<_> = self.attached_tables.iter().map(|t| &t.table_fq_name).collect();
+                let filtered_tables: Vec<_> = discovered_tables
+                    .iter()
+                    .filter(|t| !attached_names.contains(&t.fully_qualified_name))
+                    .cloned()
+                    .collect();
+
+                if filtered_tables.is_empty() {
+                    // If all discovered tables were already attached, only provide guidance
+                    // if it's not being provided by Step 3b.
+                    // Actually, if we're in SqlRetrieval state, Step 3b might not have run yet
+                    // or it might run after this. 
+                    // To be safe, if we have attached tables, we'll let Step 3b handle the guidance.
+                    if self.attached_tables.is_empty() {
+                        Some("No database tables discovered.".to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    let table_list = self.format_table_list(&filtered_tables);
+                    let first_table = filtered_tables.first().map(|t| t.fully_qualified_name.as_str());
+                    let base_sql_instructions = system_prompt::build_sql_instructions(
+                        self.tool_call_format,
+                        self.model_tool_format,
+                        first_table,
+                    );
+                    Some(system_prompt::build_retrieved_sql_context(*max_table_relevancy, &table_list, &base_sql_instructions))
+                }
             }
 
             AgenticState::ToolOrchestration { materialized_tools } => {
@@ -714,9 +762,21 @@ impl AgenticStateMachine {
             }
 
             AgenticState::SchemaContextInjected { tables, max_relevancy, sql_enabled } => {
-                let table_list = self.format_table_list(tables);
+                // Filter out any tables that are already in the attached_tables list
+                let attached_names: HashSet<_> = self.attached_tables.iter().map(|t| &t.table_fq_name).collect();
+                let filtered_tables: Vec<_> = tables
+                    .iter()
+                    .filter(|t| !attached_names.contains(&t.fully_qualified_name))
+                    .cloned()
+                    .collect();
+
+                if filtered_tables.is_empty() && !self.attached_tables.is_empty() {
+                    return None;
+                }
+
+                let table_list = self.format_table_list(&filtered_tables);
                 let sql_instructions = if *sql_enabled {
-                    let first_table = tables.first().map(|t| t.fully_qualified_name.as_str());
+                    let first_table = filtered_tables.first().map(|t| t.fully_qualified_name.as_str());
                     let mut instr = system_prompt::build_sql_instructions(
                         self.tool_call_format,
                         self.model_tool_format,
@@ -785,7 +845,9 @@ impl AgenticStateMachine {
         }
 
         // Auto schema search results (only if state doesn't already have schema context)
-        if !self.current_state.has_schema_context() {
+        // If the user has explicitly attached tables, we skip auto schema search
+        // to avoid duplication and cluttering the prompt with unwanted tables.
+        if !self.current_state.has_schema_context() && self.attached_tables.is_empty() {
             if let Some(ref output) = self.auto_schema_search {
                 let sql_enabled = self.enabled_capabilities.contains(&Capability::SqlQuery) 
                     && output.tables.iter().map(|t| t.relevance).fold(0.0f32, f32::max) >= self.thresholds.schema_relevancy;

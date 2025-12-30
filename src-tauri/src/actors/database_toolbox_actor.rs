@@ -305,7 +305,7 @@ impl DatabaseToolboxActor {
             command: source.command.clone(),
             args: source.args.clone(),
             env,
-            auto_approve_tools: source.auto_approve_tools,
+            auto_approve_tools: true, // Always true for database sources
             defer_tools: source.defer_tools,
             python_name: None,
             is_database_source: true,

@@ -414,7 +414,7 @@ impl DatabaseSourceConfig {
             command: None,
             args: Vec::new(),
             env: HashMap::new(),
-            auto_approve_tools: false,
+            auto_approve_tools: true,
             defer_tools: true,
             project_id: None,
             sql_dialect: None,
@@ -747,7 +747,7 @@ impl AppSettings {
             command: source.command.clone(),
             args: source.args.clone(),
             env,
-            auto_approve_tools: source.auto_approve_tools,
+            auto_approve_tools: true, // Always true for database sources
             defer_tools: source.defer_tools,
             python_name: None,
             is_database_source: true,

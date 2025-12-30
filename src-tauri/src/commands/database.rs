@@ -13,7 +13,7 @@ use crate::settings::{
 use fastembed::TextEmbedding;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::oneshot;
 
 /// Status of a table in the schema cache
@@ -25,6 +25,18 @@ pub struct SchemaTableStatus {
     pub enabled: bool,
     pub column_count: usize,
     pub description: Option<String>,
+}
+
+/// Progress of a schema refresh operation
+#[derive(Clone, serde::Serialize)]
+pub struct SchemaRefreshProgress {
+    pub message: String,
+    pub source_name: String,
+    pub current_table: Option<String>,
+    pub tables_done: usize,
+    pub tables_total: usize,
+    pub is_complete: bool,
+    pub error: Option<String>,
 }
 
 /// Result of a table search including relevance score
@@ -52,6 +64,7 @@ pub struct SchemaRefreshSummary {
 
 /// Refresh database schemas for a given configuration
 pub async fn refresh_database_schemas_for_config(
+    app_handle: &AppHandle,
     handles: &State<'_, ActorHandles>,
     embedding_state: &State<'_, EmbeddingModelState>,
     toolbox_config: &DatabaseToolboxConfig,
@@ -82,7 +95,7 @@ pub async fn refresh_database_schemas_for_config(
     let mut errors = Vec::new();
 
     for source in sources {
-        match refresh_schema_cache_for_source(handles, &source, embedding_model.clone()).await {
+        match refresh_schema_cache_for_source(app_handle, handles, &source, embedding_model.clone()).await {
             Ok(status) => refreshed_sources.push(status),
             Err(err) => {
                 let msg = format!("{} ({}): {}", source.name, source.id, err);
@@ -95,6 +108,19 @@ pub async fn refresh_database_schemas_for_config(
         }
     }
 
+    let _ = app_handle.emit(
+        "schema-refresh-progress",
+        SchemaRefreshProgress {
+            message: "Refresh complete".to_string(),
+            source_name: "".to_string(),
+            current_table: None,
+            tables_done: 0,
+            tables_total: 0,
+            is_complete: true,
+            error: None,
+        },
+    );
+
     Ok(SchemaRefreshSummary {
         sources: refreshed_sources,
         errors,
@@ -104,6 +130,7 @@ pub async fn refresh_database_schemas_for_config(
 /// Refresh database schemas
 #[tauri::command]
 pub async fn refresh_database_schemas(
+    app_handle: AppHandle,
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
     embedding_state: State<'_, EmbeddingModelState>,
@@ -113,7 +140,7 @@ pub async fn refresh_database_schemas(
     drop(settings_guard);
 
     let summary =
-        refresh_database_schemas_for_config(&handles, &embedding_state, &toolbox_config).await?;
+        refresh_database_schemas_for_config(&app_handle, &handles, &embedding_state, &toolbox_config).await?;
 
     if !summary.errors.is_empty() {
         println!(
@@ -751,22 +778,70 @@ pub async fn load_cached_enabled_flags(
 
 /// Refresh schema cache for a single source
 pub async fn refresh_schema_cache_for_source(
+    app_handle: &AppHandle,
     handles: &State<'_, ActorHandles>,
     source: &DatabaseSourceConfig,
     embedding_model: Arc<TextEmbedding>,
 ) -> Result<SchemaSourceStatus, String> {
+    let _ = app_handle.emit(
+        "schema-refresh-progress",
+        SchemaRefreshProgress {
+            message: format!("Refreshing source '{}'", source.name),
+            source_name: source.name.clone(),
+            current_table: None,
+            tables_done: 0,
+            tables_total: 0,
+            is_complete: false,
+            error: None,
+        },
+    );
+
     println!(
         "[SchemaRefresh] Refreshing source '{}' ({})",
         source.name, source.id
     );
 
     // Preserve existing enabled flags if present
-    let previous_map = load_cached_enabled_flags(&handles.schema_tx, &source.id).await?;
+    let previous_map = match load_cached_enabled_flags(&handles.schema_tx, &source.id).await {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = app_handle.emit(
+                "schema-refresh-progress",
+                SchemaRefreshProgress {
+                    message: format!("Failed to load cached flags for {}", source.name),
+                    source_name: source.name.clone(),
+                    current_table: None,
+                    tables_done: 0,
+                    tables_total: 0,
+                    is_complete: false,
+                    error: Some(e.clone()),
+                },
+            );
+            return Err(e);
+        }
+    };
 
     // Remove stale entries so we only keep current enumeration
     let _ = clear_source_cache(&handles.schema_tx, &source.id).await;
 
-    let mut datasets = enumerate_source_schemas(&handles.database_toolbox_tx, &source.id).await?;
+    let mut datasets = match enumerate_source_schemas(&handles.database_toolbox_tx, &source.id).await {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = app_handle.emit(
+                "schema-refresh-progress",
+                SchemaRefreshProgress {
+                    message: format!("Failed to enumerate schemas for {}", source.name),
+                    source_name: source.name.clone(),
+                    current_table: None,
+                    tables_done: 0,
+                    tables_total: 0,
+                    is_complete: false,
+                    error: Some(e.clone()),
+                },
+            );
+            return Err(e);
+        }
+    };
     
     // Apply BigQuery dataset allowlist if provided
     if source.kind == SupportedDatabaseKind::Bigquery {
@@ -789,8 +864,10 @@ pub async fn refresh_schema_cache_for_source(
     }
     
     let mut tables_status = Vec::new();
+    let mut all_tables_to_process = Vec::new();
 
-    for dataset in datasets {
+    // First pass: gather all tables to process across all datasets
+    for dataset in &datasets {
         let dataset_clean = dataset.trim().to_string();
         // Skip datasets ending with numeric suffix (commonly sharded/dated tables)
         if dataset_clean
@@ -799,14 +876,10 @@ pub async fn refresh_schema_cache_for_source(
             .map(|c| c.is_ascii_digit())
             .unwrap_or(false)
         {
-            println!(
-                "[SchemaRefresh] Skipping dataset '{}' because it ends with a numeric suffix",
-                dataset_clean
-            );
             continue;
         }
 
-        let mut tables = match enumerate_tables_for_schema(
+        let tables = match enumerate_tables_for_schema(
             &handles.database_toolbox_tx,
             &source.id,
             &dataset_clean,
@@ -814,113 +887,120 @@ pub async fn refresh_schema_cache_for_source(
         .await
         {
             Ok(t) => t,
-            Err(err) => {
-                println!(
-                    "[SchemaRefresh] Failed to enumerate tables for {}: {}",
-                    dataset_clean, err
-                );
-                continue;
-            }
+            Err(_) => continue,
         };
-
-        // Apply BigQuery table allowlist if provided
-        if source.kind == SupportedDatabaseKind::Bigquery {
-            if let Some(allow_raw) = source.table_allowlist.as_ref() {
-                let allow: Vec<String> = allow_raw
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if !allow.is_empty() {
-                    let allow_set: HashSet<String> = allow.into_iter().collect();
-                    tables.retain(|t| allow_set.contains(t));
-                    println!(
-                        "[SchemaRefresh] Applying table allowlist for source {} dataset {}: {} tables retained",
-                        source.id,
-                        dataset_clean,
-                        tables.len()
-                    );
-                }
-            }
-        }
 
         for table_name in tables {
             let table_clean = table_name.trim().to_string();
-            // Skip tables ending with numeric suffix (commonly sharded/dated tables)
+            // Skip tables ending with numeric suffix
             if table_clean
                 .chars()
                 .last()
                 .map(|c| c.is_ascii_digit())
                 .unwrap_or(false)
             {
-                println!(
-                    "[SchemaRefresh] Skipping table '{}' in dataset '{}' because it ends with a numeric suffix",
-                    table_clean,
-                    dataset_clean
-                );
                 continue;
             }
 
-            let fq_name = build_fully_qualified_table_name(source, &dataset_clean, &table_name);
-            let enabled = previous_map.get(&fq_name).copied().unwrap_or(true);
-
-            match fetch_table_schema(&handles.database_toolbox_tx, &source.id, &fq_name).await {
-                Ok(mut table_schema) => {
-                    table_schema.enabled = enabled;
-                    // Annotate join-worthy columns for chunk key purposes
-                    let partition_set: HashSet<String> =
-                        table_schema.partition_columns.iter().cloned().collect();
-                    let cluster_set: HashSet<String> =
-                        table_schema.cluster_columns.iter().cloned().collect();
-                    let primary_set: HashSet<String> =
-                        table_schema.primary_keys.iter().cloned().collect();
-
-                    let (table_embedding, column_embeddings) =
-                        match embed_table_and_columns(embedding_model.clone(), &table_schema).await
-                        {
-                            Ok(res) => res,
-                            Err(err) => {
-                                println!(
-                                    "[SchemaRefresh] Failed to embed table {}: {}",
-                                    fq_name, err
-                                );
-                                continue;
-                            }
-                        };
-
-                    if let Err(err) = cache_table_and_columns(
-                        &handles.schema_tx,
-                        table_schema.clone(),
-                        table_embedding,
-                        column_embeddings,
-                        &primary_set,
-                        &partition_set,
-                        &cluster_set,
-                    )
-                    .await
-                    {
-                        println!(
-                            "[SchemaRefresh] Failed to cache table {}: {}",
-                            fq_name, err
-                        );
-                        continue;
+            // Apply BigQuery table allowlist if provided
+            if source.kind == SupportedDatabaseKind::Bigquery {
+                if let Some(allow_raw) = source.table_allowlist.as_ref() {
+                    let allow: Vec<String> = allow_raw
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !allow.is_empty() {
+                        let allow_set: HashSet<String> = allow.into_iter().collect();
+                        if !allow_set.contains(&table_clean) {
+                            continue;
+                        }
                     }
-
-                    tables_status.push(SchemaTableStatus {
-                        source_id: source.id.clone(),
-                        source_name: source.name.clone(),
-                        table_fq_name: fq_name.clone(),
-                        enabled,
-                        column_count: table_schema.columns.len(),
-                        description: table_schema.description.clone(),
-                    });
                 }
-                Err(err) => {
+            }
+
+            all_tables_to_process.push((dataset_clean.clone(), table_clean));
+        }
+    }
+
+    let tables_total = all_tables_to_process.len();
+    let mut tables_done = 0;
+
+    for (dataset_clean, table_clean) in all_tables_to_process {
+        tables_done += 1;
+        let fq_name = build_fully_qualified_table_name(source, &dataset_clean, &table_clean);
+        
+        let _ = app_handle.emit(
+            "schema-refresh-progress",
+            SchemaRefreshProgress {
+                message: format!("Processing table {}/{}", tables_done, tables_total),
+                source_name: source.name.clone(),
+                current_table: Some(fq_name.clone()),
+                tables_done,
+                tables_total,
+                is_complete: false,
+                error: None,
+            },
+        );
+
+        let enabled = previous_map.get(&fq_name).copied().unwrap_or(true);
+
+        match fetch_table_schema(&handles.database_toolbox_tx, &source.id, &fq_name).await {
+            Ok(mut table_schema) => {
+                table_schema.enabled = enabled;
+                // Annotate join-worthy columns for chunk key purposes
+                let partition_set: HashSet<String> =
+                    table_schema.partition_columns.iter().cloned().collect();
+                let cluster_set: HashSet<String> =
+                    table_schema.cluster_columns.iter().cloned().collect();
+                let primary_set: HashSet<String> =
+                    table_schema.primary_keys.iter().cloned().collect();
+
+                let (table_embedding, column_embeddings) =
+                    match embed_table_and_columns(embedding_model.clone(), &table_schema).await
+                    {
+                        Ok(res) => res,
+                        Err(err) => {
+                            println!(
+                                "[SchemaRefresh] Failed to embed table {}: {}",
+                                fq_name, err
+                            );
+                            continue;
+                        }
+                    };
+
+                if let Err(err) = cache_table_and_columns(
+                    &handles.schema_tx,
+                    table_schema.clone(),
+                    table_embedding,
+                    column_embeddings,
+                    &primary_set,
+                    &partition_set,
+                    &cluster_set,
+                )
+                .await
+                {
                     println!(
                         "[SchemaRefresh] Failed to cache table {}: {}",
                         fq_name, err
                     );
+                    continue;
                 }
+
+                tables_status.push(SchemaTableStatus {
+                    source_id: source.id.clone(),
+                    source_name: source.name.clone(),
+                    table_fq_name: fq_name.clone(),
+                    enabled,
+                    column_count: table_schema.columns.len(),
+                    description: table_schema.description.clone(),
+                });
+            }
+            Err(err) => {
+                println!(
+                    "[SchemaRefresh] Failed to cache table {}: {}",
+                    fq_name, err
+                );
             }
         }
     }
