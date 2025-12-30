@@ -6181,7 +6181,6 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let actor = RagRetrievalActor::new(
                     rag_rx,
-                    std::path::PathBuf::from("./data/lancedb"),
                     Some(rag_app_handle),
                 );
                 actor.run().await;

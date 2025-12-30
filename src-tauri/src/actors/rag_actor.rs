@@ -129,68 +129,132 @@ struct IndexedChunk {
 /// The RAG Actor handles document processing and retrieval
 pub struct RagRetrievalActor {
     rx: mpsc::Receiver<RagMsg>,
-    /// LanceDB connection
-    db: Option<Connection>,
-    /// Table handle for RAG chunks
-    chunks_table: Option<Table>,
-    /// Table handle for file cache
-    file_cache_table: Option<Table>,
+    /// Active connections to per-directory sidecar databases
+    connections: HashMap<PathBuf, DirectoryConnection>,
     /// App handle for emitting events
     app_handle: Option<AppHandle>,
-    /// Path to LanceDB directory
-    db_path: PathBuf,
     /// Persistent LRU cache for chunk embeddings (hash -> vector)
     embedding_lru_cache: LruCache<String, Vec<f32>>,
 }
 
+/// Represents a connection to a specific directory's sidecar database
+struct DirectoryConnection {
+    /// LanceDB connection
+    db: Connection,
+    /// Table handle for RAG chunks
+    chunks_table: Table,
+    /// Table handle for file cache
+    file_cache_table: Table,
+    /// The root path this connection serves
+    #[allow(dead_code)]
+    root_path: PathBuf,
+}
+
 impl RagRetrievalActor {
-    pub fn new(rx: mpsc::Receiver<RagMsg>, db_path: PathBuf, app_handle: Option<AppHandle>) -> Self {
+    pub fn new(rx: mpsc::Receiver<RagMsg>, app_handle: Option<AppHandle>) -> Self {
         Self {
             rx,
-            db: None,
-            chunks_table: None,
-            file_cache_table: None,
+            connections: HashMap::new(),
             app_handle,
-            db_path,
-            embedding_lru_cache: LruCache::new(
-                NonZeroUsize::new(EMBEDDING_LRU_CAPACITY).unwrap()
-            ),
+            embedding_lru_cache: LruCache::new(NonZeroUsize::new(EMBEDDING_LRU_CAPACITY).unwrap()),
         }
     }
 
     // ========================================================================
-    // DATABASE INITIALIZATION
+    // DATABASE INITIALIZATION & SIDE CAR MANAGEMENT
     // ========================================================================
 
-    async fn init_db(&mut self) -> Result<(), String> {
-        let db_path_str = self.db_path.to_string_lossy().to_string();
-        let db = connect(&db_path_str)
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to connect to LanceDB: {}", e))?;
+    const SIDECAR_CACHE_DIR: &'static str = ".plugable-rag-cache";
 
-        // Initialize chunks table
-        let chunks_schema = self.chunks_schema();
-        let chunks_table = self.ensure_table_exists(&db, RAG_CHUNKS_TABLE, chunks_schema.clone()).await?;
-        
-        // Create indexes for chunks table
-        let _ = chunks_table.create_index(&["id"], Index::Auto).execute().await;
-        let _ = chunks_table.create_index(&["hash"], Index::Auto).execute().await;
-        let _ = chunks_table.create_index(&["source_file"], Index::Auto).execute().await;
+    /// Helper to derive the sidecar cache path from a document path
+    fn get_cache_dir_for_file(&self, file_path: &Path) -> PathBuf {
+        // For a file like /Volumes/USB/docs/report.pdf
+        // Returns /Volumes/USB/docs/.plugable-rag-cache/
+        file_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(Self::SIDECAR_CACHE_DIR)
+    }
 
-        // Initialize file cache table
-        let file_cache_schema = self.file_cache_schema();
-        let file_cache_table = self.ensure_table_exists(&db, RAG_FILE_CACHE_TABLE, file_cache_schema.clone()).await?;
-        
-        // Create index for file cache
-        let _ = file_cache_table.create_index(&["file_path"], Index::Auto).execute().await;
+    /// On-demand connection creation for a specific path
+    async fn ensure_connection_for_path(
+        &mut self,
+        file_path: &Path,
+    ) -> Result<&mut DirectoryConnection, String> {
+        let cache_dir = self.get_cache_dir_for_file(file_path);
 
-        self.db = Some(db);
-        self.chunks_table = Some(chunks_table);
-        self.file_cache_table = Some(file_cache_table);
+        if !self.connections.contains_key(&cache_dir) {
+            println!("RagActor: Initializing sidecar cache at {:?}", cache_dir);
 
-        println!("RagActor: Database initialized with chunks and file cache tables");
-        Ok(())
+            // Try to create .plugable-rag-cache directory
+            let is_readonly = if let Err(e) = tokio::fs::create_dir_all(&cache_dir).await {
+                println!(
+                    "RagActor WARNING: Could not create sidecar directory {:?}. Falling back to in-memory: {}",
+                    cache_dir, e
+                );
+                true
+            } else {
+                false
+            };
+
+            let db_path_str = if is_readonly {
+                "memory://".to_string()
+            } else {
+                cache_dir.to_string_lossy().to_string()
+            };
+
+            let db = connect(&db_path_str)
+                .execute()
+                .await
+                .map_err(|e| format!("Failed to connect to LanceDB at {}: {}", db_path_str, e))?;
+
+            // Initialize chunks table
+            let chunks_schema = self.chunks_schema();
+            let chunks_table = self
+                .ensure_table_exists(&db, RAG_CHUNKS_TABLE, chunks_schema.clone())
+                .await?;
+
+            // Create indexes for chunks table
+            let _ = chunks_table
+                .create_index(&["id"], Index::Auto)
+                .execute()
+                .await;
+            let _ = chunks_table
+                .create_index(&["hash"], Index::Auto)
+                .execute()
+                .await;
+            let _ = chunks_table
+                .create_index(&["source_file"], Index::Auto)
+                .execute()
+                .await;
+
+            // Initialize file cache table
+            let file_cache_schema = self.file_cache_schema();
+            let file_cache_table = self
+                .ensure_table_exists(&db, RAG_FILE_CACHE_TABLE, file_cache_schema.clone())
+                .await?;
+
+            // Create index for file cache
+            let _ = file_cache_table
+                .create_index(&["file_path"], Index::Auto)
+                .execute()
+                .await;
+
+            self.connections.insert(
+                cache_dir.clone(),
+                DirectoryConnection {
+                    db,
+                    chunks_table,
+                    file_cache_table,
+                    root_path: file_path
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .to_path_buf(),
+                },
+            );
+        }
+
+        Ok(self.connections.get_mut(&cache_dir).unwrap())
     }
 
     async fn ensure_table_exists(
@@ -290,11 +354,6 @@ impl RagRetrievalActor {
     // ========================================================================
 
     pub async fn run(mut self) {
-        // Initialize LanceDB
-        if let Err(e) = self.init_db().await {
-            println!("RagActor ERROR: Failed to initialize database: {}", e);
-        }
-
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 RagMsg::IndexRagDocuments {
@@ -341,43 +400,39 @@ impl RagRetrievalActor {
 
     async fn clear_all_tables(&self) -> bool {
         let mut success = true;
-        
-        if let Some(ref table) = self.chunks_table {
-            if let Err(e) = table.delete("1=1").await {
-                println!("RagActor ERROR: Failed to clear chunks: {}", e);
+
+        for (cache_dir, conn) in &self.connections {
+            if let Err(e) = conn.chunks_table.delete("1=1").await {
+                println!("RagActor ERROR: Failed to clear chunks in {:?}: {}", cache_dir, e);
+                success = false;
+            }
+            if let Err(e) = conn.file_cache_table.delete("1=1").await {
+                println!("RagActor ERROR: Failed to clear file cache in {:?}: {}", cache_dir, e);
                 success = false;
             }
         }
-        
-        if let Some(ref table) = self.file_cache_table {
-            if let Err(e) = table.delete("1=1").await {
-                println!("RagActor ERROR: Failed to clear file cache: {}", e);
-                success = false;
-            }
-        }
-        
+
         success
     }
 
     async fn remove_file(&self, source_file: &str) -> RemoveFileResult {
         let escaped_file = source_file.replace("'", "''");
-        
-        // Remove from chunks table
-        if let Some(ref table) = self.chunks_table {
+        let cache_dir = self.get_cache_dir_for_file(Path::new(source_file));
+
+        if let Some(conn) = self.connections.get(&cache_dir) {
+            // Remove from chunks table
             let filter = format!("source_file = '{}'", escaped_file);
-            if let Err(e) = table.delete(&filter).await {
+            if let Err(e) = conn.chunks_table.delete(&filter).await {
                 println!("RagActor ERROR: Failed to remove file chunks: {}", e);
             }
-        }
-        
-        // Remove from file cache table
-        if let Some(ref table) = self.file_cache_table {
+
+            // Remove from file cache table
             let filter = format!("file_path = '{}'", escaped_file);
-            if let Err(e) = table.delete(&filter).await {
+            if let Err(e) = conn.file_cache_table.delete(&filter).await {
                 println!("RagActor ERROR: Failed to remove file cache entry: {}", e);
             }
         }
-        
+
         RemoveFileResult {
             chunks_removed: 0,
             remaining_chunks: self.get_total_chunks().await,
@@ -385,55 +440,67 @@ impl RagRetrievalActor {
     }
 
     async fn get_total_chunks(&self) -> usize {
-        if let Some(ref table) = self.chunks_table {
-            if let Ok(count) = table.count_rows(None).await {
-                return count;
+        let mut total = 0;
+        for conn in self.connections.values() {
+            if let Ok(count) = conn.chunks_table.count_rows(None).await {
+                total += count;
             }
         }
-        0
+        total
     }
 
     async fn get_indexed_files(&self) -> Vec<String> {
-        if let Some(ref table) = self.chunks_table {
-            let mut files = std::collections::HashSet::new();
-            if let Ok(mut query) = table.query().select(Select::Columns(vec!["source_file".to_string()])).execute().await {
+        let mut all_files = std::collections::HashSet::new();
+        
+        for conn in self.connections.values() {
+            if let Ok(mut query) = conn.chunks_table.query().select(Select::Columns(vec!["source_file".to_string()])).execute().await {
                 while let Some(Ok(batch)) = query.next().await {
                     if let Some(col) = batch.column_by_name("source_file") {
                         if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
                             for i in 0..arr.len() {
-                                files.insert(arr.value(i).to_string());
+                                all_files.insert(arr.value(i).to_string());
                             }
                         }
                     }
                 }
             }
-            return files.into_iter().collect();
         }
-        Vec::new()
+        
+        all_files.into_iter().collect()
     }
 
     // ========================================================================
     // FILE CACHE OPERATIONS
     // ========================================================================
 
-    /// Get cached file entry by path
-    async fn get_file_cache(&self, file_path: &str) -> Option<FileCacheEntry> {
-        let table = self.file_cache_table.as_ref()?;
+    /// Get cached file entry by path from a specific table
+    async fn get_file_cache_from_table(
+        &self,
+        table: &Table,
+        file_path: &str,
+    ) -> Option<FileCacheEntry> {
         let escaped = file_path.replace("'", "''");
-        let query = table.query().only_if(format!("file_path = '{}'", escaped)).limit(1);
+        let query = table
+            .query()
+            .only_if(format!("file_path = '{}'", escaped))
+            .limit(1);
         let mut stream = query.execute().await.ok()?;
-        
+
         if let Some(Ok(batch)) = stream.next().await {
             if batch.num_rows() > 0 {
-                let paths = batch.column_by_name("file_path")
+                let paths = batch
+                    .column_by_name("file_path")
                     .and_then(|c| c.as_any().downcast_ref::<StringArray>())?;
-                let crcs = batch.column_by_name("crc32")
+                let crcs = batch
+                    .column_by_name("crc32")
                     .and_then(|c| c.as_any().downcast_ref::<arrow_array::UInt32Array>())?;
-                let counts = batch.column_by_name("chunk_count")
+                let counts = batch
+                    .column_by_name("chunk_count")
                     .and_then(|c| c.as_any().downcast_ref::<arrow_array::Int64Array>())?;
-                let timestamps = batch.column_by_name("indexed_at")
+                let timestamps = batch
+                    .column_by_name("indexed_at")
                     .and_then(|c| c.as_any().downcast_ref::<arrow_array::Int64Array>())?;
-                
+
                 return Some(FileCacheEntry {
                     file_path: paths.value(0).to_string(),
                     crc32: crcs.value(0),
@@ -445,31 +512,32 @@ impl RagRetrievalActor {
         None
     }
 
-    /// Save or update file cache entry
-    async fn save_file_cache(&self, entry: &FileCacheEntry) -> Result<(), String> {
-        let table = self.file_cache_table.as_ref().ok_or("File cache table not initialized")?;
-        
+    /// Save or update file cache entry in a specific table
+    async fn save_file_cache_to_table(
+        &self,
+        table: &Table,
+        entry: &FileCacheEntry,
+    ) -> Result<(), String> {
         // Delete existing entry if any
         let escaped = entry.file_path.replace("'", "''");
         let _ = table.delete(&format!("file_path = '{}'", escaped)).await;
-        
+
         // Insert new entry
         let schema = self.file_cache_schema();
         let paths = Arc::new(StringArray::from(vec![entry.file_path.clone()]));
         let crcs = Arc::new(arrow_array::UInt32Array::from(vec![entry.crc32]));
         let counts = Arc::new(arrow_array::Int64Array::from(vec![entry.chunk_count as i64]));
         let timestamps = Arc::new(arrow_array::Int64Array::from(vec![entry.indexed_at]));
-        
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![paths, crcs, counts, timestamps],
-        ).map_err(|e| format!("Failed to create file cache batch: {}", e))?;
-        
-        table.add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
+
+        let batch = RecordBatch::try_new(schema.clone(), vec![paths, crcs, counts, timestamps])
+            .map_err(|e| format!("Failed to create file cache batch: {}", e))?;
+
+        table
+            .add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
             .execute()
             .await
             .map_err(|e| format!("Failed to save file cache: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -486,10 +554,11 @@ impl RagRetrievalActor {
     // ========================================================================
 
     /// Batch lookup of cached embeddings - returns HashMap of hash -> vector
+    /// This now searches across ALL known connections
     async fn get_cached_embeddings_batch(&mut self, hashes: &[String]) -> HashMap<String, Vec<f32>> {
         let mut result = HashMap::new();
         let mut db_lookup_needed = Vec::new();
-        
+
         // First check LRU cache
         for hash in hashes {
             if let Some(vector) = self.embedding_lru_cache.get(hash) {
@@ -498,33 +567,45 @@ impl RagRetrievalActor {
                 db_lookup_needed.push(hash.clone());
             }
         }
-        
+
         if db_lookup_needed.is_empty() {
             return result;
         }
-        
-        // Batch query LanceDB for cache misses
-        if let Some(ref table) = self.chunks_table {
-            // Build IN clause (limit batch size to avoid huge queries)
-            for chunk in db_lookup_needed.chunks(500) {
-                let hash_list: Vec<String> = chunk.iter()
+
+        // Batch query ALL LanceDB connections for cache misses
+        // (An embedding might be in a different sidecar if the same content exists elsewhere)
+        for conn in self.connections.values() {
+            if db_lookup_needed.is_empty() {
+                break;
+            }
+
+            let table = &conn.chunks_table;
+            for chunk in db_lookup_needed.clone().chunks(500) {
+                let hash_list: Vec<String> = chunk
+                    .iter()
                     .map(|h| format!("'{}'", h.replace("'", "''")))
                     .collect();
                 let filter = format!("hash IN ({})", hash_list.join(", "));
-                
-                if let Ok(query) = table.query()
+
+                if let Ok(query) = table
+                    .query()
                     .only_if(filter)
-                    .select(Select::Columns(vec!["hash".to_string(), "vector".to_string()]))
+                    .select(Select::Columns(vec![
+                        "hash".to_string(),
+                        "vector".to_string(),
+                    ]))
                     .execute()
-                    .await 
+                    .await
                 {
                     let mut stream = query;
                     while let Some(Ok(batch)) = stream.next().await {
-                        let hashes_col = batch.column_by_name("hash")
+                        let hashes_col = batch
+                            .column_by_name("hash")
                             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                        let vectors_col = batch.column_by_name("vector")
+                        let vectors_col = batch
+                            .column_by_name("vector")
                             .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>());
-                        
+
                         if let (Some(hashes), Some(vectors)) = (hashes_col, vectors_col) {
                             for i in 0..batch.num_rows() {
                                 let hash = hashes.value(i).to_string();
@@ -533,7 +614,9 @@ impl RagRetrievalActor {
                                     let vector = arr.values().to_vec();
                                     // Add to LRU cache
                                     self.embedding_lru_cache.put(hash.clone(), vector.clone());
-                                    result.insert(hash, vector);
+                                    result.insert(hash.clone(), vector);
+                                    // Remove from lookup needed
+                                    db_lookup_needed.retain(|h| h != &hash);
                                 }
                             }
                         }
@@ -541,7 +624,7 @@ impl RagRetrievalActor {
                 }
             }
         }
-        
+
         result
     }
 
@@ -583,11 +666,17 @@ impl RagRetrievalActor {
         let mut files_skipped = 0;
         
         for file_path in &files_to_process {
-            let file_name = file_path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let _file_path_str = file_path.to_string_lossy().to_string();
+            let file_path_str = file_path.to_string_lossy().to_string();
+
+            // Ensure we have a connection for this file's directory
+            // We scope the borrow here so we can call other self methods later
+            let (chunks_table, file_cache_table) = match self.ensure_connection_for_path(file_path).await {
+                Ok(conn) => (conn.chunks_table.clone(), conn.file_cache_table.clone()),
+                Err(e) => {
+                    println!("RagActor ERROR: Skipping {:?} - {}", file_path, e);
+                    continue;
+                }
+            };
 
             // Read file bytes
             let bytes = match tokio::fs::read(file_path).await {
@@ -597,12 +686,14 @@ impl RagRetrievalActor {
                     continue;
                 }
             };
-            
+
             // Compute CRC32 (fast)
             let current_crc = crc32fast::hash(&bytes);
-            
+
             // Check file-level cache
-            let cached_entry = self.get_file_cache(&file_name).await;
+            let cached_entry = self
+                .get_file_cache_from_table(&file_cache_table, &file_path_str)
+                .await;
             if !self.should_reindex_file(current_crc, cached_entry.as_ref()) {
                 // File unchanged, skip processing
                 files_processed_count += 1;
@@ -615,15 +706,18 @@ impl RagRetrievalActor {
             }
 
             // File needs processing - first remove any existing chunks for this file
-            if let Some(ref table) = self.chunks_table {
-                let filter = format!("source_file = '{}'", file_name.replace("'", "''"));
-                let _ = table.delete(&filter).await;
-            }
+            let escaped_path = file_path_str.replace("'", "''");
+            let filter = format!("source_file = '{}'", escaped_path);
+            let _ = chunks_table.delete(&filter).await;
 
             // Determine if binary file
-            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             let is_binary = ext == "pdf" || ext == "docx";
-            
+
             let content = if is_binary {
                 String::new()
             } else {
@@ -634,39 +728,47 @@ impl RagRetrievalActor {
             if let Ok(text_content) = self.extract_text(file_path, &content) {
                 // Parse document into elements (with heading detection)
                 let elements = self.parse_document(&ext, &text_content);
-                
-                // Chunk semantically with heading context
+
+                // Chunk semantically with heading detection
                 let chunks_with_context = self.semantic_chunk(&elements);
-                
+
                 total_chunks_in_index += chunks_with_context.len();
-                
-                for (idx, (heading_ctx, chunk_content)) in chunks_with_context.into_iter().enumerate() {
+
+                let mut chunks_for_this_file = Vec::new();
+                for (idx, (heading_ctx, chunk_content)) in chunks_with_context.into_iter().enumerate()
+                {
                     let chunk_hash = self.compute_hash(&chunk_content);
-                    all_pending_chunks.push(IndexedChunk {
-                        id: format!("{}:{}:{}", chunk_hash, file_name, idx),
+                    chunks_for_this_file.push(IndexedChunk {
+                        id: format!("{}:{}:{}", chunk_hash, file_path_str, idx),
                         hash: chunk_hash,
                         file_crc32: current_crc,
                         content: chunk_content,
                         heading_context: heading_ctx,
-                        source_file: file_name.clone(),
+                        source_file: file_path_str.clone(),
                         chunk_index: idx,
                         vector: Vec::new(),
                     });
                 }
-                
+
+                all_pending_chunks.extend(chunks_for_this_file);
+
                 // Update file cache
                 let cache_entry = FileCacheEntry {
-                    file_path: file_name.clone(),
+                    file_path: file_path_str.clone(),
                     crc32: current_crc,
-                    chunk_count: all_pending_chunks.iter()
-                        .filter(|c| c.source_file == file_name)
+                    chunk_count: all_pending_chunks
+                        .iter()
+                        .filter(|c| c.source_file == file_path_str)
                         .count(),
                     indexed_at: chrono::Utc::now().timestamp(),
                 };
-                if let Err(e) = self.save_file_cache(&cache_entry).await {
+                if let Err(e) = self
+                    .save_file_cache_to_table(&file_cache_table, &cache_entry)
+                    .await
+                {
                     println!("RagActor: Warning - failed to save file cache: {}", e);
                 }
-                
+
                 files_processed_count += 1;
             }
         }
@@ -769,9 +871,23 @@ impl RagRetrievalActor {
             }
         }
 
-        // Phase 5: Batch save to LanceDB
-        println!("RagActor: Saving {} chunks to database", final_chunks.len());
-        self.save_chunks_to_db(final_chunks).await?;
+        // Phase 5: Batch save to LanceDB (grouped by connection)
+        println!("RagActor: Saving {} chunks to databases", final_chunks.len());
+        
+        // Group chunks by their target connection
+        let mut chunks_by_cache_dir: HashMap<PathBuf, Vec<IndexedChunk>> = HashMap::new();
+        for chunk in final_chunks {
+            let cache_dir = self.get_cache_dir_for_file(Path::new(&chunk.source_file));
+            chunks_by_cache_dir.entry(cache_dir).or_default().push(chunk);
+        }
+
+        for (cache_dir, chunks) in chunks_by_cache_dir {
+            if let Some(conn) = self.connections.get(&cache_dir) {
+                if let Err(e) = self.save_chunks_to_db(&conn.chunks_table, chunks).await {
+                    println!("RagActor ERROR: Failed to save chunks to {:?}: {}", cache_dir, e);
+                }
+            }
+        }
 
         let total_time = indexing_start.elapsed();
         println!("RagActor: Indexing complete in {} ms", total_time.as_millis());
@@ -783,12 +899,11 @@ impl RagRetrievalActor {
         })
     }
 
-    async fn save_chunks_to_db(&self, chunks: Vec<IndexedChunk>) -> Result<(), String> {
+    async fn save_chunks_to_db(&self, table: &Table, chunks: Vec<IndexedChunk>) -> Result<(), String> {
         if chunks.is_empty() {
             return Ok(());
         }
 
-        let table = self.chunks_table.as_ref().ok_or("Chunks table not initialized")?;
         let schema = self.chunks_schema();
 
         let mut ids = Vec::with_capacity(chunks.len());
@@ -1446,83 +1561,106 @@ impl RagRetrievalActor {
 
     async fn search_documents(&self, query_vector: Vec<f32>, limit: usize) -> Vec<RagChunk> {
         let search_start = Instant::now();
-        let table = match &self.chunks_table {
-            Some(t) => t,
-            None => return Vec::new(),
-        };
+        let mut all_results = Vec::new();
 
-        let query = match table.query().nearest_to(query_vector.clone()) {
-            Ok(q) => q,
-            Err(e) => {
-                println!("RagActor ERROR: Failed to create vector query: {}", e);
-                return Vec::new();
-            }
-        };
+        // Query each connection in parallel
+        for (cache_dir, conn) in &self.connections {
+            let table = &conn.chunks_table;
+            let query = match table.query().nearest_to(query_vector.clone()) {
+                Ok(q) => q,
+                Err(e) => {
+                    println!(
+                        "RagActor ERROR: Failed to create vector query for {:?}: {}",
+                        cache_dir, e
+                    );
+                    continue;
+                }
+            };
 
-        let mut results = Vec::new();
-        let mut query_stream = match query.limit(limit).execute().await {
-            Ok(s) => s,
-            Err(e) => {
-                println!("RagActor ERROR: Failed to execute search: {}", e);
-                return Vec::new();
-            }
-        };
+            let mut query_stream = match query.limit(limit).execute().await {
+                Ok(s) => s,
+                Err(e) => {
+                    println!(
+                        "RagActor ERROR: Failed to execute search for {:?}: {}",
+                        cache_dir, e
+                    );
+                    continue;
+                }
+            };
 
-        while let Some(Ok(batch)) = query_stream.next().await {
-            let ids = batch
-                .column_by_name("id")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let contents = batch
-                .column_by_name("content")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let heading_contexts = batch
-                .column_by_name("heading_context")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let source_files = batch
-                .column_by_name("source_file")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let chunk_indices = batch
-                .column_by_name("chunk_index")
-                .and_then(|c| c.as_any().downcast_ref::<arrow_array::Int64Array>());
-            let distances = batch
-                .column_by_name("_distance")
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+            while let Some(Ok(batch)) = query_stream.next().await {
+                let ids = batch
+                    .column_by_name("id")
+                    .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+                let contents = batch
+                    .column_by_name("content")
+                    .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+                let heading_contexts = batch
+                    .column_by_name("heading_context")
+                    .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+                let source_files = batch
+                    .column_by_name("source_file")
+                    .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+                let chunk_indices = batch
+                    .column_by_name("chunk_index")
+                    .and_then(|c| c.as_any().downcast_ref::<arrow_array::Int64Array>());
+                let distances = batch
+                    .column_by_name("_distance")
+                    .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
-            if let (Some(ids), Some(contents), Some(heading_contexts), Some(source_files), Some(chunk_indices), Some(distances)) =
-                (ids, contents, heading_contexts, source_files, chunk_indices, distances)
-            {
-                for i in 0..batch.num_rows() {
-                    let distance = distances.value(i);
-                    let score = 1.0 / (1.0 + distance);
-                    
-                    // Include heading context in the returned content
-                    let heading_ctx = heading_contexts.value(i);
-                    let raw_content = contents.value(i);
-                    let full_content = if heading_ctx.is_empty() {
-                        raw_content.to_string()
-                    } else {
-                        format!("[Context: {}]\n\n{}", heading_ctx, raw_content)
-                    };
+                if let (
+                    Some(ids),
+                    Some(contents),
+                    Some(heading_contexts),
+                    Some(source_files),
+                    Some(chunk_indices),
+                    Some(distances),
+                ) = (
+                    ids,
+                    contents,
+                    heading_contexts,
+                    source_files,
+                    chunk_indices,
+                    distances,
+                ) {
+                    for i in 0..batch.num_rows() {
+                        let distance = distances.value(i);
+                        let score = 1.0 / (1.0 + distance);
 
-                    results.push(RagChunk {
-                        id: ids.value(i).to_string(),
-                        content: full_content,
-                        source_file: source_files.value(i).to_string(),
-                        chunk_index: chunk_indices.value(i) as usize,
-                        score,
-                    });
+                        // Include heading context in the returned content
+                        let heading_ctx = heading_contexts.value(i);
+                        let raw_content = contents.value(i);
+                        let full_content = if heading_ctx.is_empty() {
+                            raw_content.to_string()
+                        } else {
+                            format!("[Context: {}]\n\n{}", heading_ctx, raw_content)
+                        };
+
+                        all_results.push(RagChunk {
+                            id: ids.value(i).to_string(),
+                            content: full_content,
+                            source_file: source_files.value(i).to_string(),
+                            chunk_index: chunk_indices.value(i) as usize,
+                            score,
+                        });
+                    }
                 }
             }
         }
 
+        // Sort by score and take top `limit`
+        all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        all_results.truncate(limit);
+
         let total_time = search_start.elapsed();
         println!(
-            "RagActor: Search completed in {} ms ({} results)",
+            "RagActor: Federated search completed in {} ms ({} results across {} connections)",
             total_time.as_millis(),
-            results.len()
+            all_results.len(),
+            self.connections.len()
         );
 
-        results
+        all_results
     }
 }
 
