@@ -197,15 +197,14 @@ export function Sidebar({ className = "" }: SidebarProps) {
             <div className="sidebar-scroll-region flex-1 overflow-y-auto scrollbar-hide px-3 pt-4">
                 {/* New Chat Button */}
                 <button
-                    onClick={async () => {
-                        // Clear RAG context first - new chats shouldn't inherit attached documents
-                        // This matches ChatGPT/Claude behavior where each new conversation is fresh
-                        await useChatStore.getState().clearRagContext();
-                        
+                    onClick={() => {
+                        // Use setCurrentChatId(null) which clears all per-chat attachments:
+                        // databases, tools, documents - matching ChatGPT/Claude behavior
+                        const store = useChatStore.getState();
+                        store.setCurrentChatId(null);
                         useChatStore.setState({
                             chatMessages: [],
                             chatInputValue: '',
-                            currentChatId: null,
                         });
                     }}
                     className="sidebar-new-chat-button inline-flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors px-3 py-1.5 rounded-full group text-xs font-semibold uppercase tracking-wide self-start"

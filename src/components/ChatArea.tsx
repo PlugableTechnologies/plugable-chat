@@ -1,5 +1,23 @@
-import { useChatStore, ToolCallRecord, CodeExecutionRecord, RagChunk, type Message } from '../store/chat-store';
+import { 
+    useChatStore, 
+    ToolCallRecord, 
+    CodeExecutionRecord, 
+    RagChunk, 
+    type Message,
+    type AttachedTool
+} from '../store/chat-store';
+import { useSettingsStore } from '../store/settings-store';
 import { StatusBar, StreamingWarningBar } from './StatusBar';
+import { 
+    Search, 
+    Database, 
+    Wrench, 
+    Check, 
+    X, 
+    Loader2, 
+    AlertCircle,
+    Layout
+} from 'lucide-react';
 // Icons replaced with unicode characters
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -221,7 +239,7 @@ const ToolProcessingBlock = ({ content, startTime }: { content: string; startTim
     }
 
     return (
-        <details className="my-2 group/processing border border-purple-300 rounded-xl overflow-hidden bg-purple-50/70" open>
+        <details className="my-2 group/processing border border-purple-300 rounded-xl overflow-hidden bg-purple-50/70">
             <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-purple-100/50 transition-colors select-none">
                 <div className="flex gap-1">
                     <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" />
@@ -402,8 +420,9 @@ function isNumericColumn(rows: (string | number | boolean | null)[][], colIndex:
 }
 
 // SQL Result Table component - renders tabular data from sql_select results
+// Note: SQL executed details are shown in the tool call accordion, not duplicated here
 const SqlResultTable = ({ sqlResult }: { sqlResult: SqlResult }) => {
-    const { columns, rows, row_count, sql_executed } = sqlResult;
+    const { columns, rows, row_count } = sqlResult;
     
     // Pre-compute which columns are numeric for alignment
     const numericColumns = useMemo(() => {
@@ -453,21 +472,9 @@ const SqlResultTable = ({ sqlResult }: { sqlResult: SqlResult }) => {
                 </table>
             </div>
             
-            {/* Footer with row count and SQL */}
-            <div className="mt-2 flex flex-col gap-1">
-                <div className="text-xs text-gray-500">
-                    {row_count === 1 ? '1 row' : `${row_count.toLocaleString()} rows`} returned
-                </div>
-                {sql_executed && (
-                    <details className="group">
-                        <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-600">
-                            SQL Executed
-                        </summary>
-                        <pre className="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto text-gray-600 font-mono">
-                            {sql_executed}
-                        </pre>
-                    </details>
-                )}
+            {/* Footer with row count */}
+            <div className="mt-1 text-xs text-gray-500">
+                {row_count === 1 ? '1 row' : `${row_count.toLocaleString()} rows`} returned
             </div>
         </div>
     );
@@ -779,17 +786,96 @@ const RagFilePills = ({
     );
 };
 
+// Database Table Pills Component
+const AttachedTablePills = ({ 
+    tables, 
+    onRemove 
+}: { 
+    tables: any[], 
+    onRemove: (fqName: string) => void 
+}) => {
+    if (tables.length === 0) return null;
+    
+    const truncateName = (name: string) => {
+        if (name.length <= 20) return name;
+        return name.slice(0, 17) + '...';
+    };
+    
+    return (
+        <div className="db-table-pill-bar flex flex-wrap gap-2 px-2 py-2 max-w-[900px] mx-auto">
+            {tables.map((table) => (
+                <div 
+                    key={table.tableFqName}
+                    className="db-table-pill inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 text-amber-800 rounded-full text-xs font-medium group"
+                    title={`${table.tableFqName} (${table.sourceName})`}
+                >
+                    <span>🗄️</span>
+                    <span>{truncateName(table.tableFqName)}</span>
+                    <button
+                        onClick={() => onRemove(table.tableFqName)}
+                        className="w-4 h-4 flex items-center justify-center rounded-full hover:bg-amber-200 text-amber-600 hover:text-amber-900 transition-colors"
+                        title={`Remove ${table.tableFqName}`}
+                    >
+                        ×
+                    </button>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+// Attached Tool Pills Component
+const AttachedToolPills = ({ 
+    tools, 
+    onRemove 
+}: { 
+    tools: any[], 
+    onRemove: (key: string) => void 
+}) => {
+    if (tools.length === 0) return null;
+    
+    return (
+        <div className="tool-pill-bar flex flex-wrap gap-2 px-2 py-2 max-w-[900px] mx-auto">
+            {tools.map((tool) => (
+                <div 
+                    key={tool.key}
+                    className="tool-pill inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-100 text-purple-800 rounded-full text-xs font-medium group"
+                    title={`${tool.name} on ${tool.server}`}
+                >
+                    <span>🔧</span>
+                    <span>{tool.name}</span>
+                    <button
+                        onClick={() => onRemove(tool.key)}
+                        className="w-4 h-4 flex items-center justify-center rounded-full hover:bg-purple-200 text-purple-600 hover:text-purple-900 transition-colors"
+                        title={`Remove ${tool.name}`}
+                    >
+                        ×
+                    </button>
+                </div>
+            ))}
+        </div>
+    );
+};
+
 // Attachment Menu Component
 const AttachmentMenu = ({ 
     isOpen, 
     onClose, 
     onSelectFiles, 
-    onSelectFolder 
+    onSelectFolder,
+    onSelectDatabase,
+    onSelectTool,
+    filesDisabled,
+    dbDisabled
 }: { 
     isOpen: boolean, 
     onClose: () => void, 
     onSelectFiles: () => void, 
-    onSelectFolder: () => void 
+    onSelectFolder: () => void,
+    onSelectDatabase: () => void,
+    onSelectTool: () => void,
+    filesDisabled: boolean,
+    dbDisabled: boolean
 }) => {
     const menuRef = useRef<HTMLDivElement>(null);
     
@@ -810,21 +896,45 @@ const AttachmentMenu = ({
     return (
         <div 
             ref={menuRef}
-            className="absolute bottom-full left-0 mb-2 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[160px] z-50"
+            className="absolute bottom-full left-0 mb-2 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[180px] z-50"
         >
             <button
                 onClick={() => { onSelectFiles(); onClose(); }}
-                className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                disabled={filesDisabled}
+                className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${
+                    filesDisabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 hover:bg-gray-100'
+                }`}
             >
                 <span>📄</span>
                 <span>Attach Files</span>
             </button>
             <button
                 onClick={() => { onSelectFolder(); onClose(); }}
-                className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                disabled={filesDisabled}
+                className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${
+                    filesDisabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 hover:bg-gray-100'
+                }`}
             >
                 <span>📁</span>
                 <span>Attach Folder</span>
+            </button>
+            <div className="border-t border-gray-100 my-1" />
+            <button
+                onClick={() => { onSelectDatabase(); onClose(); }}
+                disabled={dbDisabled}
+                className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${
+                    dbDisabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 hover:bg-gray-100'
+                }`}
+            >
+                <span>🗄️</span>
+                <span>Attach Database</span>
+            </button>
+            <button
+                onClick={() => { onSelectTool(); onClose(); }}
+                className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+            >
+                <span>🔧</span>
+                <span>Attach Tool</span>
             </button>
         </div>
     );
@@ -843,7 +953,11 @@ const InputBar = ({
     attachedCount,
     onAttachFiles,
     onAttachFolder,
+    onAttachDatabase,
+    onAttachTool,
     onClearAttachments,
+    filesDisabled = false,
+    dbDisabled = false,
     disabled = false
 }: {
     className?: string,
@@ -857,7 +971,11 @@ const InputBar = ({
     attachedCount: number,
     onAttachFiles: () => void,
     onAttachFolder: () => void,
+    onAttachDatabase: () => void,
+    onAttachTool: () => void,
     onClearAttachments: () => void,
+    filesDisabled?: boolean,
+    dbDisabled?: boolean,
     disabled?: boolean
 }) => {
     const [menuOpen, setMenuOpen] = useState(false);
@@ -891,6 +1009,10 @@ const InputBar = ({
                         onClose={() => setMenuOpen(false)}
                         onSelectFiles={onAttachFiles}
                         onSelectFolder={onAttachFolder}
+                        onSelectDatabase={onAttachDatabase}
+                        onSelectTool={onAttachTool}
+                        filesDisabled={filesDisabled}
+                        dbDisabled={dbDisabled}
                     />
                 </div>
                 {hasAttachments && (
@@ -1619,7 +1741,8 @@ const AssistantMessage = memo(function AssistantMessage({
             {thinkingStartTime && isLastMessage && hasThinkOnly && (
                 <ThinkingIndicator startTime={thinkingStartTime} />
             )}
-            {toolProcessingStartTime && isLastMessage && hasToolOnly && (
+            {/* Only show processing block if we don't have results yet */}
+            {toolProcessingStartTime && isLastMessage && hasToolOnly && toolCalls.length === 0 && (
                 <ToolProcessingBlock content={message.content} startTime={toolProcessingStartTime} />
             )}
             {message.codeExecutions && message.codeExecutions.length > 0 && (
@@ -1644,11 +1767,17 @@ export function ChatArea() {
         // RAG state
         attachedPaths, ragIndexedFiles, isIndexingRag,
         addAttachment, searchRagContext, clearRagContext, removeRagFile,
+        // Attachment state
+        attachedDatabaseTables, attachedTools, 
+        removeAttachedTable, removeAttachedTool,
+        clearAttachedTables, clearAttachedTools,
         // Tool execution state
         pendingToolApproval, toolExecution, approveCurrentToolCall, rejectCurrentToolCall,
         // Streaming state
         streamingChatId
     } = useChatStore();
+    
+    const { settings, openSettings, setActiveTab } = useSettingsStore();
     
     // Check if streaming is active in a different chat (input should be blocked)
     const isStreamingInOtherChat = streamingChatId !== null && streamingChatId !== currentChatId;
@@ -1660,6 +1789,16 @@ export function ChatArea() {
     const [ragStartTime, setRagStartTime] = useState<number | null>(null);
     const [ragStage, setRagStage] = useState<'indexing' | 'searching'>('indexing');
     const [isRagProcessing, setIsRagProcessing] = useState(false);
+
+    // Per-chat attachment modal state
+    const [dbModalOpen, setDbModalOpen] = useState(false);
+    const [toolModalOpen, setToolModalOpen] = useState(false);
+
+    // Mutual exclusivity
+    const hasRagAttachments = attachedPaths.length > 0 || ragIndexedFiles.length > 0;
+    const hasDbAttachments = attachedDatabaseTables.length > 0;
+    const filesDisabled = hasDbAttachments;
+    const dbDisabled = hasRagAttachments;
 
     // Follow mode: auto-scroll to bottom when true, stop when user scrolls up
     const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -1773,9 +1912,27 @@ export function ChatArea() {
         }
     };
 
+    // Handle database selection modal
+    const handleAttachDatabase = () => {
+        const hasConnectedDatabases = (settings?.database_toolbox?.sources || []).some(s => s.enabled);
+        if (!hasConnectedDatabases) {
+            setActiveTab('databases');
+            openSettings();
+        } else {
+            setDbModalOpen(true);
+        }
+    };
+
+    // Handle tool selection modal
+    const handleAttachTool = () => {
+        setToolModalOpen(true);
+    };
+
     // Handle clearing attachments (also clears RAG context)
     const handleClearAttachments = async () => {
         await clearRagContext();
+        clearAttachedTables();
+        clearAttachedTools();
     };
 
     const handleSend = async () => {
@@ -1893,7 +2050,17 @@ export function ChatArea() {
             // Fetch the exact system prompt that will be sent for this turn
             let systemPromptPreview: string | null = null;
             try {
-                systemPromptPreview = await invoke<string>('get_system_prompt_preview', { user_prompt: messageToSend });
+                systemPromptPreview = await invoke<string>('get_system_prompt_preview', { 
+                    userPrompt: messageToSend,
+                    attachedFiles: storeState.ragIndexedFiles,
+                    attachedTables: storeState.attachedDatabaseTables.map(t => ({
+                        source_id: t.sourceId,
+                        table_fq_name: t.tableFqName,
+                        column_count: t.columnCount,
+                        schema_text: null
+                    })),
+                    attachedTools: storeState.attachedTools.map(t => t.key),
+                });
             } catch (e) {
                 console.error('[ChatArea] Failed to fetch system prompt preview:', e);
             }
@@ -1923,6 +2090,14 @@ export function ChatArea() {
                 history: history,
                 reasoningEffort,
                 model: storeState.currentModel,
+                attachedFiles: storeState.ragIndexedFiles,
+                attachedTables: storeState.attachedDatabaseTables.map(t => ({
+                    source_id: t.sourceId,
+                    table_fq_name: t.tableFqName,
+                    column_count: t.columnCount,
+                    schema_text: null
+                })),
+                attachedTools: storeState.attachedTools.map(t => t.key),
             });
 
             if (returnedChatId && returnedChatId !== chatId) {
@@ -2068,14 +2243,33 @@ export function ChatArea() {
                 </div>
             )}
 
+            {/* Attachment Modals */}
+            <DatabaseAttachmentModal
+                isOpen={dbModalOpen}
+                onClose={() => setDbModalOpen(false)}
+                chatPrompt={chatInputValue}
+            />
+            <ToolAttachmentModal 
+                isOpen={toolModalOpen} 
+                onClose={() => setToolModalOpen(false)} 
+            />
+
             {/* Fixed Input Area at Bottom */}
             <div className="chat-input-section flex-shrink-0 mt-1 pb-4">
-                {/* RAG File Pills - show indexed files above input */}
+                {/* Attachment Pills */}
                 <div className="chat-input-pill-row px-2 sm:px-6">
                     <RagFilePills 
                         files={ragIndexedFiles} 
                         onRemove={removeRagFile}
                         isIndexing={isIndexingRag}
+                    />
+                    <AttachedTablePills 
+                        tables={attachedDatabaseTables}
+                        onRemove={removeAttachedTable}
+                    />
+                    <AttachedToolPills 
+                        tools={attachedTools}
+                        onRemove={removeAttachedTool}
                     />
                 </div>
                 <div className="chat-input-bar-row px-2 sm:px-6">
@@ -2088,10 +2282,14 @@ export function ChatArea() {
                         handleKeyDown={handleKeyDown}
                         textareaRef={textareaRef}
                         isLoading={assistantStreamingActive}
-                        attachedCount={attachedPaths.length}
+                        attachedCount={attachedPaths.length + attachedDatabaseTables.length + attachedTools.length}
                         onAttachFiles={handleAttachFiles}
                         onAttachFolder={handleAttachFolder}
+                        onAttachDatabase={handleAttachDatabase}
+                        onAttachTool={handleAttachTool}
                         onClearAttachments={handleClearAttachments}
+                        filesDisabled={filesDisabled}
+                        dbDisabled={dbDisabled}
                         disabled={isStreamingInOtherChat}
                     />
                 </div>
@@ -2099,3 +2297,323 @@ export function ChatArea() {
         </div>
     )
 }
+
+// ========== Attachment Modals ==========
+
+const DatabaseAttachmentModal = ({ 
+    isOpen, 
+    onClose, 
+    chatPrompt = "" 
+}: { 
+    isOpen: boolean; 
+    onClose: () => void;
+    chatPrompt?: string;
+}) => {
+    const { attachedDatabaseTables, addAttachedTable, removeAttachedTable } = useChatStore();
+    const [results, setResults] = useState<any[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    // Fetch tables when modal opens, ordered by relevance to chat prompt (if any)
+    useEffect(() => {
+        if (!isOpen) return;
+        
+        const fetchTables = async () => {
+            setLoading(true);
+            setError(null);
+            try {
+                // If there's a chat prompt, use semantic search to order by relevance
+                // Otherwise, get all tables (backend returns all when query is empty)
+                const searchResults = await invoke<any[]>('search_database_tables', { 
+                    query: chatPrompt.trim(), 
+                    limit: 50 
+                });
+                setResults(searchResults);
+            } catch (err: any) {
+                setError(err?.message || String(err));
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        fetchTables();
+    }, [isOpen, chatPrompt]);
+
+    if (!isOpen) return null;
+
+    const isAttached = (fqName: string) => 
+        attachedDatabaseTables.some(t => t.tableFqName === fqName);
+    
+    const hasPrompt = chatPrompt.trim().length > 0;
+
+    return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        <Database className="text-amber-500" size={20} />
+                        <h2 className="text-lg font-semibold text-gray-900">Attach Database Tables</h2>
+                    </div>
+                    <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+                        <X size={20} />
+                    </button>
+                </div>
+
+                <div className="p-6 space-y-4 flex-1 overflow-hidden flex flex-col">
+                    {/* Show context about ordering */}
+                    {hasPrompt && (
+                        <div className="text-xs text-gray-500 bg-amber-50 px-3 py-2 rounded-lg border border-amber-100">
+                            <span className="font-medium text-amber-700">Ordered by relevance to:</span>{' '}
+                            <span className="italic">"{chatPrompt.length > 60 ? chatPrompt.slice(0, 60) + '...' : chatPrompt}"</span>
+                        </div>
+                    )}
+
+                    {error && (
+                        <div className="flex items-center gap-2 p-3 bg-red-50 text-red-700 rounded-lg text-sm">
+                            <AlertCircle size={16} />
+                            <span>{error}</span>
+                        </div>
+                    )}
+
+                    <div className="flex-1 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
+                        {loading ? (
+                            <div className="flex flex-col items-center justify-center py-12 text-gray-400 gap-3">
+                                <Loader2 className="animate-spin" size={32} />
+                                <p className="text-sm">Loading tables...</p>
+                            </div>
+                        ) : results.length === 0 ? (
+                            <div className="text-center py-12 text-gray-500 italic">
+                                No database tables available. Configure database sources in Settings.
+                            </div>
+                        ) : (
+                            results.map((res) => {
+                                const table = res.table;
+                                const attached = isAttached(table.table_fq_name);
+                                return (
+                                    <div 
+                                        key={table.table_fq_name}
+                                        onClick={() => {
+                                            if (attached) {
+                                                removeAttachedTable(table.table_fq_name);
+                                            } else {
+                                                addAttachedTable({
+                                                    sourceId: table.source_id,
+                                                    sourceName: table.source_name,
+                                                    tableFqName: table.table_fq_name,
+                                                    columnCount: table.column_count
+                                                });
+                                            }
+                                        }}
+                                        className={`group cursor-pointer p-4 rounded-xl border transition-all flex items-start gap-4 ${
+                                            attached 
+                                                ? 'bg-amber-50 border-amber-200 ring-1 ring-amber-200' 
+                                                : 'bg-white border-gray-100 hover:border-amber-200 hover:bg-gray-50'
+                                        }`}
+                                    >
+                                        <div className={`mt-0.5 w-5 h-5 rounded border flex items-center justify-center transition-colors ${
+                                            attached 
+                                                ? 'bg-amber-500 border-amber-500 text-white' 
+                                                : 'bg-white border-gray-300 group-hover:border-amber-400'
+                                        }`}>
+                                            {attached && <Check size={14} />}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <span className="font-medium text-gray-900 truncate">
+                                                    {table.table_fq_name}
+                                                </span>
+                                                <span className="px-1.5 py-0.5 rounded bg-gray-100 text-[10px] font-semibold text-gray-500 uppercase">
+                                                    {table.source_id}
+                                                </span>
+                                                {hasPrompt && res.relevance_score > 0 && (
+                                                    <span className="text-[10px] text-amber-600 font-medium">
+                                                        {(res.relevance_score * 100).toFixed(0)}% match
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-3 text-xs text-gray-500">
+                                                <span className="flex items-center gap-1">
+                                                    <Layout size={12} /> {table.column_count} columns
+                                                </span>
+                                                {table.description && (
+                                                    <span className="truncate flex-1">
+                                                        {table.description}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })
+                        )}
+                    </div>
+                </div>
+
+                <div className="px-6 py-4 bg-gray-50 border-t border-gray-100 flex justify-between items-center">
+                    <div className="text-xs text-gray-500">
+                        {attachedDatabaseTables.length} table{attachedDatabaseTables.length === 1 ? '' : 's'} selected
+                    </div>
+                    <button
+                        onClick={onClose}
+                        className="px-6 py-2 bg-gray-900 text-white rounded-xl font-medium hover:bg-gray-800 transition-colors"
+                    >
+                        Done
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const ToolAttachmentModal = ({ 
+    isOpen, 
+    onClose 
+}: { 
+    isOpen: boolean; 
+    onClose: () => void;
+}) => {
+    const { attachedTools, addAttachedTool, removeAttachedTool } = useChatStore();
+    const { serverStatuses } = useSettingsStore();
+    const [query, setQuery] = useState("");
+
+    if (!isOpen) return null;
+
+    // Build list of all available tools
+    const availableTools: AttachedTool[] = [];
+
+    // 1. Built-in tools
+    const builtins = [
+        { name: 'python_execution', desc: 'Execute Python code in a secure sandbox' },
+        { name: 'tool_search', desc: 'Discover MCP tools by semantic search' },
+        { name: 'schema_search', desc: 'Find database tables and structures' },
+        { name: 'sql_select', desc: 'Execute SQL SELECT queries on databases' }
+    ];
+
+    builtins.forEach(b => {
+        availableTools.push({
+            key: `builtin::${b.name}`,
+            name: b.name,
+            server: 'builtin',
+            isBuiltin: true
+        });
+    });
+
+    // 2. MCP tools from connected servers
+    Object.entries(serverStatuses).forEach(([serverId, status]) => {
+        if (status.connected && status.tools) {
+            status.tools.forEach(tool => {
+                availableTools.push({
+                    key: `${serverId}::${tool.name}`,
+                    name: tool.name,
+                    server: serverId,
+                    isBuiltin: false
+                });
+            });
+        }
+    });
+
+    const filteredTools = availableTools.filter(t => 
+        t.name.toLowerCase().includes(query.toLowerCase()) || 
+        t.server.toLowerCase().includes(query.toLowerCase())
+    );
+
+    const isAttached = (key: string) => attachedTools.some(t => t.key === key);
+
+    return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        <Wrench className="text-purple-500" size={20} />
+                        <h2 className="text-lg font-semibold text-gray-900">Attach Tools</h2>
+                    </div>
+                    <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+                        <X size={20} />
+                    </button>
+                </div>
+
+                <div className="p-6 space-y-4 flex-1 overflow-hidden flex flex-col">
+                    <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+                        <input
+                            type="text"
+                            autoFocus
+                            placeholder="Search tools by name or server..."
+                            className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 transition-all"
+                            value={query}
+                            onChange={(e) => setQuery(e.target.value)}
+                        />
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
+                        {filteredTools.length === 0 ? (
+                            <div className="text-center py-12 text-gray-500 italic">
+                                No tools found.
+                            </div>
+                        ) : (
+                            filteredTools.map((tool) => {
+                                const attached = isAttached(tool.key);
+                                return (
+                                    <div 
+                                        key={tool.key}
+                                        onClick={() => {
+                                            if (attached) {
+                                                removeAttachedTool(tool.key);
+                                            } else {
+                                                addAttachedTool(tool);
+                                            }
+                                        }}
+                                        className={`group cursor-pointer p-4 rounded-xl border transition-all flex items-start gap-4 ${
+                                            attached 
+                                                ? 'bg-purple-50 border-purple-200 ring-1 ring-purple-200' 
+                                                : 'bg-white border-gray-100 hover:border-purple-200 hover:bg-gray-50'
+                                        }`}
+                                    >
+                                        <div className={`mt-0.5 w-5 h-5 rounded border flex items-center justify-center transition-colors ${
+                                            attached 
+                                                ? 'bg-purple-500 border-purple-500 text-white' 
+                                                : 'bg-white border-gray-300 group-hover:border-purple-400'
+                                        }`}>
+                                            {attached && <Check size={14} />}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <span className="font-medium text-gray-900 truncate">
+                                                    {tool.name}
+                                                </span>
+                                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                                                    tool.isBuiltin 
+                                                        ? 'bg-blue-100 text-blue-600' 
+                                                        : 'bg-gray-100 text-gray-500'
+                                                }`}>
+                                                    {tool.server}
+                                                </span>
+                                            </div>
+                                            {tool.isBuiltin && (
+                                                <p className="text-xs text-gray-500">
+                                                    {builtins.find(b => b.name === tool.name)?.desc}
+                                                </p>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })
+                        )}
+                    </div>
+                </div>
+
+                <div className="px-6 py-4 bg-gray-50 border-t border-gray-100 flex justify-between items-center">
+                    <div className="text-xs text-gray-500">
+                        {attachedTools.length} tool{attachedTools.length === 1 ? '' : 's'} selected
+                    </div>
+                    <button
+                        onClick={onClose}
+                        className="px-6 py-2 bg-gray-900 text-white rounded-xl font-medium hover:bg-gray-800 transition-colors"
+                    >
+                        Done
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};

@@ -1846,14 +1846,10 @@ function BuiltinsTab({
 }) {
     const {
         settings,
-        updateCodeExecutionEnabled,
-        updateToolSearchEnabled,
         updateToolSearchMaxResults,
         updateToolExamplesEnabled,
         updateToolExamplesMax,
         updateToolSystemPrompt,
-        updateSchemaSearchEnabled,
-        updateSqlSelectEnabled,
         updateRagChunkMinRelevancy,
         updateSchemaRelevancyThreshold,
         updateRagDominantThreshold,
@@ -1862,11 +1858,8 @@ function BuiltinsTab({
     const allowedImports = (pythonAllowedImports && pythonAllowedImports.length > 0)
         ? pythonAllowedImports
         : FALLBACK_PYTHON_ALLOWED_IMPORTS;
-    const [localCodeExecutionEnabled, setLocalCodeExecutionEnabled] = useState(settings?.python_execution_enabled ?? false);
-    const [localToolSearchEnabled, setLocalToolSearchEnabled] = useState(settings?.tool_search_enabled ?? false);
-    const [localSchemaSearchEnabled, setLocalSchemaSearchEnabled] = useState(settings?.schema_search_enabled ?? false);
-    // Note: schemaSearchInternalOnly was removed - it's now auto-derived when sql_select is on but schema_search is off
-    const [localSqlSelectEnabled, setLocalSqlSelectEnabled] = useState(settings?.sql_select_enabled ?? false);
+    
+    // Enablement toggles were removed - all built-ins are now enabled via + Attach Tool in chat
     const [localToolSearchMaxResults, setLocalToolSearchMaxResults] = useState(settings?.tool_search_max_results ?? 3);
     const [localToolExamplesEnabled, setLocalToolExamplesEnabled] = useState(settings?.tool_use_examples_enabled ?? false);
     const [localToolExamplesMax, setLocalToolExamplesMax] = useState(settings?.tool_use_examples_max ?? 2);
@@ -1892,10 +1885,6 @@ function BuiltinsTab({
     const [sqlSelectPromptDraft, setSqlSelectPromptDraft] = useState(settings?.tool_system_prompts?.['builtin::sql_select'] || defaultSqlSelectPrompt);
 
     const [baselineBuiltins, setBaselineBuiltins] = useState({
-        codeExecutionEnabled: settings?.python_execution_enabled ?? false,
-        toolSearchEnabled: settings?.tool_search_enabled ?? false,
-        schemaSearchEnabled: settings?.schema_search_enabled ?? false,
-        sqlSelectEnabled: settings?.sql_select_enabled ?? false,
         pythonPrompt: settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt,
         toolSearchPrompt: settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt,
         schemaSearchPrompt: settings?.tool_system_prompts?.['builtin::schema_search'] || defaultSchemaSearchPrompt,
@@ -1903,15 +1892,14 @@ function BuiltinsTab({
         toolSearchMaxResults: settings?.tool_search_max_results ?? 3,
         toolExamplesEnabled: settings?.tool_use_examples_enabled ?? false,
         toolExamplesMax: settings?.tool_use_examples_max ?? 2,
+        ragChunkMinRelevancy: settings?.rag_chunk_min_relevancy ?? 0.3,
+        schemaRelevancyThreshold: settings?.schema_relevancy_threshold ?? 0.4,
+        ragDominantThreshold: settings?.rag_dominant_threshold ?? 0.6,
     });
     const [isSaving, setIsSaving] = useState(false);
 
     useEffect(() => {
         const nextBaseline = {
-            codeExecutionEnabled: settings?.python_execution_enabled ?? false,
-            toolSearchEnabled: settings?.tool_search_enabled ?? false,
-            schemaSearchEnabled: settings?.schema_search_enabled ?? false,
-            sqlSelectEnabled: settings?.sql_select_enabled ?? false,
             pythonPrompt: settings?.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt,
             toolSearchPrompt: settings?.tool_system_prompts?.['builtin::tool_search'] || defaultToolSearchPrompt,
             schemaSearchPrompt: settings?.tool_system_prompts?.['builtin::schema_search'] || defaultSchemaSearchPrompt,
@@ -1919,26 +1907,24 @@ function BuiltinsTab({
             toolSearchMaxResults: settings?.tool_search_max_results ?? 3,
             toolExamplesEnabled: settings?.tool_use_examples_enabled ?? false,
             toolExamplesMax: settings?.tool_use_examples_max ?? 2,
+            ragChunkMinRelevancy: settings?.rag_chunk_min_relevancy ?? 0.3,
+            schemaRelevancyThreshold: settings?.schema_relevancy_threshold ?? 0.4,
+            ragDominantThreshold: settings?.rag_dominant_threshold ?? 0.6,
         };
 
         const hasPending =
-            localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
-            localToolSearchEnabled !== baselineBuiltins.toolSearchEnabled ||
-            localSchemaSearchEnabled !== baselineBuiltins.schemaSearchEnabled ||
-            localSqlSelectEnabled !== baselineBuiltins.sqlSelectEnabled ||
             pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
             toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt ||
             schemaSearchPromptDraft !== baselineBuiltins.schemaSearchPrompt ||
             sqlSelectPromptDraft !== baselineBuiltins.sqlSelectPrompt ||
             localToolSearchMaxResults !== baselineBuiltins.toolSearchMaxResults ||
             localToolExamplesEnabled !== baselineBuiltins.toolExamplesEnabled ||
-            localToolExamplesMax !== baselineBuiltins.toolExamplesMax;
+            localToolExamplesMax !== baselineBuiltins.toolExamplesMax ||
+            localRagChunkMinRelevancy !== baselineBuiltins.ragChunkMinRelevancy ||
+            localSchemaRelevancyThreshold !== baselineBuiltins.schemaRelevancyThreshold ||
+            localRagDominantThreshold !== baselineBuiltins.ragDominantThreshold;
 
         if (!hasPending) {
-            setLocalCodeExecutionEnabled(nextBaseline.codeExecutionEnabled);
-            setLocalToolSearchEnabled(nextBaseline.toolSearchEnabled);
-            setLocalSchemaSearchEnabled(nextBaseline.schemaSearchEnabled);
-            setLocalSqlSelectEnabled(nextBaseline.sqlSelectEnabled);
             setPythonPromptDraft(nextBaseline.pythonPrompt);
             setToolSearchPromptDraft(nextBaseline.toolSearchPrompt);
             setSchemaSearchPromptDraft(nextBaseline.schemaSearchPrompt);
@@ -1946,56 +1932,38 @@ function BuiltinsTab({
             setLocalToolSearchMaxResults(nextBaseline.toolSearchMaxResults);
             setLocalToolExamplesEnabled(nextBaseline.toolExamplesEnabled);
             setLocalToolExamplesMax(nextBaseline.toolExamplesMax);
+            setLocalRagChunkMinRelevancy(nextBaseline.ragChunkMinRelevancy);
+            setLocalSchemaRelevancyThreshold(nextBaseline.schemaRelevancyThreshold);
+            setLocalRagDominantThreshold(nextBaseline.ragDominantThreshold);
             setBaselineBuiltins(nextBaseline);
         } else {
             setBaselineBuiltins(nextBaseline);
         }
     }, [
-        settings?.python_execution_enabled,
-        settings?.tool_search_enabled,
-        settings?.schema_search_enabled,
-        settings?.sql_select_enabled,
+        settings?.tool_search_max_results,
+        settings?.tool_use_examples_enabled,
+        settings?.tool_use_examples_max,
+        settings?.rag_chunk_min_relevancy,
+        settings?.schema_relevancy_threshold,
+        settings?.rag_dominant_threshold,
+        settings?.tool_system_prompts,
         defaultPythonPrompt,
         defaultToolSearchPrompt,
         defaultSchemaSearchPrompt,
         defaultSqlSelectPrompt,
-        localCodeExecutionEnabled,
-        localToolSearchEnabled,
-        localSchemaSearchEnabled,
-        localSqlSelectEnabled,
-        pythonPromptDraft,
-        schemaSearchPromptDraft,
-        sqlSelectPromptDraft,
-        localToolSearchMaxResults,
-        localToolExamplesEnabled,
-        localToolExamplesMax,
-        settings?.tool_system_prompts,
-        toolSearchPromptDraft,
-        baselineBuiltins.codeExecutionEnabled,
-        baselineBuiltins.toolSearchEnabled,
-        baselineBuiltins.schemaSearchEnabled,
-        baselineBuiltins.sqlSelectEnabled,
-        baselineBuiltins.pythonPrompt,
-        baselineBuiltins.toolSearchPrompt,
-        baselineBuiltins.schemaSearchPrompt,
-        baselineBuiltins.sqlSelectPrompt,
-        baselineBuiltins.toolSearchMaxResults,
-        baselineBuiltins.toolExamplesEnabled,
-        baselineBuiltins.toolExamplesMax,
     ]);
 
     const hasChanges =
-        localCodeExecutionEnabled !== baselineBuiltins.codeExecutionEnabled ||
-        localToolSearchEnabled !== baselineBuiltins.toolSearchEnabled ||
-        localSchemaSearchEnabled !== baselineBuiltins.schemaSearchEnabled ||
-        localSqlSelectEnabled !== baselineBuiltins.sqlSelectEnabled ||
         pythonPromptDraft !== baselineBuiltins.pythonPrompt ||
         toolSearchPromptDraft !== baselineBuiltins.toolSearchPrompt ||
         schemaSearchPromptDraft !== baselineBuiltins.schemaSearchPrompt ||
         sqlSelectPromptDraft !== baselineBuiltins.sqlSelectPrompt ||
         localToolSearchMaxResults !== baselineBuiltins.toolSearchMaxResults ||
         localToolExamplesEnabled !== baselineBuiltins.toolExamplesEnabled ||
-        localToolExamplesMax !== baselineBuiltins.toolExamplesMax;
+        localToolExamplesMax !== baselineBuiltins.toolExamplesMax ||
+        localRagChunkMinRelevancy !== baselineBuiltins.ragChunkMinRelevancy ||
+        localSchemaRelevancyThreshold !== baselineBuiltins.schemaRelevancyThreshold ||
+        localRagDominantThreshold !== baselineBuiltins.ragDominantThreshold;
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -2006,10 +1974,6 @@ function BuiltinsTab({
     }, [isSaving, onSavingChange]);
 
     const handleResetAll = useCallback(() => {
-        setLocalCodeExecutionEnabled(false);
-        setLocalToolSearchEnabled(false);
-        setLocalSchemaSearchEnabled(false);
-        setLocalSqlSelectEnabled(false);
         setPythonPromptDraft(defaultPythonPrompt);
         setToolSearchPromptDraft(defaultToolSearchPrompt);
         setSchemaSearchPromptDraft(defaultSchemaSearchPrompt);
@@ -2017,39 +1981,15 @@ function BuiltinsTab({
         setLocalToolSearchMaxResults(3);
         setLocalToolExamplesEnabled(false);
         setLocalToolExamplesMax(2);
+        setLocalRagChunkMinRelevancy(0.3);
+        setLocalSchemaRelevancyThreshold(0.4);
+        setLocalRagDominantThreshold(0.6);
     }, [
         defaultPythonPrompt,
         defaultToolSearchPrompt,
         defaultSchemaSearchPrompt,
         defaultSqlSelectPrompt,
     ]);
-
-    const handleToggleCodeExecution = () => {
-        setLocalCodeExecutionEnabled((prev) => !prev);
-    };
-
-    const handleToggleToolSearch = async () => {
-        const next = !localToolSearchEnabled;
-        setLocalToolSearchEnabled(next);
-        // Persist immediately so deferred mode survives restarts
-        try {
-            await updateToolSearchEnabled(next);
-            setBaselineBuiltins((prev) => ({
-                ...prev,
-                toolSearchEnabled: next,
-            }));
-        } catch (e) {
-            console.error('[Settings] Failed to update tool_search_enabled:', e);
-        }
-    };
-
-    const handleToggleSchemaSearch = () => {
-        setLocalSchemaSearchEnabled((prev) => !prev);
-    };
-
-    const handleToggleSqlSelect = () => {
-        setLocalSqlSelectEnabled((prev) => !prev);
-    };
 
     const handleResetPythonPrompt = () => {
         setPythonPromptDraft(defaultPythonPrompt);
@@ -2078,24 +2018,6 @@ function BuiltinsTab({
         const targetSchemaSearchPrompt = schemaSearchPromptDraft?.trim() ? schemaSearchPromptDraft : defaultSchemaSearchPrompt;
         const targetSqlSelectPrompt = sqlSelectPromptDraft?.trim() ? sqlSelectPromptDraft : defaultSqlSelectPrompt;
 
-        if (localCodeExecutionEnabled !== settings.python_execution_enabled) {
-            saves.push(updateCodeExecutionEnabled(localCodeExecutionEnabled));
-        }
-
-        if (localToolSearchEnabled !== (settings.tool_search_enabled ?? false)) {
-            saves.push(updateToolSearchEnabled(localToolSearchEnabled));
-        }
-
-        if (localSchemaSearchEnabled !== (settings.schema_search_enabled ?? false)) {
-            saves.push(updateSchemaSearchEnabled(localSchemaSearchEnabled));
-        }
-
-        // Note: schemaSearchInternalOnly removed - now auto-derived from sql_select && !schema_search
-
-        if (localSqlSelectEnabled !== (settings.sql_select_enabled ?? false)) {
-            saves.push(updateSqlSelectEnabled(localSqlSelectEnabled));
-        }
-
         if (localToolSearchMaxResults !== (settings.tool_search_max_results ?? 3)) {
             saves.push(updateToolSearchMaxResults(localToolSearchMaxResults));
         }
@@ -2106,6 +2028,18 @@ function BuiltinsTab({
 
         if (localToolExamplesMax !== (settings.tool_use_examples_max ?? 2)) {
             saves.push(updateToolExamplesMax(localToolExamplesMax));
+        }
+
+        if (localRagChunkMinRelevancy !== settings.rag_chunk_min_relevancy) {
+            saves.push(updateRagChunkMinRelevancy(localRagChunkMinRelevancy));
+        }
+
+        if (localSchemaRelevancyThreshold !== settings.schema_relevancy_threshold) {
+            saves.push(updateSchemaRelevancyThreshold(localSchemaRelevancyThreshold));
+        }
+
+        if (localRagDominantThreshold !== settings.rag_dominant_threshold) {
+            saves.push(updateRagDominantThreshold(localRagDominantThreshold));
         }
 
         if (targetPythonPrompt !== (settings.tool_system_prompts?.['builtin::python_execution'] || defaultPythonPrompt)) {
@@ -2127,10 +2061,6 @@ function BuiltinsTab({
         try {
             await Promise.all(saves);
             setBaselineBuiltins({
-                codeExecutionEnabled: localCodeExecutionEnabled,
-                toolSearchEnabled: localToolSearchEnabled,
-                schemaSearchEnabled: localSchemaSearchEnabled,
-                sqlSelectEnabled: localSqlSelectEnabled,
                 pythonPrompt: targetPythonPrompt,
                 toolSearchPrompt: targetToolSearchPrompt,
                 schemaSearchPrompt: targetSchemaSearchPrompt,
@@ -2138,37 +2068,38 @@ function BuiltinsTab({
                 toolSearchMaxResults: localToolSearchMaxResults,
                 toolExamplesEnabled: localToolExamplesEnabled,
                 toolExamplesMax: localToolExamplesMax,
+                ragChunkMinRelevancy: localRagChunkMinRelevancy,
+                schemaRelevancyThreshold: localSchemaRelevancyThreshold,
+                ragDominantThreshold: localRagDominantThreshold,
             });
         } finally {
             setIsSaving(false);
             onSavingChange?.(false);
         }
     }, [
+        pythonPromptDraft,
+        toolSearchPromptDraft,
+        schemaSearchPromptDraft,
+        sqlSelectPromptDraft,
+        localToolSearchMaxResults,
+        localToolExamplesEnabled,
+        localToolExamplesMax,
+        localRagChunkMinRelevancy,
+        localSchemaRelevancyThreshold,
+        localRagDominantThreshold,
+        settings,
         defaultPythonPrompt,
         defaultToolSearchPrompt,
         defaultSchemaSearchPrompt,
         defaultSqlSelectPrompt,
-        localCodeExecutionEnabled,
-        localToolSearchEnabled,
-        localSchemaSearchEnabled,
-        localSqlSelectEnabled,
-        localToolSearchMaxResults,
-        localToolExamplesEnabled,
-        localToolExamplesMax,
-        onSavingChange,
-        pythonPromptDraft,
-        schemaSearchPromptDraft,
-        settings,
-        sqlSelectPromptDraft,
-        toolSearchPromptDraft,
-        updateCodeExecutionEnabled,
-        updateSchemaSearchEnabled,
-        updateSqlSelectEnabled,
+        updateToolSearchMaxResults,
         updateToolExamplesEnabled,
         updateToolExamplesMax,
-        updateToolSearchEnabled,
-        updateToolSearchMaxResults,
+        updateRagChunkMinRelevancy,
+        updateSchemaRelevancyThreshold,
+        updateRagDominantThreshold,
         updateToolSystemPrompt,
+        onSavingChange,
     ]);
 
     useEffect(() => {
@@ -2191,17 +2122,6 @@ function BuiltinsTab({
                 <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
                     <div className="flex items-start justify-between gap-3">
                         <div className="flex items-center gap-3">
-                            <button
-                                onClick={handleToggleCodeExecution}
-                                className={`relative w-10 h-5 rounded-full transition-colors ${localCodeExecutionEnabled ? 'bg-blue-500' : 'bg-gray-300'
-                                    }`}
-                                title="Toggle python_execution"
-                            >
-                                <div
-                                    className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localCodeExecutionEnabled ? 'translate-x-5' : ''
-                                        }`}
-                                />
-                            </button>
                             <div>
                                 <div className="flex items-center gap-2">
                                     <span className="font-medium text-gray-900">python_execution</span>
@@ -2223,9 +2143,6 @@ function BuiltinsTab({
                             >
                                 Reset
                             </button>
-                            <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">
-                                builtin
-                            </span>
                         </div>
                     </div>
                     <textarea
@@ -2235,28 +2152,17 @@ function BuiltinsTab({
                         className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
                         placeholder={defaultPythonPrompt}
                     />
-                    <p className="text-[11px] text-gray-500">Appended to the system prompt when Python execution is enabled.</p>
+                    <p className="text-[11px] text-gray-500">Appended to the system prompt when Python execution is attached to a chat.</p>
                 </div>
 
                 {/* tool_search prompt card */}
                 <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-2 w-full">
                     <div className="flex items-start justify-between">
                         <div className="flex items-center gap-3">
-                            <button
-                                onClick={handleToggleToolSearch}
-                                className={`relative w-10 h-5 rounded-full transition-colors ${localToolSearchEnabled ? 'bg-blue-500' : 'bg-gray-300'
-                                    }`}
-                                title="Toggle deferred mode"
-                            >
-                                <div
-                                    className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localToolSearchEnabled ? 'translate-x-5' : ''
-                                        }`}
-                                />
-                            </button>
                             <div>
-                                <div className="text-sm font-semibold text-gray-900">tool_search (Deferred mode)</div>
+                                <div className="text-sm font-semibold text-gray-900">tool_search (Configuration)</div>
                                 <p className="text-xs text-gray-500">
-                                    When on, MCP tools stay hidden until tool_search runs (auto-run on first user prompt).
+                                    Discover MCP tools related to your search query.
                                 </p>
                             </div>
                         </div>
@@ -2279,11 +2185,6 @@ function BuiltinsTab({
                         className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
                         placeholder={defaultToolSearchPrompt}
                     />
-                    <p className="text-[11px] text-gray-500">
-                        {localToolSearchEnabled
-                            ? 'Deferred mode on: MCP tools stay hidden until tool_search runs (auto-run on the first user prompt of a turn).'
-                            : 'Deferred mode off: MCP tools are exposed immediately in the system prompt.'}
-                    </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                         <label className="flex flex-col text-xs text-gray-600">
                             <span className="font-semibold text-gray-800 mb-1">Max results per search</span>
@@ -2304,7 +2205,7 @@ function BuiltinsTab({
                             <div className="flex items-center justify-between">
                                 <div>
                                     <div className="text-xs font-semibold text-gray-800">Tool examples</div>
-                                    <p className="text-[11px] text-gray-500">Include input_examples in prompts (capped for small models).</p>
+                                    <p className="text-[11px] text-gray-500">Include input_examples in prompts.</p>
                                 </div>
                                 <button
                                     onClick={() => setLocalToolExamplesEnabled((prev) => !prev)}
@@ -2337,191 +2238,124 @@ function BuiltinsTab({
                         </div>
                     </div>
                 </div>
-            </div>
 
-            {/* schema_search card */}
-            <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
-                <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                        <button
-                            onClick={handleToggleSchemaSearch}
-                            className={`relative w-10 h-5 rounded-full transition-colors ${localSchemaSearchEnabled ? 'bg-blue-500' : 'bg-gray-300'
-                                }`}
-                            title="Toggle schema_search"
-                        >
-                            <div
-                                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localSchemaSearchEnabled ? 'translate-x-5' : ''
-                                    }`}
+                {/* schema_search card */}
+                <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-2 w-full">
+                    <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-3">
+                            <div>
+                                <div className="text-sm font-semibold text-gray-900">schema_search</div>
+                                <p className="text-xs text-gray-500">
+                                    Discover database tables and their structure.
+                                </p>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={handleResetSchemaSearchPrompt}
+                                className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
+                                title="Reset to default prompt"
+                            >
+                                Reset
+                            </button>
+                            <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                        </div>
+                    </div>
+                    <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
+                    <textarea
+                        value={schemaSearchPromptDraft}
+                        onChange={(e) => setSchemaSearchPromptDraft(e.target.value)}
+                        rows={3}
+                        className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
+                        placeholder={defaultSchemaSearchPrompt}
+                    />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                        <label className="flex flex-col text-xs text-gray-600">
+                            <span className="font-semibold text-gray-800 mb-1">Schema Relevancy Threshold</span>
+                            <input
+                                type="number"
+                                step={0.1}
+                                min={0}
+                                max={1}
+                                value={localSchemaRelevancyThreshold}
+                                onChange={(e) => setLocalSchemaRelevancyThreshold(Number(e.target.value))}
+                                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
                             />
-                        </button>
-                        <div>
-                            <div className="flex items-center gap-2">
-                                <span className="font-medium text-gray-900">schema_search</span>
-                                <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">builtin</span>
+                            <span className="text-[11px] text-gray-500 mt-1">Minimum similarity to include a table.</span>
+                        </label>
+                    </div>
+                </div>
+
+                {/* sql_select card */}
+                <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-2 w-full">
+                    <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-3">
+                            <div>
+                                <div className="text-sm font-semibold text-gray-900">sql_select</div>
+                                <p className="text-xs text-gray-500">
+                                    Execute SQL queries against attached tables.
+                                </p>
                             </div>
-                            <p className="text-xs text-gray-500 mt-0.5">
-                                Search database schemas by semantic similarity
-                            </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={handleResetSqlSelectPrompt}
+                                className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
+                                title="Reset to default prompt"
+                            >
+                                Reset
+                            </button>
+                            <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
                         </div>
                     </div>
+                    <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
+                    <textarea
+                        value={sqlSelectPromptDraft}
+                        onChange={(e) => setSqlSelectPromptDraft(e.target.value)}
+                        rows={3}
+                        className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
+                        placeholder={defaultSqlSelectPrompt}
+                    />
                 </div>
 
-                {/* Note: "Internal search only" toggle was removed - internal schema search is now
-                    auto-derived when sql_select is enabled but schema_search is not */}
-
-                {/* Relevancy Thresholds */}
-                <div className="border-t border-gray-100 pt-3 mt-2 space-y-3">
-                    <div className="text-xs font-semibold text-gray-700">Relevancy Thresholds</div>
-                    
-                    <div className="space-y-1">
-                        <div className="flex items-center justify-between">
-                            <span className="text-xs text-gray-600">Schema Relevancy Threshold</span>
-                            <span className="text-xs font-mono text-gray-500">{localSchemaRelevancyThreshold.toFixed(2)}</span>
-                        </div>
-                        <input
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.05"
-                            value={localSchemaRelevancyThreshold}
-                            onChange={(e) => {
-                                const value = parseFloat(e.target.value);
-                                setLocalSchemaRelevancyThreshold(value);
-                                updateSchemaRelevancyThreshold(value);
-                            }}
-                            className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                        />
-                        <p className="text-[10px] text-gray-400">Minimum score to inject tables into context and enable sql_select</p>
-                    </div>
-                </div>
-
-                <div className="flex items-center justify-between gap-2 pt-1">
-                    <div className="text-xs font-semibold text-gray-900">System prompt (optional)</div>
-                    <button
-                        onClick={handleResetSchemaSearchPrompt}
-                        className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
-                    >
-                        Reset
-                    </button>
-                </div>
-                <textarea
-                    value={schemaSearchPromptDraft}
-                    onChange={(e) => setSchemaSearchPromptDraft(e.target.value)}
-                    rows={2}
-                    className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
-                    placeholder={defaultSchemaSearchPrompt}
-                />
-            </div>
-
-            {/* sql_select card */}
-            <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
-                <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                        <button
-                            onClick={handleToggleSqlSelect}
-                            className={`relative w-10 h-5 rounded-full transition-colors ${localSqlSelectEnabled ? 'bg-blue-500' : 'bg-gray-300'
-                                }`}
-                            title="Toggle sql_select"
-                        >
-                            <div
-                                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localSqlSelectEnabled ? 'translate-x-5' : ''
-                                    }`}
+                {/* Shared Relevancy thresholds */}
+                <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
+                    <div className="text-sm font-semibold text-gray-900">General Retrieval Configuration</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <label className="flex flex-col text-xs text-gray-600">
+                            <span className="font-semibold text-gray-800 mb-1">RAG Relevancy Threshold</span>
+                            <input
+                                type="number"
+                                step={0.1}
+                                min={0}
+                                max={1}
+                                value={localRagChunkMinRelevancy}
+                                onChange={(e) => setLocalRagChunkMinRelevancy(Number(e.target.value))}
+                                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
                             />
-                        </button>
-                        <div>
-                            <div className="flex items-center gap-2">
-                                <span className="font-medium text-gray-900">sql_select</span>
-                                <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">builtin</span>
-                            </div>
-                            <p className="text-xs text-gray-500 mt-0.5">
-                                Execute SQL queries on configured databases
-                            </p>
-                        </div>
+                            <span className="text-[11px] text-gray-500 mt-1">Minimum similarity to include a document chunk.</span>
+                        </label>
+                        <label className="flex flex-col text-xs text-gray-600">
+                            <span className="font-semibold text-gray-800 mb-1">RAG Dominant Threshold</span>
+                            <input
+                                type="number"
+                                step={0.1}
+                                min={0}
+                                max={1}
+                                value={localRagDominantThreshold}
+                                onChange={(e) => setLocalRagDominantThreshold(Number(e.target.value))}
+                                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                            />
+                            <span className="text-[11px] text-gray-500 mt-1">Similarity above which SQL is suppressed to focus context.</span>
+                        </label>
                     </div>
                 </div>
-                <div className="flex items-center justify-between gap-2 pt-1">
-                    <div className="text-xs font-semibold text-gray-900">System prompt (optional)</div>
-                    <button
-                        onClick={handleResetSqlSelectPrompt}
-                        className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
-                    >
-                        Reset
-                    </button>
-                </div>
-                <textarea
-                    value={sqlSelectPromptDraft}
-                    onChange={(e) => setSqlSelectPromptDraft(e.target.value)}
-                    rows={2}
-                    className="w-full px-3 py-2 text-sm font-mono border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
-                    placeholder={defaultSqlSelectPrompt}
-                />
             </div>
 
-            {/* RAG Document Retrieval card */}
-            <div className="border border-gray-200 rounded-xl bg-white p-4 space-y-3 w-full">
-                <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                        <div className="w-10 h-5 flex items-center justify-center">
-                            <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                        </div>
-                        <div>
-                            <div className="flex items-center gap-2">
-                                <span className="font-medium text-gray-900">Document Retrieval (RAG)</span>
-                                <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">automatic</span>
-                            </div>
-                            <p className="text-xs text-gray-500 mt-0.5">
-                                Contextual retrieval from attached documents
-                            </p>
-                        </div>
-                    </div>
-                </div>
-
-                {/* RAG Relevancy Thresholds */}
-                <div className="space-y-3 pt-1">
-                    <div className="space-y-1">
-                        <div className="flex items-center justify-between">
-                            <span className="text-xs text-gray-600">Min Chunk Relevancy</span>
-                            <span className="text-xs font-mono text-gray-500">{localRagChunkMinRelevancy.toFixed(2)}</span>
-                        </div>
-                        <input
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.05"
-                            value={localRagChunkMinRelevancy}
-                            onChange={(e) => {
-                                const value = parseFloat(e.target.value);
-                                setLocalRagChunkMinRelevancy(value);
-                                updateRagChunkMinRelevancy(value);
-                            }}
-                            className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                        />
-                        <p className="text-[10px] text-gray-400">Document chunks below this score are not injected into context</p>
-                    </div>
-
-                    <div className="space-y-1">
-                        <div className="flex items-center justify-between">
-                            <span className="text-xs text-gray-600">RAG Dominant Threshold</span>
-                            <span className="text-xs font-mono text-gray-500">{localRagDominantThreshold.toFixed(2)}</span>
-                        </div>
-                        <input
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.05"
-                            value={localRagDominantThreshold}
-                            onChange={(e) => {
-                                const value = parseFloat(e.target.value);
-                                setLocalRagDominantThreshold(value);
-                                updateRagDominantThreshold(value);
-                            }}
-                            className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                        />
-                        <p className="text-[10px] text-gray-400">Above this relevancy, SQL context is suppressed to focus the model</p>
-                    </div>
-                </div>
+            <div className="mt-6 pt-4 border-t border-gray-100">
+                <p className="text-sm text-gray-600 text-center italic">
+                    Select <strong>+ Attach Tool</strong> in chat to use an enabled tool
+                </p>
             </div>
         </div>
     );
@@ -2667,6 +2501,12 @@ function ToolsTab({
                     )}
                 </div>
             </div>
+
+            <div className="mt-6 pt-4 border-t border-gray-100 text-center italic">
+                <p className="text-sm text-gray-600">
+                    Select <strong>+ Attach Tool</strong> in chat to use an enabled tool
+                </p>
+            </div>
         </div>
     );
 }
@@ -2690,6 +2530,7 @@ function DatabasesTab({
         sources: [],
     });
     const [saveError, setSaveError] = useState<string | null>(null);
+    const [refreshingSources, setRefreshingSources] = useState<Record<string, boolean>>({});
 
     // Simple deep erase of internal properties for checking dirty state if needed
     // For now simplistic dirty check
@@ -2765,6 +2606,21 @@ function DatabasesTab({
     useEffect(() => {
         onRegisterSave?.(handleSave);
     }, [handleSave, onRegisterSave]);
+
+    const handleRefreshSchemas = async (sourceId: string) => {
+        setRefreshingSources(prev => ({ ...prev, [sourceId]: true }));
+        setSaveError(null);
+        try {
+            // Backend refresh_database_schemas refreshes all enabled sources
+            // For now we'll just call it and it will refresh all enabled ones
+            // In the future we might want a per-source refresh command
+            await invoke('refresh_database_schemas');
+        } catch (err: any) {
+            setSaveError(`Refresh failed: ${err?.message || String(err)}`);
+        } finally {
+            setRefreshingSources(prev => ({ ...prev, [sourceId]: false }));
+        }
+    };
 
     // Handle adding a new database source
     const addSource = (kind: SupportedDatabaseKind) => {
@@ -2873,6 +2729,21 @@ function DatabasesTab({
                                     />
                                     Enabled
                                 </label>
+                                {source.enabled && (
+                                    <button
+                                        onClick={() => handleRefreshSchemas(source.id)}
+                                        disabled={refreshingSources[source.id]}
+                                        className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50 transition-colors"
+                                        title="Refresh table schemas from this database"
+                                    >
+                                        {refreshingSources[source.id] ? (
+                                            <Loader2 size={12} className="animate-spin" />
+                                        ) : (
+                                            <RefreshCw size={12} />
+                                        )}
+                                        Refresh
+                                    </button>
+                                )}
                                 <button onClick={() => removeSource(idx)} className="text-gray-400 hover:text-red-500">
                                     <Trash2 size={16} />
                                 </button>
@@ -3079,298 +2950,6 @@ function DatabasesTab({
     );
 }
 
-type SchemaTableStatus = {
-    source_id: string;
-    source_name: string;
-    table_fq_name: string;
-    enabled: boolean;
-    column_count: number;
-    description?: string | null;
-};
-
-type SchemaSourceStatus = {
-    source_id: string;
-    source_name: string;
-    database_kind: SupportedDatabaseKind;
-    tables: SchemaTableStatus[];
-};
-
-// Schemas Tab - view and manage cached schemas
-function SchemasTab({
-    onDirtyChange,
-    onRegisterSave,
-    onSavingChange,
-}: {
-    onDirtyChange?: (dirty: boolean) => void;
-    onRegisterSave?: (handler: () => Promise<void>) => void;
-    onSavingChange?: (saving: boolean) => void;
-}) {
-    const { settings } = useSettingsStore();
-    const [sources, setSources] = useState<SchemaSourceStatus[]>([]);
-    const [loading, setLoading] = useState(false);
-    const [initializingSchemas, setInitializingSchemas] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-    const [lastRefreshed, setLastRefreshed] = useState<number | null>(null);
-    const [pendingTables, setPendingTables] = useState<Record<string, boolean>>({});
-
-    const enabledSourcesKey = (settings?.database_toolbox?.sources || [])
-        .filter((s) => s.enabled)
-        .map((s) => s.id)
-        .sort()
-        .join(',');
-
-    useEffect(() => {
-        onDirtyChange?.(false);
-    }, [onDirtyChange]);
-
-    useEffect(() => {
-        onSavingChange?.(loading || initializingSchemas);
-    }, [initializingSchemas, loading, onSavingChange]);
-
-    const refreshSchemas = useCallback(async () => {
-        setLoading(true);
-        setError(null);
-        try {
-            const result = await invoke<SchemaSourceStatus[]>('refresh_database_schemas');
-            setSources(result || []);
-            setLastRefreshed(Date.now());
-        } catch (err: any) {
-            const message = err?.message || String(err);
-            setError(message);
-        } finally {
-            setLoading(false);
-        }
-    }, []);
-
-    const loadCachedSchemas = useCallback(async () => {
-        if (!enabledSourcesKey) {
-            setSources([]);
-            setLastRefreshed(null);
-            return;
-        }
-
-        setInitializingSchemas(true);
-        setError(null);
-        try {
-            const cached = await invoke<SchemaSourceStatus[]>('get_cached_database_schemas');
-            const cachedSources = cached || [];
-            setSources(cachedSources);
-
-            const hasCachedTables = cachedSources.some(src => src.tables.length > 0);
-            if (!hasCachedTables) {
-                await refreshSchemas();
-            }
-        } catch (err: any) {
-            const message = err?.message || String(err);
-            setError(message);
-        } finally {
-            setInitializingSchemas(false);
-        }
-    }, [enabledSourcesKey, refreshSchemas]);
-
-    useEffect(() => {
-        loadCachedSchemas();
-    }, [loadCachedSchemas]);
-
-    useEffect(() => {
-        onRegisterSave?.(refreshSchemas);
-    }, [onRegisterSave, refreshSchemas]);
-
-    const toggleTable = useCallback(async (sourceId: string, tableName: string, nextEnabled: boolean) => {
-        const key = `${sourceId}::${tableName}`;
-        setError(null);
-        setPendingTables(prev => ({ ...prev, [key]: true }));
-        setSources(prev =>
-            prev.map(src =>
-                src.source_id === sourceId
-                    ? {
-                        ...src,
-                        tables: src.tables.map(tbl =>
-                            tbl.table_fq_name === tableName ? { ...tbl, enabled: nextEnabled } : tbl
-                        ),
-                    }
-                    : src
-            )
-        );
-
-        try {
-            const updated = await invoke<SchemaTableStatus>('set_schema_table_enabled', {
-                source_id: sourceId,
-                table_fq_name: tableName,
-                enabled: nextEnabled,
-            });
-
-            setSources(prev =>
-                prev.map(src =>
-                    src.source_id === sourceId
-                        ? {
-                            ...src,
-                            tables: src.tables.map(tbl =>
-                                tbl.table_fq_name === tableName
-                                    ? {
-                                        ...tbl,
-                                        enabled: updated.enabled,
-                                        column_count: updated.column_count,
-                                        description: updated.description ?? tbl.description,
-                                    }
-                                    : tbl
-                            ),
-                        }
-                        : src
-                )
-            );
-        } catch (err: any) {
-            setError(err?.message || String(err));
-            setSources(prev =>
-                prev.map(src =>
-                    src.source_id === sourceId
-                        ? {
-                            ...src,
-                            tables: src.tables.map(tbl =>
-                                tbl.table_fq_name === tableName ? { ...tbl, enabled: !nextEnabled } : tbl
-                            ),
-                        }
-                        : src
-                )
-            );
-        } finally {
-            setPendingTables(prev => {
-                const next = { ...prev };
-                delete next[key];
-                return next;
-            });
-        }
-    }, []);
-
-    const totalTables = sources.reduce((acc, src) => acc + (src.tables?.length || 0), 0);
-    const hasEnabledSources = Boolean(enabledSourcesKey);
-    const isLoadingSchemas = loading || initializingSchemas;
-
-    return (
-        <div className="schemas-tab-panel space-y-6">
-            <div className="flex items-start justify-between gap-3">
-                <div>
-                    <h3 className="text-lg font-medium text-gray-900">Schema cache</h3>
-                    <p className="text-sm text-gray-500">
-                        We enumerate enabled databases, embed their tables, and let you disable tables from search.
-                    </p>
-                    {lastRefreshed && (
-                        <p className="text-xs text-gray-400 mt-1">
-                            Last refreshed {new Date(lastRefreshed).toLocaleTimeString()}
-                        </p>
-                    )}
-                </div>
-                <div className="flex items-center gap-2">
-                    <button
-                        onClick={refreshSchemas}
-                        disabled={isLoadingSchemas || !hasEnabledSources}
-                        className="schema-refresh-button inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                        {isLoadingSchemas ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-                        Refresh schemas
-                    </button>
-                </div>
-            </div>
-
-            {error && (
-                <div className="schema-error-alert flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                    <AlertCircle size={16} />
-                    <span>{error}</span>
-                </div>
-            )}
-
-            {!hasEnabledSources && (
-                <div className="schema-empty rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-sm text-gray-600">
-                    Enable at least one database source in the Databases tab, then refresh to cache its schemas.
-                </div>
-            )}
-
-            {isLoadingSchemas && (
-                <div className="schema-loading flex items-center gap-2 text-sm text-gray-600">
-                    <Loader2 size={16} className="animate-spin" />
-                    <span>{loading ? 'Refreshing schemas (this can take a while)...' : 'Loading cached schemas...'}</span>
-                </div>
-            )}
-
-            {!isLoadingSchemas && hasEnabledSources && sources.length === 0 && (
-                <div className="schema-empty-state rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-sm text-gray-600">
-                    No schemas cached yet. Click "Refresh schemas" to enumerate and embed your databases.
-                </div>
-            )}
-
-            {sources.length > 0 && (
-                <div className="schema-summary text-xs text-gray-500">
-                    Tracking {sources.length} source{sources.length === 1 ? '' : 's'} · {totalTables} table{totalTables === 1 ? '' : 's'}
-                </div>
-            )}
-
-            <div className="schema-source-list space-y-4">
-                {sources.map((source) => (
-                    <div key={source.source_id} className="schema-source-card border border-gray-200 rounded-xl p-4 space-y-3">
-                        <div className="flex items-start justify-between gap-2">
-                            <div>
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-gray-900">{source.source_name}</span>
-                                    <span className="text-xs font-medium bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full">
-                                        {source.database_kind}
-                                    </span>
-                                </div>
-                                <div className="text-xs text-gray-500 mt-1">
-                                    {source.source_id} · {source.tables.length} table{source.tables.length === 1 ? '' : 's'}
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="schema-table-list space-y-2">
-                            {source.tables.length === 0 && (
-                                <div className="schema-table-empty text-xs text-gray-500 bg-gray-50 border border-dashed border-gray-200 rounded-lg px-3 py-2">
-                                    No tables found for this source.
-                                </div>
-                            )}
-                            {source.tables.map((table) => {
-                                const key = `${source.source_id}::${table.table_fq_name}`;
-                                return (
-                                    <div
-                                        key={key}
-                                        className="schema-table-row flex items-start justify-between gap-3 rounded-lg border border-gray-100 bg-white px-3 py-2"
-                                    >
-                                        <div className="flex items-start gap-3">
-                                            <input
-                                                type="checkbox"
-                                                className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                                                checked={table.enabled}
-                                                disabled={pendingTables[key]}
-                                                onChange={() => toggleTable(source.source_id, table.table_fq_name, !table.enabled)}
-                                            />
-                                            <div>
-                                                <div className="text-sm font-medium text-gray-900">{table.table_fq_name}</div>
-                                                <div className="text-xs text-gray-500 flex flex-wrap gap-2">
-                                                    <span>{table.column_count} column{table.column_count === 1 ? '' : 's'}</span>
-                                                    {table.description && (
-                                                        <span className="truncate max-w-[360px]">{table.description}</span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <span
-                                            className={`schema-table-chip text-xs font-medium px-2 py-1 rounded-full ${table.enabled
-                                                ? 'bg-green-50 text-green-700 border border-green-100'
-                                                : 'bg-gray-100 text-gray-600 border border-gray-200'
-                                                }`}
-                                        >
-                                            {table.enabled ? 'Enabled' : 'Disabled'}
-                                        </span>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    </div>
-                ))}
-            </div>
-        </div>
-    );
-}
-
 export function SettingsModal() {
     const { isSettingsOpen, closeSettings, activeTab, setActiveTab, isLoading } = useSettingsStore();
     const [systemDirty, setSystemDirty] = useState(false);
@@ -3389,9 +2968,6 @@ export function SettingsModal() {
     const [databasesDirty, setDatabasesDirty] = useState(false);
     const [databasesSaving, setDatabasesSaving] = useState(false);
     const databasesSaveHandlerRef = useRef<(() => Promise<void>) | null>(null);
-    const [schemasDirty, setSchemasDirty] = useState(false);
-    const [schemasSaving, setSchemasSaving] = useState(false);
-    const schemasSaveHandlerRef = useRef<(() => Promise<void>) | null>(null);
 
     const { settings } = useSettingsStore();
 
@@ -3439,14 +3015,6 @@ export function SettingsModal() {
         setDatabasesSaving(saving);
     }, []);
 
-    const handleRegisterSchemasSave = useCallback((handler: () => Promise<void>) => {
-        schemasSaveHandlerRef.current = handler;
-    }, []);
-
-    const handleSchemasSavingChange = useCallback((saving: boolean) => {
-        setSchemasSaving(saving);
-    }, []);
-
     const handleHeaderReset = useCallback(() => {
         if (activeTab === 'builtins') {
             builtinsResetHandlerRef.current?.();
@@ -3465,8 +3033,6 @@ export function SettingsModal() {
             handler = builtinsSaveHandlerRef.current;
         } else if (activeTab === 'databases') {
             handler = databasesSaveHandlerRef.current;
-        } else if (activeTab === 'schemas') {
-            handler = schemasSaveHandlerRef.current;
         }
         if (!handler) return;
         await handler();
@@ -3483,11 +3049,9 @@ export function SettingsModal() {
                     ? interfacesDirty
                     : activeTab === 'builtins'
                         ? builtinsDirty
-                        : activeTab === 'databases'
-                            ? databasesDirty
-                            : activeTab === 'schemas'
-                                ? schemasDirty
-                                : false;
+                    : activeTab === 'databases'
+                        ? databasesDirty
+                        : false;
 
     const isCurrentTabSaving =
         activeTab === 'system-prompt'
@@ -3500,13 +3064,10 @@ export function SettingsModal() {
                         ? builtinsSaving
                         : activeTab === 'databases'
                             ? databasesSaving
-                            : activeTab === 'schemas'
-                                ? schemasSaving
-                                : false;
+                            : false;
 
     // Conditions for showing database tabs
     const showDatabasesTab = settings?.schema_search_enabled || settings?.sql_select_enabled;
-    const showSchemasTab = (settings?.database_toolbox?.sources ?? []).some(source => source.enabled);
 
     return (
         <div id="settings-modal" className="settings-modal fixed inset-0 z-50 flex items-center justify-center">
@@ -3563,18 +3124,6 @@ export function SettingsModal() {
                         <Cpu size={16} />
                         Models
                     </button>
-                    {showSchemasTab && (
-                        <button
-                            onClick={() => setActiveTab('schemas')}
-                            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'schemas'
-                                ? 'border-blue-500 text-blue-600'
-                                : 'border-transparent text-gray-500 hover:text-gray-700'
-                                }`}
-                        >
-                            <Code2 size={16} />
-                            Schemas
-                        </button>
-                    )}
                     {showDatabasesTab && (
                         <button
                             onClick={() => setActiveTab('databases')}
@@ -3674,13 +3223,6 @@ export function SettingsModal() {
                                     onDirtyChange={setDatabasesDirty}
                                     onRegisterSave={handleRegisterDatabasesSave}
                                     onSavingChange={handleDatabasesSavingChange}
-                                />
-                            )}
-                            {activeTab === 'schemas' && (
-                                <SchemasTab
-                                    onDirtyChange={setSchemasDirty}
-                                    onRegisterSave={handleRegisterSchemasSave}
-                                    onSavingChange={handleSchemasSavingChange}
                                 />
                             )}
                         </>

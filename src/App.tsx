@@ -462,9 +462,16 @@ function App() {
                   })}
                 </select>
                 {hasToolCalling && (
-                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-100 text-green-700 border border-green-200" title="This model supports native tool calling">
+                  <button 
+                    onClick={() => {
+                      useSettingsStore.getState().setActiveTab('tools');
+                      useSettingsStore.getState().openSettings();
+                    }}
+                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 transition-colors cursor-pointer" 
+                    title="This model supports native tool calling. Click to configure tools."
+                  >
                     🔧 Tools
-                  </span>
+                  </button>
                 )}
               </div>
             ) : currentModel === 'Loading...' ? (

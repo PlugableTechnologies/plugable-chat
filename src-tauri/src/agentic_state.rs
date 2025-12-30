@@ -149,6 +149,10 @@ pub struct PromptContext {
     pub base_prompt: String,
     /// Whether user has attached documents
     pub has_attachments: bool,
+    /// Per-chat attached database tables
+    pub attached_tables: Vec<crate::settings_state_machine::AttachedTableInfo>,
+    /// Per-chat attached tools
+    pub attached_tools: Vec<String>,
     /// MCP tool context
     pub mcp_context: McpToolContext,
     /// Tool call format to use
@@ -166,6 +170,8 @@ impl Default for PromptContext {
         Self {
             base_prompt: String::new(),
             has_attachments: false,
+            attached_tables: Vec::new(),
+            attached_tools: Vec::new(),
             mcp_context: McpToolContext::default(),
             tool_call_format: ToolCallFormatName::Hermes,
             model_tool_format: None,

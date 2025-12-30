@@ -139,7 +139,8 @@ pub struct RagRetrievalActor {
 
 /// Represents a connection to a specific directory's sidecar database
 struct DirectoryConnection {
-    /// LanceDB connection
+    /// LanceDB connection (kept alive for table handles)
+    #[allow(dead_code)]
     db: Connection,
     /// Table handle for RAG chunks
     chunks_table: Table,

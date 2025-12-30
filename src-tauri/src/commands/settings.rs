@@ -518,8 +518,11 @@ pub async fn get_state_machine_preview(
     let prompt_context = agentic_state::PromptContext {
         base_prompt: guard.system_prompt.clone(),
         has_attachments: false,
+        attached_tables: Vec::new(),
+        attached_tools: Vec::new(),
         mcp_context: agentic_state::McpToolContext::default(),
         tool_call_format: guard.tool_call_formats.primary,
+        model_tool_format: None,
         custom_tool_prompts: guard.tool_system_prompts.clone(),
         python_primary: guard.python_execution_enabled,
     };

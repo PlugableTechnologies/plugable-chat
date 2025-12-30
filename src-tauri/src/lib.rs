@@ -1,3 +1,14 @@
+// =============================================================================
+// Module Organization Strategy
+// =============================================================================
+// Tauri commands are organized into domain-specific modules under `commands/`
+// to keep this file focused and maintainable. See `src/AGENTS.md` for details.
+//
+// - New commands go in `commands/*.rs`, NOT here
+// - Commands are re-exported via `commands/mod.rs` and imported below via `use commands::*`
+// - This file retains: module declarations, core agentic loop (`chat`), app init (`run`)
+// =============================================================================
+
 pub mod actors;
 pub mod agentic_state;
 pub mod app_state;
@@ -15,13 +26,14 @@ pub mod tool_adapters;
 pub mod tool_capability;
 pub mod tool_registry;
 pub mod tools;
+pub mod commands;
 
 #[cfg(test)]
 mod tests;
 
-use actors::database_toolbox_actor::{DatabaseToolboxActor, DatabaseToolboxMsg, ToolboxStatus};
+use actors::database_toolbox_actor::{DatabaseToolboxActor, DatabaseToolboxMsg};
 use actors::foundry_actor::ModelGatewayActor;
-use actors::mcp_host_actor::{McpToolRouterActor, McpTool, McpToolResult};
+use actors::mcp_host_actor::{McpToolRouterActor, McpTool};
 use actors::python_actor::{PythonMsg, PythonSandboxActor};
 use actors::rag_actor::RagRetrievalActor;
 use actors::schema_vector_actor::{SchemaVectorStoreActor, SchemaVectorMsg};
@@ -40,19 +52,17 @@ use mcp_test_server::{
     run_with_args as run_mcp_test_server, CliArgs as McpTestCliArgs,
 };
 use model_profiles::resolve_profile;
+use crate::agentic_state::McpToolInfo;
 use crate::protocol::{
-    parse_tool_calls, CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus,
-    McpHostMsg, ModelFamily, ModelInfo, OpenAITool, OpenAIToolCall, OpenAIToolCallFunction,
-    ParsedToolCall, RagChunk, RagIndexResult, RagMsg, RemoveFileResult, ToolCallsPendingEvent,
+    ChatMessage, FoundryMsg, McpHostMsg, ModelFamily, ModelInfo, OpenAITool, OpenAIToolCall,
+    OpenAIToolCallFunction, ParsedToolCall, RagMsg, ToolCallsPendingEvent,
     ToolExecutingEvent, ToolFormat, ToolHeartbeatEvent, ToolLoopFinishedEvent, ToolResultEvent,
     ToolSchema, VectorMsg,
 };
 use crate::repetition_detector::RepetitionDetector;
-use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
 use serde_json::json;
 use settings::{
-    enforce_python_name, AppSettings, CachedColumnSchema, CachedTableSchema, ChatFormatName,
-    DatabaseSourceConfig, DatabaseToolboxConfig, McpServerConfig, SupportedDatabaseKind,
+    ChatFormatName, DatabaseToolboxConfig, McpServerConfig,
     ToolCallFormatConfig, ToolCallFormatName,
 };
 use std::collections::{HashMap, HashSet};
@@ -64,14 +74,18 @@ use tokio::sync::{mpsc, oneshot};
 use tool_adapters::{detect_python_code, format_tool_result, parse_tool_calls_for_model_profile};
 use tool_capability::ToolCapabilityResolver;
 use tool_registry::{create_shared_registry, SharedToolRegistry, ToolSearchResult};
-use settings_state_machine::SettingsStateMachine;
-use state_machine::{AgenticStateMachine, StatePreview};
+use settings_state_machine::{SettingsStateMachine, ChatTurnContext};
+use state_machine::AgenticStateMachine;
 use tools::code_execution::{CodeExecutionExecutor, CodeExecutionInput, CodeExecutionOutput};
 use tools::tool_search::{
     precompute_tool_search_embeddings, ToolSearchExecutor, ToolSearchInput, ToolSearchOutput,
 };
 use tools::schema_search::SchemaSearchOutput;
 use uuid::Uuid;
+
+// Import all Tauri commands from domain-specific modules (see commands/mod.rs)
+// This keeps lib.rs lean while making commands available for the invoke_handler
+use commands::*;
 
 /// Global toggle for verbose logging, enabled when LOG_VERBOSE (or PLUGABLE_LOG_VERBOSE)
 /// is set to a truthy value such as 1/true/yes/on/debug.
@@ -94,11 +108,6 @@ pub fn is_verbose_logging_enabled() -> bool {
 /// Maximum number of tool call iterations before stopping (safety limit)
 const MAX_TOOL_ITERATIONS: usize = 20;
 const PYTHON_EXECUTION_TOOL_TYPE: &str = "python_execution_20251206";
-
-/// Build a consistent key for tool-specific settings
-fn tool_prompt_key(server_id: &str, tool_name: &str) -> String {
-    format!("{}::{}", server_id, tool_name)
-}
 
 /// Keep the shared registry's database built-ins in sync with current settings.
 async fn sync_registry_database_tools(
@@ -2358,282 +2367,6 @@ pub(crate) async fn run_agentic_loop(
 }
 
 
-#[tauri::command]async fn search_history(
-    query: String,
-    handles: State<'_, ActorHandles>,
-    app_handle: tauri::AppHandle,
-) -> Result<(), String> {
-    // Ask Foundry Actor for embedding
-    let (emb_tx, emb_rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetEmbedding {
-            text: query,
-            respond_to: emb_tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Wait for embedding
-    let embedding = emb_rx.await.map_err(|_| "Foundry actor died")?;
-
-    // Send to Vector Actor
-    let (search_tx, search_rx) = oneshot::channel();
-    handles
-        .vector_tx
-        .send(VectorMsg::SearchChatsByEmbedding {
-            query_vector: embedding,
-            limit: 10,
-            respond_to: search_tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let results = search_rx.await.map_err(|_| "Vector actor died")?;
-
-    app_handle
-        .emit("sidebar-update", results)
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn get_all_chats(
-    handles: State<'_, ActorHandles>,
-) -> Result<Vec<protocol::ChatSummary>, String> {
-    let (tx, rx) = oneshot::channel();
-    handles.vector_tx
-        .send(VectorMsg::FetchAllChats { respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "Vector actor died".to_string())
-}
-
-#[tauri::command]
-async fn get_models(handles: State<'_, ActorHandles>) -> Result<Vec<String>, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetModels { respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())
-}
-
-#[tauri::command]
-async fn set_model(model: String, handles: State<'_, ActorHandles>) -> Result<bool, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::SetModel {
-            model_id: model,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())
-}
-
-#[tauri::command]
-async fn get_cached_models(handles: State<'_, ActorHandles>) -> Result<Vec<CachedModel>, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetCachedModels { respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())
-}
-
-#[tauri::command]
-async fn get_model_info(handles: State<'_, ActorHandles>) -> Result<Vec<ModelInfo>, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetModelInfo { respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())
-}
-
-#[tauri::command]
-async fn download_model(
-    model_name: String,
-    handles: State<'_, ActorHandles>,
-) -> Result<(), String> {
-    println!("[download_model] Starting download for: {}", model_name);
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::DownloadModel {
-            model_name: model_name.clone(),
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| format!("Failed to send download request: {}", e))?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())?
-}
-
-#[tauri::command]
-async fn load_model(model_name: String, handles: State<'_, ActorHandles>) -> Result<(), String> {
-    println!("[load_model] Loading model: {}", model_name);
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::LoadModel {
-            model_name: model_name.clone(),
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| format!("Failed to send load request: {}", e))?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())?
-}
-
-#[tauri::command]
-async fn get_loaded_models(handles: State<'_, ActorHandles>) -> Result<Vec<String>, String> {
-    println!("[get_loaded_models] Getting loaded models");
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetLoadedModels { respond_to: tx })
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    Ok(rx.await.map_err(|_| "Foundry actor died".to_string())?)
-}
-
-#[tauri::command]
-async fn reload_foundry(handles: State<'_, ActorHandles>) -> Result<(), String> {
-    use std::io::Write;
-    println!("\n[reload_foundry] 🔄 Reloading foundry service (requested by UI)");
-    let _ = std::io::stdout().flush();
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::Reload { respond_to: tx })
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    match rx.await {
-        Ok(res) => {
-            println!(
-                "[reload_foundry] ✅ Reload command completed with result: {:?}",
-                res
-            );
-            let _ = std::io::stdout().flush();
-            res.map_err(|e| e)
-        }
-        Err(_) => {
-            println!("[reload_foundry] ❌ Foundry actor died while reloading");
-            let _ = std::io::stdout().flush();
-            Err("Foundry actor died".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn get_catalog_models(
-    handles: State<'_, ActorHandles>,
-) -> Result<Vec<CatalogModel>, String> {
-    println!("[get_catalog_models] Getting catalog models");
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetCatalogModels { respond_to: tx })
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    Ok(rx.await.map_err(|_| "Foundry actor died".to_string())?)
-}
-
-#[tauri::command]
-async fn unload_model(model_name: String, handles: State<'_, ActorHandles>) -> Result<(), String> {
-    println!("[unload_model] Unloading model: {}", model_name);
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::UnloadModel {
-            model_name: model_name.clone(),
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())?
-}
-
-#[tauri::command]
-async fn get_foundry_service_status(
-    handles: State<'_, ActorHandles>,
-) -> Result<FoundryServiceStatus, String> {
-    println!("[get_foundry_service_status] Getting service status");
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetServiceStatus { respond_to: tx })
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())?
-}
-
-#[tauri::command]
-async fn remove_cached_model(
-    model_name: String,
-    handles: State<'_, ActorHandles>,
-) -> Result<(), String> {
-    println!("[remove_cached_model] Removing cached model: {}", model_name);
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::RemoveCachedModel {
-            model_name: model_name.clone(),
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())?
-}
-
-#[tauri::command]
-async fn cancel_generation(
-    generation_id: u32,
-    cancellation_state: State<'_, CancellationState>,
-) -> Result<(), String> {
-    use std::io::Write;
-
-    println!("\n[cancel_generation] 🛑 STOP BUTTON PRESSED - User requested cancellation");
-    println!(
-        "[cancel_generation] Requested generation_id: {}",
-        generation_id
-    );
-    let _ = std::io::stdout().flush();
-
-    // Check if this matches the current generation
-    let current_id = *cancellation_state.current_generation_id.read().await;
-
-    // Send cancel signal
-    if let Some(sender) = cancellation_state.cancel_signal.read().await.as_ref() {
-        let _ = sender.send(true);
-        println!(
-            "[cancel_generation] ✅ Cancel signal sent to generation {} (current active: {})",
-            generation_id, current_id
-        );
-        let _ = std::io::stdout().flush();
-    } else {
-        println!(
-            "[cancel_generation] ⚠️ No active generation to cancel (no cancel signal registered)"
-        );
-        let _ = std::io::stdout().flush();
-    }
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn get_turn_status(
-    turn_tracker: State<'_, TurnTrackerState>,
-) -> Result<TurnProgress, String> {
-    let progress = turn_tracker.progress.read().await;
-    Ok(progress.clone())
-}
-
 #[derive(Default)]
 struct AutoDiscoveryContext {
     tool_search_output: Option<ToolSearchOutput>,
@@ -2898,6 +2631,9 @@ async fn chat(
     history: Vec<ChatMessage>,
     reasoning_effort: String,
     model: String, // Frontend is source of truth for model selection
+    attached_files: Vec<String>,
+    attached_tables: Vec<crate::settings_state_machine::AttachedTableInfo>,
+    attached_tools: Vec<String>,
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
     settings_sm_state: State<'_, SettingsStateMachineState>,
@@ -2998,6 +2734,68 @@ async fn chat(
     let chat_format_default = settings.chat_format_default;
     let chat_format_overrides = settings.chat_format_overrides.clone();
     drop(settings);
+
+    // Build ChatTurnContext with attachments
+    let mut turn_attached_tables = Vec::new();
+    for table in attached_tables {
+        // Fetch full table schema from cache to build prompt context
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = handles.schema_tx.send(SchemaVectorMsg::GetTablesForSource {
+            source_id: table.source_id.clone(),
+            respond_to: tx,
+        }).await {
+            println!("[Chat] Warning: Failed to send GetTablesForSource: {}", e);
+            turn_attached_tables.push(table);
+            continue;
+        }
+
+        match rx.await {
+            Ok(cached_tables) => {
+                if let Some(cached) = cached_tables.into_iter().find(|t| t.fully_qualified_name == table.table_fq_name) {
+                    let mut schema_text = format!("Table: {}\n", cached.fully_qualified_name);
+                    if let Some(ref desc) = cached.description {
+                        schema_text.push_str(&format!("Description: {}\n", desc));
+                    }
+                    schema_text.push_str("Columns:\n");
+                    for col in cached.columns {
+                        schema_text.push_str(&format!("- {} ({})", col.name, col.data_type));
+                        if let Some(ref d) = col.description {
+                            schema_text.push_str(&format!(": {}", d));
+                        }
+                        schema_text.push_str("\n");
+                    }
+                    
+                    turn_attached_tables.push(crate::settings_state_machine::AttachedTableInfo {
+                        source_id: table.source_id,
+                        table_fq_name: table.table_fq_name,
+                        column_count: table.column_count,
+                        schema_text: Some(schema_text),
+                    });
+                } else {
+                    turn_attached_tables.push(table);
+                }
+            }
+            Err(_) => {
+                turn_attached_tables.push(table);
+            }
+        }
+    }
+
+    let turn_context = ChatTurnContext {
+        attached_files: attached_files.clone(),
+        attached_tables: turn_attached_tables.clone(),
+        attached_tools: attached_tools.clone(),
+    };
+
+    // Let state machine compute turn-specific configuration
+    let turn_config = {
+        let sm_guard = settings_sm_state.machine.read().await;
+        let settings_guard = settings_state.settings.read().await;
+        sm_guard.compute_for_turn(&settings_guard, &tool_filter, &turn_context)
+    };
+
+    println!("[Chat] Turn Configuration: Mode={}, Enabled Tools={:?}", 
+        turn_config.mode.name(), turn_config.enabled_tools);
 
     // Initialize turn tracker for this generation
     {
@@ -3377,6 +3175,12 @@ async fn chat(
             .get_internal_tools()
             .iter()
             .filter(|schema| {
+                // If per-chat tools are attached, only allow those
+                if !turn_config.enabled_tools.is_empty() {
+                    return turn_config.enabled_tools.contains(&schema.name);
+                }
+
+                // Fallback to global settings if no per-chat tools attached
                 // Only include python_execution if it's enabled
                 if schema.name == "python_execution" {
                     python_execution_enabled && tool_filter.builtin_allowed("python_execution")
@@ -3392,10 +3196,23 @@ async fn chat(
             .collect()
     };
 
-    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
+    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled && turn_config.enabled_tools.is_empty() {
         let mut list = builtin_tools;
         if !auto_discovery.discovered_tool_schemas.is_empty() {
             list.extend(auto_discovery.discovered_tool_schemas.clone());
+        }
+        list
+    } else if !turn_config.enabled_tools.is_empty() {
+        // If per-chat tools attached, filter MCP tools to only those explicitly attached
+        let mut list = builtin_tools;
+        for (server_id, tools) in &filtered_tool_descriptions {
+            let server_attached_tools: Vec<McpTool> = tools.iter().filter(|t| {
+                let key = format!("{}::{}", server_id, t.name);
+                turn_config.enabled_tools.contains(&key)
+            }).cloned().collect();
+            if !server_attached_tools.is_empty() {
+                list.push((server_id.clone(), server_attached_tools));
+            }
         }
         list
     } else {
@@ -3413,19 +3230,35 @@ async fn chat(
         for (server_id, schema) in registry.get_visible_tools_with_servers() {
             // Filter builtin tools based on their enabled state and tool filter
             if server_id == "builtin" {
-                if schema.name == "python_execution" {
-                    if !python_execution_enabled || !tool_filter.builtin_allowed("python_execution")
-                    {
+                // If per-chat tools attached, only allow those
+                if !turn_config.enabled_tools.is_empty() {
+                    if !turn_config.enabled_tools.contains(&schema.name) {
                         continue;
                     }
-                } else if schema.name == "tool_search" {
-                    // Only include tool_search if there are deferred tools to discover
-                    if !has_deferred_mcp_tools || !tool_filter.builtin_allowed("tool_search") {
+                } else {
+                    // Fallback to global settings
+                    if schema.name == "python_execution" {
+                        if !python_execution_enabled || !tool_filter.builtin_allowed("python_execution")
+                        {
+                            continue;
+                        }
+                    } else if schema.name == "tool_search" {
+                        // Only include tool_search if there are deferred tools to discover
+                        if !has_deferred_mcp_tools || !tool_filter.builtin_allowed("tool_search") {
+                            continue;
+                        }
+                    } else if !tool_filter.builtin_allowed(&schema.name) {
+                        // Other built-ins (schema_search, sql_select) - check filter
                         continue;
                     }
-                } else if !tool_filter.builtin_allowed(&schema.name) {
-                    // Other built-ins (schema_search, sql_select) - check filter
-                    continue;
+                }
+            } else {
+                // MCP tools - check if explicitly attached if any tools are attached
+                if !turn_config.enabled_tools.is_empty() {
+                    let key = format!("{}::{}", server_id, schema.name);
+                    if !turn_config.enabled_tools.contains(&key) {
+                        continue;
+                    }
                 }
             }
             // Build OpenAI tool; MCP tools get server prefix for routing (sanitized)
@@ -3496,6 +3329,8 @@ async fn chat(
     let prompt_context = agentic_state::PromptContext {
         base_prompt: configured_system_prompt.clone(),
         has_attachments,
+        attached_tables: turn_attached_tables.clone(),
+        attached_tools: attached_tools.clone(),
         mcp_context,
         tool_call_format: primary_format_for_prompt,
         model_tool_format: resolved_model_tool_format,
@@ -3513,6 +3348,12 @@ async fn chat(
             prompt_context,
         )
     };
+
+    // Compute turn-specific configuration (Tier 1 overrides)
+    {
+        let settings_guard = settings_state.settings.read().await;
+        initial_state_machine.compute_turn_config(&settings_guard, &tool_filter);
+    }
 
     // Update state machine with auto-discovery results
     let schema_relevancy = auto_discovery.schema_search_output.as_ref()
@@ -3698,1832 +3539,126 @@ async fn chat(
 }
 
 #[tauri::command]
-async fn delete_chat(id: String, handles: State<'_, ActorHandles>) -> Result<bool, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .vector_tx
-        .send(VectorMsg::DeleteChatById { id, respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "Vector actor died".to_string())
-}
-
-#[tauri::command]
-async fn load_chat(id: String, handles: State<'_, ActorHandles>) -> Result<Option<String>, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .vector_tx
-        .send(VectorMsg::FetchChatMessages { id, respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "Vector actor died".to_string())
-}
-
-#[tauri::command]
-async fn update_chat(
-    id: String,
-    title: Option<String>,
-    pinned: Option<bool>,
+async fn get_system_prompt_preview(
+    user_prompt: String,
+    attached_files: Vec<String>,
+    attached_tables: Vec<crate::settings_state_machine::AttachedTableInfo>,
+    attached_tools: Vec<String>,
     handles: State<'_, ActorHandles>,
-) -> Result<bool, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .vector_tx
-        .send(VectorMsg::UpdateChatTitleAndPin {
-            id,
-            title,
-            pinned,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "Vector actor died".to_string())
-}
-
-#[tauri::command]
-fn log_to_terminal(message: String) {
-    println!("[FRONTEND] {}", message);
-}
-
-// ============ RAG Commands ============
-
-#[tauri::command]
-async fn select_files() -> Result<Vec<String>, String> {
-    // Note: File selection is handled directly by the frontend using the dialog plugin
-    // This command is kept for potential future use
-    Ok(Vec::new())
-}
-
-#[tauri::command]
-async fn select_folder() -> Result<Option<String>, String> {
-    // Similar to select_files - frontend will use dialog plugin directly
-    Ok(None)
-}
-
-#[tauri::command]
-async fn process_rag_documents(
-    paths: Vec<String>,
-    handles: State<'_, ActorHandles>,
-    embedding_state: State<'_, EmbeddingModelState>,
-) -> Result<RagIndexResult, String> {
-    println!("[RAG] Processing {} paths", paths.len());
-
-    // Get the embedding model
-    let model_guard = embedding_state.model.read().await;
-    let embedding_model = model_guard
-        .clone()
-        .ok_or_else(|| "Embedding model not initialized".to_string())?;
-    drop(model_guard);
-
-    let (tx, rx) = oneshot::channel();
-    handles
-        .rag_tx
-        .send(RagMsg::IndexRagDocuments {
-            paths,
-            embedding_model,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|_| "RAG actor died".to_string())?
-}
-
-#[tauri::command]
-async fn search_rag_context(
-    query: String,
-    limit: usize,
-    handles: State<'_, ActorHandles>,
-) -> Result<Vec<RagChunk>, String> {
-    println!(
-        "[RAG] Searching for context with query length: {}",
-        query.len()
-    );
-
-    // First, get embedding for the query
-    let (emb_tx, emb_rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetEmbedding {
-            text: query,
-            respond_to: emb_tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let query_vector = emb_rx.await.map_err(|_| "Foundry actor died")?;
-
-    // Then search the RAG index
-    let (search_tx, search_rx) = oneshot::channel();
-    handles
-        .rag_tx
-        .send(RagMsg::SearchRagChunksByEmbedding {
-            query_vector,
-            limit,
-            respond_to: search_tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    search_rx.await.map_err(|_| "RAG actor died".to_string())
-}
-
-#[tauri::command]
-async fn clear_rag_context(handles: State<'_, ActorHandles>) -> Result<bool, String> {
-    println!("[RAG] Clearing context");
-
-    let (tx, rx) = oneshot::channel();
-    handles
-        .rag_tx
-        .send(RagMsg::ClearContext { respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|_| "RAG actor died".to_string())
-}
-
-#[tauri::command]
-async fn remove_rag_file(
-    handles: State<'_, ActorHandles>,
-    source_file: String,
-) -> Result<RemoveFileResult, String> {
-    println!("[RAG] Removing file from index: {}", source_file);
-
-    let (tx, rx) = oneshot::channel();
-    handles
-        .rag_tx
-        .send(RagMsg::RemoveFile {
-            source_file,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|_| "RAG actor died".to_string())
-}
-
-#[tauri::command]
-async fn get_rag_indexed_files(handles: State<'_, ActorHandles>) -> Result<Vec<String>, String> {
-    println!("[RAG] Getting indexed files");
-
-    let (tx, rx) = oneshot::channel();
-    handles
-        .rag_tx
-        .send(RagMsg::GetIndexedFiles { respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|_| "RAG actor died".to_string())
-}
-
-// ============ Settings Commands ============
-
-#[tauri::command]
-async fn get_settings(settings_state: State<'_, SettingsState>) -> Result<AppSettings, String> {
-    let guard = settings_state.settings.read().await;
-    Ok(guard.clone())
-}
-
-#[tauri::command]
-fn get_default_mcp_test_server() -> McpServerConfig {
-    settings::default_mcp_test_server()
-}
-
-#[tauri::command]
-fn get_python_allowed_imports() -> Vec<String> {
-    PYTHON_ALLOWED_MODULES
-        .iter()
-        .map(|m| m.to_string())
-        .collect()
-}
-
-#[tauri::command]
-async fn save_app_settings(
-    new_settings: AppSettings,
     settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut normalized = new_settings;
-    normalized.tool_call_formats.normalize();
-
-    // Save to file
-    settings::save_settings(&normalized).await?;
-
-    // Update in-memory state
-    let mut guard = settings_state.settings.write().await;
-    *guard = normalized.clone();
-    
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    let mode_changed = sm_guard.refresh(&normalized, &launch_config.tool_filter);
-    if mode_changed {
-        println!(
-            "[SettingsStateMachine] Mode updated after settings save: {}",
-            sm_guard.operational_mode().name()
-        );
-    }
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn add_mcp_server(
-    mut config: McpServerConfig,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    enforce_python_name(&mut config);
-
-    let mut guard = settings_state.settings.write().await;
-
-    // Check for duplicate ID
-    if guard.mcp_servers.iter().any(|s| s.id == config.id) {
-        return Err(format!("Server with ID '{}' already exists", config.id));
-    }
-
-    guard.mcp_servers.push(config);
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_mcp_server(
-    mut config: McpServerConfig,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-    handles: State<'_, ActorHandles>,
-) -> Result<(), String> {
-    enforce_python_name(&mut config);
-
-    let all_configs_for_sync;
-    {
-        let mut guard = settings_state.settings.write().await;
-
-        if let Some(server) = guard.mcp_servers.iter_mut().find(|s| s.id == config.id) {
-            *server = config;
-            settings::save_settings(&guard).await?;
-            all_configs_for_sync = guard.get_all_mcp_configs();
-
-            // Refresh the SettingsStateMachine (Tier 1)
-            let mut sm_guard = settings_sm_state.machine.write().await;
-            sm_guard.refresh(&guard, &launch_config.tool_filter);
-        } else {
-            return Err(format!("Server with ID '{}' not found", config.id));
-        }
-    }
-
-    // Sync enabled servers after settings change
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::SyncEnabledServers {
-            configs: all_configs_for_sync,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let results = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
-    for (server_id, result) in results {
-        match result {
-            Ok(()) => println!("[Settings] Server {} sync successful", server_id),
-            Err(e) => println!("[Settings] Server {} sync failed: {}", server_id, e),
-        }
-    }
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn remove_mcp_server(
-    server_id: String,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-    handles: State<'_, ActorHandles>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-
-    let initial_len = guard.mcp_servers.len();
-    guard.mcp_servers.retain(|s| s.id != server_id);
-    let prefix = format!("{}::", server_id);
-    guard
-        .tool_system_prompts
-        .retain(|key, _| !key.starts_with(&prefix));
-
-    if guard.mcp_servers.len() < initial_len {
-        settings::save_settings(&guard).await?;
-
-        // Refresh the SettingsStateMachine (Tier 1)
-        let mut sm_guard = settings_sm_state.machine.write().await;
-        sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-        // Explicitly disconnect the removed server
-        let (tx, rx) = oneshot::channel();
-        let _ = handles
-            .mcp_host_tx
-            .send(McpHostMsg::DisconnectServer {
-                server_id: server_id.clone(),
-                respond_to: tx,
-            })
-            .await;
-        let _ = rx.await;
-
-        Ok(())
-    } else {
-        Err(format!("Server with ID '{}' not found", server_id))
-    }
-}
-
-#[tauri::command]
-async fn update_system_prompt(
-    prompt: String,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.system_prompt = prompt;
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_tool_system_prompt(
-    server_id: String,
-    tool_name: String,
-    prompt: String,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    let key = tool_prompt_key(&server_id, &tool_name);
-
-    if prompt.trim().is_empty() {
-        guard.tool_system_prompts.remove(&key);
-    } else {
-        guard.tool_system_prompts.insert(key, prompt);
-    }
-
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_tool_call_formats(
-    config: ToolCallFormatConfig,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut normalized = config;
-    normalized.normalize();
-    let mut guard = settings_state.settings.write().await;
-    guard.tool_call_formats = normalized.clone();
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!(
-        "[Settings] tool_call_formats updated: primary={:?}, enabled={:?}",
-        normalized.primary, normalized.enabled
-    );
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_chat_format(
-    model_id: String,
-    format: ChatFormatName,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-
-    // Store override only when different from default to keep config small
-    if format == guard.chat_format_default {
-        guard.chat_format_overrides.remove(&model_id);
-    } else {
-        guard.chat_format_overrides.insert(model_id.clone(), format);
-    }
-
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!(
-        "[Settings] chat_format updated: model_id={} format={:?}",
-        model_id, format
-    );
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_python_execution_enabled(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.python_execution_enabled = enabled;
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!(
-        "[Settings] python_execution_enabled updated to: {}",
-        enabled
-    );
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_native_tool_calling_enabled(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    // Update the format config to add/remove Native format
-    if enabled {
-        if !guard
-            .tool_call_formats
-            .enabled
-            .contains(&ToolCallFormatName::Native)
-        {
-            guard
-                .tool_call_formats
-                .enabled
-                .insert(0, ToolCallFormatName::Native);
-        }
-        guard.tool_call_formats.primary = ToolCallFormatName::Native;
-    } else {
-        guard
-            .tool_call_formats
-            .enabled
-            .retain(|f| *f != ToolCallFormatName::Native);
-        if guard.tool_call_formats.primary == ToolCallFormatName::Native {
-            guard.tool_call_formats.primary = guard
-                .tool_call_formats
-                .enabled
-                .first()
-                .copied()
-                .unwrap_or(ToolCallFormatName::Hermes);
-        }
-    }
-    guard.tool_call_formats.normalize();
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!(
-        "[Settings] Native tool calling updated to: {} (primary={:?}, enabled={:?})",
-        enabled, guard.tool_call_formats.primary, guard.tool_call_formats.enabled
-    );
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_tool_search_enabled(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.tool_search_enabled = enabled;
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!("[Settings] tool_search_enabled updated to: {}", enabled);
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_schema_search_enabled(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
     launch_config: State<'_, LaunchConfigState>,
     tool_registry_state: State<'_, ToolRegistryState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.schema_search_enabled = enabled;
-    settings::save_settings(&guard).await?;
-    {
-        let mut registry = tool_registry_state.registry.write().await;
-        registry.set_schema_search_enabled(enabled);
-    }
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!("[Settings] schema_search_enabled updated to: {}", enabled);
-    Ok(())
-}
-
-// Note: update_schema_search_internal_only was removed - internal schema search
-// is now auto-derived when sql_select is enabled but schema_search is not
-
-#[tauri::command]
-async fn update_sql_select_enabled(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-    tool_registry_state: State<'_, ToolRegistryState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.sql_select_enabled = enabled;
-    settings::save_settings(&guard).await?;
-    {
-        let mut registry = tool_registry_state.registry.write().await;
-        registry.set_sql_select_enabled(enabled);
-    }
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!("[Settings] sql_select_enabled updated to: {}", enabled);
-    Ok(())
-}
-
-// ============ Relevancy Threshold Commands ============
-
-#[tauri::command]
-async fn update_rag_chunk_min_relevancy(
-    value: f32,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.rag_chunk_min_relevancy = value;
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!("[Settings] rag_chunk_min_relevancy updated to: {}", value);
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_schema_relevancy_threshold(
-    value: f32,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.schema_relevancy_threshold = value;
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!("[Settings] schema_relevancy_threshold updated to: {}", value);
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_rag_dominant_threshold(
-    value: f32,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.rag_dominant_threshold = value;
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!("[Settings] rag_dominant_threshold updated to: {}", value);
-    Ok(())
-}
-
-/// Get a preview of all possible states for the settings UI
-#[tauri::command]
-async fn get_state_machine_preview(
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-) -> Result<Vec<StatePreview>, String> {
-    let guard = settings_state.settings.read().await;
-    
-    // Use three-tier hierarchy: SettingsStateMachine provides capabilities
-    let settings_sm_guard = settings_sm_state.machine.read().await;
-    
-    // Create a minimal PromptContext for preview
-    let prompt_context = agentic_state::PromptContext {
-        base_prompt: guard.system_prompt.clone(),
-        has_attachments: false,
-        mcp_context: agentic_state::McpToolContext::default(),
-        tool_call_format: guard.tool_call_formats.primary,
-        model_tool_format: None,
-        custom_tool_prompts: guard.tool_system_prompts.clone(),
-        python_primary: guard.python_execution_enabled,
-    };
-    
-    let machine = AgenticStateMachine::new_from_settings_sm(
-        &settings_sm_guard,
-        prompt_context,
-    );
-    
-    let previews = machine.get_possible_states();
-    println!(
-        "[Settings] State machine preview: {} possible states (mode: {})",
-        previews.len(),
-        settings_sm_guard.operational_mode().name()
-    );
-    Ok(previews)
-}
-
-#[tauri::command]
-async fn update_database_toolbox_config(
-    config: settings::DatabaseToolboxConfig,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-    handles: State<'_, ActorHandles>,
     embedding_state: State<'_, EmbeddingModelState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.database_toolbox = config.clone();
-    settings::save_settings(&guard).await?;
+) -> Result<String, String> {
+    // 1. Get current settings and model info
+    let settings = settings_state.settings.read().await;
+    let base_prompt = settings.system_prompt.clone();
+    let server_configs = settings.mcp_servers.clone();
+    let tool_search_enabled = settings.tool_search_enabled;
+    let schema_search_enabled = settings.schema_search_enabled;
+    // Internal schema search is auto-derived: ON when sql_select is enabled but schema_search is not
+    let internal_schema_search = settings.should_run_internal_schema_search();
+    let sql_select_enabled = settings.sql_select_enabled;
+    let _python_execution_enabled = settings.python_execution_enabled;
+    let tool_system_prompts = settings.tool_system_prompts.clone();
+    let database_toolbox_config = settings.database_toolbox.clone();
+    let settings_for_resolver = settings.clone();
+    drop(settings);
 
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!("[Settings] database_toolbox config updated");
-    drop(guard);
-
-    // If toolbox is disabled or has no enabled sources, ensure it's stopped
-    if !config.enabled || config.sources.iter().all(|s| !s.enabled) {
+    // 2. Build turn context and configuration
+    let mut turn_attached_tables = Vec::new();
+    for table in attached_tables {
+        // Fetch full table schema from cache to build prompt context
         let (tx, rx) = oneshot::channel();
-        let _ = handles.database_toolbox_tx.send(DatabaseToolboxMsg::Stop { reply_to: tx }).await;
-        let _ = rx.await;
-        println!("[Settings] database_toolbox stopped because it is disabled");
-        return Ok(());
-    }
-
-    let refresh_summary =
-        refresh_database_schemas_for_config(&handles, &embedding_state, &config).await?;
-
-    if !refresh_summary.errors.is_empty() {
-        let joined = refresh_summary.errors.join("; ");
-        println!(
-            "[Settings] Schema refresh completed with errors after config save: {}",
-            &joined
-        );
-        return Err(format!(
-            "Schema refresh failed after saving database settings: {}. Fix the MCP database configuration here and try again.",
-            joined
-        ));
-    }
-
-    Ok(())
-}
-
-// ============ Database Schema Cache Commands ============
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct SchemaTableStatus {
-    source_id: String,
-    source_name: String,
-    table_fq_name: String,
-    enabled: bool,
-    column_count: usize,
-    description: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct SchemaSourceStatus {
-    source_id: String,
-    source_name: String,
-    database_kind: SupportedDatabaseKind,
-    tables: Vec<SchemaTableStatus>,
-}
-
-#[derive(Debug, Clone)]
-struct SchemaRefreshSummary {
-    sources: Vec<SchemaSourceStatus>,
-    errors: Vec<String>,
-}
-
-async fn refresh_database_schemas_for_config(
-    handles: &State<'_, ActorHandles>,
-    embedding_state: &State<'_, EmbeddingModelState>,
-    toolbox_config: &settings::DatabaseToolboxConfig,
-) -> Result<SchemaRefreshSummary, String> {
-    let sources: Vec<DatabaseSourceConfig> = toolbox_config
-        .sources
-        .iter()
-        .cloned()
-        .filter(|s| s.enabled)
-        .collect();
-
-    if sources.is_empty() {
-        return Ok(SchemaRefreshSummary {
-            sources: Vec::new(),
-            errors: Vec::new(),
-        });
-    }
-
-    let model_guard = embedding_state.model.read().await;
-    let embedding_model = model_guard
-        .clone()
-        .ok_or_else(|| "Embedding model not initialized".to_string())?;
-    drop(model_guard);
-
-    ensure_toolbox_running(&handles.database_toolbox_tx, toolbox_config).await?;
-
-    let mut refreshed_sources = Vec::new();
-    let mut errors = Vec::new();
-
-    for source in sources {
-        match refresh_schema_cache_for_source(handles, &source, embedding_model.clone()).await {
-            Ok(status) => refreshed_sources.push(status),
-            Err(err) => {
-                let msg = format!("{} ({}): {}", source.name, source.id, err);
-                println!(
-                    "[SchemaRefresh] Failed to refresh source {} ({}): {}",
-                    source.name, source.id, err
-                );
-                errors.push(msg);
-            }
-        }
-    }
-
-    Ok(SchemaRefreshSummary {
-        sources: refreshed_sources,
-        errors,
-    })
-}
-
-#[tauri::command]
-async fn refresh_database_schemas(
-    handles: State<'_, ActorHandles>,
-    settings_state: State<'_, SettingsState>,
-    embedding_state: State<'_, EmbeddingModelState>,
-) -> Result<Vec<SchemaSourceStatus>, String> {
-    let settings_guard = settings_state.settings.read().await;
-    let toolbox_config = settings_guard.database_toolbox.clone();
-    drop(settings_guard);
-
-    let summary =
-        refresh_database_schemas_for_config(&handles, &embedding_state, &toolbox_config).await?;
-
-    if !summary.errors.is_empty() {
-        println!(
-            "[SchemaRefresh] Completed with errors: {}",
-            summary.errors.join("; ")
-        );
-    }
-
-    Ok(summary.sources)
-}
-
-#[tauri::command]
-async fn get_cached_database_schemas(
-    handles: State<'_, ActorHandles>,
-    settings_state: State<'_, SettingsState>,
-) -> Result<Vec<SchemaSourceStatus>, String> {
-    let settings_guard = settings_state.settings.read().await;
-    let sources: Vec<DatabaseSourceConfig> = settings_guard
-        .database_toolbox
-        .sources
-        .iter()
-        .cloned()
-        .filter(|s| s.enabled)
-        .collect();
-    drop(settings_guard);
-
-    if sources.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut cached_sources = Vec::new();
-
-    for source in sources {
-        let (tx, rx) = oneshot::channel();
-        handles
-            .schema_tx
-            .send(SchemaVectorMsg::GetTablesForSource {
-                source_id: source.id.clone(),
-                respond_to: tx,
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let cached_tables = rx
-            .await
-            .map_err(|_| "Schema vector actor unavailable".to_string())?;
-
-        let table_statuses = cached_tables
-            .into_iter()
-            .map(|table| SchemaTableStatus {
-                source_id: source.id.clone(),
-                source_name: source.name.clone(),
-                table_fq_name: table.fully_qualified_name,
-                enabled: table.enabled,
-                column_count: table.columns.len(),
-                description: table.description,
-            })
-            .collect();
-
-        cached_sources.push(SchemaSourceStatus {
-            source_id: source.id.clone(),
-            source_name: source.name.clone(),
-            database_kind: source.kind,
-            tables: table_statuses,
-        });
-    }
-
-    Ok(cached_sources)
-}
-
-#[tauri::command]
-async fn set_schema_table_enabled(
-    handles: State<'_, ActorHandles>,
-    settings_state: State<'_, SettingsState>,
-    embedding_state: State<'_, EmbeddingModelState>,
-    source_id: String,
-    table_fq_name: String,
-    enabled: bool,
-) -> Result<SchemaTableStatus, String> {
-    let settings_guard = settings_state.settings.read().await;
-    let toolbox_config = settings_guard.database_toolbox.clone();
-    let source = settings_guard
-        .database_toolbox
-        .sources
-        .iter()
-        .find(|s| s.id == source_id)
-        .cloned()
-        .ok_or_else(|| format!("Source not found: {}", source_id))?;
-    let source_name = source.name.clone();
-    drop(settings_guard);
-
-    // Try to flip the enabled flag on the cached record
-    let toggle_result = {
-        let (tx, rx) = oneshot::channel();
-        handles
-            .schema_tx
-            .send(SchemaVectorMsg::SetTableEnabled {
-                table_fq_name: table_fq_name.clone(),
-                enabled,
-                respond_to: tx,
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-
-        rx.await
-            .map_err(|_| "Schema vector actor unavailable".to_string())?
-    };
-
-    let table_schema = match toggle_result {
-        Ok(schema) => schema,
-        Err(err) => {
-            if !enabled {
-                return Err(err);
-            }
-
-            // If enabling a table that is not cached yet, fetch and cache it now
-            println!(
-                "[SchemaRefresh] Table {} not cached yet, fetching fresh schema: {}",
-                table_fq_name, err
-            );
-
-            let model_guard = embedding_state.model.read().await;
-            let embedding_model = model_guard
-                .clone()
-                .ok_or_else(|| "Embedding model not initialized".to_string())?;
-            drop(model_guard);
-
-            ensure_toolbox_running(&handles.database_toolbox_tx, &toolbox_config).await?;
-
-            let table_schema =
-                fetch_table_schema(&handles.database_toolbox_tx, &source.id, &table_fq_name)
-                    .await?;
-            let mut schema_with_flag = table_schema.clone();
-            schema_with_flag.enabled = true;
-            let primary_set: std::collections::HashSet<String> =
-                schema_with_flag.primary_keys.iter().cloned().collect();
-            let partition_set: std::collections::HashSet<String> =
-                schema_with_flag.partition_columns.iter().cloned().collect();
-            let cluster_set: std::collections::HashSet<String> =
-                schema_with_flag.cluster_columns.iter().cloned().collect();
-            let (table_embedding, column_embeddings) =
-                embed_table_and_columns(embedding_model.clone(), &schema_with_flag).await?;
-            cache_table_and_columns(
-                &handles.schema_tx,
-                schema_with_flag.clone(),
-                table_embedding,
-                column_embeddings,
-                &primary_set,
-                &partition_set,
-                &cluster_set,
-            )
-            .await?;
-            schema_with_flag
-        }
-    };
-
-    Ok(SchemaTableStatus {
-        source_id: source.id,
-        source_name,
-        table_fq_name: table_schema.fully_qualified_name,
-        enabled: table_schema.enabled,
-        column_count: table_schema.columns.len(),
-        description: table_schema.description,
-    })
-}
-
-async fn refresh_schema_cache_for_source(
-    handles: &State<'_, ActorHandles>,
-    source: &DatabaseSourceConfig,
-    embedding_model: Arc<TextEmbedding>,
-) -> Result<SchemaSourceStatus, String> {
-    println!(
-        "[SchemaRefresh] Refreshing source '{}' ({})",
-        source.name, source.id
-    );
-
-    // Preserve existing enabled flags if present
-    let previous_map = load_cached_enabled_flags(&handles.schema_tx, &source.id).await?;
-
-    // Remove stale entries so we only keep current enumeration
-    let _ = clear_source_cache(&handles.schema_tx, &source.id).await;
-
-    let mut datasets = enumerate_source_schemas(&handles.database_toolbox_tx, &source.id).await?;
-    // Apply BigQuery dataset allowlist if provided
-    if source.kind == SupportedDatabaseKind::Bigquery {
-        if let Some(allow_raw) = source.dataset_allowlist.as_ref() {
-            let allow: Vec<String> = allow_raw
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !allow.is_empty() {
-                let allow_set: std::collections::HashSet<String> = allow.into_iter().collect();
-                datasets.retain(|d| allow_set.contains(d));
-                println!(
-                    "[SchemaRefresh] Applying dataset allowlist for source {}: {} datasets retained",
-                    source.id,
-                    datasets.len()
-                );
-            }
-        }
-    }
-    let mut tables_status = Vec::new();
-
-    for dataset in datasets {
-        let dataset_clean = dataset.trim().to_string();
-        if dataset_clean
-            .chars()
-            .last()
-            .map(|c| c.is_ascii_digit())
-            .unwrap_or(false)
-        {
-            println!(
-                "[SchemaRefresh] Skipping dataset '{}' because it ends with a numeric suffix",
-                dataset_clean
-            );
+        if let Err(_) = handles.schema_tx.send(SchemaVectorMsg::GetTablesForSource {
+            source_id: table.source_id.clone(),
+            respond_to: tx,
+        }).await {
+            turn_attached_tables.push(table);
             continue;
         }
 
-        let mut tables = match enumerate_tables_for_schema(
-            &handles.database_toolbox_tx,
-            &source.id,
-            &dataset_clean,
-        )
-        .await
-        {
-            Ok(t) => t,
-            Err(err) => {
-                println!(
-                    "[SchemaRefresh] Failed to enumerate tables for {}: {}",
-                    dataset_clean, err
-                );
-                continue;
-            }
-        };
-
-        // Apply BigQuery table allowlist if provided
-        if source.kind == SupportedDatabaseKind::Bigquery {
-            if let Some(allow_raw) = source.table_allowlist.as_ref() {
-                let allow: Vec<String> = allow_raw
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if !allow.is_empty() {
-                    let allow_set: std::collections::HashSet<String> = allow.into_iter().collect();
-                    tables.retain(|t| allow_set.contains(t));
-                    println!(
-                        "[SchemaRefresh] Applying table allowlist for source {} dataset {}: {} tables retained",
-                        source.id,
-                        dataset_clean,
-                        tables.len()
-                    );
+        if let Ok(cached_tables) = rx.await {
+            if let Some(cached) = cached_tables.into_iter().find(|t| t.fully_qualified_name == table.table_fq_name) {
+                let mut schema_text = format!("Table: {}\n", cached.fully_qualified_name);
+                if let Some(ref desc) = cached.description {
+                    schema_text.push_str(&format!("Description: {}\n", desc));
                 }
-            }
-        }
-
-        for table_name in tables {
-            let table_clean = table_name.trim().to_string();
-            if table_clean
-                .chars()
-                .last()
-                .map(|c| c.is_ascii_digit())
-                .unwrap_or(false)
-            {
-                println!(
-                    "[SchemaRefresh] Skipping table '{}' in dataset '{}' because it ends with a numeric suffix",
-                    table_clean,
-                    dataset_clean
-                );
-                continue;
-            }
-
-            let fq_name = build_fully_qualified_table_name(source, &dataset_clean, &table_name);
-            let enabled = previous_map.get(&fq_name).copied().unwrap_or(true);
-
-            match fetch_table_schema(&handles.database_toolbox_tx, &source.id, &fq_name).await {
-                Ok(mut table_schema) => {
-                    table_schema.enabled = enabled;
-                    // Annotate join-worthy columns for chunk key purposes
-                    let partition_set: std::collections::HashSet<String> =
-                        table_schema.partition_columns.iter().cloned().collect();
-                    let cluster_set: std::collections::HashSet<String> =
-                        table_schema.cluster_columns.iter().cloned().collect();
-                    let primary_set: std::collections::HashSet<String> =
-                        table_schema.primary_keys.iter().cloned().collect();
-
-                    let (table_embedding, column_embeddings) =
-                        match embed_table_and_columns(embedding_model.clone(), &table_schema).await
-                        {
-                            Ok(res) => res,
-                            Err(err) => {
-                                println!(
-                                    "[SchemaRefresh] Failed to embed table {}: {}",
-                                    fq_name, err
-                                );
-                                continue;
-                            }
-                        };
-
-                    if let Err(err) = cache_table_and_columns(
-                        &handles.schema_tx,
-                        table_schema.clone(),
-                        table_embedding,
-                        column_embeddings,
-                        &primary_set,
-                        &partition_set,
-                        &cluster_set,
-                    )
-                    .await
-                    {
-                        println!(
-                            "[SchemaRefresh] Failed to cache table {}: {}",
-                            fq_name, err
-                        );
-                        continue;
+                schema_text.push_str("Columns:\n");
+                for col in cached.columns {
+                    schema_text.push_str(&format!("- {} ({})", col.name, col.data_type));
+                    if let Some(ref d) = col.description {
+                        schema_text.push_str(&format!(": {}", d));
                     }
-
-                    tables_status.push(SchemaTableStatus {
-                        source_id: source.id.clone(),
-                        source_name: source.name.clone(),
-                        table_fq_name: fq_name.clone(),
-                        enabled,
-                        column_count: table_schema.columns.len(),
-                        description: table_schema.description.clone(),
-                    });
+                    schema_text.push_str("\n");
                 }
-                Err(err) => {
-                    println!(
-                        "[SchemaRefresh] Failed to cache table {}: {}",
-                        fq_name, err
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(SchemaSourceStatus {
-        source_id: source.id.clone(),
-        source_name: source.name.clone(),
-        database_kind: source.kind,
-        tables: tables_status,
-    })
-}
-
-async fn ensure_toolbox_running(
-    toolbox_tx: &mpsc::Sender<DatabaseToolboxMsg>,
-    config: &DatabaseToolboxConfig,
-) -> Result<(), String> {
-    if !config.enabled {
-        println!(
-            "[SchemaRefresh] Database toolbox is disabled in settings; attempting to start anyway"
-        );
-    }
-
-    let (status_tx, status_rx) = oneshot::channel();
-    toolbox_tx
-        .send(DatabaseToolboxMsg::GetStatus {
-            reply_to: status_tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-    let status: ToolboxStatus = status_rx
-        .await
-        .map_err(|_| "Database toolbox actor unavailable".to_string())?;
-
-    if status.running {
-        return Ok(());
-    }
-
-    let (tx, rx) = oneshot::channel();
-    toolbox_tx
-        .send(DatabaseToolboxMsg::Start {
-            config: config.clone(),
-            reply_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let start_result = rx
-        .await
-        .map_err(|_| "Database toolbox actor unavailable".to_string())?;
-
-    match start_result {
-        Ok(()) => Ok(()),
-        Err(msg) if msg.contains("already running") => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
-async fn enumerate_source_schemas(
-    toolbox_tx: &mpsc::Sender<DatabaseToolboxMsg>,
-    source_id: &str,
-) -> Result<Vec<String>, String> {
-    let (tx, rx) = oneshot::channel();
-    toolbox_tx
-        .send(DatabaseToolboxMsg::EnumerateSchemas {
-            source_id: source_id.to_string(),
-            reply_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await
-        .map_err(|_| "Database toolbox actor unavailable".to_string())?
-}
-
-async fn enumerate_tables_for_schema(
-    toolbox_tx: &mpsc::Sender<DatabaseToolboxMsg>,
-    source_id: &str,
-    dataset_or_schema: &str,
-) -> Result<Vec<String>, String> {
-    let (tx, rx) = oneshot::channel();
-    toolbox_tx
-        .send(DatabaseToolboxMsg::EnumerateTables {
-            source_id: source_id.to_string(),
-            dataset_or_schema: dataset_or_schema.to_string(),
-            reply_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await
-        .map_err(|_| "Database toolbox actor unavailable".to_string())?
-}
-
-async fn fetch_table_schema(
-    toolbox_tx: &mpsc::Sender<DatabaseToolboxMsg>,
-    source_id: &str,
-    table_fq_name: &str,
-) -> Result<CachedTableSchema, String> {
-    let (tx, rx) = oneshot::channel();
-    toolbox_tx
-        .send(DatabaseToolboxMsg::GetTableInfo {
-            source_id: source_id.to_string(),
-            fully_qualified_table: table_fq_name.to_string(),
-            reply_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await
-        .map_err(|_| "Database toolbox actor unavailable".to_string())?
-}
-
-fn build_fully_qualified_table_name(
-    source: &DatabaseSourceConfig,
-    dataset_or_schema: &str,
-    table_name: &str,
-) -> String {
-    match source.kind {
-        SupportedDatabaseKind::Bigquery | SupportedDatabaseKind::Spanner => {
-            if let Some(project_id) = &source.project_id {
-                format!("{}.{}.{}", project_id, dataset_or_schema, table_name)
+                
+                turn_attached_tables.push(crate::settings_state_machine::AttachedTableInfo {
+                    source_id: table.source_id,
+                    table_fq_name: table.table_fq_name,
+                    column_count: table.column_count,
+                    schema_text: Some(schema_text),
+                });
             } else {
-                format!("{}.{}", dataset_or_schema, table_name)
+                turn_attached_tables.push(table);
             }
-        }
-        _ => format!("{}.{}", dataset_or_schema, table_name),
-    }
-}
-
-fn split_parent_and_table(fq_name: &str) -> (String, String) {
-    let parts: Vec<&str> = fq_name.split('.').collect();
-    if parts.len() < 2 {
-        return ("".to_string(), fq_name.to_string());
-    }
-    let table = parts.last().unwrap().to_string();
-    let parent = parts[..parts.len() - 1].join(".");
-    (parent, table)
-}
-
-fn build_table_embedding_text(schema: &CachedTableSchema) -> String {
-    let column_summaries: Vec<String> = schema
-        .columns
-        .iter()
-        .map(|c| format!("{} {}{}", c.name, c.data_type, if c.nullable { " nullable" } else { "" }))
-        .collect();
-
-    let primary = if schema.primary_keys.is_empty() {
-        "none".to_string()
-    } else {
-        schema.primary_keys.join(", ")
-    };
-
-    let partitions = if schema.partition_columns.is_empty() {
-        "none".to_string()
-    } else {
-        schema.partition_columns.join(", ")
-    };
-
-    let clusters = if schema.cluster_columns.is_empty() {
-        "none".to_string()
-    } else {
-        schema.cluster_columns.join(", ")
-    };
-
-    format!(
-        "table {} ({}) columns [{}]; primary keys: {}; partitions: {}; clusters: {}; description: {}",
-        schema.fully_qualified_name,
-        schema.kind.display_name(),
-        column_summaries.join("; "),
-        primary,
-        partitions,
-        clusters,
-        schema
-            .description
-            .clone()
-            .unwrap_or_else(|| "none".to_string())
-    )
-}
-
-fn build_column_embedding_text(table_name: &str, column: &CachedColumnSchema) -> String {
-    format!(
-        "column {}.{} type {} {}; description: {}",
-        table_name,
-        column.name,
-        column.data_type,
-        if column.nullable { "nullable" } else { "not null" },
-        column
-            .description
-            .clone()
-            .unwrap_or_else(|| "none".to_string())
-    )
-}
-
-async fn embed_table_and_columns(
-    model: Arc<TextEmbedding>,
-    schema: &CachedTableSchema,
-) -> Result<(Vec<f32>, Vec<Vec<f32>>), String> {
-    let table_text = build_table_embedding_text(schema);
-    let column_texts: Vec<String> = schema
-        .columns
-        .iter()
-        .map(|c| build_column_embedding_text(&schema.fully_qualified_name, c))
-        .collect();
-
-    let mut to_embed = Vec::with_capacity(1 + column_texts.len());
-    to_embed.push(table_text);
-    to_embed.extend(column_texts);
-
-    let model_clone = model.clone();
-    let embeddings = tokio::task::spawn_blocking(move || model_clone.embed(to_embed, None))
-        .await
-        .map_err(|e| format!("Embedding task panicked: {}", e))?
-        .map_err(|e| format!("Failed to embed schema: {}", e))?;
-
-    let mut iter = embeddings.into_iter();
-    let table_embedding = iter
-        .next()
-        .ok_or_else(|| "No table embedding returned".to_string())?;
-    let column_embeddings: Vec<Vec<f32>> = iter.collect();
-
-    Ok((table_embedding, column_embeddings))
-}
-
-async fn cache_table_and_columns(
-    schema_tx: &mpsc::Sender<SchemaVectorMsg>,
-    schema: CachedTableSchema,
-    table_embedding: Vec<f32>,
-    column_embeddings: Vec<Vec<f32>>,
-    primary_keys: &std::collections::HashSet<String>,
-    partition_keys: &std::collections::HashSet<String>,
-    cluster_keys: &std::collections::HashSet<String>,
-) -> Result<(), String> {
-    if schema.columns.len() != column_embeddings.len() {
-        println!(
-            "[SchemaRefresh] Column embedding count mismatch for {} (columns={}, embeddings={})",
-            schema.fully_qualified_name,
-            schema.columns.len(),
-            column_embeddings.len()
-        );
-    }
-
-    let (tx, rx) = oneshot::channel();
-    schema_tx
-        .send(SchemaVectorMsg::CacheTableSchema {
-            schema: schema.clone(),
-            table_embedding,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await
-        .map_err(|_| "Schema vector actor unavailable".to_string())?
-        .map_err(|e| format!("Failed to cache table: {}", e))?;
-
-    // Build base chunk key: table only (to reduce duplication); disambiguation relies on table_fq_name elsewhere
-    let (_, table_name) = split_parent_and_table(&schema.fully_qualified_name);
-    let base_chunk = table_name;
-
-    for (column, embedding) in schema.columns.iter().zip(column_embeddings.into_iter()) {
-        let is_join = primary_keys.contains(&column.name)
-            || partition_keys.contains(&column.name)
-            || cluster_keys.contains(&column.name);
-        let chunk_key = if is_join {
-            format!("{}:join", base_chunk)
         } else {
-            base_chunk.clone()
-        };
-
-        let (col_tx, col_rx) = oneshot::channel();
-        schema_tx
-            .send(SchemaVectorMsg::CacheColumnSchema {
-                table_fq_name: schema.fully_qualified_name.clone(),
-                source_id: schema.source_id.clone(),
-                column: column.clone(),
-                column_embedding: embedding,
-                chunk_key,
-                respond_to: col_tx,
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-
-        col_rx
-            .await
-            .map_err(|_| "Schema vector actor unavailable".to_string())?
-            .map_err(|e| format!("Failed to cache column: {}", e))?;
+            turn_attached_tables.push(table);
+        }
     }
 
-    Ok(())
-}
+    let turn_context = ChatTurnContext {
+        attached_files: attached_files.clone(),
+        attached_tables: turn_attached_tables,
+        attached_tools: attached_tools.clone(),
+    };
 
-async fn clear_source_cache(
-    schema_tx: &mpsc::Sender<SchemaVectorMsg>,
-    source_id: &str,
-) -> Result<(), String> {
-    let (tx, rx) = oneshot::channel();
-    schema_tx
-        .send(SchemaVectorMsg::ClearSource {
-            source_id: source_id.to_string(),
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await
-        .map_err(|_| "Schema vector actor unavailable".to_string())?
-}
-
-async fn load_cached_enabled_flags(
-    schema_tx: &mpsc::Sender<SchemaVectorMsg>,
-    source_id: &str,
-) -> Result<HashMap<String, bool>, String> {
-    let (tx, rx) = oneshot::channel();
-    schema_tx
-        .send(SchemaVectorMsg::GetTablesForSource {
-            source_id: source_id.to_string(),
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let tables = rx
-        .await
-        .map_err(|_| "Schema vector actor unavailable".to_string())?;
-
-    let mut map = HashMap::new();
-    for table in tables {
-        map.insert(table.fully_qualified_name.clone(), table.enabled);
-    }
-    Ok(map)
-}
-
-// ============ MCP Commands ============
-
-/// Result of syncing an MCP server - includes error message if failed
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct McpSyncResult {
-    pub server_id: String,
-    pub success: bool,
-    pub error: Option<String>,
-}
-
-#[tauri::command]
-async fn sync_mcp_servers(
-    handles: State<'_, ActorHandles>,
-    settings_state: State<'_, SettingsState>,
-) -> Result<Vec<McpSyncResult>, String> {
-    let settings = settings_state.settings.read().await;
-    let configs = settings.get_all_mcp_configs();
-    drop(settings);
-
-    // Count enabled and deferred servers for informative logging
-    let enabled_count = configs.iter().filter(|c| c.enabled).count();
-    let deferred_count = configs.iter().filter(|c| c.enabled && c.defer_tools).count();
-    let active_count = enabled_count - deferred_count;
-    println!(
-        "[MCP] Syncing {} servers ({} enabled: {} active, {} deferred)",
-        configs.len(),
-        enabled_count,
-        active_count,
-        deferred_count
-    );
-
-    if enabled_count > 0 {
-        let enabled_names: Vec<String> = configs
-            .iter()
-            .filter(|c| c.enabled)
-            .map(|c| format!("{} ({})", c.name, c.id))
-            .collect();
-        println!("[MCP] Enabled servers: {}", enabled_names.join(", "));
-    }
-
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::SyncEnabledServers {
-            configs,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let results = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
-
-    // Convert to McpSyncResult with error messages
-    let sync_results: Vec<McpSyncResult> = results
-        .into_iter()
-        .map(|(id, r)| match r {
-            Ok(()) => McpSyncResult {
-                server_id: id,
-                success: true,
-                error: None,
-            },
-            Err(e) => {
-                println!("[MCP] Server {} sync failed: {}", id, e);
-                McpSyncResult {
-                    server_id: id,
-                    success: false,
-                    error: Some(e),
-                }
-            }
-        })
-        .collect();
-
-    Ok(sync_results)
-}
-
-#[tauri::command]
-async fn connect_mcp_server(
-    server_id: String,
-    handles: State<'_, ActorHandles>,
-    settings_state: State<'_, SettingsState>,
-) -> Result<(), String> {
-    // Get the server config from settings
-    let settings = settings_state.settings.read().await;
-    let config = settings
-        .mcp_servers
-        .iter()
-        .find(|s| s.id == server_id)
-        .cloned()
-        .ok_or_else(|| format!("Server {} not found in settings", server_id))?;
-    drop(settings);
-
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::ConnectServer {
-            config,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|_| "MCP Host actor died".to_string())?
-}
-
-#[tauri::command]
-async fn disconnect_mcp_server(
-    server_id: String,
-    handles: State<'_, ActorHandles>,
-) -> Result<(), String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::DisconnectServer {
-            server_id,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|_| "MCP Host actor died".to_string())?
-}
-
-#[tauri::command]
-async fn list_mcp_tools(
-    server_id: String,
-    handles: State<'_, ActorHandles>,
-) -> Result<Vec<McpTool>, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::ListTools {
-            server_id,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|_| "MCP Host actor died".to_string())?
-}
-
-#[tauri::command]
-async fn execute_mcp_tool(
-    server_id: String,
-    tool_name: String,
-    arguments: serde_json::Value,
-    handles: State<'_, ActorHandles>,
-) -> Result<McpToolResult, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::ExecuteTool {
-            server_id,
-            tool_name,
-            arguments,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|_| "MCP Host actor died".to_string())?
-}
-
-#[tauri::command]
-async fn get_mcp_server_status(
-    server_id: String,
-    handles: State<'_, ActorHandles>,
-) -> Result<bool, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::GetServerStatus {
-            server_id,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(rx.await.map_err(|_| "MCP Host actor died".to_string())?)
-}
-
-#[tauri::command]
-async fn get_all_mcp_tool_descriptions(
-    handles: State<'_, ActorHandles>,
-) -> Result<Vec<(String, Vec<McpTool>)>, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::GetAllToolDescriptions { respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(rx.await.map_err(|_| "MCP Host actor died".to_string())?)
-}
-
-/// Test an MCP server config and return its tools without storing the connection
-#[tauri::command]
-async fn test_mcp_server_config(
-    config: McpServerConfig,
-    handles: State<'_, ActorHandles>,
-) -> Result<Vec<McpTool>, String> {
-    println!(
-        "[MCP] Testing server config: {} ({})",
-        config.name, config.id
-    );
-
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::TestServerConfig {
-            config,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|_| "MCP Host actor died".to_string())?
-}
-
-/// Get a preview of the final system prompt with MCP tool descriptions
-#[tauri::command]
-async fn get_system_prompt_preview(
-    handles: State<'_, ActorHandles>,
-    settings_state: State<'_, SettingsState>,
-    launch_config: State<'_, LaunchConfigState>,
-    tool_registry_state: State<'_, ToolRegistryState>,
-    embedding_state: State<'_, EmbeddingModelState>,
-    user_prompt: Option<String>,
-) -> Result<String, String> {
-    // Get current settings
-    let settings = settings_state.settings.read().await;
-    let base_prompt = settings.system_prompt.clone();
-    let mut server_configs = settings.mcp_servers.clone();
-    let tool_search_enabled = settings.tool_search_enabled;
-    let schema_search_enabled = settings.schema_search_enabled;
-    let sql_select_enabled = settings.sql_select_enabled;
-    let _python_execution_enabled = settings.python_execution_enabled;
-    let tool_search_max_results = settings.tool_search_max_results.max(1);
-    let _tool_use_examples_enabled = settings.tool_use_examples_enabled;
-    let _tool_use_examples_max = settings.tool_use_examples_max;
-    let database_toolbox_config = settings.database_toolbox.clone();
-    let mut format_config = settings.tool_call_formats.clone();
-    format_config.normalize();
-    let tool_prompts = settings.tool_system_prompts.clone();
-    let settings_for_resolver = settings.clone();
-    drop(settings);
     let tool_filter = launch_config.tool_filter.clone();
+    let settings_sm = SettingsStateMachine::from_settings(&settings_for_resolver, &tool_filter);
+    let turn_config = settings_sm.compute_for_turn(&settings_for_resolver, &tool_filter, &turn_context);
 
-    sync_registry_database_tools(
-        &tool_registry_state.registry,
-        schema_search_enabled,
-        sql_select_enabled,
-    )
-    .await;
-
-    if tool_search_enabled {
-        for config in &mut server_configs {
-            config.defer_tools = true;
-        }
-    } else {
-        for config in &mut server_configs {
-            config.defer_tools = false;
-        }
+    // 3. Resolve tools and discovery
+    let (tools_tx, tools_rx) = oneshot::channel();
+    if let Err(e) = handles.mcp_host_tx.send(McpHostMsg::GetAllToolDescriptions {
+        respond_to: tools_tx,
+    }).await {
+        return Err(format!("Failed to get tool descriptions: {}", e));
     }
+    let tool_descriptions = tools_rx.await.map_err(|_| "MCP Host actor died")?;
 
-    // Get current tool descriptions from connected servers
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::GetAllToolDescriptions { respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let tool_descriptions = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
     let filtered_tool_descriptions: Vec<(String, Vec<McpTool>)> = tool_descriptions
         .into_iter()
         .filter_map(|(server_id, tools)| {
-            // Check if server is enabled in settings and NOT a database source
-            // (Database tools are handled separately via sql_select/schema_search)
-            let is_enabled = server_configs
-                .iter()
-                .any(|c| c.id == server_id && c.enabled && !c.is_database_source);
-
-            if !is_enabled {
+            let is_enabled = server_configs.iter().any(|c| c.id == server_id && c.enabled);
+            if !is_enabled || !tool_filter.server_allowed(&server_id) {
                 return None;
             }
-
-            if !tool_filter.server_allowed(&server_id) {
-                return None;
-            }
-            let filtered: Vec<McpTool> = tools
-                .into_iter()
-                .filter(|t| tool_filter.tool_allowed(&server_id, &t.name))
-                .collect();
-            if filtered.is_empty() {
-                None
-            } else {
-                Some((server_id, filtered))
-            }
+            let infos: Vec<McpTool> = tools.into_iter().filter(|t| tool_filter.builtin_allowed(&t.name)).collect();
+            if infos.is_empty() { None } else { Some((server_id, infos)) }
         })
         .collect();
-    let has_mcp_tools = !filtered_tool_descriptions.is_empty();
-    // Deferred tools exist only if tool_search is enabled AND there are MCP tools
-    let _has_deferred_mcp_tools = tool_search_enabled && has_mcp_tools;
-    // Note: code_mode_possible and python_tool_mode now handled by resolver
-    let prompt_for_discovery = user_prompt.unwrap_or_default();
+
     let auto_discovery = perform_auto_discovery_for_prompt(
-        &prompt_for_discovery,
-        tool_search_enabled,
-        tool_search_max_results,
-        has_mcp_tools,
-        schema_search_enabled,
+        &user_prompt,
+        tool_search_enabled && turn_config.enabled_tools.is_empty(), // Skip auto-discovery if per-chat tools attached
+        settings_for_resolver.tool_search_max_results,
+        !filtered_tool_descriptions.is_empty(),
+        schema_search_enabled || internal_schema_search || sql_select_enabled,
         settings_for_resolver.schema_relevancy_threshold,
         &database_toolbox_config,
         &filtered_tool_descriptions,
         tool_registry_state.registry.clone(),
         embedding_state.model.clone(),
         handles.schema_tx.clone(),
-        false,
-    )
-    .await;
+        false, // do_not_materialize
+    ).await;
 
-    // Check if there are any attached documents
-    let has_attachments = {
-        let (tx, rx) = oneshot::channel();
-        if handles
-            .rag_tx
-            .send(RagMsg::GetIndexedFiles { respond_to: tx })
-            .await
-            .is_ok()
-        {
-            rx.await.map(|files| !files.is_empty()).unwrap_or(false)
-        } else {
-            false
-        }
-    };
+    let has_attachments = !attached_files.is_empty();
 
-    // Resolve capabilities for prompt building
     let (resolved_capabilities, model_tool_format) = {
         let registry = tool_registry_state.registry.read().await;
         let (tx, rx) = oneshot::channel();
-        let fetched_model_info = if handles
-            .foundry_tx
-            .send(FoundryMsg::GetCurrentModel { respond_to: tx })
-            .await
-            .is_ok()
-        {
+        let fetched_model_info = if handles.foundry_tx.send(FoundryMsg::GetCurrentModel { respond_to: tx }).await.is_ok() {
             rx.await.ok().flatten()
         } else {
             None
@@ -5544,39 +3679,80 @@ async fn get_system_prompt_preview(
             supports_reasoning_effort: false,
         };
         let model_info = fetched_model_info.as_ref().unwrap_or(&default_model_info);
-        let caps = ToolCapabilityResolver::resolve(
-            &settings_for_resolver,
-            model_info,
-            &tool_filter,
-            &server_configs,
-            &registry,
-        );
+        let caps = ToolCapabilityResolver::resolve(&settings_for_resolver, model_info, &tool_filter, &server_configs, &registry);
         (caps, Some(model_info.tool_format))
     };
 
-    let settings_sm = SettingsStateMachine::from_settings(&settings_for_resolver, &tool_filter);
+    let empty_tools: Vec<(String, Vec<McpTool>)> = Vec::new();
+    let mut mcp_context = agentic_state::McpToolContext::from_tool_lists(
+        if tool_search_enabled { &empty_tools } else { &filtered_tool_descriptions },
+        if tool_search_enabled { &filtered_tool_descriptions } else { &empty_tools },
+        &server_configs,
+    );
+
+    // If turn-specific tools are attached, override the context
+    if !turn_config.enabled_tools.is_empty() {
+        let mut active_mcp = Vec::new();
+        for (server_id, tools) in filtered_tool_descriptions {
+            let attached: Vec<McpToolInfo> = tools.into_iter()
+                .filter(|t| turn_config.enabled_tools.contains(&format!("{}::{}", server_id, t.name)))
+                .map(|t| McpToolInfo::from_mcp_tool(&t))
+                .collect();
+            if !attached.is_empty() {
+                active_mcp.push((server_id, attached));
+            }
+        }
+        mcp_context.active_tools = active_mcp;
+        mcp_context.deferred_tools = Vec::new();
+    }
+
     let mut initial_state_machine = AgenticStateMachine::new_from_settings_sm(
         &settings_sm,
         crate::agentic_state::PromptContext {
             base_prompt: base_prompt.clone(),
-            mcp_context: crate::agentic_state::McpToolContext::from_tool_lists(
-                &auto_discovery.discovered_tool_schemas, // Use auto-discovered for preview if tool_search enabled
-                &Vec::new(), // Deferred not used in preview logic currently
-                &server_configs,
-            ),
+            attached_tables: turn_context.attached_tables.clone(),
+            attached_tools: attached_tools,
+            mcp_context,
             tool_call_format: resolved_capabilities.primary_format,
             model_tool_format,
-            custom_tool_prompts: tool_prompts,
+            custom_tool_prompts: tool_system_prompts,
             python_primary: resolved_capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION),
             has_attachments,
         },
     );
 
-    // Set auto-discovery context after initialization
-    initial_state_machine.set_auto_discovery_context(
-        auto_discovery.tool_search_output,
-        auto_discovery.schema_search_output,
+    // Initialize with turn config
+    initial_state_machine.compute_turn_config(&settings_for_resolver, &tool_filter);
+
+    // Extract schema search results for state machine initialization
+    let schema_relevancy = auto_discovery.schema_search_output.as_ref()
+        .map(|o| o.tables.iter().map(|t| t.relevance).fold(0.0f32, f32::max))
+        .unwrap_or(0.0);
+    
+    let discovered_tables = auto_discovery.schema_search_output.as_ref()
+        .map(|o| o.tables.iter().map(|t| agentic_state::TableInfo {
+            fully_qualified_name: t.table_name.clone(),
+            source_id: t.source_id.clone(),
+            sql_dialect: t.sql_dialect.clone(),
+            relevancy: t.relevance,
+            description: t.description.clone(),
+            columns: t.relevant_columns.iter().map(|c| agentic_state::ColumnInfo {
+                name: c.name.clone(),
+                data_type: c.data_type.clone(),
+                nullable: true,
+                description: None,
+            }).collect(),
+        }).collect())
+        .unwrap_or_default();
+
+    initial_state_machine.compute_initial_state(
+        0.0,
+        schema_relevancy,
+        discovered_tables,
+        Vec::new(),
     );
+
+    initial_state_machine.set_auto_discovery_context(auto_discovery.tool_search_output, auto_discovery.schema_search_output);
 
     Ok(initial_state_machine.build_system_prompt())
 }
@@ -5760,6 +3936,8 @@ async fn get_system_prompt_layers(
         &settings_sm,
         crate::agentic_state::PromptContext {
             base_prompt: base_prompt.clone(),
+            attached_tables: Vec::new(),
+            attached_tools: Vec::new(),
             mcp_context: crate::agentic_state::McpToolContext::from_tool_lists(
                 &visible_tool_descriptions,
                 &Vec::new(),
@@ -5786,167 +3964,6 @@ async fn get_system_prompt_layers(
         combined: sections.join("\n\n"),
     })
 }
-
-#[tauri::command]
-fn detect_tool_calls(content: String) -> Vec<ParsedToolCall> {
-    parse_tool_calls(&content)
-}
-
-/// Execute a tool call and return the result
-#[tauri::command]
-async fn execute_tool_call(
-    server_id: String,
-    tool_name: String,
-    arguments: serde_json::Value,
-    handles: State<'_, ActorHandles>,
-) -> Result<String, String> {
-    println!(
-        "[ToolCall] Executing {}::{} with args: {:?}",
-        server_id, tool_name, arguments
-    );
-
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::ExecuteTool {
-            server_id,
-            tool_name: tool_name.clone(),
-            arguments,
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let result = rx.await.map_err(|_| "MCP Host actor died".to_string())??;
-
-    // Convert the result to a string for display
-    let result_text = result
-        .content
-        .iter()
-        .filter_map(|c| c.text.as_ref())
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if result.is_error {
-        Err(format!("Tool error: {}", result_text))
-    } else {
-        Ok(result_text)
-    }
-}
-
-/// Approve a pending tool call
-#[tauri::command]
-async fn approve_tool_call(
-    approval_key: String,
-    approval_state: State<'_, ToolApprovalState>,
-) -> Result<bool, String> {
-    println!("[ToolApproval] Approving tool call: {}", approval_key);
-
-    let mut pending = approval_state.pending.write().await;
-    if let Some(sender) = pending.remove(&approval_key) {
-        let _ = sender.send(ToolApprovalDecision::Approved);
-        Ok(true)
-    } else {
-        println!(
-            "[ToolApproval] No pending approval found for key: {}",
-            approval_key
-        );
-        Err(format!(
-            "No pending approval found for key: {}",
-            approval_key
-        ))
-    }
-}
-
-/// Reject a pending tool call
-#[tauri::command]
-async fn reject_tool_call(
-    approval_key: String,
-    approval_state: State<'_, ToolApprovalState>,
-) -> Result<bool, String> {
-    println!("[ToolApproval] Rejecting tool call: {}", approval_key);
-
-    let mut pending = approval_state.pending.write().await;
-    if let Some(sender) = pending.remove(&approval_key) {
-        let _ = sender.send(ToolApprovalDecision::Rejected);
-        Ok(true)
-    } else {
-        println!(
-            "[ToolApproval] No pending approval found for key: {}",
-            approval_key
-        );
-        Err(format!(
-            "No pending approval found for key: {}",
-            approval_key
-        ))
-    }
-}
-
-/// Get list of pending tool approval keys
-#[tauri::command]
-async fn get_pending_tool_approvals(
-    approval_state: State<'_, ToolApprovalState>,
-) -> Result<Vec<String>, String> {
-    let pending = approval_state.pending.read().await;
-    Ok(pending.keys().cloned().collect())
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct LaunchOverridesPayload {
-    model: Option<String>,
-    initial_prompt: Option<String>,
-}
-
-#[tauri::command]
-async fn get_current_model(handles: State<'_, ActorHandles>) -> Result<Option<ModelInfo>, String> {
-    let (tx, rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetCurrentModel { respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())
-}
-
-#[tauri::command]
-async fn get_launch_overrides(
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<LaunchOverridesPayload, String> {
-    let launch_overrides = &launch_config.launch_overrides;
-    Ok(LaunchOverridesPayload {
-        model: launch_overrides.model.clone(),
-        initial_prompt: launch_overrides.initial_prompt.clone(),
-    })
-}
-
-/// Simple heartbeat endpoint called by the frontend once per second.
-/// Resets the "frontend alive" timer; backend will log if beats stop arriving.
-#[tauri::command]
-async fn heartbeat_ping(heartbeat_state: State<'_, HeartbeatState>) -> Result<(), String> {
-    // #region agent log
-    use std::io::Write;
-    let hb_start = std::time::Instant::now();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"lib.rs:heartbeat_ping","message":"heartbeat_ping_start","data":{{"timestamp_ms":{}}},"timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
-    let mut last = heartbeat_state.last_frontend_beat.write().await;
-    *last = Some(Instant::now());
-
-    // Clear any previous unresponsive flag so a new gap will log once.
-    let mut logged = heartbeat_state.logged_unresponsive.write().await;
-    *logged = false;
-
-    // #region agent log
-    let hb_elapsed = hb_start.elapsed().as_micros();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"lib.rs:heartbeat_ping","message":"heartbeat_ping_end","data":{{"elapsed_us":{}}},"timestamp":{}}}"#, hb_elapsed, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
-    Ok(())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let cli_args = CliArgs::try_parse().unwrap_or_else(|e| {
@@ -6285,6 +4302,7 @@ pub fn run() {
             update_database_toolbox_config,
             get_cached_database_schemas,
             refresh_database_schemas,
+            search_database_tables,
             set_schema_table_enabled,
             // MCP commands
             sync_mcp_servers,
@@ -6557,6 +4575,8 @@ mod inline_tests {
             &settings_sm,
             crate::agentic_state::PromptContext {
                 base_prompt: base_prompt.to_string(),
+                attached_tables: Vec::new(),
+                attached_tools: Vec::new(),
                 mcp_context: crate::agentic_state::McpToolContext::from_tool_lists(
                     &active_tools,
                     &Vec::new(),

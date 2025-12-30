@@ -120,6 +120,20 @@ export interface RagIndexResult {
     cache_hits: number;
 }
 
+export interface AttachedTable {
+    sourceId: string;
+    sourceName: string;
+    tableFqName: string;
+    columnCount: number;
+}
+
+export interface AttachedTool {
+    key: string;        // "builtin::python_execution" or "mcp-server-id::tool_name"
+    name: string;
+    server: string;     // "builtin" or MCP server name
+    isBuiltin: boolean;
+}
+
 // Tool execution state for UI display
 export interface PendingToolApproval {
     approvalKey: string;
@@ -286,6 +300,18 @@ interface ChatState {
     clearRagContext: () => Promise<void>;
     fetchRagIndexedFiles: () => Promise<void>;
     removeRagFile: (sourceFile: string) => Promise<void>;
+
+    // Per-chat attached database tables
+    attachedDatabaseTables: AttachedTable[];
+    addAttachedTable: (table: AttachedTable) => void;
+    removeAttachedTable: (tableFqName: string) => void;
+    clearAttachedTables: () => void;
+
+    // Per-chat attached tools (built-in + MCP)
+    attachedTools: AttachedTool[];
+    addAttachedTool: (tool: AttachedTool) => void;
+    removeAttachedTool: (toolKey: string) => void;
+    clearAttachedTools: () => void;
 
     // Tool Execution State
     pendingToolApproval: PendingToolApproval | null;
@@ -590,7 +616,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     },
 
     currentChatId: null,
-    setCurrentChatId: (id) => set({ currentChatId: id }),
+    setCurrentChatId: (id) => {
+        if (id === null) {
+            // New chat - clear all per-chat attachments (databases, tools, documents)
+            set({ 
+                currentChatId: null, 
+                attachedDatabaseTables: [], 
+                attachedTools: [],
+                attachedPaths: [],
+                ragIndexedFiles: [],
+                ragChunkCount: 0,
+            });
+        } else {
+            set({ currentChatId: id });
+        }
+    },
 
     // Operation status for status bar
     operationStatus: null,
@@ -650,7 +690,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // If we have an active chat, start a new one when switching models
         if (state.currentChatId || state.chatMessages.length > 0) {
             console.log('[ChatStore] Switching models, starting new chat');
-            set({ currentChatId: null, chatMessages: [] });
+            set({ 
+                currentChatId: null, 
+                chatMessages: [],
+                // Clear all per-chat attachments
+                attachedDatabaseTables: [],
+                attachedTools: [],
+                attachedPaths: [],
+                ragIndexedFiles: [],
+                ragChunkCount: 0,
+            });
         }
 
         set({
@@ -978,7 +1027,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // Start new chat on model change
             if (state.currentChatId || state.chatMessages.length > 0) {
                 console.log('[ChatStore] Model set, starting new chat');
-                set({ currentChatId: null, chatMessages: [] });
+                set({ 
+                    currentChatId: null, 
+                    chatMessages: [],
+                    // Clear all per-chat attachments
+                    attachedDatabaseTables: [],
+                    attachedTools: [],
+                    attachedPaths: [],
+                    ragIndexedFiles: [],
+                    ragChunkCount: 0,
+                });
             }
         } catch (e) {
             console.error("Failed to set model", e);
@@ -1072,7 +1130,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const result = await invoke<boolean>('delete_chat', { id });
             console.log('[ChatStore] delete_chat backend returned:', result);
             if (get().currentChatId === id) {
-                set({ chatMessages: [], currentChatId: null });
+                set({ 
+                    chatMessages: [], 
+                    currentChatId: null,
+                    // Clear all per-chat attachments
+                    attachedDatabaseTables: [],
+                    attachedTools: [],
+                    attachedPaths: [],
+                    ragIndexedFiles: [],
+                    ragChunkCount: 0,
+                });
             }
             // Clear from pending summaries (important for newly created chats)
             get().clearPendingSummary(id);
@@ -1997,6 +2064,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
             console.error('[ChatStore] Failed to remove RAG file:', e);
         }
     },
+
+    // Per-chat attached database tables
+    attachedDatabaseTables: [],
+    addAttachedTable: (table) => set((s) => ({
+        attachedDatabaseTables: [...s.attachedDatabaseTables.filter(t => t.tableFqName !== table.tableFqName), table]
+    })),
+    removeAttachedTable: (tableFqName) => set((s) => ({
+        attachedDatabaseTables: s.attachedDatabaseTables.filter(t => t.tableFqName !== tableFqName)
+    })),
+    clearAttachedTables: () => set({ attachedDatabaseTables: [] }),
+
+    // Per-chat attached tools
+    attachedTools: [],
+    addAttachedTool: (tool) => set((s) => ({
+        attachedTools: [...s.attachedTools.filter(t => t.key !== tool.key), tool]
+    })),
+    removeAttachedTool: (toolKey) => set((s) => ({
+        attachedTools: s.attachedTools.filter(t => t.key !== toolKey)
+    })),
+    clearAttachedTools: () => set({ attachedTools: [] }),
 
     // Tool Execution State
     pendingToolApproval: null,

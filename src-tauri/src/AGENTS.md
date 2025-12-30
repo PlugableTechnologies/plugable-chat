@@ -1,5 +1,32 @@
 # Core Backend Logic
 
+## Module Organization: Keeping `lib.rs` Lean
+
+**Strategy**: Tauri commands are organized into domain-specific modules under `commands/` to prevent `lib.rs` from becoming a monolithic file. This improves maintainability, reduces merge conflicts, and makes code easier to navigate.
+
+### Command Module Structure (`commands/`)
+- `chat.rs` - Chat history and messaging commands
+- `database.rs` - Database schema cache management
+- `mcp.rs` - MCP server management and tool execution
+- `model.rs` - Model loading, unloading, and catalog
+- `rag.rs` - RAG document indexing and search
+- `settings.rs` - Application settings and configuration
+- `tool.rs` - Tool call detection, execution, and approval
+
+### Guidelines
+1. **New Tauri commands** should be added to the appropriate `commands/*.rs` module, NOT directly in `lib.rs`
+2. **Re-export via `commands/mod.rs`**: Add `pub use module::*;` so commands are available via `commands::*`
+3. **lib.rs imports all commands** via `use commands::*;` - this brings them into scope for the invoke handler
+4. **Keep lib.rs focused on**: Module declarations, core agentic loop logic, app initialization (`run()`), and truly cross-cutting functionality
+5. **Helper functions** used only by a command module should live in that module, not lib.rs
+
+### What Stays in `lib.rs`
+- Module declarations (`pub mod ...`)
+- The `chat` command (core agentic loop - too intertwined to extract cleanly)
+- `get_system_prompt_preview` and `get_system_prompt_layers` (preview-specific logic)
+- The `run()` function (Tauri app initialization)
+- Cross-cutting internal helpers (e.g., auto-discovery, tool execution internals)
+
 ## Model-Specific Tool Calling Architecture
 The system supports multiple model families with different tool calling behaviors. Model-specific handling flows through four layers:
 

@@ -141,6 +141,33 @@ impl OperationalMode {
 
 // ============ Tool Availability ============
 
+/// Per-chat-turn context that influences state machine computation
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatTurnContext {
+    /// Files/folders attached for RAG
+    pub attached_files: Vec<String>,
+    /// Database tables attached for SQL queries
+    pub attached_tables: Vec<AttachedTableInfo>,
+    /// Tools explicitly attached for this chat (built-in and MCP)
+    pub attached_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachedTableInfo {
+    pub source_id: String,
+    pub table_fq_name: String,
+    pub column_count: usize,
+    pub schema_text: Option<String>, // Full schema definition
+}
+
+/// Configuration for a specific chat turn
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnConfiguration {
+    pub mode: OperationalMode,
+    pub enabled_tools: Vec<String>,
+    pub schema_context: Option<String>, // SQL schemas to include in prompt
+}
+
 /// Describes which tools are available given the current settings.
 /// This is a computed summary, not mutable state.
 #[derive(Debug, Clone, Default)]
@@ -254,6 +281,104 @@ impl SettingsStateMachine {
     /// Check if a built-in tool is available
     pub fn is_builtin_available(&self, name: &str) -> bool {
         self.tool_availability.is_builtin_available(name)
+    }
+
+    /// Compute operational mode and enabled tools for a specific chat turn
+    pub fn compute_for_turn(
+        &self,
+        settings: &AppSettings,
+        filter: &ToolLaunchFilter,
+        turn_context: &ChatTurnContext,
+    ) -> TurnConfiguration {
+        let mut enabled_modes = HashSet::new();
+        let mut enabled_tools = Vec::new();
+
+        // 1. RAG Mode
+        if !turn_context.attached_files.is_empty() {
+            enabled_modes.insert(SimplifiedMode::Rag);
+        }
+
+        // 2. SQL Mode
+        if !turn_context.attached_tables.is_empty() {
+            enabled_modes.insert(SimplifiedMode::Sql);
+            // Implicitly enable sql_select if tables are attached
+            if filter.builtin_allowed("sql_select") {
+                enabled_tools.push("sql_select".to_string());
+            }
+        }
+
+        // 3. User-attached Tools
+        for tool_key in &turn_context.attached_tools {
+            // tool_key is "builtin::name" or "serverId::name"
+            if tool_key.starts_with("builtin::") {
+                let name = &tool_key["builtin::".len()..];
+                if filter.builtin_allowed(name) {
+                    // Check if it's already added (like sql_select)
+                    if !enabled_tools.contains(&name.to_string()) {
+                        enabled_tools.push(name.to_string());
+                    }
+                    if name == "python_execution" {
+                        enabled_modes.insert(SimplifiedMode::Code);
+                    }
+                }
+            } else if let Some(sep_idx) = tool_key.find("::") {
+                let server_id = &tool_key[..sep_idx];
+                if filter.server_allowed(server_id) {
+                    // For MCP tools, we just pass the full key
+                    enabled_tools.push(tool_key.clone());
+                    enabled_modes.insert(SimplifiedMode::Tool);
+                }
+            }
+        }
+
+        // 4. Resolve Mode
+        let mode = if enabled_modes.is_empty() {
+            OperationalMode::Conversational
+        } else if enabled_modes.len() > 1 {
+            OperationalMode::HybridMode {
+                enabled_modes,
+                primary_format: settings.tool_call_formats.primary,
+            }
+        } else {
+            let only_mode = enabled_modes.into_iter().next().unwrap();
+            match only_mode {
+                SimplifiedMode::Sql => OperationalMode::SqlMode {
+                    schema_search_as_tool: enabled_tools.contains(&"schema_search".to_string()),
+                    internal_schema_search: false, // Per-chat tables usually don't need internal search
+                },
+                SimplifiedMode::Code => OperationalMode::CodeMode {
+                    tool_search_enabled: enabled_tools.contains(&"tool_search".to_string()),
+                    python_tool_calling: settings.python_tool_calling_enabled,
+                },
+                SimplifiedMode::Tool => OperationalMode::ToolMode {
+                    format: settings.tool_call_formats.primary,
+                    deferred_discovery: false, // Per-chat tools are usually explicit
+                },
+                SimplifiedMode::Rag => OperationalMode::Conversational, // RAG doesn't have a specific mode yet
+            }
+        };
+
+        // 5. Build schema context if tables attached
+        let schema_context = if !turn_context.attached_tables.is_empty() {
+            let mut ctx = String::from("Attached Database Table Schemas:\n\n");
+            for table in &turn_context.attached_tables {
+                if let Some(ref schema) = table.schema_text {
+                    ctx.push_str(schema);
+                    ctx.push_str("\n\n");
+                } else {
+                    ctx.push_str(&format!("Table: {} ({} columns)\n\n", table.table_fq_name, table.column_count));
+                }
+            }
+            Some(ctx)
+        } else {
+            None
+        };
+
+        TurnConfiguration {
+            mode,
+            enabled_tools,
+            schema_context,
+        }
     }
 
     // ============ Private Computation Methods ============

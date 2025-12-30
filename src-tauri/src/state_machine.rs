@@ -24,8 +24,8 @@ use crate::agentic_state::{
     RagChunk, RelevancyThresholds, StateEvent, TableInfo,
 };
 use crate::protocol::{ToolSchema, ToolFormat};
-use crate::settings::ToolCallFormatName;
-use crate::settings_state_machine::{OperationalMode, SettingsStateMachine};
+use crate::settings::{AppSettings, ToolCallFormatName};
+use crate::settings_state_machine::{OperationalMode, SettingsStateMachine, ChatTurnContext, TurnConfiguration};
 use crate::system_prompt;
 
 // ============ State Machine ============
@@ -53,6 +53,8 @@ use crate::system_prompt;
 /// - Format instructions match `tool_call_format`
 #[derive(Debug, Clone)]
 pub struct AgenticStateMachine {
+    /// The SettingsStateMachine providing capabilities and thresholds
+    settings_sm: SettingsStateMachine,
     /// Current state of the machine
     current_state: AgenticState,
     /// Capabilities enabled by settings (provided by SettingsStateMachine)
@@ -78,6 +80,13 @@ pub struct AgenticStateMachine {
     python_primary: bool,
     /// Whether user has attached documents
     has_attachments: bool,
+    /// Per-chat attached database tables
+    attached_tables: Vec<crate::settings_state_machine::AttachedTableInfo>,
+    /// Per-chat attached tools
+    attached_tools: Vec<String>,
+    
+    /// Turn-specific configuration computed from attachments
+    turn_config: Option<TurnConfiguration>,
     
     // === Auto-Discovery Context ===
     
@@ -123,6 +132,7 @@ impl AgenticStateMachine {
         );
         
         Self {
+            settings_sm: settings_sm.clone(),
             current_state: initial_state,
             enabled_capabilities,
             thresholds,
@@ -134,6 +144,9 @@ impl AgenticStateMachine {
             custom_tool_prompts: prompt_context.custom_tool_prompts,
             python_primary: prompt_context.python_primary,
             has_attachments: prompt_context.has_attachments,
+            attached_tables: prompt_context.attached_tables,
+            attached_tools: prompt_context.attached_tools,
+            turn_config: None,
             auto_tool_search: None,
             auto_schema_search: None,
         }
@@ -543,6 +556,16 @@ impl AgenticStateMachine {
         self.current_state = AgenticState::Conversational;
     }
 
+    pub fn compute_turn_config(&mut self, settings: &AppSettings, filter: &crate::tool_capability::ToolLaunchFilter) {
+        let turn_context = ChatTurnContext {
+            attached_files: Vec::new(), // Not used for mode computation in SM yet
+            attached_tables: self.attached_tables.clone(),
+            attached_tools: self.attached_tools.clone(),
+        };
+        
+        self.turn_config = Some(self.settings_sm.compute_for_turn(settings, filter, &turn_context));
+    }
+
     /// Build the system prompt for the current state.
     /// 
     /// This is the **single source of truth** for system prompt generation.
@@ -572,6 +595,13 @@ impl AgenticStateMachine {
         // 3. State-specific context
         if let Some(state_ctx) = self.build_state_context_section() {
             sections.push(state_ctx);
+        }
+
+        // 3b. Turn-specific schema context (from attached tables)
+        if let Some(ref config) = self.turn_config {
+            if let Some(ref schema_ctx) = config.schema_context {
+                sections.push(schema_ctx.to_string());
+            }
         }
 
         // 4. Auto-discovery context (tool_search and schema_search results)
