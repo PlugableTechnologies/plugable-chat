@@ -22,6 +22,10 @@ use tokio::time::{sleep, timeout};
 /// Target embedding dimension (must match LanceDB schema)
 const EMBEDDING_DIM: usize = 768;
 
+/// Default fallback model to use when no model is specified or when errors occur.
+/// This matches the phi-4-mini-instruct model that is auto-downloaded on first launch.
+const DEFAULT_FALLBACK_MODEL: &str = "phi-4-mini-instruct";
+
 /// Accumulator for OpenAI-style streaming tool calls.
 ///
 /// In the OpenAI streaming format, tool calls arrive incrementally:
@@ -1142,11 +1146,22 @@ impl ModelGatewayActor {
                                             )
                                             .min(Duration::from_secs(10));
                                             continue;
+                                        } else {
+                                            // Retries exhausted for 4XX error - suggest fallback
+                                            let error_msg = format!("HTTP {} after {} retries: {}", status, MAX_RETRIES, text);
+                                            if !model.to_lowercase().contains(DEFAULT_FALLBACK_MODEL) {
+                                                self.emit_model_fallback_required(&model, &error_msg);
+                                            }
                                         }
                                     } else if !status.is_success() {
                                         // Other non-success errors (5XX, etc.)
                                         let text = resp.text().await.unwrap_or_default();
                                         println!("Foundry error ({}): {}", status, text);
+                                        // Emit fallback suggestion for 5XX errors
+                                        let error_msg = format!("HTTP {}: {}", status, text);
+                                        if !model.to_lowercase().contains(DEFAULT_FALLBACK_MODEL) {
+                                            self.emit_model_fallback_required(&model, &error_msg);
+                                        }
                                         let _ = respond_to_clone.send(format!("Error: {}", text));
                                         break;
                                     } else {
@@ -1334,6 +1349,10 @@ impl ModelGatewayActor {
                             // If we get here with an error after max retries, report it
                             if let Some(err) = &last_error {
                                 if attempt == MAX_RETRIES {
+                                    // Emit fallback suggestion for connection errors after retries exhausted
+                                    if !model.to_lowercase().contains(DEFAULT_FALLBACK_MODEL) {
+                                        self.emit_model_fallback_required(&model, err);
+                                    }
                                     let _ = respond_to_clone.send(format!(
                                         "Error after {} retries: {}",
                                         MAX_RETRIES, err
@@ -1344,6 +1363,10 @@ impl ModelGatewayActor {
                         }
                     } else {
                         println!("Foundry endpoint not available (port not found).");
+                        // Emit fallback when Foundry endpoint not available
+                        if !requested_model.to_lowercase().contains(DEFAULT_FALLBACK_MODEL) {
+                            self.emit_model_fallback_required(&requested_model, "Foundry endpoint not available");
+                        }
                         let _ = respond_to.send("The local model service is not available. Please check if Foundry is installed and running.".to_string());
                     }
                 }
@@ -1606,13 +1629,26 @@ impl ModelGatewayActor {
                 })
                 .collect();
 
-            // Select first model as default if none selected
+            // Select default model if none selected
+            // Prefer Phi-4-mini-instruct (the model we auto-download) if available
             if self.model_id.is_none() {
-                if let Some(first) = self.available_models.first() {
-                    println!("Selected default model: {}", first);
-                    self.model_id = Some(first.clone());
-                    self.emit_model_selected(first);
-                }
+                // First, try to find the default fallback model (phi-4-mini-instruct)
+                let preferred_model = self.available_models.iter().find(|m| {
+                    m.to_lowercase().contains(DEFAULT_FALLBACK_MODEL)
+                });
+                
+                let selected = if let Some(model) = preferred_model {
+                    println!("Selected preferred default model: {}", model);
+                    model.clone()
+                } else if let Some(first) = self.available_models.first() {
+                    println!("Selected first available model as default: {}", first);
+                    first.clone()
+                } else {
+                    return true; // No models available
+                };
+                
+                self.model_id = Some(selected.clone());
+                self.emit_model_selected(&selected);
             }
 
             println!(
@@ -1720,6 +1756,23 @@ impl ModelGatewayActor {
 
     fn emit_model_selected(&self, model: &str) {
         let _ = self.app_handle.emit("model-selected", model.to_string());
+    }
+
+    /// Emit an event to request fallback to the default model due to errors.
+    /// The frontend will handle the actual model switch.
+    fn emit_model_fallback_required(&self, current_model: &str, error: &str) {
+        println!(
+            "[FoundryActor] Emitting model-fallback-required: current={}, fallback={}, error={}",
+            current_model, DEFAULT_FALLBACK_MODEL, error
+        );
+        let _ = self.app_handle.emit(
+            "model-fallback-required",
+            json!({
+                "current_model": current_model,
+                "fallback_model": DEFAULT_FALLBACK_MODEL,
+                "error": error
+            }),
+        );
     }
 
     /// Logs the content with a diff if it has changed since the last log.

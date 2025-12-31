@@ -366,6 +366,7 @@ let unlistenServiceRestartComplete: (() => void) | undefined;
 let unlistenSystemPrompt: (() => void) | undefined;
 let unlistenRagProgress: (() => void) | undefined;
 let unlistenModelStuck: (() => void) | undefined;
+let unlistenModelFallback: (() => void) | undefined;
 let unlistenEmbeddingInit: (() => void) | undefined;
 let unlistenChatStreamStatus: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
@@ -1680,6 +1681,101 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }, 15000);
             });
 
+            // Model fallback listener - triggered when 4XX/5XX errors occur with Foundry
+            const modelFallbackListener = await listen<{ current_model: string; fallback_model: string; error: string }>('model-fallback-required', async (event) => {
+                const { current_model, fallback_model, error } = event.payload;
+                console.warn(`[ChatStore] 🔄 Model fallback required: ${current_model} -> ${fallback_model}, error: ${error}`);
+                
+                // Check if fallback model is available in cached models
+                const state = get();
+                const fallbackAvailable = state.cachedModels.some(
+                    m => m.model_id.toLowerCase().includes(fallback_model.toLowerCase()) ||
+                         m.alias.toLowerCase().includes(fallback_model.toLowerCase())
+                );
+                
+                if (fallbackAvailable) {
+                    // Find the exact model ID to load
+                    const fallbackModelInfo = state.cachedModels.find(
+                        m => m.model_id.toLowerCase().includes(fallback_model.toLowerCase()) ||
+                             m.alias.toLowerCase().includes(fallback_model.toLowerCase())
+                    );
+                    
+                    if (fallbackModelInfo && state.currentModel !== fallbackModelInfo.model_id) {
+                        console.log(`[ChatStore] Switching to fallback model: ${fallbackModelInfo.model_id}`);
+                        set({
+                            operationStatus: {
+                                type: 'loading',
+                                message: `Switching to ${fallbackModelInfo.alias || fallbackModelInfo.model_id} due to error with current model...`,
+                                startTime: Date.now(),
+                            },
+                            statusBarDismissed: false,
+                        });
+                        
+                        try {
+                            await get().loadModel(fallbackModelInfo.model_id);
+                            set({
+                                operationStatus: {
+                                    type: 'loading',
+                                    message: `Switched to ${fallbackModelInfo.alias || fallbackModelInfo.model_id}`,
+                                    completed: true,
+                                    startTime: Date.now(),
+                                },
+                            });
+                            // Auto-dismiss after 5 seconds
+                            setTimeout(() => {
+                                const currentState = get();
+                                if (currentState.operationStatus?.completed) {
+                                    set({ operationStatus: null });
+                                }
+                            }, 5000);
+                        } catch (loadError: any) {
+                            console.error('[ChatStore] Failed to load fallback model:', loadError);
+                            set({
+                                backendError: `Failed to load fallback model: ${loadError.message || loadError}`,
+                                operationStatus: null,
+                            });
+                        }
+                    }
+                } else {
+                    // Fallback model not available - try to download it
+                    console.log(`[ChatStore] Fallback model ${fallback_model} not cached. Attempting download...`);
+                    set({
+                        operationStatus: {
+                            type: 'downloading',
+                            message: `Downloading ${fallback_model} (fallback model)...`,
+                            progress: 0,
+                            startTime: Date.now(),
+                        },
+                        statusBarDismissed: false,
+                    });
+                    
+                    try {
+                        await invoke('download_model', { modelName: fallback_model });
+                        console.log('[ChatStore] Fallback model download complete');
+                        
+                        // Refresh cached models
+                        await get().fetchCachedModels();
+                        
+                        // Now load it
+                        const updatedState = get();
+                        const downloadedModel = updatedState.cachedModels.find(
+                            m => m.model_id.toLowerCase().includes(fallback_model.toLowerCase()) ||
+                                 m.alias.toLowerCase().includes(fallback_model.toLowerCase())
+                        );
+                        
+                        if (downloadedModel) {
+                            await get().loadModel(downloadedModel.model_id);
+                        }
+                    } catch (downloadError: any) {
+                        console.error('[ChatStore] Failed to download fallback model:', downloadError);
+                        set({
+                            backendError: `Model error: ${error}. Fallback download failed: ${downloadError.message || downloadError}`,
+                            operationStatus: null,
+                        });
+                    }
+                }
+            });
+
             // Tool execution event listeners
             const toolCallsPendingListener = await listen<ToolCallsPendingEvent>('tool-calls-pending', (event) => {
                 console.log(`[ChatStore] Tool calls pending: ${event.payload.approval_key}`, event.payload.calls);
@@ -1938,6 +2034,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 tokenListener();
                 finishedListener();
                 modelSelectedListener();
+                modelStuckListener();
+                modelFallbackListener();
                 toolBlockedListener();
                 chatSavedListener();
                 sidebarUpdateListener();
@@ -1976,6 +2074,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenChatSaved = chatSavedListener;
             unlistenSidebarUpdate = sidebarUpdateListener;
             unlistenModelStuck = modelStuckListener;
+            unlistenModelFallback = modelFallbackListener;
             unlistenDownloadProgress = downloadProgressListener;
             unlistenLoadComplete = loadCompleteListener;
             unlistenRagProgress = ragProgressListener;
@@ -2029,6 +2128,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenModelStuck) {
             unlistenModelStuck();
             unlistenModelStuck = undefined;
+        }
+        if (unlistenModelFallback) {
+            unlistenModelFallback();
+            unlistenModelFallback = undefined;
         }
         if (unlistenToolCallsPending) {
             unlistenToolCallsPending();
