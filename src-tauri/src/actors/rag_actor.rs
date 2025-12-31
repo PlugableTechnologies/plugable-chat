@@ -666,15 +666,17 @@ impl RagRetrievalActor {
 
         // Collect all files to process
         if let Some(ref handle) = self.app_handle {
-            let _ = handle.emit("rag-progress", RagProgressEvent {
-                phase: "collecting_files".to_string(),
-                total_files: 0,
-                processed_files: 0,
-                total_chunks: 0,
-                processed_chunks: 0,
-                current_file: String::new(),
-                is_complete: false,
-            });
+                let _ = handle.emit("rag-progress", RagProgressEvent {
+                    phase: "collecting_files".to_string(),
+                    total_files: 0,
+                    processed_files: 0,
+                    total_chunks: 0,
+                    processed_chunks: 0,
+                    current_file: String::new(),
+                    is_complete: false,
+                    extraction_progress: None,
+                    extraction_total_pages: None,
+                });
         }
         let mut files_to_process: Vec<PathBuf> = Vec::new();
         for path_str in &paths {
@@ -718,6 +720,8 @@ impl RagRetrievalActor {
                     processed_chunks: 0,
                     current_file: file_path_str.clone(),
                     is_complete: false,
+                    extraction_progress: None,
+                    extraction_total_pages: None,
                 });
             }
 
@@ -790,6 +794,8 @@ impl RagRetrievalActor {
                         processed_chunks: 0,
                         current_file: file_path_str.clone(),
                         is_complete: false,
+                        extraction_progress: None,
+                        extraction_total_pages: None,
                     });
                 }
             }
@@ -801,7 +807,7 @@ impl RagRetrievalActor {
             };
 
             // Extract text and parse into elements
-            match self.extract_text(file_path, &content) {
+            match self.extract_text(file_path, &content, i, total_files) {
                 Ok(text_content) => {
                     if let Some(ref handle) = self.app_handle {
                         let _ = handle.emit("rag-progress", RagProgressEvent {
@@ -812,6 +818,8 @@ impl RagRetrievalActor {
                             processed_chunks: 0,
                             current_file: file_path_str.clone(),
                             is_complete: false,
+                            extraction_progress: None,
+                            extraction_total_pages: None,
                         });
                     }
 
@@ -870,6 +878,8 @@ impl RagRetrievalActor {
                     processed_chunks: 0,
                     current_file: String::new(),
                     is_complete: true,
+                    extraction_progress: None,
+                    extraction_total_pages: None,
                 });
             }
             return Ok(RagIndexResult {
@@ -890,6 +900,8 @@ impl RagRetrievalActor {
                 processed_chunks: 0,
                 current_file: String::new(),
                 is_complete: false,
+                extraction_progress: None,
+                extraction_total_pages: None,
             });
         }
         let all_hashes: Vec<String> = all_pending_chunks.iter()
@@ -954,6 +966,8 @@ impl RagRetrievalActor {
                         processed_chunks: final_chunks.len(),
                         current_file: final_chunks.last().map(|c| c.source_file.clone()).unwrap_or_default(),
                         is_complete: final_chunks.len() == total_pending_chunks,
+                        extraction_progress: None,
+                        extraction_total_pages: None,
                     });
                 }
             }
@@ -968,6 +982,8 @@ impl RagRetrievalActor {
                     processed_chunks: final_chunks.len(),
                     current_file: final_chunks.last().map(|c| c.source_file.clone()).unwrap_or_default(),
                     is_complete: true,
+                    extraction_progress: None,
+                    extraction_total_pages: None,
                 });
             }
         }
@@ -982,6 +998,8 @@ impl RagRetrievalActor {
                 processed_chunks: final_chunks.len(),
                 current_file: String::new(),
                 is_complete: false,
+                extraction_progress: None,
+                extraction_total_pages: None,
             });
         }
         println!("RagActor: Saving {} chunks to databases", final_chunks.len());
@@ -1579,7 +1597,13 @@ impl RagRetrievalActor {
         }
     }
 
-    fn extract_text(&self, file_path: &Path, content: &str) -> Result<String, String> {
+    fn extract_text(
+        &self,
+        file_path: &Path,
+        content: &str,
+        i: usize,
+        total_files: usize,
+    ) -> Result<String, String> {
         let ext = file_path
             .extension()
             .and_then(|e| e.to_str())
@@ -1590,23 +1614,56 @@ impl RagRetrievalActor {
             "csv" => self.parse_csv(content, ','),
             "tsv" => self.parse_csv(content, '\t'),
             "json" => self.parse_json(content),
-            "pdf" => self.extract_pdf_text(file_path),
+            "pdf" => self.extract_pdf_text_with_progress(file_path, i, total_files),
             "docx" => self.extract_docx_text(file_path),
             _ => Ok(content.to_string()),
         }
     }
 
-    fn extract_pdf_text(&self, file_path: &Path) -> Result<String, String> {
-        // Wrap in catch_unwind because pdf_extract can panic on malformed PDFs
-        let path_owned = file_path.to_path_buf();
-        let result = std::panic::catch_unwind(|| {
-            pdf_extract::extract_text(&path_owned)
-        });
-        match result {
-            Ok(Ok(text)) => Ok(text),
-            Ok(Err(e)) => Err(format!("PDF extraction failed: {}", e)),
-            Err(_) => Err("PDF extraction panicked - file may be malformed or unsupported".to_string()),
+    fn extract_pdf_text_with_progress(
+        &self,
+        file_path: &Path,
+        file_index: usize,
+        total_files: usize,
+    ) -> Result<String, String> {
+        use lopdf::Document;
+
+        let doc = Document::load(file_path).map_err(|e| format!("Failed to load PDF: {}", e))?;
+
+        let pages = doc.get_pages();
+        let total_pages = pages.len() as u32;
+        let mut extracted_text = String::new();
+
+        for (i, (page_num, _page_id)) in pages.iter().enumerate() {
+            // Extract text from this page
+            // lopdf's extract_text takes a slice of page numbers
+            let page_text = doc.extract_text(&[*page_num]).unwrap_or_default();
+            extracted_text.push_str(&page_text);
+            extracted_text.push('\n');
+
+            // Emit progress every 5 pages or on last page
+            if i % 5 == 0 || i == pages.len() - 1 {
+                let progress = ((i + 1) as f32 / pages.len() as f32 * 100.0) as u8;
+                if let Some(ref handle) = self.app_handle {
+                    let _ = handle.emit(
+                        "rag-progress",
+                        RagProgressEvent {
+                            phase: "extracting_text".to_string(),
+                            total_files,
+                            processed_files: file_index,
+                            total_chunks: 0,
+                            processed_chunks: 0,
+                            current_file: file_path.to_string_lossy().to_string(),
+                            is_complete: false,
+                            extraction_progress: Some(progress),
+                            extraction_total_pages: Some(total_pages),
+                        },
+                    );
+                }
+            }
         }
+
+        Ok(extracted_text)
     }
 
     fn extract_docx_text(&self, file_path: &Path) -> Result<String, String> {

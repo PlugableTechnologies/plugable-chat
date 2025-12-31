@@ -76,6 +76,7 @@ mcp-test-server = { path = "../mcp-test-server" }
 
 # PDF text extraction
 pdf-extract = "0.9"
+lopdf = "0.31"
 
 # DOCX parsing (DOCX = ZIP with XML)
 zip = "0.6"

@@ -1472,9 +1472,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 total_chunks: number; 
                 processed_chunks: number; 
                 current_file: string; 
-                is_complete: boolean 
+                is_complete: boolean;
+                extraction_progress?: number;
+                extraction_total_pages?: number;
             }>('rag-progress', (event) => {
-                const { phase, total_files, processed_files, total_chunks, processed_chunks, current_file, is_complete } = event.payload;
+                const { 
+                    phase, 
+                    total_files, 
+                    processed_files, 
+                    total_chunks, 
+                    processed_chunks, 
+                    current_file, 
+                    is_complete,
+                    extraction_progress,
+                    extraction_total_pages
+                } = event.payload;
                 
                 let message = 'Processing documents...';
                 let progress = 0;
@@ -1488,8 +1500,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         progress = total_files > 0 ? (processed_files / total_files) * 100 : 0;
                         break;
                     case 'extracting_text':
-                        message = `Extracting text from ${current_file.split('/').pop() || current_file}`;
-                        progress = total_files > 0 ? (processed_files / total_files) * 100 : 0;
+                        const fileName = current_file.split('/').pop() || current_file;
+                        if (extraction_progress !== undefined && extraction_total_pages !== undefined) {
+                            message = `Extracting text from ${fileName} (${extraction_progress}% - page ${Math.ceil(extraction_progress * extraction_total_pages / 100)} of ${extraction_total_pages})`;
+                            progress = extraction_progress;
+                        } else {
+                            message = `Extracting text from ${fileName}`;
+                            progress = total_files > 0 ? (processed_files / total_files) * 100 : 0;
+                        }
                         break;
                     case 'chunking':
                         message = `Chunking ${current_file.split('/').pop() || current_file}...`;

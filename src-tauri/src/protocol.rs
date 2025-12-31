@@ -886,6 +886,10 @@ pub struct RagProgressEvent {
     pub processed_chunks: usize,
     pub current_file: String,
     pub is_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extraction_progress: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extraction_total_pages: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
