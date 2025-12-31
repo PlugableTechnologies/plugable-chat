@@ -109,6 +109,116 @@ pub fn is_verbose_logging_enabled() -> bool {
 const MAX_TOOL_ITERATIONS: usize = 20;
 const PYTHON_EXECUTION_TOOL_TYPE: &str = "python_execution_20251206";
 
+/// Maximum number of columns to include per attached table in the system prompt.
+/// Helps prevent overwhelming local models with massive column lists.
+const MAX_ATTACHED_TABLE_COLUMNS: usize = 50;
+
+/// Check if a column is "essential" and should always be included in schema context.
+/// Essential columns are: primary keys, partition columns, cluster columns, 
+/// and columns with common ID/date/timestamp patterns.
+fn is_essential_column(col_name: &str, table_schema: &settings::CachedTableSchema) -> bool {
+    // Primary keys, partition, cluster columns are always essential
+    if table_schema.primary_keys.contains(&col_name.to_string())
+        || table_schema.partition_columns.contains(&col_name.to_string())
+        || table_schema.cluster_columns.contains(&col_name.to_string())
+    {
+        return true;
+    }
+    // Common patterns for IDs and dates that are often used for filtering/joining
+    let lower = col_name.to_lowercase();
+    lower.ends_with("_id")
+        || lower.ends_with("_date")
+        || lower == "id"
+        || lower.contains("timestamp")
+        || lower.contains("created_at")
+        || lower.contains("updated_at")
+}
+
+/// Build filtered schema_text for an attached table, using semantic column search
+/// and essential column detection to limit context size.
+fn build_filtered_schema_text(
+    cached: &settings::CachedTableSchema,
+    semantic_column_names: Option<&HashSet<String>>,
+) -> String {
+    let mut schema_text = format!("Table: {} [{} Syntax]\n", cached.fully_qualified_name, cached.sql_dialect);
+    
+    if let Some(ref desc) = cached.description {
+        schema_text.push_str(&format!("Description: {}\n", desc));
+    }
+    
+    // Build key columns section (always shown)
+    let mut key_info = Vec::new();
+    if !cached.primary_keys.is_empty() {
+        key_info.push(format!("PK: {}", cached.primary_keys.join(", ")));
+    }
+    if !cached.partition_columns.is_empty() {
+        key_info.push(format!("Partition: {}", cached.partition_columns.join(", ")));
+    }
+    if !cached.cluster_columns.is_empty() {
+        key_info.push(format!("Cluster: {}", cached.cluster_columns.join(", ")));
+    }
+    if !key_info.is_empty() {
+        schema_text.push_str(&format!("Key columns: {}\n", key_info.join(" | ")));
+    }
+    
+    // Collect columns to include: essential + semantically relevant
+    let mut included_columns: Vec<&settings::CachedColumnSchema> = Vec::new();
+    let mut seen_names: HashSet<&str> = HashSet::new();
+    
+    // 1. Always include essential columns first
+    for col in &cached.columns {
+        if is_essential_column(&col.name, cached) && !seen_names.contains(col.name.as_str()) {
+            included_columns.push(col);
+            seen_names.insert(&col.name);
+        }
+    }
+    
+    // 2. Add semantically relevant columns (if provided)
+    if let Some(semantic_names) = semantic_column_names {
+        for col in &cached.columns {
+            if semantic_names.contains(&col.name) && !seen_names.contains(col.name.as_str()) {
+                included_columns.push(col);
+                seen_names.insert(&col.name);
+            }
+        }
+    }
+    
+    // 3. If we still have room and no semantic filtering, add remaining columns
+    if semantic_column_names.is_none() {
+        for col in &cached.columns {
+            if !seen_names.contains(col.name.as_str()) && included_columns.len() < MAX_ATTACHED_TABLE_COLUMNS {
+                included_columns.push(col);
+                seen_names.insert(&col.name);
+            }
+        }
+    }
+    
+    // Cap at maximum
+    let was_truncated = included_columns.len() > MAX_ATTACHED_TABLE_COLUMNS;
+    included_columns.truncate(MAX_ATTACHED_TABLE_COLUMNS);
+    
+    // Build columns section
+    schema_text.push_str("Columns:\n");
+    for col in &included_columns {
+        schema_text.push_str(&format!("- {} ({})", col.name, col.data_type));
+        if let Some(ref d) = col.description {
+            schema_text.push_str(&format!(": {}", d));
+        }
+        schema_text.push('\n');
+    }
+    
+    // Add truncation indicator
+    let omitted = cached.columns.len().saturating_sub(included_columns.len());
+    if omitted > 0 || was_truncated {
+        schema_text.push_str(&format!(
+            "... and {} more columns (use schema_search tool for full list)\n",
+            omitted
+        ));
+    }
+    
+    schema_text
+}
+
 /// Keep the shared registry's database built-ins in sync with current settings.
 async fn sync_registry_database_tools(
     registry: &SharedToolRegistry,
@@ -2754,6 +2864,32 @@ async fn chat(
     drop(settings);
 
     // Build ChatTurnContext with attachments
+    // Generate embedding for user prompt (for semantic column search)
+    let user_prompt_embedding: Option<Vec<f32>> = if !message.trim().is_empty() && !attached_tables.is_empty() {
+        let model_guard = embedding_state.model.read().await;
+        if let Some(model) = model_guard.as_ref() {
+            let model_clone = Arc::clone(model);
+            let query = message.clone();
+            drop(model_guard);
+            match tokio::task::spawn_blocking(move || model_clone.embed(vec![query], None)).await {
+                Ok(Ok(embeddings)) => embeddings.into_iter().next(),
+                Ok(Err(e)) => {
+                    println!("[Chat] Warning: Failed to embed user prompt for column search: {}", e);
+                    None
+                }
+                Err(e) => {
+                    println!("[Chat] Warning: Embedding task failed: {}", e);
+                    None
+                }
+            }
+        } else {
+            drop(model_guard);
+            None
+        }
+    } else {
+        None
+    };
+
     let mut turn_attached_tables = Vec::new();
     for table in attached_tables {
         // Fetch full table schema from cache to build prompt context
@@ -2770,18 +2906,37 @@ async fn chat(
         match rx.await {
             Ok(cached_tables) => {
                 if let Some(cached) = cached_tables.into_iter().find(|t| t.fully_qualified_name == table.table_fq_name) {
-                    let mut schema_text = format!("Table: {}\n", cached.fully_qualified_name);
-                    if let Some(ref desc) = cached.description {
-                        schema_text.push_str(&format!("Description: {}\n", desc));
-                    }
-                    schema_text.push_str("Columns:\n");
-                    for col in cached.columns {
-                        schema_text.push_str(&format!("- {} ({})", col.name, col.data_type));
-                        if let Some(ref d) = col.description {
-                            schema_text.push_str(&format!(": {}", d));
+                    // Use semantic column search if we have an embedding, otherwise use all columns
+                    let semantic_columns: Option<HashSet<String>> = if let Some(ref embedding) = user_prompt_embedding {
+                        let (col_tx, col_rx) = oneshot::channel();
+                        if handles.schema_tx.send(SchemaVectorMsg::SearchColumns {
+                            query_embedding: embedding.clone(),
+                            table_fq_name: Some(cached.fully_qualified_name.clone()),
+                            limit: MAX_ATTACHED_TABLE_COLUMNS,
+                            respond_to: col_tx,
+                        }).await.is_ok() {
+                            match col_rx.await {
+                                Ok(results) => {
+                                    let names: HashSet<String> = results.iter().map(|c| c.column_name.clone()).collect();
+                                    if !names.is_empty() {
+                                        println!("[Chat] Semantic column search for {}: {} relevant columns", 
+                                            cached.fully_qualified_name, names.len());
+                                        Some(names)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Err(_) => None
+                            }
+                        } else {
+                            None
                         }
-                        schema_text.push_str("\n");
-                    }
+                    } else {
+                        None
+                    };
+                    
+                    // Use filtered schema to avoid overwhelming local models with massive column lists
+                    let schema_text = build_filtered_schema_text(&cached, semantic_columns.as_ref());
                     
                     turn_attached_tables.push(crate::settings_state_machine::AttachedTableInfo {
                         source_id: table.source_id,
@@ -3614,6 +3769,25 @@ async fn get_system_prompt_preview(
     drop(settings);
 
     // 2. Build turn context and configuration
+    // Generate embedding for user prompt (for semantic column search)
+    let user_prompt_embedding: Option<Vec<f32>> = if !user_prompt.trim().is_empty() && !attached_tables.is_empty() {
+        let model_guard = embedding_state.model.read().await;
+        if let Some(model) = model_guard.as_ref() {
+            let model_clone = Arc::clone(model);
+            let query = user_prompt.clone();
+            drop(model_guard);
+            match tokio::task::spawn_blocking(move || model_clone.embed(vec![query], None)).await {
+                Ok(Ok(embeddings)) => embeddings.into_iter().next(),
+                _ => None,
+            }
+        } else {
+            drop(model_guard);
+            None
+        }
+    } else {
+        None
+    };
+
     let mut turn_attached_tables = Vec::new();
     for table in attached_tables {
         // Fetch full table schema from cache to build prompt context
@@ -3628,18 +3802,31 @@ async fn get_system_prompt_preview(
 
         if let Ok(cached_tables) = rx.await {
             if let Some(cached) = cached_tables.into_iter().find(|t| t.fully_qualified_name == table.table_fq_name) {
-                let mut schema_text = format!("Table: {}\n", cached.fully_qualified_name);
-                if let Some(ref desc) = cached.description {
-                    schema_text.push_str(&format!("Description: {}\n", desc));
-                }
-                schema_text.push_str("Columns:\n");
-                for col in cached.columns {
-                    schema_text.push_str(&format!("- {} ({})", col.name, col.data_type));
-                    if let Some(ref d) = col.description {
-                        schema_text.push_str(&format!(": {}", d));
+                // Use semantic column search if we have an embedding
+                let semantic_columns: Option<HashSet<String>> = if let Some(ref embedding) = user_prompt_embedding {
+                    let (col_tx, col_rx) = oneshot::channel();
+                    if handles.schema_tx.send(SchemaVectorMsg::SearchColumns {
+                        query_embedding: embedding.clone(),
+                        table_fq_name: Some(cached.fully_qualified_name.clone()),
+                        limit: MAX_ATTACHED_TABLE_COLUMNS,
+                        respond_to: col_tx,
+                    }).await.is_ok() {
+                        match col_rx.await {
+                            Ok(results) => {
+                                let names: HashSet<String> = results.iter().map(|c| c.column_name.clone()).collect();
+                                if !names.is_empty() { Some(names) } else { None }
+                            }
+                            Err(_) => None
+                        }
+                    } else {
+                        None
                     }
-                    schema_text.push_str("\n");
-                }
+                } else {
+                    None
+                };
+                
+                // Use filtered schema to avoid overwhelming local models with massive column lists
+                let schema_text = build_filtered_schema_text(&cached, semantic_columns.as_ref());
                 
                 turn_attached_tables.push(crate::settings_state_machine::AttachedTableInfo {
                     source_id: table.source_id,
