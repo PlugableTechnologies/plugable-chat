@@ -574,7 +574,73 @@ impl AgenticStateMachine {
             attached_tools: self.attached_tools.clone(),
         };
         
-        self.turn_config = Some(self.settings_sm.compute_for_turn(settings, filter, &turn_context));
+        let config = self.settings_sm.compute_for_turn(settings, filter, &turn_context);
+        
+        // Update enabled_capabilities based on per-turn attached tools.
+        // This ensures that compute_initial_state() will see these capabilities
+        // even if the corresponding setting is disabled globally.
+        for tool_name in &config.enabled_tools {
+            if tool_name == "python_execution" {
+                self.enabled_capabilities.insert(Capability::PythonExecution);
+            } else if tool_name == "sql_select" {
+                self.enabled_capabilities.insert(Capability::SqlQuery);
+            } else if tool_name == "schema_search" {
+                self.enabled_capabilities.insert(Capability::SchemaSearch);
+            } else if tool_name == "tool_search" {
+                self.enabled_capabilities.insert(Capability::ToolSearch);
+            } else if tool_name.contains("::") && !tool_name.starts_with("builtin::") {
+                // MCP tool (format: "server_id::tool_name")
+                self.enabled_capabilities.insert(Capability::McpTools);
+            }
+        }
+        
+        // If the turn config establishes a specific mode, update the current state
+        // to match. This handles the case where user attaches tools that override
+        // the default state derived from settings.
+        match &config.mode {
+            OperationalMode::CodeMode { .. } => {
+                // Ensure we're in CodeExecution state for proper prompt generation
+                if !matches!(self.current_state, AgenticState::CodeExecution { .. }) {
+                    self.transition_to(AgenticState::CodeExecution {
+                        available_tools: Vec::new(),
+                    });
+                }
+                // CRITICAL: Set python_primary=true so the tool_call format section
+                // is NOT added to the prompt (it conflicts with Python mode).
+                self.python_primary = true;
+            }
+            OperationalMode::SqlMode { .. } => {
+                if !matches!(self.current_state, AgenticState::SqlRetrieval { .. }) {
+                    self.transition_to(AgenticState::SqlRetrieval {
+                        discovered_tables: Vec::new(),
+                        max_table_relevancy: 0.0,
+                    });
+                }
+            }
+            OperationalMode::ToolMode { .. } => {
+                if !matches!(self.current_state, AgenticState::ToolOrchestration { .. }) {
+                    self.transition_to(AgenticState::ToolOrchestration {
+                        materialized_tools: Vec::new(),
+                    });
+                }
+            }
+            OperationalMode::HybridMode { enabled_modes, .. } => {
+                use crate::settings_state_machine::SimplifiedMode;
+                // For hybrid mode, prefer CodeExecution if Code is enabled
+                if enabled_modes.contains(&SimplifiedMode::Code) {
+                    if !matches!(self.current_state, AgenticState::CodeExecution { .. }) {
+                        self.transition_to(AgenticState::CodeExecution {
+                            available_tools: Vec::new(),
+                        });
+                    }
+                }
+            }
+            OperationalMode::Conversational => {
+                // No transition needed - keep current state or let compute_initial_state handle it
+            }
+        }
+        
+        self.turn_config = Some(config);
     }
 
     /// Build the system prompt for the current state.
@@ -1317,6 +1383,151 @@ mod tests {
 
         // Check that SQL Retrieval is present (since sql_select is enabled)
         assert!(previews.iter().any(|p| p.name == "SQL Retrieval"));
+    }
+
+    #[test]
+    fn test_turn_attached_python_enables_code_execution() {
+        // Scenario: python_execution_enabled=false in settings, but user explicitly
+        // attaches python_execution for this turn. The state machine should enable
+        // CodeExecution mode and generate Python guidance.
+        let mut settings = AppSettings::default();
+        settings.python_execution_enabled = false; // Disabled in settings
+        settings.sql_select_enabled = true;
+        
+        let filter = ToolLaunchFilter::default();
+        let settings_sm = SettingsStateMachine::from_settings(&settings, &filter);
+        
+        // Create state machine with python_execution in attached_tools
+        let mut machine = AgenticStateMachine::new_from_settings_sm(
+            &settings_sm,
+            crate::agentic_state::PromptContext {
+                base_prompt: "Test".to_string(),
+                mcp_context: crate::agentic_state::McpToolContext::default(),
+                attached_tables: Vec::new(),
+                attached_tools: vec!["builtin::python_execution".to_string()],
+                tool_call_format: ToolCallFormatName::Hermes,
+                model_tool_format: None,
+                custom_tool_prompts: HashMap::new(),
+                python_primary: false,
+                has_attachments: false,
+            },
+        );
+        
+        // Initially, PythonExecution should NOT be in capabilities (setting is disabled)
+        assert!(!machine.enabled_capabilities().contains(&Capability::PythonExecution));
+        
+        // Compute turn config - this should add PythonExecution to capabilities
+        machine.compute_turn_config(&settings, &filter);
+        
+        // Now PythonExecution SHOULD be in capabilities
+        assert!(machine.enabled_capabilities().contains(&Capability::PythonExecution));
+        
+        // The state should be CodeExecution
+        assert!(matches!(machine.current_state(), AgenticState::CodeExecution { .. }));
+        
+        // Python should be allowed
+        assert!(machine.is_tool_allowed("python_execution"));
+        
+        // The system prompt should contain Python guidance
+        let prompt = machine.build_system_prompt();
+        assert!(prompt.contains("Python"), "System prompt should contain Python guidance");
+        assert!(prompt.contains("print"), "System prompt should contain print guidance");
+        
+        // CRITICAL: The prompt should NOT contain conflicting tool_call format instructions
+        // because python_primary should be true after compute_turn_config
+        assert!(!prompt.contains("## Tool Calling Format"), 
+            "System prompt should NOT contain Tool Calling Format section when Python mode is active");
+        assert!(prompt.contains("EXAMPLE"), 
+            "System prompt should contain Python example");
+    }
+
+    #[test]
+    fn test_turn_attached_mcp_tool_enables_tool_orchestration() {
+        // Scenario: No MCP servers are enabled in settings, but user explicitly
+        // attaches an MCP tool for this turn. The state machine should enable
+        // ToolOrchestration mode.
+        let settings = AppSettings::default(); // No MCP servers configured
+        
+        let filter = ToolLaunchFilter::default();
+        let settings_sm = SettingsStateMachine::from_settings(&settings, &filter);
+        
+        // Create state machine with an MCP tool in attached_tools
+        let mut machine = AgenticStateMachine::new_from_settings_sm(
+            &settings_sm,
+            crate::agentic_state::PromptContext {
+                base_prompt: "Test".to_string(),
+                mcp_context: crate::agentic_state::McpToolContext::default(),
+                attached_tables: Vec::new(),
+                attached_tools: vec!["my-mcp-server::some_tool".to_string()],
+                tool_call_format: ToolCallFormatName::Hermes,
+                model_tool_format: None,
+                custom_tool_prompts: HashMap::new(),
+                python_primary: false,
+                has_attachments: false,
+            },
+        );
+        
+        // Initially, McpTools should NOT be in capabilities (no MCP servers enabled)
+        assert!(!machine.enabled_capabilities().contains(&Capability::McpTools));
+        
+        // Compute turn config - this should add McpTools to capabilities
+        machine.compute_turn_config(&settings, &filter);
+        
+        // Now McpTools SHOULD be in capabilities
+        assert!(machine.enabled_capabilities().contains(&Capability::McpTools));
+        
+        // The state should be ToolOrchestration
+        assert!(matches!(machine.current_state(), AgenticState::ToolOrchestration { .. }));
+    }
+
+    #[test]
+    fn test_turn_attached_table_enables_sql_mode() {
+        // Scenario: sql_select is enabled but no tables attached by default.
+        // User explicitly attaches a table. The state machine should enable
+        // SqlRetrieval mode and include SQL guidance.
+        let mut settings = AppSettings::default();
+        settings.sql_select_enabled = true;
+        
+        let filter = ToolLaunchFilter::default();
+        let settings_sm = SettingsStateMachine::from_settings(&settings, &filter);
+        
+        // Create state machine with an attached table
+        let attached_table = crate::settings_state_machine::AttachedTableInfo {
+            source_id: "test-source".to_string(),
+            table_fq_name: "test_schema.test_table".to_string(),
+            column_count: 5,
+            schema_text: Some("CREATE TABLE test_schema.test_table (id INT, name TEXT);".to_string()),
+        };
+        
+        let mut machine = AgenticStateMachine::new_from_settings_sm(
+            &settings_sm,
+            crate::agentic_state::PromptContext {
+                base_prompt: "Test".to_string(),
+                mcp_context: crate::agentic_state::McpToolContext::default(),
+                attached_tables: vec![attached_table],
+                attached_tools: Vec::new(),
+                tool_call_format: ToolCallFormatName::Hermes,
+                model_tool_format: None,
+                custom_tool_prompts: HashMap::new(),
+                python_primary: false,
+                has_attachments: false,
+            },
+        );
+        
+        // Compute turn config
+        machine.compute_turn_config(&settings, &filter);
+        
+        // The state should be SqlRetrieval
+        assert!(matches!(machine.current_state(), AgenticState::SqlRetrieval { .. }));
+        
+        // SQL should be allowed
+        assert!(machine.is_tool_allowed("sql_select"));
+        
+        // The system prompt should contain the attached table schema
+        let prompt = machine.build_system_prompt();
+        assert!(prompt.contains("test_schema.test_table") || prompt.contains("test_table"), 
+            "System prompt should contain attached table reference");
+        assert!(prompt.contains("sql_select"), "System prompt should contain sql_select guidance");
     }
 }
 

@@ -36,10 +36,20 @@ rather than inventing results.";
 
 pub const PYTHON_SANDBOX_RULES: &str = "\
 - You must return exactly one runnable Python program in a single ```python ... ``` block. Do not return explanations or multiple blocks.
-- Tool calling is only available via Python. Use the provided global functions. Do NOT emit <tool_call> tags or JSON tool calls.
-- Use print(...) for user-facing markdown on stdout.
-- Use sys.stderr.write(...) for handoff text, which is captured on stderr and triggers loop continuation.
-- Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.";
+- Your Python code will be executed directly. Do NOT emit <tool_call> tags, JSON tool calls, or any other format - ONLY valid Python code.
+- Use print(...) for user-facing output on stdout.
+- Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.
+
+**EXAMPLE** - This is the EXACT format required:
+
+```python
+import math
+# Calculate and print result
+result = math.pi
+print(f\"Pi to 50 decimal places: {result:.50f}\")
+```
+
+Do NOT wrap code in tool_call tags. Just write Python code like the example above.";
 
 // ============ Builders ============
 

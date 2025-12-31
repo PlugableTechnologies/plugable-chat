@@ -66,5 +66,36 @@ Key log prefixes to watch:
 - **Enabled**: Controls parsing/execution. Python blocks execute if Code Mode is enabled.
 - **Primary**: Affects advertisement in the system prompt. Does not disable other enabled formats.
 
+## Attachment Visibility Principle (CRITICAL)
+
+**Invariant**: The user's visible attachments (pills in the UI) must exactly match what is enabled and explained in the system prompt.
+
+### The Rule
+1. **If visible as a pill → MUST be enabled and explained in the system prompt**
+   - User attaches `python_execution` tool → Python guidance appears in prompt
+   - User attaches a database table → SQL guidance + schema appear in prompt
+   - User attaches an MCP tool → Tool is available and documented in prompt
+   - User attaches a file → RAG context is retrieved and included
+
+2. **If NOT visible as a pill → MUST NOT be mentioned in the system prompt**
+   - No SQL tables attached → No SQL-specific guidance (even if `sql_select_enabled=true`)
+   - No Python tool attached → No Python sandbox guidance (even if capability exists)
+
+### Implementation
+- **Frontend** (`chat-store.ts`): Pills are rendered from `attachedTools`, `attachedDatabaseTables`, `ragIndexedFiles`
+- **Backend** (`state_machine.rs`): `compute_turn_config()` updates `enabled_capabilities` based on attached items
+- **Prompt Generation** (`build_system_prompt()`): Only includes guidance for capabilities in `enabled_capabilities`
+
+### Common Bug Pattern
+If a user attaches something (visible pill) but the model doesn't receive guidance:
+1. Check if `compute_turn_config()` adds the capability to `enabled_capabilities`
+2. Check if the state transition matches the attachment type
+3. Check if `build_system_prompt_sections()` includes the relevant section
+
+### Tests
+- `test_turn_attached_python_enables_code_execution`
+- `test_turn_attached_mcp_tool_enables_tool_orchestration`
+- `test_turn_attached_table_enables_sql_mode`
+
 ## TODOs
 - Re-enable native tool payloads for Phi/Hermes once Foundry JSON schema validation accepts OpenAI tool definitions.
