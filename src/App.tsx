@@ -367,15 +367,36 @@ function App() {
       const cooledDown = now - lastResetTs > RESET_COOLDOWN_MS;
       if (isSoftStalled && cooledDown) {
         lastResetTs = now;
-        console.warn("[App] Detected stalled streaming/tool heartbeat. Refreshing listeners.");
-        state.cleanupListeners();
-        state.setupListeners();
+        const currentMsg = state.operationStatus?.message || '';
+        console.warn(`[App] Long wait detected: stalledFor=${stalledFor}ms, currentStatus="${currentMsg}"`);
+        
+        // Update the status message to show elapsed time, but don't destroy listeners
+        // The backend may still be processing (Foundry can take 20-30s for first token)
+        const waitSeconds = Math.floor(stalledFor / 1000);
+        let newMessage = currentMsg;
+        
+        // Update status to show we're still waiting
+        if (currentMsg === 'Generating response...' || currentMsg === 'Preparing model request...') {
+          newMessage = `Waiting for model (${waitSeconds}s)...`;
+        } else if (currentMsg === 'Sending request to model...') {
+          newMessage = `Model processing (${waitSeconds}s)...`;
+        } else if (currentMsg.includes('Waiting for model') || currentMsg.includes('Model processing')) {
+          // Already showing wait message, just update the time
+          newMessage = currentMsg.includes('Model processing') 
+            ? `Model processing (${waitSeconds}s)...`
+            : `Waiting for model (${waitSeconds}s)...`;
+        }
+        
+        if (newMessage !== currentMsg) {
+          state.setOperationStatus({
+            type: "streaming",
+            message: newMessage,
+            startTime: state.operationStatus?.startTime || Date.now(),
+          });
+        }
+        
+        // Update activity timestamp to reset the stall timer
         state.setLastStreamActivityTs(now);
-        state.setOperationStatus({
-          type: "streaming",
-          message: "Reconnecting to backend...",
-          startTime: state.operationStatus?.startTime || Date.now(),
-        });
       }
       if (isHardStalled) {
         console.warn("[App] Hard stall detected. Reconciling with backend and unblocking UI.");

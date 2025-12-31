@@ -367,6 +367,7 @@ let unlistenSystemPrompt: (() => void) | undefined;
 let unlistenRagProgress: (() => void) | undefined;
 let unlistenModelStuck: (() => void) | undefined;
 let unlistenEmbeddingInit: (() => void) | undefined;
+let unlistenChatStreamStatus: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
 let hasInitializedRagContext = false; // Only clear RAG context once on true app startup
@@ -1393,6 +1394,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     lastStreamActivityTs: Date.now(),
                 });
             });
+
+            // Chat stream status listener - provides granular status updates during request lifecycle
+            const chatStreamStatusListener = await listen<{ phase: string; message: string; time_to_first_response_ms?: number }>('chat-stream-status', (event) => {
+                const { phase, message } = event.payload;
+                const now = Date.now();
+                console.log(`[ChatStore] 📡 chat-stream-status: phase=${phase}, message=${message}`);
+                
+                // For prewarming phase, show loading status even if not actively streaming
+                if (phase === 'prewarming') {
+                    set((state) => {
+                        // Only show prewarming if not already streaming
+                        if (state.assistantStreamingActive) return state;
+                        return {
+                            operationStatus: {
+                                type: 'loading',
+                                message,
+                                startTime: state.operationStatus?.startTime || now,
+                            },
+                            statusBarDismissed: false,
+                        };
+                    });
+                    return;
+                }
+                
+                set((state) => {
+                    // Only update if we're actively streaming
+                    if (!state.assistantStreamingActive) {
+                        console.log(`[ChatStore] chat-stream-status ignored: not streaming`);
+                        return state;
+                    }
+                    return {
+                        operationStatus: {
+                            type: 'streaming',
+                            message,
+                            startTime: state.operationStatus?.startTime || now,
+                        },
+                        // Update activity timestamp to prevent stall detector from triggering
+                        lastStreamActivityTs: now,
+                    };
+                });
+            });
             
             const systemPromptListener = await listen<{ chat_id?: string; generation_id?: number; prompt: string }>('system-prompt', (event) => {
                 set((state) => {
@@ -1914,6 +1956,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 serviceRestartStartedListener();
                 serviceRestartCompleteListener();
                 embeddingInitListener();
+                chatStreamStatusListener();
                 isSettingUp = false;
                 return;
             }
@@ -1921,6 +1964,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // Assign to module variables
             unlistenToken = tokenListener;
             unlistenFinished = finishedListener;
+            unlistenChatStreamStatus = chatStreamStatusListener;
             unlistenModelSelected = modelSelectedListener;
             unlistenToolBlocked = toolBlockedListener;
             unlistenToolCallsPending = toolCallsPendingListener;
@@ -2049,6 +2093,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenServiceRestartComplete) {
             unlistenServiceRestartComplete();
             unlistenServiceRestartComplete = undefined;
+        }
+        if (unlistenChatStreamStatus) {
+            unlistenChatStreamStatus();
+            unlistenChatStreamStatus = undefined;
         }
         set({ isListening: false });
         isSettingUp = false; // Reset setup guard

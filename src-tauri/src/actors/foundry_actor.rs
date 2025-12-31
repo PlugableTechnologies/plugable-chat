@@ -406,6 +406,8 @@ pub struct ModelGatewayActor {
     valid_eps: Vec<String>,
     /// Shared logging persistence (prompts, tools)
     logging_persistence: Arc<LoggingPersistence>,
+    /// Shared HTTP client for all Foundry API requests (connection pooling)
+    http_client: reqwest::Client,
 }
 
 impl ModelGatewayActor {
@@ -415,6 +417,14 @@ impl ModelGatewayActor {
         shared_embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
         logging_persistence: Arc<LoggingPersistence>,
     ) -> Self {
+        // Create HTTP client with connection pooling optimized for local service
+        let http_client = reqwest::Client::builder()
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(2)
+            .tcp_keepalive(Duration::from_secs(60))
+            .build()
+            .expect("Failed to create HTTP client");
+
         Self {
             foundry_msg_rx,
             port: None,
@@ -426,6 +436,7 @@ impl ModelGatewayActor {
             registered_eps: Vec::new(),
             valid_eps: Vec::new(),
             logging_persistence,
+            http_client,
         }
     }
 
@@ -452,6 +463,98 @@ impl ModelGatewayActor {
         false
     }
 
+    /// Pre-warm the HTTP connection pool by making a lightweight request to Foundry.
+    /// This ensures the first chat completion doesn't pay the connection establishment cost.
+    async fn prewarm_http_connection(&self) {
+        if let Some(port) = self.port {
+            let url = format!("http://127.0.0.1:{}/openai/status", port);
+            println!("FoundryActor: Pre-warming HTTP connection to {}", url);
+            let start = std::time::Instant::now();
+            match self
+                .http_client
+                .get(&url)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(_) => {
+                    println!(
+                        "FoundryActor: HTTP connection pre-warmed in {:?}",
+                        start.elapsed()
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "FoundryActor: Failed to pre-warm connection (non-fatal): {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Pre-load a model into VRAM to reduce time-to-first-token.
+    /// This is fire-and-forget - we don't wait for completion.
+    /// The model load happens in the background and will be ready for the first chat.
+    fn prewarm_model_in_background(&self, model_name: String) {
+        if let Some(port) = self.port {
+            let client = self.http_client.clone();
+            let app_handle = self.app_handle.clone();
+            
+            // Spawn a background task to load the model
+            tokio::spawn(async move {
+                let encoded_name = urlencoding::encode(&model_name);
+                let url = format!(
+                    "http://127.0.0.1:{}/openai/load/{}?ttl=0",
+                    port, encoded_name
+                );
+                println!(
+                    "FoundryActor: 🔥 Pre-warming model {} (loading into VRAM)...",
+                    model_name
+                );
+                let start = std::time::Instant::now();
+                
+                // Emit status so UI knows what's happening
+                let _ = app_handle.emit(
+                    "chat-stream-status",
+                    serde_json::json!({
+                        "phase": "prewarming",
+                        "message": format!("Loading {} into memory...", model_name)
+                    }),
+                );
+                
+                match client
+                    .get(&url)
+                    .timeout(Duration::from_secs(120)) // 2 minute timeout for loading
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        println!(
+                            "FoundryActor: ✅ Model {} pre-warmed in {:?}",
+                            model_name,
+                            start.elapsed()
+                        );
+                    }
+                    Ok(resp) => {
+                        println!(
+                            "FoundryActor: ⚠️ Model pre-warm returned status {}: {}",
+                            resp.status(),
+                            model_name
+                        );
+                    }
+                    Err(e) => {
+                        // This is non-fatal - the model will be loaded on first use
+                        println!(
+                            "FoundryActor: ⚠️ Model pre-warm failed (non-fatal): {} - {}",
+                            model_name, e
+                        );
+                    }
+                }
+            });
+        }
+    }
+
     pub async fn run(mut self) {
         println!("Initializing Foundry Local Manager via CLI...");
 
@@ -467,6 +570,16 @@ impl ModelGatewayActor {
         // Foundry may take time to start up, so we retry with exponential backoff
         self.update_connection_info_with_retry(5, Duration::from_secs(2))
             .await;
+
+        // Pre-warm the HTTP connection pool so first chat request doesn't pay connection cost
+        self.prewarm_http_connection().await;
+
+        // Pre-warm the first available model to reduce time-to-first-token
+        // This loads the model into VRAM in the background
+        if let Some(first_model) = self.available_models.first().cloned() {
+            println!("FoundryActor: Pre-warming first available model: {}", first_model);
+            self.prewarm_model_in_background(first_model);
+        }
 
         // Initialize embedding model after detecting available execution providers
         // Note: fastembed uses ort internally, which will automatically use GPU if
@@ -548,8 +661,6 @@ impl ModelGatewayActor {
                 }
             }
         });
-
-        let client = reqwest::Client::new();
 
         while let Some(msg) = self.foundry_msg_rx.recv().await {
             match msg {
@@ -647,6 +758,10 @@ impl ModelGatewayActor {
                 } => {
                     self.model_id = Some(model_id.clone());
                     self.emit_model_selected(&model_id);
+                    
+                    // Pre-warm the model in the background to reduce time-to-first-token
+                    self.prewarm_model_in_background(model_id);
+                    
                     let _ = respond_to.send(true);
                 }
                 FoundryMsg::Chat {
@@ -660,6 +775,15 @@ impl ModelGatewayActor {
                     respond_to,
                     mut stream_cancel_rx,
                 } => {
+                    // Emit status immediately when chat request is received
+                    let _ = self.app_handle.emit(
+                        "chat-stream-status",
+                        json!({
+                            "phase": "preparing",
+                            "message": "Preparing model request..."
+                        }),
+                    );
+
                     // Check if we need to restart/reconnect
                     if self.port.is_none() || self.available_models.is_empty() {
                         println!("FoundryActor: No models found or port missing. Attempting to restart service...");
@@ -901,14 +1025,24 @@ impl ModelGatewayActor {
                                 }
                             );
                         }
+                        use std::io::Write;
+                        let request_start = std::time::Instant::now();
                         println!(
                             "[FoundryActor] Sending streaming request to Foundry at {}",
                             url
                         );
-                        use std::io::Write;
                         let _ = std::io::stdout().flush();
 
-                        let client_clone = client.clone();
+                        // Emit status: sending request to model
+                        let _ = self.app_handle.emit(
+                            "chat-stream-status",
+                            json!({
+                                "phase": "sending",
+                                "message": "Sending request to model..."
+                            }),
+                        );
+
+                        let client_clone = self.http_client.clone();
                         let respond_to_clone = respond_to.clone();
 
                         // Retry logic with exponential backoff for 4XX errors
@@ -929,6 +1063,7 @@ impl ModelGatewayActor {
                             };
 
                             // Rebuild body in case anything changed after restart
+                            let body_build_start = std::time::Instant::now();
                             let current_body = build_chat_request_body(
                                 &model,
                                 model_family,
@@ -940,10 +1075,12 @@ impl ModelGatewayActor {
                                 &reasoning_effort,
                                 use_responses_api,
                             );
+                            let body_build_elapsed = body_build_start.elapsed();
 
                             // Note: Request body logging moved to log_with_diff for system prompt and tools JSON
                             // to keep logs clean. Enable RUST_LOG=debug for full request body if needed.
 
+                            let send_start = std::time::Instant::now();
                             match client_clone
                                 .post(&current_url)
                                 .json(&current_body)
@@ -951,6 +1088,23 @@ impl ModelGatewayActor {
                                 .await
                             {
                                 Ok(mut resp) => {
+                                    let send_elapsed = send_start.elapsed();
+                                    let total_elapsed = request_start.elapsed();
+                                    println!(
+                                        "[FoundryActor] ⏱️  Request timing: body_build={:?}, http_send={:?}, total={:?}",
+                                        body_build_elapsed, send_elapsed, total_elapsed
+                                    );
+                                    let _ = std::io::stdout().flush();
+
+                                    // Emit status: model is responding
+                                    let _ = self.app_handle.emit(
+                                        "chat-stream-status",
+                                        json!({
+                                            "phase": "streaming",
+                                            "message": "Generating response...",
+                                            "time_to_first_response_ms": total_elapsed.as_millis() as u64
+                                        }),
+                                    );
                                     let status = resp.status();
 
                                     // Handle 4XX client errors with retry and service restart
@@ -1005,8 +1159,8 @@ impl ModelGatewayActor {
                                         let mut last_token_time = stream_start;
                                         let mut last_progress_log = stream_start;
                                         println!(
-                                            "[FoundryActor] 📡 Stream started at {:?}",
-                                            stream_start
+                                            "[FoundryActor] 📡 Stream started (time_to_first_response={:?})",
+                                            request_start.elapsed()
                                         );
                                         let _ = std::io::stdout().flush();
 
@@ -1199,7 +1353,7 @@ impl ModelGatewayActor {
                 } => {
                     println!("FoundryActor: Downloading model: {}", model_name);
                     if let Some(port) = self.port {
-                        let result = self.download_model_impl(&client, port, &model_name).await;
+                        let result = self.download_model_impl(&self.http_client, port, &model_name).await;
                         // Refresh the models list after successful download
                         if result.is_ok() {
                             let models = self.get_models_via_rest(port).await;
@@ -1220,7 +1374,7 @@ impl ModelGatewayActor {
                 } => {
                     println!("FoundryActor: Loading model into VRAM: {}", model_name);
                     if let Some(port) = self.port {
-                        let result = self.load_model_impl(&client, port, &model_name).await;
+                        let result = self.load_model_impl(&self.http_client, port, &model_name).await;
                         // Update model_id when load succeeds
                         if result.is_ok() {
                             self.model_id = Some(model_name.clone());
@@ -1234,7 +1388,7 @@ impl ModelGatewayActor {
                 FoundryMsg::GetLoadedModels { respond_to } => {
                     println!("FoundryActor: Getting loaded models");
                     if let Some(port) = self.port {
-                        let models = self.get_loaded_models_impl(&client, port).await;
+                        let models = self.get_loaded_models_impl(&self.http_client, port).await;
                         let _ = respond_to.send(models);
                     } else {
                         let _ = respond_to.send(Vec::new());
@@ -1276,7 +1430,7 @@ impl ModelGatewayActor {
                 FoundryMsg::GetCatalogModels { respond_to } => {
                     println!("FoundryActor: Getting catalog models");
                     if let Some(port) = self.port {
-                        let catalog = self.get_catalog_models_impl(&client, port).await;
+                        let catalog = self.get_catalog_models_impl(&self.http_client, port).await;
                         let _ = respond_to.send(catalog);
                     } else {
                         let _ = respond_to.send(Vec::new());
@@ -1288,7 +1442,7 @@ impl ModelGatewayActor {
                 } => {
                     println!("FoundryActor: Unloading model: {}", model_name);
                     if let Some(port) = self.port {
-                        let result = self.unload_model_impl(&client, port, &model_name).await;
+                        let result = self.unload_model_impl(&self.http_client, port, &model_name).await;
                         let _ = respond_to.send(result);
                     } else {
                         let _ = respond_to.send(Err("Foundry service not available".to_string()));
@@ -1297,7 +1451,7 @@ impl ModelGatewayActor {
                 FoundryMsg::GetServiceStatus { respond_to } => {
                     println!("FoundryActor: Getting service status");
                     if let Some(port) = self.port {
-                        let result = self.get_service_status_impl(&client, port).await;
+                        let result = self.get_service_status_impl(&self.http_client, port).await;
                         let _ = respond_to.send(result);
                     } else {
                         let _ = respond_to.send(Err("Foundry service not available".to_string()));
@@ -1478,8 +1632,7 @@ impl ModelGatewayActor {
         let url = format!("http://127.0.0.1:{}/openai/models", port);
         println!("FoundryActor: Fetching models via REST API: {}", url);
 
-        let client = reqwest::Client::new();
-        match client.get(&url).send().await {
+        match self.http_client.get(&url).send().await {
             Ok(resp) => {
                 if resp.status().is_success() {
                     let body_val: Value = match resp.json().await {
