@@ -1448,6 +1448,17 @@ const preprocessLaTeX = (content: string) => {
             continue;
         }
         if (processed.startsWith('$', i)) {
+            // Check if this is a currency amount ($ followed by digit)
+            const nextChar = processed[i + 1];
+            const isCurrency = nextChar && /[0-9]/.test(nextChar);
+
+            if (isCurrency && !inMath) {
+                // Escape the dollar sign so it renders literally
+                result += '\\$';
+                i += 1;
+                continue;
+            }
+
             if (inMath === '$') inMath = false;
             else if (!inMath) inMath = '$';
             result += '$';
