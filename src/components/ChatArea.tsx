@@ -1571,7 +1571,9 @@ const AssistantMessage = memo(function AssistantMessage({
             pythonToolCalls
                 .slice()
                 .reverse()
-                .find((call) => call.result && call.result.trim().length > 0)
+                // Only show successful python output in the main chat area
+                // Errors stay in the tool accordion for the model to retry
+                .find((call) => !call.isError && call.result && call.result.trim().length > 0)
                 ?.result.trim(),
         [pythonToolCalls]
     );
@@ -1580,7 +1582,16 @@ const AssistantMessage = memo(function AssistantMessage({
             toolCalls
                 .slice()
                 .reverse()
-                .find((call) => call.tool !== 'python_execution' && call.result && call.result.trim().length > 0)
+                // Only show successful tool results as fallback answers
+                // Errors stay in the tool accordion for the model to retry
+                // Exclude sql_select - SQL results are already rendered as a table in renderedParts
+                .find((call) => 
+                    call.tool !== 'python_execution' && 
+                    call.tool !== 'sql_select' && 
+                    !call.isError && 
+                    call.result && 
+                    call.result.trim().length > 0
+                )
                 ?.result.trim(),
         [toolCalls]
     );

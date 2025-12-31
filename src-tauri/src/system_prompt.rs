@@ -34,7 +34,8 @@ rather than inventing results.";
 
 // ============ Python Guidance ============
 
-pub const PYTHON_SANDBOX_RULES: &str = "\
+/// Python sandbox rules for text-based code mode (raw ```python blocks)
+pub const PYTHON_SANDBOX_RULES_TEXT_MODE: &str = "\
 - You must return exactly one runnable Python program in a single ```python ... ``` block. Do not return explanations or multiple blocks.
 - Your Python code will be executed directly. Do NOT emit <tool_call> tags, JSON tool calls, or any other format - ONLY valid Python code.
 - Use print(...) for user-facing output on stdout.
@@ -50,6 +51,31 @@ print(f\"Pi to 50 decimal places: {result:.50f}\")
 ```
 
 Do NOT wrap code in tool_call tags. Just write Python code like the example above.";
+
+/// Python sandbox rules for native tool calling mode (call python_execution tool)
+pub const PYTHON_SANDBOX_RULES_NATIVE_MODE: &str = "\
+- You MUST call the `python_execution` tool to execute Python code. Do NOT output raw code blocks.
+- The `code` parameter is a JSON array of strings, where each string is one line of Python code.
+- Use print(...) for user-facing output - it will be shown directly to the user.
+- Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.
+
+**CORRECT EXAMPLE** - The `code` argument must be a JSON array (NOT a string):
+```json
+{\"name\": \"python_execution\", \"arguments\": {\"code\": [\"import math\", \"result = math.pi\", \"print(f'Pi: {result:.50f}')\"]}}
+```
+
+**WRONG** - Do NOT stringify the array:
+```json
+{\"arguments\": {\"code\": \"[...]\"}}  // WRONG - code is a string
+```
+
+The tool executes the code and shows print output to the user.";
+
+/// Allowed Python imports list
+pub const PYTHON_ALLOWED_IMPORTS: &str = "math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html";
+
+/// Legacy alias for backwards compatibility
+pub const PYTHON_SANDBOX_RULES: &str = PYTHON_SANDBOX_RULES_TEXT_MODE;
 
 // ============ Builders ============
 
@@ -128,11 +154,20 @@ pub fn build_sql_instructions(
 }
 
 /// Build the Python execution prompt section.
-pub fn build_python_prompt(available_tools: &[String], has_attachments: bool) -> String {
+/// 
+/// `use_native_tool_call`: When true, instructs model to call python_execution as a tool.
+///                         When false, instructs model to output raw ```python blocks.
+pub fn build_python_prompt(available_tools: &[String], has_attachments: bool, use_native_tool_call: bool) -> String {
     let tools_section = if available_tools.is_empty() {
         "No MCP tools discovered yet. Call `tool_search` inside Python to find relevant tools if needed.".to_string()
     } else {
         format!("Available MCP tools (call them as global functions): {}", available_tools.join(", "))
+    };
+
+    let rules = if use_native_tool_call {
+        PYTHON_SANDBOX_RULES_NATIVE_MODE
+    } else {
+        PYTHON_SANDBOX_RULES_TEXT_MODE
     };
 
     let mut prompt = format!(
@@ -142,7 +177,7 @@ pub fn build_python_prompt(available_tools: &[String], has_attachments: bool) ->
         {}\n\n\
         Keep code concise and runnable; include prints for results the user should see.",
         tools_section,
-        PYTHON_SANDBOX_RULES
+        rules
     );
 
     if has_attachments {

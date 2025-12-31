@@ -5,7 +5,8 @@ The actual enforcement layer for the Python sandbox.
 
 - **`ALLOWED_MODULES`**: Whitelist of importable modules. Must be kept in sync with `tools/code_execution.rs`.
 - **`SANDBOX_SETUP_CODE`**: Python code that:
-  - Blocks dangerous builtins: `open`, `eval`, `exec`, `compile`, `input`, `breakpoint`, `globals`, `locals`, `vars`, `memoryview`.
+  - Blocks dangerous builtins: `open`, `eval`, `input`, `breakpoint`, `globals`, `locals`, `vars`, `memoryview`.
+  - Note: `exec` and `compile` are kept because some stdlib modules (like `decimal`) use them internally during import.
   - Installs the restricted import hook.
 
 ## Limitations

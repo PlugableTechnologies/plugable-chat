@@ -621,11 +621,27 @@ fn parse_pythonic_tool_calls(content: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
     let re = Regex::new(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)").unwrap();
 
+    // Known tool names to filter out false positives (same list as parse_pythonic_code_block_tool_calls)
+    // This prevents Python builtins like print() from being treated as tool calls
+    let known_tools = [
+        "sql_select",
+        "schema_search",
+        "tool_search",
+        "python_execution",
+    ];
+
     for cap in re.captures_iter(content) {
         let name = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         if name.is_empty() {
             continue;
         }
+
+        // Only parse if it looks like a known tool or has server prefix (e.g., "server___tool")
+        let is_known = known_tools.contains(&name) || name.contains("___");
+        if !is_known {
+            continue;
+        }
+
         let args_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
         // Use tool-specific positional argument parsing for sql_select
         let arguments = if name == "sql_select" {

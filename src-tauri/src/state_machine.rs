@@ -1031,7 +1031,16 @@ impl AgenticStateMachine {
 
     /// Generate the Python execution prompt section.
     fn python_execution_prompt(&self, available_tools: &[String]) -> String {
-        let mut prompt = system_prompt::build_python_prompt(available_tools, self.has_attachments);
+        // Determine if we should use native tool calling mode
+        // Native mode: model calls python_execution as a tool with code parameter
+        // Text mode: model outputs raw ```python blocks that we detect and execute
+        let use_native_tool_call = self.tool_call_format == ToolCallFormatName::Native;
+        
+        let mut prompt = system_prompt::build_python_prompt(
+            available_tools, 
+            self.has_attachments,
+            use_native_tool_call,
+        );
 
         // Add custom python_execution prompt if available
         if let Some(custom) = self.custom_tool_prompts.get("builtin::python_execution") {

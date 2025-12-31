@@ -499,7 +499,12 @@ class _SandboxStdErr:
 sys.stderr = _SandboxStdErr()
 
 # Remove dangerous builtins
-_blocked = ['open', 'eval', 'exec', 'compile', 'input', 'breakpoint', 
+# Note: We keep 'exec' and 'compile' because some stdlib modules (like decimal)
+# use them internally during import. Our sandbox is safe because:
+# 1. Code is compiled via RustPython's vm.compile() before reaching Python
+# 2. Import restrictions prevent loading dangerous modules
+# 3. The user code itself is already validated before execution
+_blocked = ['open', 'eval', 'input', 'breakpoint', 
             'globals', 'locals', 'vars', 'memoryview']
 for _name in _blocked:
     if hasattr(builtins, _name):

@@ -1276,6 +1276,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     }
                     const now = Date.now();
                     
+                    // Clear "Reconnecting" status if we're receiving tokens again
+                    // This handles the case where the stall detector set the message but streaming resumed
+                    const shouldClearReconnecting = state.operationStatus?.message?.includes('Reconnecting');
+                    const newOperationStatus = shouldClearReconnecting ? {
+                        type: 'streaming' as const,
+                        message: 'Generating response...',
+                        startTime: state.operationStatus?.startTime || now,
+                    } : state.operationStatus;
+                    
                     // Check if we're streaming to a different chat than currently displayed
                     const targetChatId = state.streamingChatId;
                     const isStreamingToOtherChat = targetChatId && targetChatId !== state.currentChatId;
@@ -1289,9 +1298,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                                 ...lastMsg,
                                 content: lastMsg.content + event.payload
                             };
-                            return { streamingMessages: newStreamingMessages, lastStreamActivityTs: now };
+                            return { streamingMessages: newStreamingMessages, lastStreamActivityTs: now, operationStatus: newOperationStatus };
                         }
-                        return { ...state, lastStreamActivityTs: now };
+                        return { ...state, lastStreamActivityTs: now, operationStatus: newOperationStatus };
                     }
                     
                     // Normal case: streaming to current chat
@@ -1303,9 +1312,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                             ...lastMsg,
                             content: lastMsg.content + event.payload
                         };
-                        return { chatMessages: newMessages, lastStreamActivityTs: now };
+                        return { chatMessages: newMessages, lastStreamActivityTs: now, operationStatus: newOperationStatus };
                     }
-                    return { ...state, lastStreamActivityTs: now };
+                    return { ...state, lastStreamActivityTs: now, operationStatus: newOperationStatus };
                 });
             });
 

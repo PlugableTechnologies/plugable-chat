@@ -2033,7 +2033,8 @@ pub(crate) async fn run_agentic_loop(
                         );
                     }
                 }
-                "python_execution" => {
+                "python_execution" if !is_error => {
+                    // Only transition state on SUCCESS - errors should allow retry without state change
                     // Check for stderr in the result to determine if we need a handoff
                     let has_stderr = result_text.contains("STDERR:");
                     let stdout = if result_text.contains("STDOUT:") {
@@ -3004,7 +3005,13 @@ async fn chat(
     let native_available = native_tool_calling_enabled;
     let primary_format_for_prompt =
         format_config.resolve_primary_for_prompt(code_mode_possible, native_available);
-    let python_tool_mode = code_mode_possible;
+    // python_tool_mode controls DETECTION of Python code in responses.
+    // This should be enabled when python_execution is available, regardless of prompt format.
+    // Even if we prompt the model with Native/Hermes format, it may still output Python code blocks.
+    // When it does, we should detect and execute them if python_execution is enabled.
+    let python_tool_mode = python_execution_enabled
+        && python_tool_calling_enabled
+        && tool_filter.builtin_allowed("python_execution");
     // tool_search is only offered when explicitly enabled in settings AND there are deferred tools
     let allow_tool_search_for_python =
         python_tool_mode && tool_search_enabled && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search");
