@@ -158,21 +158,23 @@ impl ToolCapabilityResolver {
     }
     
     /// Extract enabled built-ins from settings (temporary migration helper)
-    /// TODO: Replace with direct access to settings.enabled_builtins once migrated
+    /// Built-in tools require BOTH their *_enabled flag AND presence in always_on_builtin_tools
+    /// to be considered globally enabled.
     fn extract_enabled_builtins(settings: &AppSettings) -> HashSet<String> {
         let mut enabled = HashSet::new();
+        let always_on = &settings.always_on_builtin_tools;
         
-        // Check individual boolean flags (current structure)
-        if settings.python_execution_enabled {
+        // Check individual boolean flags AND always_on_builtin_tools
+        if settings.python_execution_enabled && always_on.contains(&BUILTIN_PYTHON_EXECUTION.to_string()) {
             enabled.insert(BUILTIN_PYTHON_EXECUTION.to_string());
         }
-        if settings.tool_search_enabled {
+        if settings.tool_search_enabled && always_on.contains(&BUILTIN_TOOL_SEARCH.to_string()) {
             enabled.insert(BUILTIN_TOOL_SEARCH.to_string());
         }
-        if settings.schema_search_enabled {
+        if settings.schema_search_enabled && always_on.contains(&BUILTIN_SCHEMA_SEARCH.to_string()) {
             enabled.insert(BUILTIN_SCHEMA_SEARCH.to_string());
         }
-        if settings.sql_select_enabled {
+        if settings.sql_select_enabled && always_on.contains(&BUILTIN_SQL_SELECT.to_string()) {
             enabled.insert(BUILTIN_SQL_SELECT.to_string());
         }
         

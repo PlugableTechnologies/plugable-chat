@@ -225,6 +225,16 @@ async fn sync_registry_database_tools(
     schema_search_enabled: bool,
     sql_select_enabled: bool,
 ) {
+    // #region agent log
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        use std::io::Write;
+        let _ = writeln!(f, r#"{{"location":"lib.rs:sync_registry","message":"sync_registry_database_tools called","data":{{"sql_select_enabled":{},"schema_search_enabled":{}}},"timestamp":{},"sessionId":"debug-session","hypothesisId":"C"}}"#,
+            sql_select_enabled,
+            schema_search_enabled,
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+        );
+    }
+    // #endregion
     let mut guard = registry.write().await;
     guard.set_schema_search_enabled(schema_search_enabled);
     guard.set_sql_select_enabled(sql_select_enabled);
@@ -3370,6 +3380,20 @@ async fn chat(
     // Visible tools: always include enabled built-ins; defer MCP tools to tool_search unless materialized.
     let builtin_tools: Vec<(String, Vec<McpTool>)> = {
         let registry = tool_registry_state.registry.read().await;
+        // #region agent log
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+            use std::io::Write;
+            let _ = writeln!(f, r#"{{"location":"lib.rs:3371","message":"builtin_tools filter (post-fix)","data":{{"turn_enabled_tools":{:?},"always_on_builtin_tools":{:?},"sql_select_enabled":{},"schema_search_enabled":{},"python_execution_enabled":{},"registry_internal_tools":{:?}}},"timestamp":{},"sessionId":"debug-session","hypothesisId":"B","runId":"post-fix"}}"#,
+                turn_config.enabled_tools,
+                always_on_builtin_tools,
+                sql_select_enabled,
+                schema_search_enabled,
+                python_execution_enabled,
+                registry.get_internal_tools().iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            );
+        }
+        // #endregion
         registry
             .get_internal_tools()
             .iter()
@@ -3379,16 +3403,22 @@ async fn chat(
                     return turn_config.enabled_tools.contains(&schema.name);
                 }
 
-                // Fallback to global settings if no per-chat tools attached
-                // Only include python_execution if it's enabled
+                // Fallback: include tool only if it's in always_on_builtin_tools AND passes filter
+                // Built-in tools require BOTH their *_enabled flag AND presence in always_on_builtin_tools
+                let is_always_on = always_on_builtin_tools.contains(&schema.name);
+                
                 if schema.name == "python_execution" {
-                    python_execution_enabled && tool_filter.builtin_allowed("python_execution")
+                    is_always_on && python_execution_enabled && tool_filter.builtin_allowed("python_execution")
                 } else if schema.name == "tool_search" {
-                    // Only include tool_search if there are deferred tools to discover
-                    has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
+                    // tool_search only if always-on AND there are deferred tools to discover
+                    is_always_on && has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
+                } else if schema.name == "sql_select" {
+                    is_always_on && sql_select_enabled && tool_filter.builtin_allowed("sql_select")
+                } else if schema.name == "schema_search" {
+                    is_always_on && schema_search_enabled && tool_filter.builtin_allowed("schema_search")
                 } else {
-                    // Other built-ins (schema_search, sql_select) are included if allowed
-                    tool_filter.builtin_allowed(&schema.name)
+                    // Unknown built-ins: require always_on and filter
+                    is_always_on && tool_filter.builtin_allowed(&schema.name)
                 }
             })
             .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
@@ -3435,19 +3465,28 @@ async fn chat(
                         continue;
                     }
                 } else {
-                    // Fallback to global settings
+                    // Fallback: require tool to be in always_on_builtin_tools
+                    let is_always_on = always_on_builtin_tools.contains(&schema.name);
+                    
                     if schema.name == "python_execution" {
-                        if !python_execution_enabled || !tool_filter.builtin_allowed("python_execution")
-                        {
+                        if !is_always_on || !python_execution_enabled || !tool_filter.builtin_allowed("python_execution") {
                             continue;
                         }
                     } else if schema.name == "tool_search" {
-                        // Only include tool_search if there are deferred tools to discover
-                        if !has_deferred_mcp_tools || !tool_filter.builtin_allowed("tool_search") {
+                        // tool_search only if always-on AND there are deferred tools to discover
+                        if !is_always_on || !has_deferred_mcp_tools || !tool_filter.builtin_allowed("tool_search") {
                             continue;
                         }
-                    } else if !tool_filter.builtin_allowed(&schema.name) {
-                        // Other built-ins (schema_search, sql_select) - check filter
+                    } else if schema.name == "sql_select" {
+                        if !is_always_on || !sql_select_enabled || !tool_filter.builtin_allowed("sql_select") {
+                            continue;
+                        }
+                    } else if schema.name == "schema_search" {
+                        if !is_always_on || !schema_search_enabled || !tool_filter.builtin_allowed("schema_search") {
+                            continue;
+                        }
+                    } else if !is_always_on || !tool_filter.builtin_allowed(&schema.name) {
+                        // Unknown built-ins: require always_on and filter
                         continue;
                     }
                 }

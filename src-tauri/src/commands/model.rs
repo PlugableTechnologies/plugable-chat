@@ -3,8 +3,9 @@
 //! Commands for listing, loading, unloading, and managing AI models
 //! through the Foundry Local service.
 
-use crate::app_state::ActorHandles;
+use crate::app_state::{ActorHandles, SettingsState};
 use crate::protocol::{CachedModel, CatalogModel, FoundryMsg, FoundryServiceStatus, ModelInfo};
+use crate::settings;
 use tauri::State;
 use tokio::sync::oneshot;
 
@@ -20,19 +21,37 @@ pub async fn get_models(handles: State<'_, ActorHandles>) -> Result<Vec<String>,
     rx.await.map_err(|_| "Foundry actor died".to_string())
 }
 
-/// Set the active model
+/// Set the active model and persist selection to settings
 #[tauri::command]
-pub async fn set_model(model: String, handles: State<'_, ActorHandles>) -> Result<bool, String> {
+pub async fn set_model(
+    model: String,
+    handles: State<'_, ActorHandles>,
+    settings_state: State<'_, SettingsState>,
+) -> Result<bool, String> {
     let (tx, rx) = oneshot::channel();
     handles
         .foundry_tx
         .send(FoundryMsg::SetModel {
-            model_id: model,
+            model_id: model.clone(),
             respond_to: tx,
         })
         .await
         .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())
+    let result = rx.await.map_err(|_| "Foundry actor died".to_string())?;
+
+    // Persist the model selection to settings
+    if result {
+        let mut guard = settings_state.settings.write().await;
+        guard.selected_model = Some(model.clone());
+        if let Err(e) = settings::save_settings(&guard).await {
+            // Log but don't fail - the model is already set in Foundry
+            println!("[set_model] Warning: Failed to persist model selection: {}", e);
+        } else {
+            println!("[set_model] Model selection persisted: {}", model);
+        }
+    }
+
+    Ok(result)
 }
 
 /// Get cached model information

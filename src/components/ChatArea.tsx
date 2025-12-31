@@ -2043,6 +2043,9 @@ export function ChatArea() {
         clearRelevanceSearch(); // Clear relevance results when sending
         if (textareaRef.current) textareaRef.current.style.height = 'auto';
         setAssistantStreamingActive(true);
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ChatArea.tsx:2045',message:'setAssistantStreamingActive(true) called',data:{chatId},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'F'})}).catch(()=>{});
+        // #endregion
         storeState.setLastStreamActivityTs(Date.now());
         
         // Track which chat we're streaming to (for cross-chat switching)

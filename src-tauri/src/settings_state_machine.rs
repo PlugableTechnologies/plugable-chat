@@ -384,33 +384,50 @@ impl SettingsStateMachine {
     // ============ Private Computation Methods ============
 
     /// Compute which capabilities are enabled based on settings and filter.
+    /// 
+    /// Built-in tools require BOTH their *_enabled flag AND presence in always_on_builtin_tools
+    /// to be considered globally enabled. Per-chat attached tools are handled separately
+    /// in compute_for_turn().
     fn compute_enabled_capabilities(
         settings: &AppSettings,
         filter: &ToolLaunchFilter,
     ) -> HashSet<Capability> {
         let mut caps = HashSet::new();
+        let always_on = &settings.always_on_builtin_tools;
 
         // RAG is always available if we support attachments
         // (gated by actual attachment presence at runtime)
         caps.insert(Capability::Rag);
 
-        // Schema search
-        if settings.schema_search_enabled && filter.builtin_allowed("schema_search") {
+        // Schema search - requires *_enabled flag AND presence in always_on_builtin_tools
+        if settings.schema_search_enabled 
+            && always_on.contains(&"schema_search".to_string())
+            && filter.builtin_allowed("schema_search") 
+        {
             caps.insert(Capability::SchemaSearch);
         }
 
-        // SQL query
-        if settings.sql_select_enabled && filter.builtin_allowed("sql_select") {
+        // SQL query - requires *_enabled flag AND presence in always_on_builtin_tools
+        if settings.sql_select_enabled 
+            && always_on.contains(&"sql_select".to_string())
+            && filter.builtin_allowed("sql_select") 
+        {
             caps.insert(Capability::SqlQuery);
         }
 
-        // Python execution
-        if settings.python_execution_enabled && filter.builtin_allowed("python_execution") {
+        // Python execution - requires *_enabled flag AND presence in always_on_builtin_tools
+        if settings.python_execution_enabled 
+            && always_on.contains(&"python_execution".to_string())
+            && filter.builtin_allowed("python_execution") 
+        {
             caps.insert(Capability::PythonExecution);
         }
 
-        // Tool search
-        if settings.tool_search_enabled && filter.builtin_allowed("tool_search") {
+        // Tool search - requires *_enabled flag AND presence in always_on_builtin_tools
+        if settings.tool_search_enabled 
+            && always_on.contains(&"tool_search".to_string())
+            && filter.builtin_allowed("tool_search") 
+        {
             caps.insert(Capability::ToolSearch);
         }
 
@@ -428,14 +445,32 @@ impl SettingsStateMachine {
     }
 
     /// Compute tool availability from settings.
+    /// 
+    /// Built-in tools require BOTH their *_enabled flag AND presence in always_on_builtin_tools
+    /// to be considered globally available.
     fn compute_tool_availability(
         settings: &AppSettings,
         filter: &ToolLaunchFilter,
     ) -> ToolAvailability {
+        // #region agent log
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+            use std::io::Write;
+            let _ = writeln!(f, r#"{{"location":"settings_state_machine.rs:435","message":"compute_tool_availability called","data":{{"sql_select_enabled":{},"always_on_builtin_tools":{:?},"python_enabled":{},"tool_search_enabled":{},"schema_search_enabled":{}}},"timestamp":{},"sessionId":"debug-session","hypothesisId":"A"}}"#,
+                settings.sql_select_enabled,
+                settings.always_on_builtin_tools,
+                settings.python_execution_enabled,
+                settings.tool_search_enabled,
+                settings.schema_search_enabled,
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            );
+        }
+        // #endregion
         let mut enabled_builtins = HashSet::new();
+        let always_on = &settings.always_on_builtin_tools;
 
-        // Check each built-in
+        // Check each built-in - requires BOTH *_enabled flag AND presence in always_on_builtin_tools
         if settings.python_execution_enabled
+            && always_on.contains(&"python_execution".to_string())
             && filter.builtin_allowed("python_execution")
             && settings
                 .tool_call_formats
@@ -444,17 +479,26 @@ impl SettingsStateMachine {
             enabled_builtins.insert("python_execution".to_string());
         }
 
-        if settings.tool_search_enabled && filter.builtin_allowed("tool_search") {
+        if settings.tool_search_enabled 
+            && always_on.contains(&"tool_search".to_string())
+            && filter.builtin_allowed("tool_search") 
+        {
             enabled_builtins.insert("tool_search".to_string());
         }
 
         // schema_search is only exposed as a tool if explicitly enabled
         // (internal schema search is auto-derived when sql_select is on but schema_search is off)
-        if settings.schema_search_enabled && filter.builtin_allowed("schema_search") {
+        if settings.schema_search_enabled 
+            && always_on.contains(&"schema_search".to_string())
+            && filter.builtin_allowed("schema_search") 
+        {
             enabled_builtins.insert("schema_search".to_string());
         }
 
-        if settings.sql_select_enabled && filter.builtin_allowed("sql_select") {
+        if settings.sql_select_enabled 
+            && always_on.contains(&"sql_select".to_string())
+            && filter.builtin_allowed("sql_select") 
+        {
             enabled_builtins.insert("sql_select".to_string());
         }
 
