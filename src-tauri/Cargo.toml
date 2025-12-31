@@ -74,9 +74,8 @@ async-channel = "2"
 python-sandbox = { path = "crates/python-sandbox" }
 mcp-test-server = { path = "../mcp-test-server" }
 
-# PDF text extraction
+# PDF text extraction (pdf-extract has better font encoding handling than raw lopdf)
 pdf-extract = "0.9"
-lopdf = "0.31"
 
 # DOCX parsing (DOCX = ZIP with XML)
 zip = "0.6"

@@ -1626,19 +1626,16 @@ impl RagRetrievalActor {
         file_index: usize,
         total_files: usize,
     ) -> Result<String, String> {
-        use lopdf::Document;
+        // pdf-extract has better font encoding handling than raw lopdf
+        // It properly handles ToUnicode CMaps and custom font encodings
+        let pages = pdf_extract::extract_text_by_pages(file_path)
+            .map_err(|e| format!("Failed to extract PDF text: {}", e))?;
 
-        let doc = Document::load(file_path).map_err(|e| format!("Failed to load PDF: {}", e))?;
-
-        let pages = doc.get_pages();
         let total_pages = pages.len() as u32;
         let mut extracted_text = String::new();
 
-        for (i, (page_num, _page_id)) in pages.iter().enumerate() {
-            // Extract text from this page
-            // lopdf's extract_text takes a slice of page numbers
-            let page_text = doc.extract_text(&[*page_num]).unwrap_or_default();
-            extracted_text.push_str(&page_text);
+        for (i, page_text) in pages.iter().enumerate() {
+            extracted_text.push_str(page_text);
             extracted_text.push('\n');
 
             // Emit progress every 5 pages or on last page
