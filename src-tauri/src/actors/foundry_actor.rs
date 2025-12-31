@@ -650,6 +650,7 @@ impl ModelGatewayActor {
                     let _ = respond_to.send(true);
                 }
                 FoundryMsg::Chat {
+                    model: requested_model,
                     chat_history_messages,
                     reasoning_effort,
                     native_tool_specs,
@@ -690,16 +691,28 @@ impl ModelGatewayActor {
                     }
 
                     if let Some(port) = self.port {
-                        // Use detected model or default to "Phi-4-generic-gpu:1" if detection failed but port is open
-                        let model = self
-                            .model_id
-                            .clone()
-                            .unwrap_or_else(|| "Phi-4-generic-gpu:1".to_string());
+                        // Use the model provided in the request (frontend is source of truth)
+                        let model = requested_model.clone();
+                        
+                        // Check for desync between requested model and actor state
+                        if let Some(ref actor_model) = self.model_id {
+                            if actor_model != &model {
+                                println!(
+                                    "[FoundryActor] WARNING: Model desync detected! Request model='{}', Actor model='{}'. Using request model.",
+                                    model, actor_model
+                                );
+                            }
+                        } else {
+                             println!(
+                                "[FoundryActor] WARNING: Actor has no model_id set, using request model='{}'",
+                                model
+                            );
+                        }
 
-                let desired_chat_format = chat_format_overrides
-                    .get(&model)
-                    .copied()
-                    .unwrap_or(chat_format_default);
+                        let desired_chat_format = chat_format_overrides
+                            .get(&model)
+                            .copied()
+                            .unwrap_or(chat_format_default);
                         let supports_responses = Self::model_supports_responses(&model);
                         let effective_chat_format = if desired_chat_format == ChatFormatName::OpenaiResponses
                             && !supports_responses

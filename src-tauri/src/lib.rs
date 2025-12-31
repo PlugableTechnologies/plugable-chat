@@ -1271,6 +1271,7 @@ pub(crate) async fn run_agentic_loop(
 
         if let Err(e) = foundry_tx
             .send(FoundryMsg::Chat {
+                model: model_name.clone(),
                 chat_history_messages: model_messages,
                 reasoning_effort: reasoning_effort.clone(),
                 native_tool_specs: openai_tools.clone(),

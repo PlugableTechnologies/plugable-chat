@@ -965,6 +965,7 @@ pub enum FoundryMsg {
     },
     /// Chat with the model (streaming)
     Chat {
+        model: String,
         chat_history_messages: Vec<ChatMessage>,
         reasoning_effort: String,
         /// Optional OpenAI-format tools for native tool calling
