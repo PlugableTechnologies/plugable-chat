@@ -1135,7 +1135,10 @@ mod tests {
             crate::agentic_state::PromptContext {
                 base_prompt: prompt,
                 mcp_context: crate::agentic_state::McpToolContext::default(),
+                attached_tables: Vec::new(),
+                attached_tools: Vec::new(),
                 tool_call_format: ToolCallFormatName::Hermes,
+                model_tool_format: None,
                 custom_tool_prompts: HashMap::new(),
                 python_primary: false,
                 has_attachments: false,

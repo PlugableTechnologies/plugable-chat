@@ -54,7 +54,10 @@ impl AgenticIntegrationTestHarness {
         let prompt_context = PromptContext {
             base_prompt: "You are a helpful assistant.".to_string(),
             mcp_context: McpToolContext::default(),
+            attached_tables: Vec::new(),
+            attached_tools: Vec::new(),
             tool_call_format: settings.tool_call_formats.primary,
+            model_tool_format: None,
             custom_tool_prompts: HashMap::new(),
             python_primary: settings.tool_call_formats.primary == ToolCallFormatName::CodeMode,
             has_attachments: false,

@@ -1718,7 +1718,7 @@ mod tests {
     // Helper to create a minimal actor for testing parsing/chunking methods
     fn create_test_actor() -> RagRetrievalActor {
         let (_, rx) = mpsc::channel(1);
-        RagRetrievalActor::new(rx, PathBuf::from("/tmp/test"), None)
+        RagRetrievalActor::new(rx, None)
     }
 
     // ========================================================================

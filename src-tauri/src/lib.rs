@@ -4330,7 +4330,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod inline_tests {
-    use crate::settings::ToolCallFormatName;
+    use crate::settings::{AppSettings, ToolCallFormatName};
     use crate::protocol::ToolFormat;
     use crate::tool_capability::ToolLaunchFilter;
 
