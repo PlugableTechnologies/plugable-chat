@@ -42,8 +42,12 @@ impl ToolCapabilityTestHarness {
         primary_format: ToolCallFormatName,
     ) -> AppSettings {
         let mut settings = AppSettings::default();
-        settings.python_execution_enabled = python_execution_enabled;
-        settings.tool_search_enabled = tool_search_enabled;
+        if python_execution_enabled {
+            settings.always_on_builtin_tools.push("python_execution".to_string());
+        }
+        if tool_search_enabled {
+            settings.always_on_builtin_tools.push("tool_search".to_string());
+        }
         settings.tool_call_formats.primary = primary_format;
         settings.tool_call_formats.enabled = vec![primary_format];
         settings.tool_call_formats.normalize();
@@ -117,8 +121,7 @@ async fn test_format_compliance_native() {
 #[ignore] // Requires Foundry Local to be running
 async fn test_python_execution_triggered() {
     // Test that math questions trigger python_execution when enabled
-    let mut settings = ToolCapabilityTestHarness::create_test_settings(true, false, ToolCallFormatName::CodeMode);
-    settings.python_execution_enabled = true;
+    let settings = ToolCapabilityTestHarness::create_test_settings(true, false, ToolCallFormatName::CodeMode);
     let model_info = ToolCapabilityTestHarness::create_test_model_info(false, ToolFormat::Hermes);
     let filter = ToolLaunchFilter::default();
     let registry = ToolCapabilityTestHarness::create_test_registry();

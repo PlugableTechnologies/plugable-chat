@@ -399,33 +399,29 @@ impl SettingsStateMachine {
         // (gated by actual attachment presence at runtime)
         caps.insert(Capability::Rag);
 
-        // Schema search - requires *_enabled flag AND presence in always_on_builtin_tools
-        if settings.schema_search_enabled 
-            && always_on.contains(&"schema_search".to_string())
+        // Schema search - requires presence in always_on_builtin_tools
+        if always_on.contains(&"schema_search".to_string())
             && filter.builtin_allowed("schema_search") 
         {
             caps.insert(Capability::SchemaSearch);
         }
 
-        // SQL query - requires *_enabled flag AND presence in always_on_builtin_tools
-        if settings.sql_select_enabled 
-            && always_on.contains(&"sql_select".to_string())
+        // SQL query - requires presence in always_on_builtin_tools
+        if always_on.contains(&"sql_select".to_string())
             && filter.builtin_allowed("sql_select") 
         {
             caps.insert(Capability::SqlQuery);
         }
 
-        // Python execution - requires *_enabled flag AND presence in always_on_builtin_tools
-        if settings.python_execution_enabled 
-            && always_on.contains(&"python_execution".to_string())
+        // Python execution - requires presence in always_on_builtin_tools
+        if always_on.contains(&"python_execution".to_string())
             && filter.builtin_allowed("python_execution") 
         {
             caps.insert(Capability::PythonExecution);
         }
 
-        // Tool search - requires *_enabled flag AND presence in always_on_builtin_tools
-        if settings.tool_search_enabled 
-            && always_on.contains(&"tool_search".to_string())
+        // Tool search - requires presence in always_on_builtin_tools
+        if always_on.contains(&"tool_search".to_string())
             && filter.builtin_allowed("tool_search") 
         {
             caps.insert(Capability::ToolSearch);
@@ -452,25 +448,11 @@ impl SettingsStateMachine {
         settings: &AppSettings,
         filter: &ToolLaunchFilter,
     ) -> ToolAvailability {
-        // #region agent log
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            use std::io::Write;
-            let _ = writeln!(f, r#"{{"location":"settings_state_machine.rs:435","message":"compute_tool_availability called","data":{{"sql_select_enabled":{},"always_on_builtin_tools":{:?},"python_enabled":{},"tool_search_enabled":{},"schema_search_enabled":{}}},"timestamp":{},"sessionId":"debug-session","hypothesisId":"A"}}"#,
-                settings.sql_select_enabled,
-                settings.always_on_builtin_tools,
-                settings.python_execution_enabled,
-                settings.tool_search_enabled,
-                settings.schema_search_enabled,
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
-            );
-        }
-        // #endregion
         let mut enabled_builtins = HashSet::new();
         let always_on = &settings.always_on_builtin_tools;
 
-        // Check each built-in - requires BOTH *_enabled flag AND presence in always_on_builtin_tools
-        if settings.python_execution_enabled
-            && always_on.contains(&"python_execution".to_string())
+        // Check each built-in - requires presence in always_on_builtin_tools
+        if always_on.contains(&"python_execution".to_string())
             && filter.builtin_allowed("python_execution")
             && settings
                 .tool_call_formats
@@ -479,8 +461,7 @@ impl SettingsStateMachine {
             enabled_builtins.insert("python_execution".to_string());
         }
 
-        if settings.tool_search_enabled 
-            && always_on.contains(&"tool_search".to_string())
+        if always_on.contains(&"tool_search".to_string())
             && filter.builtin_allowed("tool_search") 
         {
             enabled_builtins.insert("tool_search".to_string());
@@ -488,15 +469,13 @@ impl SettingsStateMachine {
 
         // schema_search is only exposed as a tool if explicitly enabled
         // (internal schema search is auto-derived when sql_select is on but schema_search is off)
-        if settings.schema_search_enabled 
-            && always_on.contains(&"schema_search".to_string())
+        if always_on.contains(&"schema_search".to_string())
             && filter.builtin_allowed("schema_search") 
         {
             enabled_builtins.insert("schema_search".to_string());
         }
 
-        if settings.sql_select_enabled 
-            && always_on.contains(&"sql_select".to_string())
+        if always_on.contains(&"sql_select".to_string())
             && filter.builtin_allowed("sql_select") 
         {
             enabled_builtins.insert("sql_select".to_string());
@@ -589,7 +568,7 @@ impl SettingsStateMachine {
 
         if has_tools {
             // Check if tools are deferred
-            let deferred_discovery = settings.tool_search_enabled
+            let deferred_discovery = tool_availability.is_builtin_available("tool_search")
                 && settings.mcp_servers.iter().any(|s| s.enabled && s.defer_tools);
 
             return OperationalMode::ToolMode {
@@ -659,8 +638,8 @@ mod tests {
     #[test]
     fn test_sql_mode_when_only_sql_enabled() {
         let mut settings = AppSettings::default();
-        settings.sql_select_enabled = true;
-        settings.schema_search_enabled = true;
+        settings.always_on_builtin_tools.push("sql_select".to_string());
+        settings.always_on_builtin_tools.push("schema_search".to_string());
         settings.database_toolbox.enabled = true;
 
         let filter = default_filter();
@@ -674,7 +653,7 @@ mod tests {
     #[test]
     fn test_code_mode_when_only_python_enabled() {
         let mut settings = AppSettings::default();
-        settings.python_execution_enabled = true;
+        settings.always_on_builtin_tools.push("python_execution".to_string());
         // Ensure code mode is in enabled formats
         settings.tool_call_formats.enabled.push(ToolCallFormatName::CodeMode);
 
@@ -689,9 +668,9 @@ mod tests {
     #[test]
     fn test_hybrid_mode_when_multiple_enabled() {
         let mut settings = AppSettings::default();
-        settings.python_execution_enabled = true;
-        settings.sql_select_enabled = true;
-        settings.schema_search_enabled = true;
+        settings.always_on_builtin_tools.push("python_execution".to_string());
+        settings.always_on_builtin_tools.push("sql_select".to_string());
+        settings.always_on_builtin_tools.push("schema_search".to_string());
         settings.database_toolbox.enabled = true;
         settings.tool_call_formats.enabled.push(ToolCallFormatName::CodeMode);
 
@@ -713,7 +692,7 @@ mod tests {
     #[test]
     fn test_capability_check() {
         let mut settings = AppSettings::default();
-        settings.python_execution_enabled = true;
+        settings.always_on_builtin_tools.push("python_execution".to_string());
 
         let filter = default_filter();
         let sm = SettingsStateMachine::from_settings(&settings, &filter);
@@ -726,7 +705,7 @@ mod tests {
     #[test]
     fn test_tool_availability() {
         let mut settings = AppSettings::default();
-        settings.python_execution_enabled = true;
+        settings.always_on_builtin_tools.push("python_execution".to_string());
         settings.tool_call_formats.enabled.push(ToolCallFormatName::CodeMode);
 
         let filter = default_filter();
@@ -749,7 +728,7 @@ mod tests {
 
         // Enable Python
         let mut new_settings = settings.clone();
-        new_settings.python_execution_enabled = true;
+        new_settings.always_on_builtin_tools.push("python_execution".to_string());
         new_settings.tool_call_formats.enabled.push(ToolCallFormatName::CodeMode);
 
         let changed = sm.refresh(&new_settings, &filter);

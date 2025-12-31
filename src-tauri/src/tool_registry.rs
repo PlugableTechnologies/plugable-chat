@@ -197,10 +197,6 @@ pub struct ToolRegistry {
     server_python_names: HashMap<String, String>,
     /// Reverse mapping of python module name to server_id
     python_name_to_server: HashMap<String, String>,
-    /// Whether schema_search is enabled
-    schema_search_enabled: bool,
-    /// Whether sql_select is enabled
-    sql_select_enabled: bool,
 }
 
 impl ToolRegistry {
@@ -216,33 +212,31 @@ impl ToolRegistry {
             materialized_tools: std::collections::HashSet::new(),
             server_python_names: HashMap::new(),
             python_name_to_server: HashMap::new(),
-            schema_search_enabled: false,
-            sql_select_enabled: false,
         }
     }
 
     /// Enable or disable schema_search built-in
     pub fn set_schema_search_enabled(&mut self, enabled: bool) {
-        if enabled && !self.schema_search_enabled {
+        let exists = self.internal_tools.iter().any(|t| t.name == "schema_search");
+        if enabled && !exists {
             self.internal_tools.push(schema_search_tool());
             println!("[ToolRegistry] schema_search enabled");
-        } else if !enabled && self.schema_search_enabled {
+        } else if !enabled && exists {
             self.internal_tools.retain(|t| t.name != "schema_search");
             println!("[ToolRegistry] schema_search disabled");
         }
-        self.schema_search_enabled = enabled;
     }
 
     /// Enable or disable sql_select built-in
     pub fn set_sql_select_enabled(&mut self, enabled: bool) {
-        if enabled && !self.sql_select_enabled {
+        let exists = self.internal_tools.iter().any(|t| t.name == "sql_select");
+        if enabled && !exists {
             self.internal_tools.push(sql_select_tool());
             println!("[ToolRegistry] sql_select enabled");
-        } else if !enabled && self.sql_select_enabled {
+        } else if !enabled && exists {
             self.internal_tools.retain(|t| t.name != "sql_select");
             println!("[ToolRegistry] sql_select disabled");
         }
-        self.sql_select_enabled = enabled;
     }
 
     /// Register domain tools from an MCP server with its Python module name

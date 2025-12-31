@@ -222,22 +222,11 @@ fn build_filtered_schema_text(
 /// Keep the shared registry's database built-ins in sync with current settings.
 async fn sync_registry_database_tools(
     registry: &SharedToolRegistry,
-    schema_search_enabled: bool,
-    sql_select_enabled: bool,
+    always_on_builtin_tools: &[String],
 ) {
-    // #region agent log
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        use std::io::Write;
-        let _ = writeln!(f, r#"{{"location":"lib.rs:sync_registry","message":"sync_registry_database_tools called","data":{{"sql_select_enabled":{},"schema_search_enabled":{}}},"timestamp":{},"sessionId":"debug-session","hypothesisId":"C"}}"#,
-            sql_select_enabled,
-            schema_search_enabled,
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
-        );
-    }
-    // #endregion
     let mut guard = registry.write().await;
-    guard.set_schema_search_enabled(schema_search_enabled);
-    guard.set_sql_select_enabled(sql_select_enabled);
+    guard.set_schema_search_enabled(always_on_builtin_tools.contains(&"schema_search".to_string()));
+    guard.set_sql_select_enabled(always_on_builtin_tools.contains(&"sql_select".to_string()));
 }
 
 /// Ensure sql_select is enabled (registry + persisted settings) after schema search.
@@ -254,8 +243,8 @@ async fn auto_enable_sql_select(
     }
 
     let mut settings_guard = settings_state.settings.write().await;
-    if !settings_guard.sql_select_enabled {
-        settings_guard.sql_select_enabled = true;
+    if !settings_guard.always_on_builtin_tools.contains(&"sql_select".to_string()) {
+        settings_guard.always_on_builtin_tools.push("sql_select".to_string());
         
         // Refresh the SettingsStateMachine (Tier 1)
         let mut sm_guard = settings_sm_state.machine.write().await;
@@ -263,12 +252,12 @@ async fn auto_enable_sql_select(
 
         if let Err(e) = settings::save_settings(&settings_guard).await {
             println!(
-                "[Chat] Failed to persist sql_select_enabled ({}): {}",
+                "[Chat] Failed to persist auto-enabled sql_select ({}): {}",
                 reason, e
             );
         } else {
             println!(
-                "[Chat] sql_select_enabled auto-enabled after {}",
+                "[Chat] sql_select auto-enabled after {}",
                 reason
             );
         }
@@ -1448,17 +1437,6 @@ pub(crate) async fn run_agentic_loop(
         );
         println!("[AgenticLoop] 📄 Full model response:\n---\n{}\n---", assistant_response);
         let _ = std::io::stdout().flush();
-        // #region agent log
-        {
-            let response_preview: String = assistant_response.chars().take(1000).collect();
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"MODEL","location":"lib.rs:agentic_loop","message":"model_response_complete","data":{{"iteration":{},"token_count":{},"response_len":{},"response_preview":"{}"}},"timestamp":{}}}"#, 
-                    iteration, token_count, assistant_response.len(), 
-                    response_preview.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r"),
-                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-            }
-        }
-        // #endregion
 
         let agentic_action = detect_agentic_action(
             &assistant_response,
@@ -1775,19 +1753,7 @@ pub(crate) async fn run_agentic_loop(
             });
 
             // Execute the tool - check for built-in tools first
-            // #region agent log
-            {
-                let args_json = serde_json::to_string(&resolved_call.arguments).unwrap_or_else(|_| "{}".to_string());
-                let args_preview: String = args_json.chars().take(500).collect();
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"TOOL","location":"lib.rs:agentic_loop","message":"tool_call_start","data":{{"iteration":{},"idx":{},"server":"{}","tool":"{}","is_builtin":{},"args_preview":"{}"}},"timestamp":{}}}"#, 
-                        iteration, idx, resolved_call.server, resolved_call.tool, is_builtin_tool(&resolved_call.tool),
-                        args_preview.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n"),
-                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                }
-            }
-            let tool_exec_start = std::time::Instant::now();
-            // #endregion
+            let _tool_exec_start = std::time::Instant::now();
             let (result_text, is_error) = if is_builtin_tool(&resolved_call.tool) {
                 match resolved_call.tool.as_str() {
                     "tool_search" => {
@@ -2085,19 +2051,6 @@ pub(crate) async fn run_agentic_loop(
                 }
             };
 
-            // #region agent log
-            {
-                let tool_elapsed_ms = tool_exec_start.elapsed().as_millis();
-                let result_preview: String = result_text.chars().take(500).collect();
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"TOOL","location":"lib.rs:agentic_loop","message":"tool_call_end","data":{{"iteration":{},"idx":{},"server":"{}","tool":"{}","is_error":{},"elapsed_ms":{},"result_len":{},"result_preview":"{}"}},"timestamp":{}}}"#, 
-                        iteration, idx, resolved_call.server, resolved_call.tool, is_error, tool_elapsed_ms, result_text.len(),
-                        result_preview.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r"),
-                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                }
-            }
-            // #endregion
-
             // Handle state machine transitions based on tool execution
             match resolved_call.tool.as_str() {
                 "sql_select" if !is_error => {
@@ -2363,11 +2316,6 @@ pub(crate) async fn run_agentic_loop(
     }
 
     // Emit loop finished event
-    // #region agent log
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:agentic_loop","message":"emit_tool_loop_finished_before","data":{{"iterations":{},"had_tool_calls":{}}},"timestamp":{}}}"#, iteration, had_tool_calls, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
     let _ = app_handle.emit(
         "tool-loop-finished",
         ToolLoopFinishedEvent {
@@ -2375,17 +2323,7 @@ pub(crate) async fn run_agentic_loop(
             had_tool_calls,
         },
     );
-    // #region agent log
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:agentic_loop","message":"emit_chat_finished_before","data":{{}},"timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
     let _ = app_handle.emit("chat-finished", ());
-    // #region agent log
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:agentic_loop","message":"emit_chat_finished_after","data":{{}},"timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
 
     {
         let now_ms = std::time::SystemTime::now()
@@ -2457,17 +2395,7 @@ pub(crate) async fn run_agentic_loop(
                             println!(
                                 "[ChatSave] UpsertChatRecord sent, emitting chat-saved event"
                             );
-                            // #region agent log
-                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:run_agentic_loop","message":"chat_saved_emit_before","data":{{"chat_id":"{}"}},"timestamp":{}}}"#, &chat_id[..8.min(chat_id.len())], std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                            }
-                            // #endregion
                             let _ = app_handle.emit("chat-saved", chat_id.clone());
-                            // #region agent log
-                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:run_agentic_loop","message":"chat_saved_emit_after","data":{{"chat_id":"{}"}},"timestamp":{}}}"#, &chat_id[..8.min(chat_id.len())], std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                            }
-                            // #endregion
                         }
                         Err(e) => println!(
                             "[ChatSave] ERROR: Failed to send UpsertChatRecord: {}",
@@ -2480,11 +2408,6 @@ pub(crate) async fn run_agentic_loop(
         }
         Err(e) => println!("[ChatSave] ERROR: Failed to send GetEmbedding: {}", e),
     }
-    // #region agent log
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"lib.rs:run_agentic_loop","message":"agentic_loop_end","data":{{"chat_id":"{}"}},"timestamp":{}}}"#, &chat_id[..8.min(chat_id.len())], std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
 }
 
 
@@ -2810,13 +2733,6 @@ async fn chat(
     let settings = settings_state.settings.read().await;
     let configured_system_prompt = settings.system_prompt.clone();
     let mut server_configs = settings.get_all_mcp_configs();
-    let tool_search_enabled = settings.tool_search_enabled;
-    let schema_search_enabled = settings.schema_search_enabled;
-    // Internal schema search is auto-derived: ON when sql_select is enabled but schema_search is not
-    let internal_schema_search = settings.should_run_internal_schema_search();
-    let sql_select_enabled = settings.sql_select_enabled;
-    let python_execution_enabled = settings.python_execution_enabled;
-    let python_tool_calling_enabled = settings.python_tool_calling_enabled;
     let tool_search_max_results = settings.tool_search_max_results.max(1);
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
@@ -2828,14 +2744,6 @@ async fn chat(
     let always_on_tables = settings.always_on_tables.clone();
     let always_on_rag_paths = settings.always_on_rag_paths.clone();
 
-    println!(
-        "[Chat] Settings: python_execution={}, tool_search={}, schema_search={}, sql_select={}",
-        python_execution_enabled,
-        tool_search_enabled,
-        schema_search_enabled,
-        sql_select_enabled
-    );
-    
     // Log always-on configuration if any is set
     if !always_on_builtin_tools.is_empty() || !always_on_mcp_tools.is_empty() || !always_on_tables.is_empty() || !always_on_rag_paths.is_empty() {
         println!(
@@ -2847,30 +2755,26 @@ async fn chat(
         );
     }
 
-    let mut enabled_db_sources = Vec::new();
-    // Database sources should only be enabled when database-specific tools are on.
-    // python_execution alone does NOT require database MCP connections.
-    let db_tools_available = schema_search_enabled || sql_select_enabled || internal_schema_search;
-    
-    if settings.database_toolbox.enabled && db_tools_available {
-        enabled_db_sources = settings
-            .database_toolbox
-            .sources
-            .iter()
-            .filter(|s| s.enabled)
-            .map(|s| s.id.clone())
-            .collect();
-        if !enabled_db_sources.is_empty() {
-            println!("[Chat] Enabled database sources: {:?}", enabled_db_sources);
-        }
-    } else if settings.database_toolbox.enabled && !db_tools_available {
-        println!("[Chat] Database toolbox is ON but no database tools are enabled; sources will be treated as disabled.");
-    }
-    let mut format_config = settings.tool_call_formats.clone();
-    format_config.normalize();
-    let tool_system_prompts = settings.tool_system_prompts.clone();
     let chat_format_default = settings.chat_format_default;
     let chat_format_overrides = settings.chat_format_overrides.clone();
+    let tool_system_prompts = settings.tool_system_prompts.clone();
+    let python_tool_calling_enabled = settings.python_tool_calling_enabled;
+    let internal_schema_search = settings.should_run_internal_schema_search();
+    let mut format_config = settings.tool_call_formats.clone();
+    format_config.normalize();
+    
+    // Derived flags for legacy compatibility within this function
+    // A tool is active if it's Always On OR explicitly attached for this chat
+    let is_builtin_active = |name: &str| {
+        always_on_builtin_tools.contains(&name.to_string()) 
+            || attached_tools.contains(&format!("builtin::{}", name)) 
+            || attached_tools.contains(&name.to_string())
+    };
+    let python_execution_enabled = is_builtin_active("python_execution");
+    let _tool_search_enabled = is_builtin_active("tool_search");
+    let schema_search_enabled = is_builtin_active("schema_search");
+    let sql_select_enabled = is_builtin_active("sql_select");
+    
     drop(settings);
 
     // Build ChatTurnContext with attachments
@@ -2977,6 +2881,12 @@ async fn chat(
         sm_guard.compute_for_turn(&settings_guard, &tool_filter, &turn_context)
     };
 
+    let enabled_db_sources: Vec<String> = server_configs
+        .iter()
+        .filter(|s| s.is_database_source && s.enabled)
+        .map(|s| s.id.clone())
+        .collect();
+
     println!("[Chat] Turn Configuration: Mode={}, Enabled Tools={:?}", 
         turn_config.mode.name(), turn_config.enabled_tools);
 
@@ -2999,7 +2909,8 @@ async fn chat(
     }
 
     // Ensure database toolbox actor is initialized if database tools are enabled
-    if schema_search_enabled || internal_schema_search || sql_select_enabled {
+    let db_tools_available = turn_config.mode.has_sql();
+    if db_tools_available {
         if let Err(e) =
             ensure_toolbox_running(&handles.database_toolbox_tx, &database_toolbox_config).await
         {
@@ -3023,27 +2934,15 @@ async fn chat(
 
     // Look up model info for the frontend-provided model to check capabilities
     // Frontend is the source of truth for model selection
-    let (current_model_info, model_supports_native_tools) = {
+    let (current_model_info, _model_supports_native_tools) = {
         let (tx, rx) = oneshot::channel();
         if handles
             .foundry_tx
-            .send(FoundryMsg::GetModelInfo { respond_to: tx })
+            .send(FoundryMsg::GetCurrentModel { respond_to: tx })
             .await
             .is_ok()
         {
-            if let Ok(models) = rx.await {
-                // Find the model that matches the frontend-selected model
-                if let Some(model_info) = models.into_iter().find(|m| m.id == model) {
-                    let supports_native = model_info.tool_calling;
-                    (Some(model_info), supports_native)
-                } else {
-                    // Model not found in info list - use defaults
-                    println!("[Chat] Warning: Model '{}' not found in model info, using defaults", model);
-                    (None, false)
-                }
-            } else {
-                (None, false)
-            }
+            (rx.await.ok().flatten(), true) // Placeholder for now, real check below
         } else {
             (None, false)
         }
@@ -3054,6 +2953,7 @@ async fn chat(
     let resolved_model_tool_format = Some(profile.tool_call_format);
 
     // Native tool calling is only available if: format is enabled AND model supports it
+    let model_supports_native_tools = current_model_info.as_ref().map(|m| m.tool_calling).unwrap_or(false);
     let native_tool_calling_enabled =
         format_config.native_enabled() && model_supports_native_tools;
 
@@ -3070,16 +2970,16 @@ async fn chat(
         native_tool_calling_enabled
     );
 
-    // Ensure registry reflects persisted database tool toggles before building prompts
+    // Ensure registry reflects Always On built-ins before building prompts
     sync_registry_database_tools(
         &tool_registry_state.registry,
-        schema_search_enabled,
-        sql_select_enabled,
+        &always_on_builtin_tools,
     )
     .await;
 
     // Apply global tool_search flag to server defer settings (only if tool_search is actually available)
     let tool_search_allowed = tool_filter.builtin_allowed("tool_search");
+    let tool_search_enabled = always_on_builtin_tools.contains(&"tool_search".to_string());
     if tool_search_enabled && tool_search_allowed {
         for config in &mut server_configs {
             config.defer_tools = true;
@@ -3088,7 +2988,7 @@ async fn chat(
         // If tool search is explicitly disabled globally, we MUST surface regular tools or they'll be unreachable.
         // HOWEVER, database sources should stay deferred because they are only meant for sql_select context injection.
         for config in &mut server_configs {
-            if !enabled_db_sources.contains(&config.id) {
+            if !config.is_database_source {
                 config.defer_tools = false;
             }
         }
@@ -3380,20 +3280,6 @@ async fn chat(
     // Visible tools: always include enabled built-ins; defer MCP tools to tool_search unless materialized.
     let builtin_tools: Vec<(String, Vec<McpTool>)> = {
         let registry = tool_registry_state.registry.read().await;
-        // #region agent log
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            use std::io::Write;
-            let _ = writeln!(f, r#"{{"location":"lib.rs:3371","message":"builtin_tools filter (post-fix)","data":{{"turn_enabled_tools":{:?},"always_on_builtin_tools":{:?},"sql_select_enabled":{},"schema_search_enabled":{},"python_execution_enabled":{},"registry_internal_tools":{:?}}},"timestamp":{},"sessionId":"debug-session","hypothesisId":"B","runId":"post-fix"}}"#,
-                turn_config.enabled_tools,
-                always_on_builtin_tools,
-                sql_select_enabled,
-                schema_search_enabled,
-                python_execution_enabled,
-                registry.get_internal_tools().iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
-            );
-        }
-        // #endregion
         registry
             .get_internal_tools()
             .iter()
@@ -3792,18 +3678,23 @@ async fn get_system_prompt_preview(
     let settings = settings_state.settings.read().await;
     let base_prompt = settings.system_prompt.clone();
     let server_configs = settings.mcp_servers.clone();
-    let tool_search_enabled = settings.tool_search_enabled;
-    let schema_search_enabled = settings.schema_search_enabled;
-    // Internal schema search is auto-derived: ON when sql_select is enabled but schema_search is not
-    let internal_schema_search = settings.should_run_internal_schema_search();
-    let sql_select_enabled = settings.sql_select_enabled;
-    let _python_execution_enabled = settings.python_execution_enabled;
     let tool_system_prompts = settings.tool_system_prompts.clone();
     let database_toolbox_config = settings.database_toolbox.clone();
     // Always-on configuration for gating auto-discovery
     let always_on_builtin_tools = settings.always_on_builtin_tools.clone();
     let always_on_mcp_tools = settings.always_on_mcp_tools.clone();
     let always_on_tables = settings.always_on_tables.clone();
+
+    // Derived flags for legacy compatibility within this function
+    let is_builtin_active = |name: &str| {
+        always_on_builtin_tools.contains(&name.to_string()) 
+            || attached_tools.contains(&format!("builtin::{}", name)) 
+            || attached_tools.contains(&name.to_string())
+    };
+    let schema_search_enabled = is_builtin_active("schema_search");
+    let sql_select_enabled = is_builtin_active("sql_select");
+    let tool_search_enabled = is_builtin_active("tool_search");
+
     let settings_for_resolver = settings.clone();
     drop(settings);
 
@@ -3914,13 +3805,14 @@ async fn get_system_prompt_preview(
 
     // Gate auto-discovery based on effective attachments (explicit + always-on)
     let has_effective_tables = !turn_context.attached_tables.is_empty() || !always_on_tables.is_empty();
+    let internal_schema_search = settings_for_resolver.should_run_internal_schema_search();
     let should_run_schema_search = has_effective_tables
         && (schema_search_enabled || internal_schema_search || sql_select_enabled);
     
     let has_effective_tools = !attached_tools.is_empty() 
         || !always_on_builtin_tools.is_empty() 
         || !always_on_mcp_tools.is_empty();
-    let should_run_tool_search = tool_search_enabled 
+    let should_run_tool_search = tool_search_enabled
         && turn_config.enabled_tools.is_empty() 
         && (has_effective_tools || !filtered_tool_descriptions.is_empty());
 
@@ -4043,213 +3935,6 @@ async fn get_system_prompt_preview(
     Ok(initial_state_machine.build_system_prompt())
 }
 
-#[derive(Clone, serde::Serialize)]
-struct SystemPromptLayers {
-    base_prompt: String,
-    additions: Vec<String>,
-    combined: String,
-}
-
-#[tauri::command]
-async fn get_system_prompt_layers(
-    handles: State<'_, ActorHandles>,
-    settings_state: State<'_, SettingsState>,
-    launch_config: State<'_, LaunchConfigState>,
-    tool_registry_state: State<'_, ToolRegistryState>,
-) -> Result<SystemPromptLayers, String> {
-    // Get current settings
-    let settings = settings_state.settings.read().await;
-    let base_prompt = settings.system_prompt.clone();
-    let mut server_configs = settings.mcp_servers.clone();
-    let tool_search_enabled = settings.tool_search_enabled;
-    let schema_search_enabled = settings.schema_search_enabled;
-    let sql_select_enabled = settings.sql_select_enabled;
-    let python_execution_enabled = settings.python_execution_enabled;
-    // python_tool_calling_enabled now handled by resolver
-    let _tool_use_examples_enabled = settings.tool_use_examples_enabled;
-    let _tool_use_examples_max = settings.tool_use_examples_max;
-    let mut format_config = settings.tool_call_formats.clone();
-    format_config.normalize();
-    let tool_prompts = settings.tool_system_prompts.clone();
-    let settings_for_resolver = settings.clone();
-    drop(settings);
-    let tool_filter = launch_config.tool_filter.clone();
-
-    sync_registry_database_tools(
-        &tool_registry_state.registry,
-        schema_search_enabled,
-        sql_select_enabled,
-    )
-    .await;
-
-    if tool_search_enabled {
-        for config in &mut server_configs {
-            config.defer_tools = true;
-        }
-    } else {
-        for config in &mut server_configs {
-            config.defer_tools = false;
-        }
-    }
-
-    // Get current tool descriptions from connected servers
-    let (tx, rx) = oneshot::channel();
-    handles
-        .mcp_host_tx
-        .send(McpHostMsg::GetAllToolDescriptions { respond_to: tx })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let tool_descriptions = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
-    let filtered_tool_descriptions: Vec<(String, Vec<McpTool>)> = tool_descriptions
-        .into_iter()
-        .filter_map(|(server_id, tools)| {
-            // Check if server is enabled in settings and NOT a database source
-            // (Database tools are handled separately via sql_select/schema_search)
-            let is_enabled = server_configs
-                .iter()
-                .any(|c| c.id == server_id && c.enabled && !c.is_database_source);
-
-            if !is_enabled {
-                return None;
-            }
-
-            if !tool_filter.server_allowed(&server_id) {
-                return None;
-            }
-            let filtered: Vec<McpTool> = tools
-                .into_iter()
-                .filter(|t| tool_filter.tool_allowed(&server_id, &t.name))
-                .collect();
-            if filtered.is_empty() {
-                None
-            } else {
-                Some((server_id, filtered))
-            }
-        })
-        .collect();
-    let has_mcp_tools = !filtered_tool_descriptions.is_empty();
-    // Deferred tools exist only if tool_search is enabled AND there are MCP tools
-    let has_deferred_mcp_tools = tool_search_enabled && has_mcp_tools;
-
-    let builtin_tools: Vec<(String, Vec<McpTool>)> = {
-        let registry = tool_registry_state.registry.read().await;
-        registry
-            .get_internal_tools()
-            .iter()
-            .filter(|schema| {
-                // Only include python_execution if it's enabled
-                if schema.name == "python_execution" {
-                    python_execution_enabled && tool_filter.builtin_allowed("python_execution")
-                } else if schema.name == "tool_search" {
-                    // Only include tool_search if there are deferred tools to discover
-                    has_deferred_mcp_tools && tool_filter.builtin_allowed("tool_search")
-                } else {
-                    // Other built-ins (schema_search, sql_select) are included if allowed
-                    tool_filter.builtin_allowed(&schema.name)
-                }
-            })
-            .map(|schema| ("builtin".to_string(), vec![tool_schema_to_mcp_tool(schema)]))
-            .collect()
-    };
-
-    let visible_tool_descriptions: Vec<(String, Vec<McpTool>)> = if tool_search_enabled {
-        // Defer MCP tools; always include built-ins.
-        builtin_tools
-    } else {
-        let mut list = builtin_tools;
-        list.extend(filtered_tool_descriptions.clone());
-        list
-    };
-
-    // Check if there are any attached documents
-    let has_attachments = {
-        let (tx, rx) = oneshot::channel();
-        if handles
-            .rag_tx
-            .send(RagMsg::GetIndexedFiles { respond_to: tx })
-            .await
-            .is_ok()
-        {
-            rx.await.map(|files| !files.is_empty()).unwrap_or(false)
-        } else {
-            false
-        }
-    };
-
-    // Resolve capabilities for prompt building
-    let (resolved_capabilities, model_tool_format) = {
-        let registry = tool_registry_state.registry.read().await;
-        let (tx, rx) = oneshot::channel();
-        let fetched_model_info = if handles
-            .foundry_tx
-            .send(FoundryMsg::GetCurrentModel { respond_to: tx })
-            .await
-            .is_ok()
-        {
-            rx.await.ok().flatten()
-        } else {
-            None
-        };
-        let default_model_info = ModelInfo {
-            id: "unknown".to_string(),
-            family: ModelFamily::Generic,
-            tool_calling: false,
-            tool_format: ToolFormat::TextBased,
-            vision: false,
-            reasoning: false,
-            reasoning_format: protocol::ReasoningFormat::None,
-            max_input_tokens: 4096,
-            max_output_tokens: 2048,
-            supports_tool_calling: false,
-            supports_temperature: true,
-            supports_top_p: true,
-            supports_reasoning_effort: false,
-        };
-        let model_info = fetched_model_info.as_ref().unwrap_or(&default_model_info);
-        let caps = ToolCapabilityResolver::resolve(
-            &settings_for_resolver,
-            model_info,
-            &tool_filter,
-            &server_configs,
-            &registry,
-        );
-        (caps, Some(model_info.tool_format))
-    };
-
-    let settings_sm = SettingsStateMachine::from_settings(&settings_for_resolver, &tool_filter);
-    let initial_state_machine = AgenticStateMachine::new_from_settings_sm(
-        &settings_sm,
-        crate::agentic_state::PromptContext {
-            base_prompt: base_prompt.clone(),
-            attached_tables: Vec::new(),
-            attached_tools: Vec::new(),
-            mcp_context: crate::agentic_state::McpToolContext::from_tool_lists(
-                &visible_tool_descriptions,
-                &Vec::new(),
-                &server_configs,
-            ),
-            tool_call_format: resolved_capabilities.primary_format,
-            model_tool_format,
-            custom_tool_prompts: tool_prompts,
-            python_primary: resolved_capabilities.available_builtins.contains(tool_capability::BUILTIN_PYTHON_EXECUTION),
-            has_attachments,
-        },
-    );
-
-    let sections = initial_state_machine.build_system_prompt_sections();
-    let additions = if sections.len() > 1 {
-        sections[1..].to_vec()
-    } else {
-        Vec::new()
-    };
-
-    Ok(SystemPromptLayers {
-        base_prompt: base_prompt.clone(),
-        additions,
-        combined: sections.join("\n\n"),
-    })
-}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let cli_args = CliArgs::try_parse().unwrap_or_else(|e| {
@@ -4576,11 +4261,6 @@ pub fn run() {
             update_tool_system_prompt,
             update_tool_call_formats,
             update_chat_format,
-            update_python_execution_enabled,
-            update_native_tool_calling_enabled,
-            update_tool_search_enabled,
-            update_schema_search_enabled,
-            update_sql_select_enabled,
             update_rag_chunk_min_relevancy,
             update_schema_relevancy_threshold,
             update_rag_dominant_threshold,
@@ -4605,7 +4285,6 @@ pub fn run() {
             get_all_mcp_tool_descriptions,
             test_mcp_server_config,
             get_system_prompt_preview,
-            get_system_prompt_layers,
             detect_tool_calls,
             execute_tool_call,
             approve_tool_call,

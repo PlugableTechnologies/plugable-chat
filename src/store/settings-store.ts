@@ -69,18 +69,12 @@ export interface AppSettings {
     tool_call_formats: ToolCallFormatConfig;
     tool_system_prompts: Record<string, string>;
     tool_search_max_results: number;
-    tool_search_enabled: boolean;
-    python_execution_enabled: boolean;
     python_tool_calling_enabled: boolean;
     legacy_tool_call_format_enabled: boolean;
     tool_use_examples_enabled: boolean;
     tool_use_examples_max: number;
     // Database built-ins
     database_toolbox: DatabaseToolboxConfig;
-    schema_search_enabled: boolean;
-    sql_select_enabled: boolean;
-    // Note: schema_search_internal_only was removed - it's now auto-derived
-    // when sql_select is enabled but schema_search is not
     // Relevancy thresholds for state machine
     rag_chunk_min_relevancy: number;
     schema_relevancy_threshold: number;
@@ -139,14 +133,9 @@ interface SettingsState {
     updateSystemPrompt: (prompt: string) => Promise<void>;
     updateToolCallFormats: (config: ToolCallFormatConfig) => Promise<void>;
     updateChatFormat: (modelId: string, format: ChatFormatName) => Promise<void>;
-    updateCodeExecutionEnabled: (enabled: boolean) => Promise<void>;
-    updateNativeToolCallingEnabled: (enabled: boolean) => Promise<void>;
-    updateToolSearchEnabled: (enabled: boolean) => Promise<void>;
     updateToolSearchMaxResults: (maxResults: number) => Promise<void>;
     updateToolExamplesEnabled: (enabled: boolean) => Promise<void>;
     updateToolExamplesMax: (maxExamples: number) => Promise<void>;
-    updateSchemaSearchEnabled: (enabled: boolean) => Promise<void>;
-    updateSqlSelectEnabled: (enabled: boolean) => Promise<void>;
     // Relevancy thresholds for state machine
     updateRagChunkMinRelevancy: (value: number) => Promise<void>;
     updateSchemaRelevancyThreshold: (value: number) => Promise<void>;
@@ -308,7 +297,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 tool_call_formats: normalizedFormats,
                 chat_format_default: settings.chat_format_default ?? 'openai_completions',
                 chat_format_overrides: settings.chat_format_overrides ?? {},
-                tool_search_enabled: settings.tool_search_enabled ?? false,
                 tool_search_max_results: settings.tool_search_max_results ?? 3,
                 tool_use_examples_enabled: settings.tool_use_examples_enabled ?? false,
                 tool_use_examples_max: settings.tool_use_examples_max ?? 2,
@@ -363,8 +351,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     tool_call_formats: DEFAULT_TOOL_CALL_FORMATS,
                     tool_system_prompts: {},
                     tool_search_max_results: 3,
-                    tool_search_enabled: false,
-                    python_execution_enabled: false,
                     python_tool_calling_enabled: true,
                     legacy_tool_call_format_enabled: false,
                     tool_use_examples_enabled: false,
@@ -373,8 +359,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                         enabled: false,
                         sources: [],
                     },
-                    schema_search_enabled: false,
-                    sql_select_enabled: false,
                     // Relevancy thresholds defaults
                     rag_chunk_min_relevancy: 0.3,
                     schema_relevancy_threshold: 0.4,
@@ -498,102 +482,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         }
     },
 
-    updateCodeExecutionEnabled: async (enabled: boolean) => {
-        const currentSettings = get().settings;
-        if (!currentSettings) return;
-
-        // Optimistic update
-        set({
-            settings: { ...currentSettings, python_execution_enabled: enabled },
-            error: null
-        });
-
-        try {
-            await invoke('update_python_execution_enabled', { enabled });
-            console.log('[SettingsStore] Code execution enabled updated:', enabled);
-        } catch (e: any) {
-            console.error('[SettingsStore] Failed to update code execution enabled:', e);
-            // Revert on error
-            set({
-                settings: currentSettings,
-                error: `Failed to save: ${e.message || e}`
-            });
-        }
-    },
-
-    updateNativeToolCallingEnabled: async (enabled: boolean) => {
-        const currentSettings = get().settings;
-        if (!currentSettings) return;
-
-        // Compute new format config with native enabled/disabled
-        const currentFormats = currentSettings.tool_call_formats;
-        let newEnabled = [...currentFormats.enabled];
-        let newPrimary = currentFormats.primary;
-
-        if (enabled) {
-            // Add native if not already present
-            if (!newEnabled.includes('native')) {
-                newEnabled = ['native', ...newEnabled];
-            }
-            // Set native as primary
-            newPrimary = 'native';
-        } else {
-            // Remove native from enabled
-            newEnabled = newEnabled.filter(f => f !== 'native');
-            // If native was primary, fall back to first available
-            if (newPrimary === 'native') {
-                newPrimary = newEnabled[0] || 'hermes';
-            }
-        }
-
-        const newFormats: ToolCallFormatConfig = {
-            enabled: newEnabled,
-            primary: newPrimary,
-        };
-
-        // Optimistic update
-        set({
-            settings: { ...currentSettings, tool_call_formats: newFormats },
-            error: null
-        });
-
-        try {
-            await invoke('update_native_tool_calling_enabled', { enabled });
-            console.log('[SettingsStore] Native tool calling updated:', enabled);
-            // Re-fetch to sync with backend
-            await get().fetchSettings();
-        } catch (e: any) {
-            console.error('[SettingsStore] Failed to update native tool calling:', e);
-            // Revert on error
-            set({
-                settings: currentSettings,
-                error: `Failed to save: ${e.message || e}`
-            });
-        }
-    },
-
-    updateToolSearchEnabled: async (enabled: boolean) => {
-        const currentSettings = get().settings;
-        if (!currentSettings) return;
-
-        // Optimistic update
-        set({
-            settings: { ...currentSettings, tool_search_enabled: enabled },
-            error: null,
-        });
-
-        try {
-            await invoke('update_tool_search_enabled', { enabled });
-            console.log('[SettingsStore] tool_search_enabled updated:', enabled);
-            get().bumpPromptRefresh();
-        } catch (e: any) {
-            console.error('[SettingsStore] Failed to update tool_search_enabled:', e);
-            set({
-                settings: currentSettings,
-                error: `Failed to save: ${e.message || e}`,
-            });
-        }
-    },
     updateToolSearchMaxResults: async (maxResults: number) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
@@ -644,47 +532,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             set({
                 settings: currentSettings,
                 error: `Failed to save: ${e.message || e}`,
-            });
-        }
-    },
-
-    updateSchemaSearchEnabled: async (enabled: boolean) => {
-        const currentSettings = get().settings;
-        if (!currentSettings) return;
-        set({
-            settings: { ...currentSettings, schema_search_enabled: enabled },
-            error: null
-        });
-        try {
-            await invoke('update_schema_search_enabled', { enabled });
-            console.log('[SettingsStore] schema_search_enabled updated:', enabled);
-        } catch (e: any) {
-            console.error('[SettingsStore] Failed to update schema_search_enabled:', e);
-            set({
-                settings: currentSettings,
-                error: `Failed to save: ${e.message || e}`
-            });
-        }
-    },
-
-    // Note: updateSchemaSearchInternalOnly was removed - internal schema search
-    // is now auto-derived when sql_select is enabled but schema_search is not
-
-    updateSqlSelectEnabled: async (enabled: boolean) => {
-        const currentSettings = get().settings;
-        if (!currentSettings) return;
-        set({
-            settings: { ...currentSettings, sql_select_enabled: enabled },
-            error: null
-        });
-        try {
-            await invoke('update_sql_select_enabled', { enabled });
-            console.log('[SettingsStore] sql_select_enabled updated:', enabled);
-        } catch (e: any) {
-            console.error('[SettingsStore] Failed to update sql_select_enabled:', e);
-            set({
-                settings: currentSettings,
-                error: `Failed to save: ${e.message || e}`
             });
         }
     },

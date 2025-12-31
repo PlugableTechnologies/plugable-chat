@@ -622,14 +622,6 @@ pub struct AppSettings {
     /// Maximum number of tools returned by tool_search (defaults to 3 for token control)
     #[serde(default = "default_tool_search_max_results")]
     pub tool_search_max_results: usize,
-    /// Whether tool_search defers MCP tool exposure until discovery (off by default).
-    #[serde(default)]
-    pub tool_search_enabled: bool,
-    /// Whether the python_execution built-in tool is enabled (disabled by default).
-    /// When enabled, models can execute Python code in a sandboxed environment.
-    /// Renamed from code_execution_enabled - alias preserved for backwards compatibility.
-    #[serde(default, alias = "code_execution_enabled")]
-    pub python_execution_enabled: bool,
     /// Whether python-driven tool calling is allowed. If false, we will not
     /// execute tool calls even if python_execution is enabled.
     #[serde(default = "default_python_tool_calling_enabled")]
@@ -646,16 +638,6 @@ pub struct AppSettings {
     /// Configuration for Google MCP Database Toolbox integration
     #[serde(default)]
     pub database_toolbox: DatabaseToolboxConfig,
-    /// Whether the schema_search built-in tool is enabled (disabled by default).
-    /// When enabled, models can search for relevant database tables using embeddings.
-    #[serde(default, alias = "search_schemas_enabled")]
-    pub schema_search_enabled: bool,
-    /// Whether the sql_select built-in tool is enabled (disabled by default).
-    /// When enabled, models can execute SQL queries via configured database sources.
-    /// Note: If sql_select is enabled but schema_search is not, schema search will
-    /// automatically run internally to provide table context.
-    #[serde(default, alias = "execute_sql_enabled")]
-    pub sql_select_enabled: bool,
     
     // ============ Relevancy Thresholds for State Machine ============
     
@@ -726,18 +708,23 @@ fn default_rag_dominant_threshold() -> f32 {
 }
 
 impl AppSettings {
+    /// Check if a built-in tool is marked as Always On.
+    pub fn is_builtin_always_on(&self, name: &str) -> bool {
+        self.always_on_builtin_tools.contains(&name.to_string())
+    }
+
     /// Determine if schema search should run internally (not exposed as a tool).
     /// 
-    /// This is automatically derived:
-    /// - If sql_select is enabled but schema_search is not, internal search is ON
+    /// This is automatically derived for globally enabled tools:
+    /// - If sql_select is always on but schema_search is not, internal search is ON
     /// - This provides table context for SQL queries without exposing schema_search as a tool
     pub fn should_run_internal_schema_search(&self) -> bool {
-        self.sql_select_enabled && !self.schema_search_enabled
+        self.is_builtin_always_on("sql_select") && !self.is_builtin_always_on("schema_search")
     }
     
-    /// Check if any schema search functionality is active (as tool or internal).
+    /// Check if any schema search functionality is active globally (as tool or internal).
     pub fn has_schema_search_active(&self) -> bool {
-        self.schema_search_enabled || self.should_run_internal_schema_search()
+        self.is_builtin_always_on("schema_search") || self.should_run_internal_schema_search()
     }
     
     /// Get all enabled MCP server configurations, including database sources.
@@ -745,11 +732,10 @@ impl AppSettings {
         let mut configs = self.mcp_servers.clone();
 
         // Database sources are only active if the toolbox is enabled AND at least one
-        // database-specific tool (sql_select, schema_search) is enabled.
-        // Note: python_execution does NOT require database MCP connections - it can call
-        // sql_select/schema_search internally, but those tools gate database access.
-        let db_tools_available = self.schema_search_enabled 
-            || self.sql_select_enabled 
+        // database-specific tool (sql_select, schema_search) is enabled globally.
+        // Note: per-chat attachments will override this at runtime in lib.rs.
+        let db_tools_available = self.is_builtin_always_on("schema_search") 
+            || self.is_builtin_always_on("sql_select") 
             || self.should_run_internal_schema_search();
 
         // Always include database sources so they can be disconnected if toolbox is disabled
@@ -890,17 +876,11 @@ impl Default for AppSettings {
             tool_call_formats: ToolCallFormatConfig::default(),
             tool_system_prompts: HashMap::new(),
             tool_search_max_results: default_tool_search_max_results(),
-            tool_search_enabled: false,
-            python_execution_enabled: false,
             python_tool_calling_enabled: default_python_tool_calling_enabled(),
             legacy_tool_call_format_enabled: false,
             tool_use_examples_enabled: false,
             tool_use_examples_max: default_tool_use_examples_max(),
             database_toolbox: DatabaseToolboxConfig::default(),
-            schema_search_enabled: false,
-            sql_select_enabled: false,
-            // Note: schema_search_internal_only was removed - it's now auto-derived
-            // from sql_select_enabled && !schema_search_enabled
             // Relevancy thresholds
             rag_chunk_min_relevancy: default_rag_chunk_min_relevancy(),
             schema_relevancy_threshold: default_schema_relevancy_threshold(),
@@ -938,25 +918,60 @@ fn get_config_path() -> PathBuf {
 pub async fn load_settings() -> AppSettings {
     let config_path = get_config_path();
 
-    let mut settings = match fs::read_to_string(&config_path).await {
-        Ok(contents) => match serde_json::from_str(&contents) {
-            Ok(settings) => {
-                println!("Settings loaded from {:?}", config_path);
-                settings
-            }
-            Err(e) => {
-                println!("Failed to parse settings: {}, using defaults", e);
-                AppSettings::default()
-            }
-        },
+    let (mut settings, raw_json) = match fs::read_to_string(&config_path).await {
+        Ok(contents) => {
+            let s = match serde_json::from_str::<AppSettings>(&contents) {
+                Ok(settings) => {
+                    println!("Settings loaded from {:?}", config_path);
+                    settings
+                }
+                Err(e) => {
+                    println!("Failed to parse settings: {}, using defaults", e);
+                    AppSettings::default()
+                }
+            };
+            let v = serde_json::from_str::<serde_json::Value>(&contents).ok();
+            (s, v)
+        }
         Err(e) => {
             println!(
                 "No config file found at {:?}: {}, using defaults",
                 config_path, e
             );
-            AppSettings::default()
+            (AppSettings::default(), None)
         }
     };
+
+    // Perform migration from legacy boolean flags if they exist in the raw JSON
+    if let Some(obj) = raw_json.and_then(|v| v.as_object().cloned()) {
+        let mut always_on = settings.always_on_builtin_tools.clone();
+        
+        // Map legacy field names/aliases to tool names
+        let legacy_map = [
+            ("tool_search_enabled", "tool_search"),
+            ("python_execution_enabled", "python_execution"),
+            ("code_execution_enabled", "python_execution"),
+            ("schema_search_enabled", "schema_search"),
+            ("search_schemas_enabled", "schema_search"),
+            ("sql_select_enabled", "sql_select"),
+            ("execute_sql_enabled", "sql_select"),
+        ];
+
+        let mut migrated = false;
+        for (field, tool) in legacy_map {
+            if obj.get(field).and_then(|v| v.as_bool()).unwrap_or(false) {
+                if !always_on.contains(&tool.to_string()) {
+                    always_on.push(tool.to_string());
+                    migrated = true;
+                    println!("Migrated legacy tool flag: {} -> always_on_builtin_tools", field);
+                }
+            }
+        }
+        
+        if migrated {
+            settings.always_on_builtin_tools = always_on;
+        }
+    }
 
     // Normalize tool format config after load
     settings.tool_call_formats.normalize();
@@ -1011,10 +1026,6 @@ mod tests {
                 .enabled
         );
         assert!(settings.tool_system_prompts.is_empty());
-        // tool_search is disabled by default (no deferral)
-        assert!(!settings.tool_search_enabled);
-        // python_execution is disabled by default
-        assert!(!settings.python_execution_enabled);
         // python tool calling defaults
         assert!(settings.python_tool_calling_enabled);
         assert!(!settings.legacy_tool_call_format_enabled);
@@ -1030,8 +1041,7 @@ mod tests {
         assert_eq!(settings.tool_call_formats, ToolCallFormatConfig::default());
         assert_eq!(settings.chat_format_default, default_chat_format());
         assert!(settings.chat_format_overrides.is_empty());
-        assert!(!settings.schema_search_enabled);
-        assert!(!settings.sql_select_enabled);
+        assert!(settings.always_on_builtin_tools.is_empty());
     }
 
     #[test]
@@ -1060,276 +1070,58 @@ mod tests {
         assert_eq!(settings.tool_call_formats, parsed.tool_call_formats);
         assert_eq!(settings.chat_format_default, parsed.chat_format_default);
         assert_eq!(settings.chat_format_overrides, parsed.chat_format_overrides);
-        assert_eq!(settings.schema_search_enabled, parsed.schema_search_enabled);
-        assert_eq!(settings.sql_select_enabled, parsed.sql_select_enabled);
-    }
-
-    #[test]
-    fn test_backwards_compat_database_tools_enabled() {
-        let json = r#"{"system_prompt": "test", "mcp_servers": [], "search_schemas_enabled": true, "execute_sql_enabled": true}"#;
-        let parsed: AppSettings = serde_json::from_str(json).unwrap();
-        assert!(parsed.schema_search_enabled);
-        assert!(parsed.sql_select_enabled);
-    }
-
-    #[test]
-    fn test_backwards_compat_code_execution_enabled() {
-        // Test that old config files with "code_execution_enabled" still work
-        let json =
-            r#"{"system_prompt": "test", "mcp_servers": [], "code_execution_enabled": true}"#;
-        let parsed: AppSettings = serde_json::from_str(json).unwrap();
-        assert!(parsed.python_execution_enabled);
-        // Default for new flags should still apply
-        assert!(parsed.python_tool_calling_enabled);
-        assert!(!parsed.legacy_tool_call_format_enabled);
-        assert_eq!(parsed.tool_call_formats, ToolCallFormatConfig::default());
-    }
-
-    #[test]
-    fn tool_call_format_normalizes_primary_and_enabled() {
-        let mut cfg = ToolCallFormatConfig {
-            enabled: vec![ToolCallFormatName::Hermes],
-            primary: ToolCallFormatName::CodeMode,
-        };
-        cfg.normalize();
-
-        assert_eq!(cfg.enabled, vec![ToolCallFormatName::Hermes]);
-        assert_eq!(cfg.primary, ToolCallFormatName::Hermes);
-    }
-
-    #[test]
-    fn tool_call_format_dedupes_enabled_preserving_order() {
-        let mut cfg = ToolCallFormatConfig {
-            enabled: vec![
-                ToolCallFormatName::Hermes,
-                ToolCallFormatName::Hermes,
-                ToolCallFormatName::PureJson,
-            ],
-            primary: ToolCallFormatName::Hermes,
-        };
-        cfg.normalize();
-
-        assert_eq!(
-            cfg.enabled,
-            vec![ToolCallFormatName::Hermes, ToolCallFormatName::PureJson]
-        );
-        assert_eq!(cfg.primary, ToolCallFormatName::Hermes);
-    }
-
-    // ============ Python Identifier Validation Tests ============
-
-    #[test]
-    fn test_validate_python_identifier_valid() {
-        assert!(validate_python_identifier("my_module").is_ok());
-        assert!(validate_python_identifier("weather_api").is_ok());
-        assert!(validate_python_identifier("mcp_test_server").is_ok());
-        assert!(validate_python_identifier("_private").is_ok());
-        assert!(validate_python_identifier("module123").is_ok());
-        assert!(validate_python_identifier("a").is_ok());
-    }
-
-    #[test]
-    fn test_validate_python_identifier_invalid() {
-        // Empty
-        assert!(validate_python_identifier("").is_err());
-
-        // Starts with digit
-        assert!(validate_python_identifier("123module").is_err());
-
-        // Contains uppercase
-        assert!(validate_python_identifier("MyModule").is_err());
-        assert!(validate_python_identifier("myModule").is_err());
-
-        // Contains invalid characters
-        assert!(validate_python_identifier("my-module").is_err());
-        assert!(validate_python_identifier("my.module").is_err());
-        assert!(validate_python_identifier("my module").is_err());
-        assert!(validate_python_identifier("my@module").is_err());
-
-        // Python keywords
-        assert!(validate_python_identifier("import").is_err());
-        assert!(validate_python_identifier("class").is_err());
-        assert!(validate_python_identifier("def").is_err());
-        assert!(validate_python_identifier("None").is_err());
-    }
-
-    #[test]
-    fn test_to_python_identifier() {
-        // Basic conversion
-        assert_eq!(to_python_identifier("My Module"), "my_module");
-        assert_eq!(to_python_identifier("mcp-test-server"), "mcp_test_server");
-        assert_eq!(to_python_identifier("Weather API"), "weather_api");
-
-        // Handle leading digits
-        assert_eq!(to_python_identifier("123abc"), "_123abc");
-
-        // Handle special characters
-        assert_eq!(to_python_identifier("my.module.name"), "my_module_name");
-        assert_eq!(to_python_identifier("test@server#1"), "testserver1");
-
-        // Handle multiple separators
-        assert_eq!(to_python_identifier("my--module__name"), "my_module_name");
-
-        // Handle empty/invalid input
-        assert_eq!(to_python_identifier("@#$"), "module");
-        assert_eq!(to_python_identifier(""), "module");
-
-        // Handle Python keywords
-        assert_eq!(to_python_identifier("import"), "import_");
-        assert_eq!(to_python_identifier("class"), "class_");
-
-        // Handle trailing separators
-        assert_eq!(to_python_identifier("module_"), "module");
-        assert_eq!(to_python_identifier("module--"), "module");
-    }
-
-    #[test]
-    fn test_mcp_server_get_python_name() {
-        // With explicit python_name
-        let mut config = McpServerConfig::new("my-server".to_string(), "My Server".to_string());
-        config.python_name = Some("custom_name".to_string());
-        assert_eq!(config.get_python_name(), "custom_name");
-
-        // Without explicit python_name (derived from id)
-        let config2 = McpServerConfig::new("mcp-weather-api".to_string(), "Weather".to_string());
-        assert_eq!(config2.get_python_name(), "mcp_weather_api");
-    }
-
-    #[test]
-    fn test_mcp_server_set_python_name() {
-        let mut config = McpServerConfig::new("test".to_string(), "Test".to_string());
-
-        // Valid name
-        assert!(config.set_python_name("my_module").is_ok());
-        assert_eq!(config.python_name, Some("my_module".to_string()));
-
-        // Invalid name
-        assert!(config.set_python_name("My-Module").is_err());
-        assert!(config.set_python_name("123abc").is_err());
-        assert!(config.set_python_name("import").is_err());
-    }
-
-    #[test]
-    fn test_enforce_python_name_sanitizes_name_and_python_name() {
-        let mut config = McpServerConfig::new("server-1".to_string(), "Server Name 1".to_string());
-        enforce_python_name(&mut config);
-        assert_eq!(config.name, "Server Name 1");
-        assert_eq!(config.python_name.as_deref(), Some("server_name_1"));
-    }
-
-    #[test]
-    fn test_tool_call_format_normalization_and_resolution() {
-        // Primary not in enabled -> should normalize
-        let mut cfg = ToolCallFormatConfig {
-            enabled: vec![ToolCallFormatName::CodeMode],
-            primary: ToolCallFormatName::Hermes,
-        };
-        cfg.normalize();
-        assert!(cfg.enabled.contains(&cfg.primary));
-
-        // Code mode unavailable -> fall back to first non-code
-        let mut cfg2 = ToolCallFormatConfig {
-            enabled: vec![ToolCallFormatName::CodeMode, ToolCallFormatName::Mistral],
-            primary: ToolCallFormatName::CodeMode,
-        };
-        cfg2.normalize();
-        let resolved = cfg2.resolve_primary_for_prompt(false, true);
-        assert_eq!(resolved, ToolCallFormatName::Mistral);
-
-        // Code mode available -> keep primary
-        let resolved2 = cfg2.resolve_primary_for_prompt(true, true);
-        assert_eq!(resolved2, ToolCallFormatName::CodeMode);
-
-        // Native unavailable -> fall back
-        let mut cfg3 = ToolCallFormatConfig {
-            enabled: vec![ToolCallFormatName::Native, ToolCallFormatName::Hermes],
-            primary: ToolCallFormatName::Native,
-        };
-        cfg3.normalize();
-        let resolved3 = cfg3.resolve_primary_for_prompt(true, false);
-        assert_eq!(resolved3, ToolCallFormatName::Hermes);
-
-        // Native available -> keep primary
-        let resolved4 = cfg3.resolve_primary_for_prompt(true, true);
-        assert_eq!(resolved4, ToolCallFormatName::Native);
-    }
-
-    // ============ Database Toolbox Configuration Tests ============
-
-    #[test]
-    fn test_supported_database_kind_methods() {
-        assert_eq!(SupportedDatabaseKind::Bigquery.execute_tool_name(), "execute_sql");
-        assert_eq!(SupportedDatabaseKind::Postgres.execute_tool_name(), "postgres-sql");
-        assert_eq!(SupportedDatabaseKind::Mysql.execute_tool_name(), "mysql-sql");
-        assert_eq!(SupportedDatabaseKind::Sqlite.execute_tool_name(), "sqlite-sql");
-        assert_eq!(SupportedDatabaseKind::Spanner.execute_tool_name(), "spanner-sql");
-
-        assert_eq!(SupportedDatabaseKind::Bigquery.sql_dialect(), "GoogleSQL");
-        assert_eq!(SupportedDatabaseKind::Postgres.sql_dialect(), "PostgreSQL");
-
-        assert_eq!(SupportedDatabaseKind::Bigquery.display_name(), "BigQuery");
-        assert_eq!(SupportedDatabaseKind::Postgres.display_name(), "PostgreSQL");
-    }
-
-    #[test]
-    fn test_database_source_config_new() {
-        let source = DatabaseSourceConfig::new(
-            "my-pg".to_string(),
-            "My PostgreSQL".to_string(),
-            SupportedDatabaseKind::Postgres,
-        );
-        assert_eq!(source.id, "my-pg");
-        assert_eq!(source.name, "My PostgreSQL");
-        assert_eq!(source.kind, SupportedDatabaseKind::Postgres);
-        assert!(!source.enabled);
-        assert!(source.project_id.is_none());
-    }
-
-    #[test]
-    fn test_database_toolbox_config_default() {
-        let config = DatabaseToolboxConfig::default();
-        assert!(!config.enabled);
-        assert!(config.sources.is_empty());
-    }
-
-    #[test]
-    fn test_database_toolbox_config_serde_roundtrip() {
-        let config = DatabaseToolboxConfig {
-            enabled: true,
-            sources: vec![
-                DatabaseSourceConfig {
-                    id: "bq-prod".to_string(),
-                    name: "BigQuery Production".to_string(),
-                    kind: SupportedDatabaseKind::Bigquery,
-                    enabled: true,
-                    transport: Transport::Stdio,
-                    command: Some("/opt/homebrew/bin/toolbox".to_string()),
-                    args: vec!["--stdio".to_string(), "--prebuilt".to_string(), "bigquery".to_string()],
-                    env: HashMap::new(),
-                    auto_approve_tools: false,
-                    defer_tools: true,
-                    project_id: Some("my-project".to_string()),
-                    sql_dialect: None,
-                    dataset_allowlist: None,
-                    table_allowlist: None,
-                },
-            ],
-        };
-
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: DatabaseToolboxConfig = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(config.enabled, parsed.enabled);
-        assert_eq!(config.sources.len(), parsed.sources.len());
-        assert_eq!(config.sources[0].kind, parsed.sources[0].kind);
-        assert_eq!(config.sources[0].command, parsed.sources[0].command);
+        assert_eq!(settings.always_on_builtin_tools, parsed.always_on_builtin_tools);
     }
 
     #[test]
     fn test_app_settings_includes_database_toolbox() {
         let settings = AppSettings::default();
         assert!(!settings.database_toolbox.enabled);
-        assert!(!settings.schema_search_enabled);
-        assert!(!settings.sql_select_enabled);
+        assert!(settings.always_on_builtin_tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_settings_migration() {
+        // Create a temporary config file with legacy flags
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let config_dir = home.join(".plugable-chat");
+        let config_path = config_dir.join("config.json");
+        
+        // Backup existing config if it exists
+        let backup_path = config_dir.join("config.json.bak");
+        let has_existing = config_path.exists();
+        if has_existing {
+            fs::copy(&config_path, &backup_path).await.unwrap();
+        } else {
+            fs::create_dir_all(&config_dir).await.unwrap();
+        }
+
+        let legacy_json = r#"{
+            "system_prompt": "test prompt",
+            "tool_search_enabled": true,
+            "python_execution_enabled": false,
+            "search_schemas_enabled": true,
+            "execute_sql_enabled": true,
+            "always_on_builtin_tools": ["python_execution"]
+        }"#;
+        
+        fs::write(&config_path, legacy_json).await.unwrap();
+
+        // Load settings - should migrate flags
+        let settings = load_settings().await;
+
+        // Verify migration
+        assert!(settings.always_on_builtin_tools.contains(&"tool_search".to_string()));
+        assert!(settings.always_on_builtin_tools.contains(&"python_execution".to_string()));
+        assert!(settings.always_on_builtin_tools.contains(&"schema_search".to_string()));
+        assert!(settings.always_on_builtin_tools.contains(&"sql_select".to_string()));
+        assert_eq!(settings.always_on_builtin_tools.len(), 4);
+
+        // Cleanup: restore or remove
+        if has_existing {
+            fs::rename(&backup_path, &config_path).await.unwrap();
+        } else {
+            fs::remove_file(&config_path).await.unwrap();
+        }
     }
 }

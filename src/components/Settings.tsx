@@ -232,12 +232,6 @@ interface TestResult {
     error?: string;
 }
 
-interface SystemPromptLayers {
-    base_prompt: string;
-    additions: string[];
-    combined: string;
-}
-
 type ToolParameter = {
     name: string;
     type: string;
@@ -1392,14 +1386,9 @@ function SystemPromptTab({
     onRegisterSave?: (handler: () => Promise<void>) => void;
     onSavingChange?: (saving: boolean) => void;
 }) {
-    const { settings, updateSystemPrompt, error, promptRefreshTick } = useSettingsStore();
+    const { settings, updateSystemPrompt, error } = useSettingsStore();
     const [localPrompt, setLocalPrompt] = useState(settings?.system_prompt || '');
     const [hasChanges, setHasChanges] = useState(false);
-    const [preview, setPreview] = useState<string | null>(null);
-    const [showPreview, setShowPreview] = useState(false);
-    const [loadingPreview, setLoadingPreview] = useState(false);
-    const [layers, setLayers] = useState<SystemPromptLayers | null>(null);
-    const [layersError, setLayersError] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
 
     useEffect(() => {
@@ -1409,46 +1398,12 @@ function SystemPromptTab({
         }
     }, [settings?.system_prompt]);
 
-    const fetchLayers = useCallback(() => {
-        setLoadingPreview(true);
-        setLayersError(null);
-        invoke<SystemPromptLayers>('get_system_prompt_layers')
-            .then((data) => {
-                setLayers(data);
-                setPreview(data.combined);
-            })
-            .catch((e) => {
-                console.error('Failed to get system prompt layers:', e);
-                setLayersError(e.message || String(e));
-                setPreview('Failed to load preview');
-            })
-            .finally(() => setLoadingPreview(false));
-    }, []);
-
-    // Keep layers in sync with saved settings
-    useEffect(() => {
-        fetchLayers();
-    }, [fetchLayers, settings?.mcp_servers, settings?.python_execution_enabled, settings?.system_prompt]);
-
-    // Refresh when prompt refresh tick changes (e.g., MCP config saved)
-    useEffect(() => {
-        fetchLayers();
-    }, [fetchLayers, promptRefreshTick]);
-
-    // Fetch preview when toggling view
-    useEffect(() => {
-        if (showPreview) {
-            fetchLayers();
-        }
-    }, [showPreview, fetchLayers]);
-
     const handleSave = async () => {
         setIsSaving(true);
         onSavingChange?.(true);
         try {
             await updateSystemPrompt(localPrompt);
             setHasChanges(false);
-            fetchLayers();
         } finally {
             setIsSaving(false);
             onSavingChange?.(false);
@@ -1480,9 +1435,6 @@ function SystemPromptTab({
     // Check if current prompt matches default
     const isDefault = localPrompt === DEFAULT_SYSTEM_PROMPT;
 
-    // Count enabled MCP servers
-    const enabledServers = settings?.mcp_servers?.filter(s => s.enabled).length || 0;
-
     return (
         <div className="space-y-4">
             <div>
@@ -1500,81 +1452,8 @@ function SystemPromptTab({
                     placeholder="Enter your system prompt..."
                 />
                 <p className="mt-2 text-xs text-gray-500">
-                    This is the base prompt. MCP tool descriptions are appended automatically based on enabled servers.
+                    This is the base prompt. Tool descriptions and instructions are appended automatically during chat based on your configuration and attachments.
                 </p>
-            </div>
-
-            {/* Tool prompt breakdown */}
-            <div className="border border-gray-200 rounded-xl overflow-hidden">
-                <div className="flex items-center justify-between px-4 py-3 bg-gray-50">
-                    <div className="flex items-center gap-2">
-                        <Wrench size={16} />
-                        <span className="text-sm font-medium text-gray-700">Additional prompts from tools</span>
-                    </div>
-                    <button
-                        onClick={fetchLayers}
-                        className="text-xs text-blue-600 hover:text-blue-700"
-                    >
-                        Refresh
-                    </button>
-                </div>
-                <div className="p-4 bg-white space-y-3">
-                    {loadingPreview ? (
-                        <div className="flex items-center gap-2 text-sm text-gray-600">
-                            <Loader2 size={16} className="animate-spin" />
-                            Loading tool prompts...
-                        </div>
-                    ) : layersError ? (
-                        <div className="text-sm text-red-700 bg-red-50 px-3 py-2 rounded-lg">{layersError}</div>
-                    ) : layers && layers.additions.length > 0 ? (
-                        layers.additions.map((block, idx) => (
-                            <pre
-                                key={idx}
-                                className="text-xs font-mono whitespace-pre-wrap text-gray-700 bg-gray-50 p-3 rounded-lg border border-gray-100"
-                            >
-                                {block}
-                            </pre>
-                        ))
-                    ) : (
-                        <p className="text-sm text-gray-500">No tool-specific prompts active.</p>
-                    )}
-                </div>
-            </div>
-
-            {/* Preview toggle */}
-            <div className="border border-gray-200 rounded-xl overflow-hidden">
-                <button
-                    onClick={() => setShowPreview(!showPreview)}
-                    className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-sm font-medium text-gray-700"
-                >
-                    <span className="flex items-center gap-2">
-                        <MessageSquare size={16} />
-                        Full System Prompt Preview
-                        {enabledServers > 0 && (
-                            <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
-                                {enabledServers} MCP server{enabledServers !== 1 ? 's' : ''} enabled
-                            </span>
-                        )}
-                    </span>
-                    {showPreview ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                </button>
-
-                {showPreview && (
-                    <div className="p-4 bg-white border-t border-gray-200">
-                        {loadingPreview ? (
-                            <div className="flex items-center justify-center py-8">
-                                <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                            </div>
-                        ) : (
-                            <pre className="text-xs font-mono whitespace-pre-wrap text-gray-700 max-h-80 overflow-y-auto bg-gray-50 p-3 rounded-lg">
-                                {preview || 'No preview available'}
-                            </pre>
-                        )}
-                        <p className="mt-2 text-xs text-gray-500">
-                            This is exactly what will be sent to the model as the system prompt.
-                        </p>
-                    </div>
-                )}
             </div>
 
             {/* State Machine Preview */}
@@ -1854,7 +1733,20 @@ function BuiltinsTab({
         updateSchemaRelevancyThreshold,
         updateRagDominantThreshold,
         pythonAllowedImports,
+        addAlwaysOnBuiltinTool,
+        removeAlwaysOnBuiltinTool,
     } = useSettingsStore();
+    const alwaysOnBuiltins = settings?.always_on_builtin_tools || [];
+    const isBuiltinAlwaysOn = (name: string) => alwaysOnBuiltins.includes(name);
+
+    const toggleBuiltinAlwaysOn = async (name: string) => {
+        if (isBuiltinAlwaysOn(name)) {
+            await removeAlwaysOnBuiltinTool(name);
+        } else {
+            await addAlwaysOnBuiltinTool(name);
+        }
+    };
+
     const allowedImports = (pythonAllowedImports && pythonAllowedImports.length > 0)
         ? pythonAllowedImports
         : FALLBACK_PYTHON_ALLOWED_IMPORTS;
@@ -2132,6 +2024,20 @@ function BuiltinsTab({
                                 </p>
                             </div>
                         </div>
+                        <div className="flex items-center gap-2 pr-1">
+                            <span className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Always On</span>
+                            <button
+                                onClick={() => toggleBuiltinAlwaysOn('python_execution')}
+                                className={`relative w-9 h-5 rounded-full transition-colors ${isBuiltinAlwaysOn('python_execution') ? 'bg-blue-500' : 'bg-gray-300'
+                                    }`}
+                                title="Keep this tool enabled for every chat"
+                            >
+                                <div
+                                    className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${isBuiltinAlwaysOn('python_execution') ? 'translate-x-4' : ''
+                                        }`}
+                                />
+                            </button>
+                        </div>
                     </div>
                     <div className="flex items-center justify-between gap-2">
                         <div className="text-xs font-semibold text-gray-900">System prompt (optional)</div>
@@ -2166,15 +2072,31 @@ function BuiltinsTab({
                                 </p>
                             </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                            <button
-                                onClick={handleResetToolSearchPrompt}
-                                className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
-                                title="Reset to default prompt"
-                            >
-                                Reset
-                            </button>
-                            <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                        <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-2 pr-3 border-r border-gray-100">
+                                <span className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Always On</span>
+                                <button
+                                    onClick={() => toggleBuiltinAlwaysOn('tool_search')}
+                                    className={`relative w-9 h-5 rounded-full transition-colors ${isBuiltinAlwaysOn('tool_search') ? 'bg-blue-500' : 'bg-gray-300'
+                                        }`}
+                                    title="Keep this tool enabled for every chat"
+                                >
+                                    <div
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${isBuiltinAlwaysOn('tool_search') ? 'translate-x-4' : ''
+                                            }`}
+                                    />
+                                </button>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={handleResetToolSearchPrompt}
+                                    className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
+                                    title="Reset to default prompt"
+                                >
+                                    Reset
+                                </button>
+                                <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                            </div>
                         </div>
                     </div>
                     <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
@@ -2250,15 +2172,31 @@ function BuiltinsTab({
                                 </p>
                             </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                            <button
-                                onClick={handleResetSchemaSearchPrompt}
-                                className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
-                                title="Reset to default prompt"
-                            >
-                                Reset
-                            </button>
-                            <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                        <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-2 pr-3 border-r border-gray-100">
+                                <span className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Always On</span>
+                                <button
+                                    onClick={() => toggleBuiltinAlwaysOn('schema_search')}
+                                    className={`relative w-9 h-5 rounded-full transition-colors ${isBuiltinAlwaysOn('schema_search') ? 'bg-blue-500' : 'bg-gray-300'
+                                        }`}
+                                    title="Keep this tool enabled for every chat"
+                                >
+                                    <div
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${isBuiltinAlwaysOn('schema_search') ? 'translate-x-4' : ''
+                                            }`}
+                                    />
+                                </button>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={handleResetSchemaSearchPrompt}
+                                    className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
+                                    title="Reset to default prompt"
+                                >
+                                    Reset
+                                </button>
+                                <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                            </div>
                         </div>
                     </div>
                     <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
@@ -2297,15 +2235,31 @@ function BuiltinsTab({
                                 </p>
                             </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                            <button
-                                onClick={handleResetSqlSelectPrompt}
-                                className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
-                                title="Reset to default prompt"
-                            >
-                                Reset
-                            </button>
-                            <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                        <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-2 pr-3 border-r border-gray-100">
+                                <span className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Always On</span>
+                                <button
+                                    onClick={() => toggleBuiltinAlwaysOn('sql_select')}
+                                    className={`relative w-9 h-5 rounded-full transition-colors ${isBuiltinAlwaysOn('sql_select') ? 'bg-blue-500' : 'bg-gray-300'
+                                        }`}
+                                    title="Keep this tool enabled for every chat"
+                                >
+                                    <div
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${isBuiltinAlwaysOn('sql_select') ? 'translate-x-4' : ''
+                                            }`}
+                                    />
+                                </button>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={handleResetSqlSelectPrompt}
+                                    className="text-[11px] text-gray-600 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50"
+                                    title="Reset to default prompt"
+                                >
+                                    Reset
+                                </button>
+                                <span className="text-[11px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-100">builtin</span>
+                            </div>
                         </div>
                     </div>
                     <label className="text-xs font-medium text-gray-600">System prompt (optional)</label>
@@ -2373,25 +2327,6 @@ function ToolsTab({
 }) {
     const { settings, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error, serverStatuses, addAlwaysOnBuiltinTool, removeAlwaysOnBuiltinTool } = useSettingsStore();
     const servers = settings?.mcp_servers || [];
-    const alwaysOnBuiltins = settings?.always_on_builtin_tools || [];
-
-    // Built-in tools that can be set to always-on
-    const builtinTools = [
-        { name: 'python_execution', description: 'Execute Python code in a sandboxed environment' },
-        { name: 'sql_select', description: 'Execute SQL SELECT queries on configured databases' },
-        { name: 'schema_search', description: 'Search for relevant database tables by description' },
-        { name: 'tool_search', description: 'Discover MCP tools relevant to the current task' },
-    ];
-
-    const isBuiltinAlwaysOn = (name: string) => alwaysOnBuiltins.includes(name);
-
-    const toggleBuiltinAlwaysOn = async (name: string) => {
-        if (isBuiltinAlwaysOn(name)) {
-            await removeAlwaysOnBuiltinTool(name);
-        } else {
-            await addAlwaysOnBuiltinTool(name);
-        }
-    };
 
     const [serverDirtyMap, setServerDirtyMap] = useState<Record<string, boolean>>({});
     const serverSaveHandlers = useRef<Record<string, () => Promise<void>>>({});
@@ -2473,42 +2408,6 @@ function ToolsTab({
 
     return (
         <div className="space-y-6">
-            {/* Built-in Tools Always-On Section */}
-            <div className="space-y-3">
-                <div>
-                    <h3 className="text-sm font-medium text-gray-700">Built-in Tools</h3>
-                    <p className="text-xs text-gray-500">Mark built-in tools as "Always On" to include them in every chat</p>
-                </div>
-                <div className="grid gap-2">
-                    {builtinTools.map((tool) => {
-                        const isOn = isBuiltinAlwaysOn(tool.name);
-                        return (
-                            <div 
-                                key={tool.name}
-                                className={`flex items-center justify-between p-3 rounded-lg border transition-colors ${
-                                    isOn ? 'bg-purple-50 border-purple-200' : 'bg-white border-gray-200'
-                                }`}
-                            >
-                                <div>
-                                    <div className="text-sm font-medium text-gray-900">{tool.name}</div>
-                                    <div className="text-xs text-gray-500">{tool.description}</div>
-                                </div>
-                                <button
-                                    onClick={() => toggleBuiltinAlwaysOn(tool.name)}
-                                    className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
-                                        isOn 
-                                            ? 'bg-purple-500 text-white hover:bg-purple-600' 
-                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                    }`}
-                                >
-                                    {isOn ? 'Always On' : 'Off'}
-                                </button>
-                            </div>
-                        );
-                    })}
-                </div>
-            </div>
-
             {/* MCP Servers Section */}
             <div className="space-y-3">
                 <div className="flex items-center justify-between">
@@ -3411,8 +3310,8 @@ export function SettingsModal() {
                             ? databasesSaving
                             : false;
 
-    // Conditions for showing database tabs
-    const showDatabasesTab = settings?.schema_search_enabled || settings?.sql_select_enabled;
+    const alwaysOn = settings?.always_on_builtin_tools || [];
+    const showDatabasesTab = alwaysOn.includes('schema_search') || alwaysOn.includes('sql_select') || settings?.database_toolbox?.enabled;
 
     return (
         <div id="settings-modal" className="settings-modal fixed inset-0 z-50 flex items-center justify-center">

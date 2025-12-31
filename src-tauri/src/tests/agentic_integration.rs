@@ -31,18 +31,17 @@ impl AgenticIntegrationTestHarness {
         primary_format: ToolCallFormatName,
     ) -> AppSettings {
         let mut settings = AppSettings::default();
-        settings.sql_select_enabled = sql_enabled;
-        settings.python_execution_enabled = python_enabled;
+        if sql_enabled {
+            settings.always_on_builtin_tools.push("sql_select".to_string());
+            settings.always_on_builtin_tools.push("schema_search".to_string());
+            settings.database_toolbox.enabled = true;
+        }
+        if python_enabled {
+            settings.always_on_builtin_tools.push("python_execution".to_string());
+        }
         settings.tool_call_formats.primary = primary_format;
         settings.tool_call_formats.enabled = vec![primary_format];
         settings.tool_call_formats.normalize();
-        
-        // Ensure database toolbox is "enabled" if SQL is enabled, so state machine resolves correctly
-        if sql_enabled {
-            settings.database_toolbox.enabled = true;
-            // Also need at least one "enabled" source for determine_available_builtins to work if called
-            // though here we are seeding the state machine directly.
-        }
         
         settings
     }

@@ -6,12 +6,10 @@
 use crate::agentic_state;
 use crate::app_state::{
     ActorHandles, EmbeddingModelState, LaunchConfigState, SettingsState, SettingsStateMachineState,
-    ToolRegistryState,
 };
 use crate::protocol::McpHostMsg;
 use crate::settings::{
     self, enforce_python_name, AppSettings, ChatFormatName, McpServerConfig, ToolCallFormatConfig,
-    ToolCallFormatName,
 };
 use crate::state_machine::{AgenticStateMachine, StatePreview};
 use python_sandbox::sandbox::ALLOWED_MODULES as PYTHON_ALLOWED_MODULES;
@@ -300,149 +298,6 @@ pub async fn update_chat_format(
     Ok(())
 }
 
-/// Toggle Python execution feature
-#[tauri::command]
-pub async fn update_python_execution_enabled(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.python_execution_enabled = enabled;
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!(
-        "[Settings] python_execution_enabled updated to: {}",
-        enabled
-    );
-    Ok(())
-}
-
-/// Toggle native tool calling feature
-#[tauri::command]
-pub async fn update_native_tool_calling_enabled(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    // Update the format config to add/remove Native format
-    if enabled {
-        if !guard
-            .tool_call_formats
-            .enabled
-            .contains(&ToolCallFormatName::Native)
-        {
-            guard
-                .tool_call_formats
-                .enabled
-                .insert(0, ToolCallFormatName::Native);
-        }
-        guard.tool_call_formats.primary = ToolCallFormatName::Native;
-    } else {
-        guard
-            .tool_call_formats
-            .enabled
-            .retain(|f| *f != ToolCallFormatName::Native);
-        if guard.tool_call_formats.primary == ToolCallFormatName::Native {
-            guard.tool_call_formats.primary = guard
-                .tool_call_formats
-                .enabled
-                .first()
-                .copied()
-                .unwrap_or(ToolCallFormatName::Hermes);
-        }
-    }
-    guard.tool_call_formats.normalize();
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!(
-        "[Settings] Native tool calling updated to: {} (primary={:?}, enabled={:?})",
-        enabled, guard.tool_call_formats.primary, guard.tool_call_formats.enabled
-    );
-    Ok(())
-}
-
-/// Toggle tool search feature
-#[tauri::command]
-pub async fn update_tool_search_enabled(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.tool_search_enabled = enabled;
-    settings::save_settings(&guard).await?;
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!("[Settings] tool_search_enabled updated to: {}", enabled);
-    Ok(())
-}
-
-/// Toggle schema search feature
-#[tauri::command]
-pub async fn update_schema_search_enabled(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-    tool_registry_state: State<'_, ToolRegistryState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.schema_search_enabled = enabled;
-    settings::save_settings(&guard).await?;
-    {
-        let mut registry = tool_registry_state.registry.write().await;
-        registry.set_schema_search_enabled(enabled);
-    }
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!("[Settings] schema_search_enabled updated to: {}", enabled);
-    Ok(())
-}
-
-/// Toggle SQL select feature
-#[tauri::command]
-pub async fn update_sql_select_enabled(
-    enabled: bool,
-    settings_state: State<'_, SettingsState>,
-    settings_sm_state: State<'_, SettingsStateMachineState>,
-    launch_config: State<'_, LaunchConfigState>,
-    tool_registry_state: State<'_, ToolRegistryState>,
-) -> Result<(), String> {
-    let mut guard = settings_state.settings.write().await;
-    guard.sql_select_enabled = enabled;
-    settings::save_settings(&guard).await?;
-    {
-        let mut registry = tool_registry_state.registry.write().await;
-        registry.set_sql_select_enabled(enabled);
-    }
-
-    // Refresh the SettingsStateMachine (Tier 1)
-    let mut sm_guard = settings_sm_state.machine.write().await;
-    sm_guard.refresh(&guard, &launch_config.tool_filter);
-
-    println!("[Settings] sql_select_enabled updated to: {}", enabled);
-    Ok(())
-}
-
 /// Update RAG chunk minimum relevancy threshold
 #[tauri::command]
 pub async fn update_rag_chunk_min_relevancy(
@@ -602,7 +457,7 @@ pub async fn get_state_machine_preview(
         tool_call_format: guard.tool_call_formats.primary,
         model_tool_format: None,
         custom_tool_prompts: guard.tool_system_prompts.clone(),
-        python_primary: guard.python_execution_enabled,
+        python_primary: guard.is_builtin_always_on("python_execution"),
     };
 
     let machine = AgenticStateMachine::new_from_settings_sm(&settings_sm_guard, prompt_context);

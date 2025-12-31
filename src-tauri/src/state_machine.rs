@@ -1196,10 +1196,12 @@ mod tests {
 
     fn test_settings() -> AppSettings {
         let mut settings = AppSettings::default();
-        settings.python_execution_enabled = true;
-        settings.tool_search_enabled = true;
-        settings.schema_search_enabled = true;
-        settings.sql_select_enabled = true;
+        settings.always_on_builtin_tools = vec![
+            "python_execution".to_string(),
+            "tool_search".to_string(),
+            "schema_search".to_string(),
+            "sql_select".to_string(),
+        ];
         settings
     }
 
@@ -1396,12 +1398,10 @@ mod tests {
 
     #[test]
     fn test_turn_attached_python_enables_code_execution() {
-        // Scenario: python_execution_enabled=false in settings, but user explicitly
+        // Scenario: python_execution not Always On in settings, but user explicitly
         // attaches python_execution for this turn. The state machine should enable
         // CodeExecution mode and generate Python guidance.
-        let mut settings = AppSettings::default();
-        settings.python_execution_enabled = false; // Disabled in settings
-        settings.sql_select_enabled = true;
+        let settings = AppSettings::default(); // python_execution is not always on
         
         let filter = ToolLaunchFilter::default();
         let settings_sm = SettingsStateMachine::from_settings(&settings, &filter);
@@ -1422,7 +1422,7 @@ mod tests {
             },
         );
         
-        // Initially, PythonExecution should NOT be in capabilities (setting is disabled)
+        // Initially, PythonExecution should NOT be in capabilities (setting is not always on)
         assert!(!machine.enabled_capabilities().contains(&Capability::PythonExecution));
         
         // Compute turn config - this should add PythonExecution to capabilities

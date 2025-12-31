@@ -269,14 +269,26 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
 
     // Core toggles
     if let Some(v) = args.tool_search {
-        settings.tool_search_enabled = v;
+        if v {
+            if !settings.always_on_builtin_tools.contains(&"tool_search".to_string()) {
+                settings.always_on_builtin_tools.push("tool_search".to_string());
+            }
+        } else {
+            settings.always_on_builtin_tools.retain(|t| t != "tool_search");
+        }
     }
     if let Some(max_results) = args.tool_search_max_results {
         let capped = max_results.clamp(1, 20);
         settings.tool_search_max_results = capped;
     }
     if let Some(v) = args.python_execution {
-        settings.python_execution_enabled = v;
+        if v {
+            if !settings.always_on_builtin_tools.contains(&"python_execution".to_string()) {
+                settings.always_on_builtin_tools.push("python_execution".to_string());
+            }
+        } else {
+            settings.always_on_builtin_tools.retain(|t| t != "python_execution");
+        }
     }
     if let Some(v) = args.python_tool_calling {
         settings.python_tool_calling_enabled = v;
@@ -459,8 +471,7 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
         // Force deterministic, test-friendly settings:
         // - Disable tool_search so the test server tools stay active (not deferred)
         // - Keep native tool calling as the primary path (no python code mode)
-        settings.tool_search_enabled = false;
-        settings.python_execution_enabled = false;
+        settings.always_on_builtin_tools.retain(|t| t != "tool_search" && t != "python_execution");
         settings.python_tool_calling_enabled = false;
 
         // Auto-populate initial prompt to trigger the dev test suite if none provided

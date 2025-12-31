@@ -164,17 +164,17 @@ impl ToolCapabilityResolver {
         let mut enabled = HashSet::new();
         let always_on = &settings.always_on_builtin_tools;
         
-        // Check individual boolean flags AND always_on_builtin_tools
-        if settings.python_execution_enabled && always_on.contains(&BUILTIN_PYTHON_EXECUTION.to_string()) {
+        // Check always_on_builtin_tools
+        if always_on.contains(&BUILTIN_PYTHON_EXECUTION.to_string()) {
             enabled.insert(BUILTIN_PYTHON_EXECUTION.to_string());
         }
-        if settings.tool_search_enabled && always_on.contains(&BUILTIN_TOOL_SEARCH.to_string()) {
+        if always_on.contains(&BUILTIN_TOOL_SEARCH.to_string()) {
             enabled.insert(BUILTIN_TOOL_SEARCH.to_string());
         }
-        if settings.schema_search_enabled && always_on.contains(&BUILTIN_SCHEMA_SEARCH.to_string()) {
+        if always_on.contains(&BUILTIN_SCHEMA_SEARCH.to_string()) {
             enabled.insert(BUILTIN_SCHEMA_SEARCH.to_string());
         }
-        if settings.sql_select_enabled && always_on.contains(&BUILTIN_SQL_SELECT.to_string()) {
+        if always_on.contains(&BUILTIN_SQL_SELECT.to_string()) {
             enabled.insert(BUILTIN_SQL_SELECT.to_string());
         }
         
@@ -208,7 +208,7 @@ impl ToolCapabilityResolver {
         
         // Check schema_search - only exposed as a tool if explicitly enabled
         // (internal schema search is auto-derived when sql_select is on but schema_search is off)
-        if settings.schema_search_enabled
+        if enabled_builtins.contains(BUILTIN_SCHEMA_SEARCH)
             && filter.builtin_allowed(BUILTIN_SCHEMA_SEARCH)
             && Self::has_enabled_database_sources(&settings.database_toolbox)
         {
