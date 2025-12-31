@@ -1,6 +1,6 @@
 import { useSettingsStore, createNewServerConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_CALL_FORMATS, type McpServerConfig, type McpTool, type ToolCallFormatConfig, type ToolCallFormatName, type DatabaseSourceConfig, type SupportedDatabaseKind, type DatabaseToolboxConfig, type ChatFormatName } from '../store/settings-store';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw, RefreshCw, AlertCircle, Download, Cpu, HardDrive, ExternalLink, Zap, GitBranch } from 'lucide-react';
+import { X, Plus, Trash2, Save, Server, MessageSquare, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2, Code2, Wrench, RotateCcw, RefreshCw, AlertCircle, Download, Cpu, HardDrive, ExternalLink, Zap, GitBranch, Database } from 'lucide-react';
 import { invoke, listen, type FoundryCatalogModel, type FoundryServiceStatus } from '../lib/api';
 import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
 import { useChatStore } from '../store/chat-store';
@@ -2371,8 +2371,27 @@ function ToolsTab({
     onRegisterSave?: (handler: () => Promise<void>) => void;
     onSavingChange?: (saving: boolean) => void;
 }) {
-    const { settings, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error, serverStatuses } = useSettingsStore();
+    const { settings, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error, serverStatuses, addAlwaysOnBuiltinTool, removeAlwaysOnBuiltinTool } = useSettingsStore();
     const servers = settings?.mcp_servers || [];
+    const alwaysOnBuiltins = settings?.always_on_builtin_tools || [];
+
+    // Built-in tools that can be set to always-on
+    const builtinTools = [
+        { name: 'python_execution', description: 'Execute Python code in a sandboxed environment' },
+        { name: 'sql_select', description: 'Execute SQL SELECT queries on configured databases' },
+        { name: 'schema_search', description: 'Search for relevant database tables by description' },
+        { name: 'tool_search', description: 'Discover MCP tools relevant to the current task' },
+    ];
+
+    const isBuiltinAlwaysOn = (name: string) => alwaysOnBuiltins.includes(name);
+
+    const toggleBuiltinAlwaysOn = async (name: string) => {
+        if (isBuiltinAlwaysOn(name)) {
+            await removeAlwaysOnBuiltinTool(name);
+        } else {
+            await addAlwaysOnBuiltinTool(name);
+        }
+    };
 
     const [serverDirtyMap, setServerDirtyMap] = useState<Record<string, boolean>>({});
     const serverSaveHandlers = useRef<Record<string, () => Promise<void>>>({});
@@ -2454,6 +2473,43 @@ function ToolsTab({
 
     return (
         <div className="space-y-6">
+            {/* Built-in Tools Always-On Section */}
+            <div className="space-y-3">
+                <div>
+                    <h3 className="text-sm font-medium text-gray-700">Built-in Tools</h3>
+                    <p className="text-xs text-gray-500">Mark built-in tools as "Always On" to include them in every chat</p>
+                </div>
+                <div className="grid gap-2">
+                    {builtinTools.map((tool) => {
+                        const isOn = isBuiltinAlwaysOn(tool.name);
+                        return (
+                            <div 
+                                key={tool.name}
+                                className={`flex items-center justify-between p-3 rounded-lg border transition-colors ${
+                                    isOn ? 'bg-purple-50 border-purple-200' : 'bg-white border-gray-200'
+                                }`}
+                            >
+                                <div>
+                                    <div className="text-sm font-medium text-gray-900">{tool.name}</div>
+                                    <div className="text-xs text-gray-500">{tool.description}</div>
+                                </div>
+                                <button
+                                    onClick={() => toggleBuiltinAlwaysOn(tool.name)}
+                                    className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
+                                        isOn 
+                                            ? 'bg-purple-500 text-white hover:bg-purple-600' 
+                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                    }`}
+                                >
+                                    {isOn ? 'Always On' : 'Off'}
+                                </button>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            {/* MCP Servers Section */}
             <div className="space-y-3">
                 <div className="flex items-center justify-between">
                     <div>
@@ -2507,6 +2563,228 @@ function ToolsTab({
                     Select <strong>+ Attach Tool</strong> in chat to use an enabled tool
                 </p>
             </div>
+        </div>
+    );
+}
+
+// Schemas Tab - manage always-on database tables
+function SchemasTab() {
+    const { settings, addAlwaysOnTable, removeAlwaysOnTable } = useSettingsStore();
+    const [cachedTables, setCachedTables] = useState<any[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [searchQuery, setSearchQuery] = useState('');
+
+    // Fetch cached tables from backend
+    useEffect(() => {
+        const fetchTables = async () => {
+            setLoading(true);
+            try {
+                const tables = await invoke<any[]>('get_cached_database_schemas');
+                setCachedTables(tables);
+            } catch (e: any) {
+                console.error('[SchemasTab] Failed to fetch tables:', e);
+            } finally {
+                setLoading(false);
+            }
+        };
+        fetchTables();
+    }, []);
+
+    const alwaysOnTables = settings?.always_on_tables || [];
+    
+    const isAlwaysOn = (sourceId: string, tableFqName: string) => 
+        alwaysOnTables.some(t => t.source_id === sourceId && t.table_fq_name === tableFqName);
+
+    const toggleAlwaysOn = async (sourceId: string, tableFqName: string) => {
+        if (isAlwaysOn(sourceId, tableFqName)) {
+            await removeAlwaysOnTable(sourceId, tableFqName);
+        } else {
+            await addAlwaysOnTable(sourceId, tableFqName);
+        }
+    };
+
+    // Filter tables by search query
+    const filteredTables = cachedTables.filter(table => {
+        if (!searchQuery.trim()) return true;
+        const query = searchQuery.toLowerCase();
+        return table.fully_qualified_name?.toLowerCase().includes(query) ||
+               table.source_id?.toLowerCase().includes(query);
+    });
+
+    return (
+        <div className="space-y-6">
+            <div>
+                <h3 className="text-sm font-medium text-gray-700">Always-On Tables</h3>
+                <p className="text-xs text-gray-500 mt-1">
+                    Tables marked as "Always On" will automatically have their schemas included in every chat.
+                    They appear as locked pills in the chat input area.
+                </p>
+            </div>
+
+            {/* Search */}
+            <div className="relative">
+                <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search tables..."
+                    className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                />
+            </div>
+
+            {loading ? (
+                <div className="flex items-center justify-center py-12">
+                    <Loader2 className="animate-spin text-gray-400" size={24} />
+                </div>
+            ) : filteredTables.length === 0 ? (
+                <div className="text-center py-8 text-gray-500 border border-dashed border-gray-200 rounded-xl">
+                    <Database size={32} className="mx-auto mb-2 opacity-30" />
+                    <p className="text-sm">No cached database tables</p>
+                    <p className="text-xs mt-1">Go to Databases tab and click "Refresh Schemas" to index your tables</p>
+                </div>
+            ) : (
+                <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                    {filteredTables.map((table) => {
+                        const isOn = isAlwaysOn(table.source_id, table.fully_qualified_name);
+                        return (
+                            <div 
+                                key={`${table.source_id}::${table.fully_qualified_name}`}
+                                className={`flex items-center justify-between p-3 rounded-lg border transition-colors ${
+                                    isOn ? 'bg-amber-50 border-amber-200' : 'bg-white border-gray-200'
+                                }`}
+                            >
+                                <div className="flex-1 min-w-0">
+                                    <div className="text-sm font-medium text-gray-900 truncate">
+                                        {table.fully_qualified_name}
+                                    </div>
+                                    <div className="text-xs text-gray-500">
+                                        Source: {table.source_id} | {table.column_count || 0} columns
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => toggleAlwaysOn(table.source_id, table.fully_qualified_name)}
+                                    className={`ml-4 px-3 py-1 text-xs font-medium rounded-full transition-colors ${
+                                        isOn 
+                                            ? 'bg-amber-500 text-white hover:bg-amber-600' 
+                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                    }`}
+                                >
+                                    {isOn ? 'Always On' : 'Off'}
+                                </button>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+
+            {alwaysOnTables.length > 0 && (
+                <div className="pt-4 border-t border-gray-100">
+                    <p className="text-xs text-gray-500">
+                        {alwaysOnTables.length} table{alwaysOnTables.length !== 1 ? 's' : ''} set to always-on
+                    </p>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// Files Tab - manage always-on RAG paths
+function FilesTab() {
+    const { settings, addAlwaysOnRagPath, removeAlwaysOnRagPath } = useSettingsStore();
+    const alwaysOnPaths = settings?.always_on_rag_paths || [];
+
+    const handleAddFiles = async () => {
+        try {
+            const paths = await invoke<string[]>('select_files');
+            for (const path of paths) {
+                if (!alwaysOnPaths.includes(path)) {
+                    await addAlwaysOnRagPath(path);
+                }
+            }
+        } catch (e: any) {
+            console.error('[FilesTab] Failed to select files:', e);
+        }
+    };
+
+    const handleAddFolder = async () => {
+        try {
+            const path = await invoke<string | null>('select_folder');
+            if (path && !alwaysOnPaths.includes(path)) {
+                await addAlwaysOnRagPath(path);
+            }
+        } catch (e: any) {
+            console.error('[FilesTab] Failed to select folder:', e);
+        }
+    };
+
+    return (
+        <div className="space-y-6">
+            <div>
+                <h3 className="text-sm font-medium text-gray-700">Always-On Files</h3>
+                <p className="text-xs text-gray-500 mt-1">
+                    Files and folders marked as "Always On" will be automatically indexed and searched in every chat.
+                    They appear as locked pills in the chat input area.
+                </p>
+            </div>
+
+            {/* Add buttons */}
+            <div className="flex gap-2">
+                <button
+                    onClick={handleAddFiles}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700"
+                >
+                    <Plus size={14} />
+                    Add Files
+                </button>
+                <button
+                    onClick={handleAddFolder}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700"
+                >
+                    <Plus size={14} />
+                    Add Folder
+                </button>
+            </div>
+
+            {alwaysOnPaths.length === 0 ? (
+                <div className="text-center py-8 text-gray-500 border border-dashed border-gray-200 rounded-xl">
+                    <HardDrive size={32} className="mx-auto mb-2 opacity-30" />
+                    <p className="text-sm">No always-on files configured</p>
+                    <p className="text-xs mt-1">Add files or folders to have them automatically available in every chat</p>
+                </div>
+            ) : (
+                <div className="space-y-2">
+                    {alwaysOnPaths.map((path) => (
+                        <div 
+                            key={path}
+                            className="flex items-center justify-between p-3 bg-emerald-50 border border-emerald-200 rounded-lg"
+                        >
+                            <div className="flex-1 min-w-0">
+                                <div className="text-sm font-medium text-gray-900 truncate" title={path}>
+                                    {path.split(/[/\\]/).pop() || path}
+                                </div>
+                                <div className="text-xs text-gray-500 truncate" title={path}>
+                                    {path}
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => removeAlwaysOnRagPath(path)}
+                                className="ml-4 p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                                title="Remove from always-on"
+                            >
+                                <Trash2 size={14} />
+                            </button>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {alwaysOnPaths.length > 0 && (
+                <div className="pt-4 border-t border-gray-100">
+                    <p className="text-xs text-gray-500">
+                        {alwaysOnPaths.length} path{alwaysOnPaths.length !== 1 ? 's' : ''} set to always-on
+                    </p>
+                </div>
+            )}
         </div>
     );
 }
@@ -3243,6 +3521,26 @@ export function SettingsModal() {
                         <Wrench size={16} />
                         Interfaces
                     </button>
+                    <button
+                        onClick={() => setActiveTab('schemas')}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'schemas'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <Database size={16} />
+                        Schemas
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('files')}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'files'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <HardDrive size={16} />
+                        Files
+                    </button>
                 </div>
 
                 {/* Content */}
@@ -3291,6 +3589,12 @@ export function SettingsModal() {
                                     onRegisterSave={handleRegisterDatabasesSave}
                                     onSavingChange={handleDatabasesSavingChange}
                                 />
+                            )}
+                            {activeTab === 'schemas' && (
+                                <SchemasTab />
+                            )}
+                            {activeTab === 'files' && (
+                                <FilesTab />
                             )}
                         </>
                     )}

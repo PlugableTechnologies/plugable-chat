@@ -2700,6 +2700,12 @@ async fn chat(
     let tool_use_examples_enabled = settings.tool_use_examples_enabled;
     let tool_use_examples_max = settings.tool_use_examples_max;
     let database_toolbox_config = settings.database_toolbox.clone();
+    
+    // Always-on configuration
+    let always_on_builtin_tools = settings.always_on_builtin_tools.clone();
+    let always_on_mcp_tools = settings.always_on_mcp_tools.clone();
+    let always_on_tables = settings.always_on_tables.clone();
+    let always_on_rag_paths = settings.always_on_rag_paths.clone();
 
     println!(
         "[Chat] Settings: python_execution={}, tool_search={}, schema_search={}, sql_select={}",
@@ -2708,6 +2714,17 @@ async fn chat(
         schema_search_enabled,
         sql_select_enabled
     );
+    
+    // Log always-on configuration if any is set
+    if !always_on_builtin_tools.is_empty() || !always_on_mcp_tools.is_empty() || !always_on_tables.is_empty() || !always_on_rag_paths.is_empty() {
+        println!(
+            "[Chat] Always-on: builtins={:?}, mcp_tools={:?}, tables={}, rag_paths={}",
+            always_on_builtin_tools.len(),
+            always_on_mcp_tools.len(),
+            always_on_tables.len(),
+            always_on_rag_paths.len()
+        );
+    }
 
     let mut enabled_db_sources = Vec::new();
     // Database sources should only be enabled when database-specific tools are on.
@@ -3078,13 +3095,33 @@ async fn chat(
         }
     }
 
+    // Compute effective tables (explicit attachments + always-on tables)
+    // Schema search only runs when we have effective tables to work with
+    let has_effective_tables = !turn_attached_tables.is_empty() || !always_on_tables.is_empty();
+    let should_run_schema_search = has_effective_tables 
+        && (schema_search_enabled || internal_schema_search || sql_select_enabled);
+    
+    // Compute effective tools (explicit attachments + always-on tools)
+    let has_effective_tools = !attached_tools.is_empty() 
+        || !always_on_builtin_tools.is_empty() 
+        || !always_on_mcp_tools.is_empty();
+    let should_run_tool_search = tool_search_enabled 
+        && tool_search_allowed 
+        && (has_effective_tools || has_mcp_tools);
+    
+    println!(
+        "[Chat] Auto-discovery gating: schema_search={} (effective_tables={}), tool_search={} (effective_tools={})",
+        should_run_schema_search, has_effective_tables,
+        should_run_tool_search, has_effective_tools
+    );
+
     // Run auto-discovery (tool search + schema search) for this user prompt
     let auto_discovery = perform_auto_discovery_for_prompt(
         &message,
-        tool_search_enabled && tool_search_allowed, // Only run auto tool discovery if allowed for this turn
+        should_run_tool_search, // Only run auto tool discovery if we have effective tools
         tool_search_max_results,
         has_mcp_tools,
-        schema_search_enabled || internal_schema_search || sql_select_enabled,
+        should_run_schema_search, // Only run auto schema search if we have effective tables
         settings_state.settings.read().await.schema_relevancy_threshold,
         &database_toolbox_config,
         &filtered_tool_descriptions,
@@ -3562,6 +3599,10 @@ async fn get_system_prompt_preview(
     let _python_execution_enabled = settings.python_execution_enabled;
     let tool_system_prompts = settings.tool_system_prompts.clone();
     let database_toolbox_config = settings.database_toolbox.clone();
+    // Always-on configuration for gating auto-discovery
+    let always_on_builtin_tools = settings.always_on_builtin_tools.clone();
+    let always_on_mcp_tools = settings.always_on_mcp_tools.clone();
+    let always_on_tables = settings.always_on_tables.clone();
     let settings_for_resolver = settings.clone();
     drop(settings);
 
@@ -3638,12 +3679,24 @@ async fn get_system_prompt_preview(
         })
         .collect();
 
+    // Gate auto-discovery based on effective attachments (explicit + always-on)
+    let has_effective_tables = !turn_context.attached_tables.is_empty() || !always_on_tables.is_empty();
+    let should_run_schema_search = has_effective_tables
+        && (schema_search_enabled || internal_schema_search || sql_select_enabled);
+    
+    let has_effective_tools = !attached_tools.is_empty() 
+        || !always_on_builtin_tools.is_empty() 
+        || !always_on_mcp_tools.is_empty();
+    let should_run_tool_search = tool_search_enabled 
+        && turn_config.enabled_tools.is_empty() 
+        && (has_effective_tools || !filtered_tool_descriptions.is_empty());
+
     let auto_discovery = perform_auto_discovery_for_prompt(
         &user_prompt,
-        tool_search_enabled && turn_config.enabled_tools.is_empty(), // Skip auto-discovery if per-chat tools attached
+        should_run_tool_search,
         settings_for_resolver.tool_search_max_results,
         !filtered_tool_descriptions.is_empty(),
-        schema_search_enabled || internal_schema_search || sql_select_enabled,
+        should_run_schema_search,
         settings_for_resolver.schema_relevancy_threshold,
         &database_toolbox_config,
         &filtered_tool_descriptions,
@@ -4298,6 +4351,11 @@ pub fn run() {
             update_rag_chunk_min_relevancy,
             update_schema_relevancy_threshold,
             update_rag_dominant_threshold,
+            // Always-on configuration commands
+            update_always_on_builtin_tools,
+            update_always_on_mcp_tools,
+            update_always_on_tables,
+            update_always_on_rag_paths,
             get_state_machine_preview,
             update_database_toolbox_config,
             get_cached_database_schemas,

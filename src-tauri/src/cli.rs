@@ -5,7 +5,7 @@
 
 use crate::app_state::LaunchOverrides;
 use crate::settings::{
-    enforce_python_name, ensure_default_servers, AppSettings, McpServerConfig, ToolCallFormatName,
+    enforce_python_name, ensure_default_servers, AlwaysOnTableConfig, AppSettings, McpServerConfig, ToolCallFormatName,
 };
 use crate::tool_capability::ToolLaunchFilter;
 use clap::Parser;
@@ -88,6 +88,29 @@ pub struct CliArgs {
     /// Servers: server_id (enables all tools from that server)
     #[arg(long, value_delimiter = ',', env = "PLUGABLE_TOOLS")]
     pub tools: Option<Vec<String>>,
+    
+    // ============ Always-On Configuration ============
+    
+    /// Always-on built-in tools (comma-separated, e.g., python_execution,sql_select)
+    /// These tools are always available in every chat without explicit attachment.
+    #[arg(long = "always-on-builtins", value_delimiter = ',', env = "PLUGABLE_ALWAYS_ON_BUILTINS")]
+    pub always_on_builtins: Option<Vec<String>>,
+    
+    /// Always-on MCP tools (comma-separated, server_id::tool_name format)
+    /// These tools are always available in every chat without explicit attachment.
+    #[arg(long = "always-on-mcp-tools", value_delimiter = ',', env = "PLUGABLE_ALWAYS_ON_MCP_TOOLS")]
+    pub always_on_mcp_tools: Option<Vec<String>>,
+    
+    /// Always-on database tables (comma-separated, source_id::table_fq_name format)
+    /// These tables' schemas are always included in the system prompt.
+    #[arg(long = "always-on-tables", value_delimiter = ',', env = "PLUGABLE_ALWAYS_ON_TABLES")]
+    pub always_on_tables: Option<Vec<String>>,
+    
+    /// Always-on RAG files/folders (comma-separated paths)
+    /// These are automatically indexed and searched for every chat.
+    #[arg(long = "always-on-rag", value_delimiter = ',', env = "PLUGABLE_ALWAYS_ON_RAG")]
+    pub always_on_rag: Option<Vec<String>>,
+    
     /// Enable the built-in dev MCP test server (off by default)
     #[arg(
         long,
@@ -359,6 +382,40 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
         if !parsed_servers.is_empty() {
             settings.mcp_servers = parsed_servers;
         }
+    }
+
+    // Always-on configuration overrides
+    if let Some(builtins) = &args.always_on_builtins {
+        settings.always_on_builtin_tools = builtins.clone();
+        println!("[Launch] Always-on built-in tools: {:?}", builtins);
+    }
+    
+    if let Some(mcp_tools) = &args.always_on_mcp_tools {
+        settings.always_on_mcp_tools = mcp_tools.clone();
+        println!("[Launch] Always-on MCP tools: {:?}", mcp_tools);
+    }
+    
+    if let Some(tables) = &args.always_on_tables {
+        settings.always_on_tables = tables
+            .iter()
+            .filter_map(|entry| {
+                if let Some((source_id, table_fq_name)) = entry.split_once("::") {
+                    Some(AlwaysOnTableConfig {
+                        source_id: source_id.to_string(),
+                        table_fq_name: table_fq_name.to_string(),
+                    })
+                } else {
+                    println!("[Launch] Invalid always-on table '{}'. Expected source_id::table_fq_name", entry);
+                    None
+                }
+            })
+            .collect();
+        println!("[Launch] Always-on tables: {:?}", settings.always_on_tables.len());
+    }
+    
+    if let Some(rag_paths) = &args.always_on_rag {
+        settings.always_on_rag_paths = rag_paths.clone();
+        println!("[Launch] Always-on RAG paths: {:?}", rag_paths);
     }
 
     // Launch-only overrides

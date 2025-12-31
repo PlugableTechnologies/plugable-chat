@@ -83,6 +83,17 @@ export interface AppSettings {
     rag_chunk_min_relevancy: number;
     schema_relevancy_threshold: number;
     rag_dominant_threshold: number;
+    // Always-on configuration
+    always_on_builtin_tools: string[];
+    always_on_mcp_tools: string[];
+    always_on_tables: AlwaysOnTableConfig[];
+    always_on_rag_paths: string[];
+}
+
+// Always-on table configuration
+export interface AlwaysOnTableConfig {
+    source_id: string;
+    table_fq_name: string;
 }
 
 // Connection status for MCP servers
@@ -114,12 +125,12 @@ interface SettingsState {
 
     // Modal state
     isSettingsOpen: boolean;
-    activeTab: 'models' | 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases';
+    activeTab: 'models' | 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas' | 'files';
 
     // Actions
     openSettings: () => void;
     closeSettings: () => void;
-    setActiveTab: (tab: 'models' | 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases') => void;
+    setActiveTab: (tab: 'models' | 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas' | 'files') => void;
 
     // Settings CRUD
     fetchSettings: () => Promise<void>;
@@ -145,6 +156,16 @@ interface SettingsState {
     updateToolSystemPrompt: (serverId: string, toolName: string, prompt: string) => Promise<void>;
     bumpPromptRefresh: () => void;
     refreshMcpTools: (serverId: string) => Promise<McpTool[]>;
+
+    // Always-on configuration
+    addAlwaysOnBuiltinTool: (toolName: string) => Promise<void>;
+    removeAlwaysOnBuiltinTool: (toolName: string) => Promise<void>;
+    addAlwaysOnMcpTool: (toolKey: string) => Promise<void>;
+    removeAlwaysOnMcpTool: (toolKey: string) => Promise<void>;
+    addAlwaysOnTable: (sourceId: string, tableFqName: string) => Promise<void>;
+    removeAlwaysOnTable: (sourceId: string, tableFqName: string) => Promise<void>;
+    addAlwaysOnRagPath: (path: string) => Promise<void>;
+    removeAlwaysOnRagPath: (path: string) => Promise<void>;
 
     // MCP Server operations
     connectServer: (serverId: string) => Promise<void>;
@@ -293,6 +314,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     enabled: settings.database_toolbox?.enabled ?? false,
                     sources: normalizedDbSources,
                 },
+                // Always-on configuration defaults
+                always_on_builtin_tools: settings.always_on_builtin_tools ?? [],
+                always_on_mcp_tools: settings.always_on_mcp_tools ?? [],
+                always_on_tables: settings.always_on_tables ?? [],
+                always_on_rag_paths: settings.always_on_rag_paths ?? [],
             };
             const allowedImports = (allowedImportsRaw && allowedImportsRaw.length > 0)
                 ? allowedImportsRaw
@@ -350,6 +376,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     rag_chunk_min_relevancy: 0.3,
                     schema_relevancy_threshold: 0.4,
                     rag_dominant_threshold: 0.6,
+                    // Always-on configuration defaults
+                    always_on_builtin_tools: [],
+                    always_on_mcp_tools: [],
+                    always_on_tables: [],
+                    always_on_rag_paths: [],
                 },
                 pythonAllowedImports: FALLBACK_PYTHON_ALLOWED_IMPORTS,
             });
@@ -947,6 +978,159 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 }
             }));
             throw e;
+        }
+    },
+
+    // ============ Always-On Configuration Methods ============
+
+    addAlwaysOnBuiltinTool: async (toolName: string) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const newList = [...currentSettings.always_on_builtin_tools];
+        if (!newList.includes(toolName)) {
+            newList.push(toolName);
+        }
+        set({
+            settings: { ...currentSettings, always_on_builtin_tools: newList },
+            error: null
+        });
+        try {
+            await invoke('update_always_on_builtin_tools', { tools: newList });
+            console.log('[SettingsStore] Always-on builtin tool added:', toolName);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to add always-on builtin tool:', e);
+            set({ settings: currentSettings, error: `Failed to save: ${e.message || e}` });
+        }
+    },
+
+    removeAlwaysOnBuiltinTool: async (toolName: string) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const newList = currentSettings.always_on_builtin_tools.filter(t => t !== toolName);
+        set({
+            settings: { ...currentSettings, always_on_builtin_tools: newList },
+            error: null
+        });
+        try {
+            await invoke('update_always_on_builtin_tools', { tools: newList });
+            console.log('[SettingsStore] Always-on builtin tool removed:', toolName);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to remove always-on builtin tool:', e);
+            set({ settings: currentSettings, error: `Failed to save: ${e.message || e}` });
+        }
+    },
+
+    addAlwaysOnMcpTool: async (toolKey: string) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const newList = [...currentSettings.always_on_mcp_tools];
+        if (!newList.includes(toolKey)) {
+            newList.push(toolKey);
+        }
+        set({
+            settings: { ...currentSettings, always_on_mcp_tools: newList },
+            error: null
+        });
+        try {
+            await invoke('update_always_on_mcp_tools', { tools: newList });
+            console.log('[SettingsStore] Always-on MCP tool added:', toolKey);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to add always-on MCP tool:', e);
+            set({ settings: currentSettings, error: `Failed to save: ${e.message || e}` });
+        }
+    },
+
+    removeAlwaysOnMcpTool: async (toolKey: string) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const newList = currentSettings.always_on_mcp_tools.filter(t => t !== toolKey);
+        set({
+            settings: { ...currentSettings, always_on_mcp_tools: newList },
+            error: null
+        });
+        try {
+            await invoke('update_always_on_mcp_tools', { tools: newList });
+            console.log('[SettingsStore] Always-on MCP tool removed:', toolKey);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to remove always-on MCP tool:', e);
+            set({ settings: currentSettings, error: `Failed to save: ${e.message || e}` });
+        }
+    },
+
+    addAlwaysOnTable: async (sourceId: string, tableFqName: string) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const exists = currentSettings.always_on_tables.some(
+            t => t.source_id === sourceId && t.table_fq_name === tableFqName
+        );
+        if (exists) return;
+        const newList = [...currentSettings.always_on_tables, { source_id: sourceId, table_fq_name: tableFqName }];
+        set({
+            settings: { ...currentSettings, always_on_tables: newList },
+            error: null
+        });
+        try {
+            await invoke('update_always_on_tables', { tables: newList });
+            console.log('[SettingsStore] Always-on table added:', sourceId, tableFqName);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to add always-on table:', e);
+            set({ settings: currentSettings, error: `Failed to save: ${e.message || e}` });
+        }
+    },
+
+    removeAlwaysOnTable: async (sourceId: string, tableFqName: string) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const newList = currentSettings.always_on_tables.filter(
+            t => !(t.source_id === sourceId && t.table_fq_name === tableFqName)
+        );
+        set({
+            settings: { ...currentSettings, always_on_tables: newList },
+            error: null
+        });
+        try {
+            await invoke('update_always_on_tables', { tables: newList });
+            console.log('[SettingsStore] Always-on table removed:', sourceId, tableFqName);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to remove always-on table:', e);
+            set({ settings: currentSettings, error: `Failed to save: ${e.message || e}` });
+        }
+    },
+
+    addAlwaysOnRagPath: async (path: string) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const newList = [...currentSettings.always_on_rag_paths];
+        if (!newList.includes(path)) {
+            newList.push(path);
+        }
+        set({
+            settings: { ...currentSettings, always_on_rag_paths: newList },
+            error: null
+        });
+        try {
+            await invoke('update_always_on_rag_paths', { paths: newList });
+            console.log('[SettingsStore] Always-on RAG path added:', path);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to add always-on RAG path:', e);
+            set({ settings: currentSettings, error: `Failed to save: ${e.message || e}` });
+        }
+    },
+
+    removeAlwaysOnRagPath: async (path: string) => {
+        const currentSettings = get().settings;
+        if (!currentSettings) return;
+        const newList = currentSettings.always_on_rag_paths.filter(p => p !== path);
+        set({
+            settings: { ...currentSettings, always_on_rag_paths: newList },
+            error: null
+        });
+        try {
+            await invoke('update_always_on_rag_paths', { paths: newList });
+            console.log('[SettingsStore] Always-on RAG path removed:', path);
+        } catch (e: any) {
+            console.error('[SettingsStore] Failed to remove always-on RAG path:', e);
+            set({ settings: currentSettings, error: `Failed to save: ${e.message || e}` });
         }
     },
 }));

@@ -740,16 +740,19 @@ const CodeExecutionBlock = ({ executions }: { executions: CodeExecutionRecord[] 
 };
 
 // RAG File Pills Component - shows indexed files above input with remove buttons
+// Supports both always-on/locked and removable pills
 const RagFilePills = ({ 
     files, 
+    alwaysOnPaths = [],
     onRemove,
     isIndexing
 }: { 
     files: string[], 
+    alwaysOnPaths?: string[],
     onRemove: (file: string) => void,
     isIndexing: boolean
 }) => {
-    if (files.length === 0 && !isIndexing) return null;
+    if (files.length === 0 && alwaysOnPaths.length === 0 && !isIndexing) return null;
     
     // Truncate filename to first 15 chars
     const truncateFilename = (filename: string) => {
@@ -765,6 +768,18 @@ const RagFilePills = ({
                     <span>Indexing...</span>
                 </div>
             )}
+            {/* Always-on RAG paths - locked appearance, no remove button */}
+            {alwaysOnPaths.map((path) => (
+                <div 
+                    key={`always-on-${path}`}
+                    className="rag-file-pill-locked inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-full text-xs font-medium"
+                    title={`${path} (always-on)`}
+                >
+                    <span>🔒</span>
+                    <span>{truncateFilename(path)}</span>
+                </div>
+            ))}
+            {/* Removable files */}
             {files.map((file) => (
                 <div 
                     key={file}
@@ -786,15 +801,17 @@ const RagFilePills = ({
     );
 };
 
-// Database Table Pills Component
+// Database Table Pills Component (supports both always-on/locked and removable pills)
 const AttachedTablePills = ({ 
     tables, 
+    alwaysOnTables = [],
     onRemove 
 }: { 
     tables: any[], 
+    alwaysOnTables?: any[],
     onRemove: (fqName: string) => void 
 }) => {
-    if (tables.length === 0) return null;
+    if (tables.length === 0 && alwaysOnTables.length === 0) return null;
     
     const truncateName = (name: string) => {
         if (name.length <= 20) return name;
@@ -803,6 +820,18 @@ const AttachedTablePills = ({
     
     return (
         <div className="db-table-pill-bar flex flex-wrap gap-2 px-2 py-2 max-w-[900px] mx-auto">
+            {/* Always-on tables - locked appearance, no remove button */}
+            {alwaysOnTables.map((table) => (
+                <div 
+                    key={`always-on-${table.tableFqName}`}
+                    className="db-table-pill-locked inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 rounded-full text-xs font-medium"
+                    title={`${table.tableFqName} (always-on)`}
+                >
+                    <span>🔒</span>
+                    <span>{truncateName(table.tableFqName)}</span>
+                </div>
+            ))}
+            {/* Removable tables */}
             {tables.map((table) => (
                 <div 
                     key={table.tableFqName}
@@ -824,18 +853,32 @@ const AttachedTablePills = ({
     );
 };
 
-// Attached Tool Pills Component
+// Attached Tool Pills Component (supports both always-on/locked and removable pills)
 const AttachedToolPills = ({ 
     tools, 
+    alwaysOnTools = [],
     onRemove 
 }: { 
     tools: any[], 
+    alwaysOnTools?: any[],
     onRemove: (key: string) => void 
 }) => {
-    if (tools.length === 0) return null;
+    if (tools.length === 0 && alwaysOnTools.length === 0) return null;
     
     return (
         <div className="tool-pill-bar flex flex-wrap gap-2 px-2 py-2 max-w-[900px] mx-auto">
+            {/* Always-on tools - locked appearance, no remove button */}
+            {alwaysOnTools.map((tool) => (
+                <div 
+                    key={`always-on-${tool.key}`}
+                    className="tool-pill-locked inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-50 border border-purple-200 text-purple-700 rounded-full text-xs font-medium"
+                    title={`${tool.name} on ${tool.server} (always-on)`}
+                >
+                    <span>🔒</span>
+                    <span>{tool.name}</span>
+                </div>
+            ))}
+            {/* Removable tools */}
             {tools.map((tool) => (
                 <div 
                     key={tool.key}
@@ -1771,6 +1814,8 @@ export function ChatArea() {
         attachedDatabaseTables, attachedTools, 
         removeAttachedTable, removeAttachedTool,
         clearAttachedTables, clearAttachedTools,
+        // Always-on state (synced from settings)
+        alwaysOnTools, alwaysOnTables, alwaysOnRagPaths, syncAlwaysOnFromSettings,
         // Tool execution state
         pendingToolApproval, toolExecution, approveCurrentToolCall, rejectCurrentToolCall,
         // Streaming state
@@ -1812,6 +1857,11 @@ export function ChatArea() {
         const atBottom = scrollHeight - scrollTop - clientHeight < 50;
         setIsFollowMode(atBottom);
     }, []);
+
+    // Sync always-on state from settings when component mounts or settings change
+    useEffect(() => {
+        syncAlwaysOnFromSettings();
+    }, [settings, syncAlwaysOnFromSettings]);
 
     // Track when thinking phase starts
     useEffect(() => {
@@ -2260,15 +2310,18 @@ export function ChatArea() {
                 <div className="chat-input-pill-row px-2 sm:px-6">
                     <RagFilePills 
                         files={ragIndexedFiles} 
+                        alwaysOnPaths={alwaysOnRagPaths}
                         onRemove={removeRagFile}
                         isIndexing={isIndexingRag}
                     />
                     <AttachedTablePills 
                         tables={attachedDatabaseTables}
+                        alwaysOnTables={alwaysOnTables}
                         onRemove={removeAttachedTable}
                     />
                     <AttachedToolPills 
                         tools={attachedTools}
+                        alwaysOnTools={alwaysOnTools}
                         onRemove={removeAttachedTool}
                     />
                 </div>

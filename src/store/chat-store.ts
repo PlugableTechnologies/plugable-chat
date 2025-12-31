@@ -313,6 +313,13 @@ interface ChatState {
     removeAttachedTool: (toolKey: string) => void;
     clearAttachedTools: () => void;
 
+    // Always-on configuration (synced from settings store)
+    // These are displayed as locked pills and always sent with chat requests
+    alwaysOnTools: AttachedTool[];
+    alwaysOnTables: AttachedTable[];
+    alwaysOnRagPaths: string[];
+    syncAlwaysOnFromSettings: () => void;
+
     // Tool Execution State
     pendingToolApproval: PendingToolApproval | null;
     toolExecution: ToolExecutionState;
@@ -2084,6 +2091,55 @@ export const useChatStore = create<ChatState>((set, get) => ({
         attachedTools: s.attachedTools.filter(t => t.key !== toolKey)
     })),
     clearAttachedTools: () => set({ attachedTools: [] }),
+
+    // Always-on configuration (synced from settings store)
+    alwaysOnTools: [],
+    alwaysOnTables: [],
+    alwaysOnRagPaths: [],
+    syncAlwaysOnFromSettings: () => {
+        // This function syncs always-on items from the settings store
+        // Called when settings change or on mount
+        // Import settings store dynamically to avoid circular dependency
+        import('./settings-store').then(({ useSettingsStore }) => {
+            const settings = useSettingsStore.getState().settings;
+            if (!settings) return;
+            
+            // Convert always-on builtin tools to AttachedTool format
+            const builtinTools: AttachedTool[] = (settings.always_on_builtin_tools || []).map(name => ({
+                key: `builtin::${name}`,
+                name,
+                server: 'builtin',
+                isBuiltin: true,
+            }));
+            
+            // Convert always-on MCP tools to AttachedTool format
+            const mcpTools: AttachedTool[] = (settings.always_on_mcp_tools || []).map(toolKey => {
+                const parts = toolKey.split('::');
+                const serverId = parts[0] || 'unknown';
+                const toolName = parts.slice(1).join('::') || toolKey;
+                return {
+                    key: toolKey,
+                    name: toolName,
+                    server: serverId,
+                    isBuiltin: false,
+                };
+            });
+            
+            // Convert always-on tables to AttachedTable format
+            const tables: AttachedTable[] = (settings.always_on_tables || []).map(t => ({
+                sourceId: t.source_id,
+                sourceName: t.source_id, // We don't have the name here, use ID
+                tableFqName: t.table_fq_name,
+                columnCount: 0, // Unknown at sync time
+            }));
+            
+            set({
+                alwaysOnTools: [...builtinTools, ...mcpTools],
+                alwaysOnTables: tables,
+                alwaysOnRagPaths: settings.always_on_rag_paths || [],
+            });
+        });
+    },
 
     // Tool Execution State
     pendingToolApproval: null,

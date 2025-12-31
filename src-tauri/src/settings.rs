@@ -585,6 +585,17 @@ pub fn enforce_python_name(config: &mut McpServerConfig) {
     config.python_name = Some(sanitized);
 }
 
+// ============ Always-On Configuration ============
+
+/// Configuration for an always-on database table
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AlwaysOnTableConfig {
+    /// Database source ID
+    pub source_id: String,
+    /// Fully qualified table name (e.g., "project.dataset.table")
+    pub table_fq_name: String,
+}
+
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -654,7 +665,30 @@ pub struct AppSettings {
     /// RAG relevancy above which SQL context is suppressed (default: 0.6)
     #[serde(default = "default_rag_dominant_threshold")]
     pub rag_dominant_threshold: f32,
-    
+
+    // ============ Always-On Configuration ============
+    // These items are automatically included in every chat without explicit attachment.
+
+    /// Always-on built-in tools (e.g., ["python_execution", "sql_select"])
+    /// These appear as locked pills in the UI and are always available.
+    #[serde(default)]
+    pub always_on_builtin_tools: Vec<String>,
+
+    /// Always-on MCP tools in "server_id::tool_name" format
+    /// These appear as locked pills in the UI and are always available.
+    #[serde(default)]
+    pub always_on_mcp_tools: Vec<String>,
+
+    /// Always-on database tables for SQL context
+    /// These tables' schemas are always included in the system prompt.
+    #[serde(default)]
+    pub always_on_tables: Vec<AlwaysOnTableConfig>,
+
+    /// Always-on RAG file/folder paths
+    /// These are automatically indexed and searched for every chat.
+    #[serde(default)]
+    pub always_on_rag_paths: Vec<String>,
+
     // NOTE: native_tool_calling_enabled has been removed.
     // Native tool calling is now controlled via tool_call_formats (Native format).
     // Old configs with this field will be migrated on load.
@@ -867,6 +901,11 @@ impl Default for AppSettings {
             rag_chunk_min_relevancy: default_rag_chunk_min_relevancy(),
             schema_relevancy_threshold: default_schema_relevancy_threshold(),
             rag_dominant_threshold: default_rag_dominant_threshold(),
+            // Always-on configuration (empty by default)
+            always_on_builtin_tools: Vec::new(),
+            always_on_mcp_tools: Vec::new(),
+            always_on_tables: Vec::new(),
+            always_on_rag_paths: Vec::new(),
         }
     }
 }

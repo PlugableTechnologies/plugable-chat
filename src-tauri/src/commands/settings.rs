@@ -503,6 +503,84 @@ pub async fn update_rag_dominant_threshold(
     Ok(())
 }
 
+// ============ Always-On Configuration Commands ============
+
+/// Update always-on built-in tools list
+#[tauri::command]
+pub async fn update_always_on_builtin_tools(
+    tools: Vec<String>,
+    settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.always_on_builtin_tools = tools.clone();
+    settings::save_settings(&guard).await?;
+
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
+    println!("[Settings] always_on_builtin_tools updated: {:?}", tools);
+    Ok(())
+}
+
+/// Update always-on MCP tools list
+#[tauri::command]
+pub async fn update_always_on_mcp_tools(
+    tools: Vec<String>,
+    settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.always_on_mcp_tools = tools.clone();
+    settings::save_settings(&guard).await?;
+
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
+    println!("[Settings] always_on_mcp_tools updated: {:?}", tools);
+    Ok(())
+}
+
+/// Update always-on database tables list
+#[tauri::command]
+pub async fn update_always_on_tables(
+    tables: Vec<settings::AlwaysOnTableConfig>,
+    settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.always_on_tables = tables.clone();
+    settings::save_settings(&guard).await?;
+
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
+    println!("[Settings] always_on_tables updated: {} tables", tables.len());
+    Ok(())
+}
+
+/// Update always-on RAG paths list
+#[tauri::command]
+pub async fn update_always_on_rag_paths(
+    paths: Vec<String>,
+    settings_state: State<'_, SettingsState>,
+    settings_sm_state: State<'_, SettingsStateMachineState>,
+    launch_config: State<'_, LaunchConfigState>,
+) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    guard.always_on_rag_paths = paths.clone();
+    settings::save_settings(&guard).await?;
+
+    let mut sm_guard = settings_sm_state.machine.write().await;
+    sm_guard.refresh(&guard, &launch_config.tool_filter);
+
+    println!("[Settings] always_on_rag_paths updated: {:?}", paths);
+    Ok(())
+}
+
 /// Get a preview of all possible states for the settings UI
 #[tauri::command]
 pub async fn get_state_machine_preview(
