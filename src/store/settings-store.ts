@@ -61,6 +61,8 @@ export interface DatabaseToolboxConfig {
 // Application settings
 export interface AppSettings {
     system_prompt: string;
+    /** Persisted model selection - applied on app startup */
+    selected_model: string | null;
     mcp_servers: McpServerConfig[];
     chat_format_default: ChatFormatName;
     chat_format_overrides: Record<string, ChatFormatName>;
@@ -354,6 +356,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 // Provide defaults on error
                 settings: {
                     system_prompt: DEFAULT_SYSTEM_PROMPT,
+                    selected_model: null,
                     mcp_servers: [],
                     chat_format_default: 'openai_completions',
                     chat_format_overrides: {},

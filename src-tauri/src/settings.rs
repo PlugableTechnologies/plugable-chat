@@ -601,6 +601,9 @@ pub struct AlwaysOnTableConfig {
 pub struct AppSettings {
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
+    /// Persisted model selection - applied on app startup
+    #[serde(default)]
+    pub selected_model: Option<String>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
     /// Default chat format when no per-model override is present
@@ -880,6 +883,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             system_prompt: default_system_prompt(),
+            selected_model: None,
             mcp_servers: vec![default_mcp_test_server()],
             chat_format_default: default_chat_format(),
             chat_format_overrides: HashMap::new(),

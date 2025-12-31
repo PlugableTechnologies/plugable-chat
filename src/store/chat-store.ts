@@ -513,9 +513,35 @@ async function initializeModelsOnStartup(
                     console.log('[ChatStore] Found loaded model:', activeModel);
                     set({ currentModel: activeModel });
                 } else {
-                    // No models loaded - load the first cached model
-                    const modelToLoad = cachedModels[0].model_id;
-                    console.log('[ChatStore] No models loaded. Loading first cached model:', modelToLoad);
+                    // No models loaded - check for persisted model selection from settings
+                    let modelToLoad = cachedModels[0].model_id;
+                    
+                    try {
+                        const { useSettingsStore } = await import('./settings-store');
+                        // Fetch settings if not already loaded
+                        let settings = useSettingsStore.getState().settings;
+                        if (!settings) {
+                            await useSettingsStore.getState().fetchSettings();
+                            settings = useSettingsStore.getState().settings;
+                        }
+                        
+                        if (settings?.selected_model) {
+                            // Check if persisted model exists in cached models
+                            const persistedModelExists = cachedModels.some(
+                                m => m.model_id === settings!.selected_model
+                            );
+                            if (persistedModelExists) {
+                                console.log('[ChatStore] Using persisted model selection:', settings.selected_model);
+                                modelToLoad = settings.selected_model;
+                            } else {
+                                console.log('[ChatStore] Persisted model not available, using first cached model');
+                            }
+                        }
+                    } catch (settingsError) {
+                        console.warn('[ChatStore] Failed to load persisted model selection:', settingsError);
+                    }
+                    
+                    console.log('[ChatStore] Loading model:', modelToLoad);
                     await get().loadModel(modelToLoad);
                 }
             } catch (loadError: any) {
@@ -1300,6 +1326,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 set((state) => {
                     // Ignore tokens if generation was stopped
                     if (!state.assistantStreamingActive) {
+                        // #region agent log
+                        fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'chat-store.ts:1304',message:'TOKEN IGNORED - assistantStreamingActive is false',data:{streamingChatId:state.streamingChatId,currentChatId:state.currentChatId},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'F'})}).catch(()=>{});
+                        // #endregion
                         return state;
                     }
                     const now = Date.now();
