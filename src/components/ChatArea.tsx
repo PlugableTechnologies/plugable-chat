@@ -2065,19 +2065,32 @@ export function ChatArea() {
         });
 
         try {
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ChatArea.tsx:2068',message:'handleSend try block entered',data:{ragIndexedFilesLength:storeState.ragIndexedFiles.length,ragChunkCount:storeState.ragChunkCount,currentModel:storeState.currentModel},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D,E'})}).catch(()=>{});
+            // #endregion
             // Check if we have RAG context to search (files are indexed immediately on attach)
             let messageToSend = text;
-            const hasRagContext = storeState.ragChunkCount > 0;
+            const hasRagContext = storeState.ragIndexedFiles.length > 0;
+            
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ChatArea.tsx:2074',message:'hasRagContext check',data:{hasRagContext,ragIndexedFiles:storeState.ragIndexedFiles},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+            // #endregion
             
             if (hasRagContext) {
-                console.log('[ChatArea] Searching RAG context with', storeState.ragChunkCount, 'indexed chunks');
+                console.log('[ChatArea] Searching RAG context with', storeState.ragIndexedFiles.length, 'indexed files');
                 
                 // Show RAG indicator
                 setIsRagProcessing(true);
                 setRagStartTime(Date.now());
                 setRagStage('searching');
                 
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ChatArea.tsx:2085',message:'Before searchRagContext',data:{query:trimmedText.slice(0,50)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+                // #endregion
                 const allChunks = await searchRagContext(trimmedText, 10);
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ChatArea.tsx:2089',message:'After searchRagContext',data:{chunksFound:allChunks.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+                // #endregion
                 // Entirely ignore rag results with a relevance score below 30%
                 const relevantChunks = allChunks.filter(chunk => chunk.score >= 0.3);
                 
@@ -2144,6 +2157,9 @@ export function ChatArea() {
             }));
             // Call backend - streaming will trigger events
             // Frontend is source of truth for model selection
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ChatArea.tsx:2160',message:'Before invoke chat',data:{chatId,model:storeState.currentModel,messageLen:messageToSend.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
             const returnedChatId = await invoke<string>('chat', {
                 chatId,
                 title: isNewChat ? derivedTitle : undefined,
@@ -2160,6 +2176,9 @@ export function ChatArea() {
                 })),
                 attachedTools: storeState.attachedTools.map(t => t.key),
             });
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ChatArea.tsx:2178',message:'After invoke chat returned',data:{returnedChatId},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
 
             if (returnedChatId && returnedChatId !== chatId) {
                 storeState.setCurrentChatId(returnedChatId);

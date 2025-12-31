@@ -11,7 +11,7 @@ use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::{connect, Connection, Table};
 use lru::LruCache;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -454,9 +454,9 @@ impl RagRetrievalActor {
         let mut all_files = std::collections::HashSet::new();
         
         for conn in self.connections.values() {
-            if let Ok(mut query) = conn.chunks_table.query().select(Select::Columns(vec!["source_file".to_string()])).execute().await {
+            if let Ok(mut query) = conn.file_cache_table.query().select(Select::Columns(vec!["file_path".to_string()])).execute().await {
                 while let Some(Ok(batch)) = query.next().await {
-                    if let Some(col) = batch.column_by_name("source_file") {
+                    if let Some(col) = batch.column_by_name("file_path") {
                         if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
                             for i in 0..arr.len() {
                                 all_files.insert(arr.value(i).to_string());
@@ -647,6 +647,17 @@ impl RagRetrievalActor {
         println!("╚══════════════════════════════════════════════════════════════╝");
 
         // Collect all files to process
+        if let Some(ref handle) = self.app_handle {
+            let _ = handle.emit("rag-progress", RagProgressEvent {
+                phase: "collecting_files".to_string(),
+                total_files: 0,
+                processed_files: 0,
+                total_chunks: 0,
+                processed_chunks: 0,
+                current_file: String::new(),
+                is_complete: false,
+            });
+        }
         let mut files_to_process: Vec<PathBuf> = Vec::new();
         for path_str in &paths {
             let path = Path::new(path_str);
@@ -659,15 +670,31 @@ impl RagRetrievalActor {
             }
         }
 
-        println!("RagActor: Found {} files to process", files_to_process.len());
+        let total_files = files_to_process.len();
+        println!("RagActor: Found {} files to process", total_files);
 
         // Phase 1: Check file-level CRC cache and collect chunks that need processing
         let mut all_pending_chunks: Vec<IndexedChunk> = Vec::new();
         let mut total_chunks_in_index = 0;
         let mut files_skipped = 0;
         
-        for file_path in &files_to_process {
+        // Collect all chunks by file for cache updating later
+        let mut chunks_by_file: HashMap<String, (u32, usize)> = HashMap::new();
+        
+        for (i, file_path) in files_to_process.iter().enumerate() {
             let file_path_str = file_path.to_string_lossy().to_string();
+
+            if let Some(ref handle) = self.app_handle {
+                let _ = handle.emit("rag-progress", RagProgressEvent {
+                    phase: "reading_files".to_string(),
+                    total_files,
+                    processed_files: i,
+                    total_chunks: 0,
+                    processed_chunks: 0,
+                    current_file: file_path_str.clone(),
+                    is_complete: false,
+                });
+            }
 
             // Ensure we have a connection for this file's directory
             // We scope the borrow here so we can call other self methods later
@@ -719,6 +746,20 @@ impl RagRetrievalActor {
                 .to_lowercase();
             let is_binary = ext == "pdf" || ext == "docx";
 
+            if is_binary {
+                if let Some(ref handle) = self.app_handle {
+                    let _ = handle.emit("rag-progress", RagProgressEvent {
+                        phase: "extracting_text".to_string(),
+                        total_files,
+                        processed_files: i,
+                        total_chunks: 0,
+                        processed_chunks: 0,
+                        current_file: file_path_str.clone(),
+                        is_complete: false,
+                    });
+                }
+            }
+
             let content = if is_binary {
                 String::new()
             } else {
@@ -727,6 +768,18 @@ impl RagRetrievalActor {
 
             // Extract text and parse into elements
             if let Ok(text_content) = self.extract_text(file_path, &content) {
+                if let Some(ref handle) = self.app_handle {
+                    let _ = handle.emit("rag-progress", RagProgressEvent {
+                        phase: "chunking".to_string(),
+                        total_files,
+                        processed_files: i,
+                        total_chunks: 0,
+                        processed_chunks: 0,
+                        current_file: file_path_str.clone(),
+                        is_complete: false,
+                    });
+                }
+
                 // Parse document into elements (with heading detection)
                 let elements = self.parse_document(&ext, &text_content);
 
@@ -751,25 +804,10 @@ impl RagRetrievalActor {
                     });
                 }
 
+                // Track chunk count for cache update later
+                chunks_by_file.insert(file_path_str.clone(), (current_crc, chunks_for_this_file.len()));
+                
                 all_pending_chunks.extend(chunks_for_this_file);
-
-                // Update file cache
-                let cache_entry = FileCacheEntry {
-                    file_path: file_path_str.clone(),
-                    crc32: current_crc,
-                    chunk_count: all_pending_chunks
-                        .iter()
-                        .filter(|c| c.source_file == file_path_str)
-                        .count(),
-                    indexed_at: chrono::Utc::now().timestamp(),
-                };
-                if let Err(e) = self
-                    .save_file_cache_to_table(&file_cache_table, &cache_entry)
-                    .await
-                {
-                    println!("RagActor: Warning - failed to save file cache: {}", e);
-                }
-
                 files_processed_count += 1;
             }
         }
@@ -784,6 +822,9 @@ impl RagRetrievalActor {
             // FIX: Emit rag-progress with is_complete=true so frontend clears status bar
             if let Some(ref handle) = self.app_handle {
                 let _ = handle.emit("rag-progress", RagProgressEvent {
+                    phase: "complete".to_string(),
+                    total_files,
+                    processed_files: total_files,
                     total_chunks: 0,
                     processed_chunks: 0,
                     current_file: String::new(),
@@ -798,6 +839,17 @@ impl RagRetrievalActor {
         }
 
         // Phase 2: Batch lookup cached embeddings (eliminates N+1 queries)
+        if let Some(ref handle) = self.app_handle {
+            let _ = handle.emit("rag-progress", RagProgressEvent {
+                phase: "checking_cache".to_string(),
+                total_files,
+                processed_files: total_files,
+                total_chunks: total_pending_chunks,
+                processed_chunks: 0,
+                current_file: String::new(),
+                is_complete: false,
+            });
+        }
         let all_hashes: Vec<String> = all_pending_chunks.iter()
             .map(|c| c.hash.clone())
             .collect();
@@ -853,6 +905,9 @@ impl RagRetrievalActor {
                 // Emit progress
                 if let Some(ref handle) = self.app_handle {
                     let _ = handle.emit("rag-progress", RagProgressEvent {
+                        phase: "generating_embeddings".to_string(),
+                        total_files,
+                        processed_files: total_files,
                         total_chunks: total_pending_chunks,
                         processed_chunks: final_chunks.len(),
                         current_file: final_chunks.last().map(|c| c.source_file.clone()).unwrap_or_default(),
@@ -864,6 +919,9 @@ impl RagRetrievalActor {
             // FIX: All embeddings were cached, emit progress event with is_complete=true
             if let Some(ref handle) = self.app_handle {
                 let _ = handle.emit("rag-progress", RagProgressEvent {
+                    phase: "complete".to_string(),
+                    total_files,
+                    processed_files: total_files,
                     total_chunks: final_chunks.len(),
                     processed_chunks: final_chunks.len(),
                     current_file: final_chunks.last().map(|c| c.source_file.clone()).unwrap_or_default(),
@@ -873,6 +931,17 @@ impl RagRetrievalActor {
         }
 
         // Phase 5: Batch save to LanceDB (grouped by connection)
+        if let Some(ref handle) = self.app_handle {
+            let _ = handle.emit("rag-progress", RagProgressEvent {
+                phase: "saving".to_string(),
+                total_files,
+                processed_files: total_files,
+                total_chunks: final_chunks.len(),
+                processed_chunks: final_chunks.len(),
+                current_file: String::new(),
+                is_complete: false,
+            });
+        }
         println!("RagActor: Saving {} chunks to databases", final_chunks.len());
         
         // Group chunks by their target connection
@@ -884,8 +953,28 @@ impl RagRetrievalActor {
 
         for (cache_dir, chunks) in chunks_by_cache_dir {
             if let Some(conn) = self.connections.get(&cache_dir) {
-                if let Err(e) = self.save_chunks_to_db(&conn.chunks_table, chunks).await {
+                if let Err(e) = self.save_chunks_to_db(&conn.chunks_table, chunks.clone()).await {
                     println!("RagActor ERROR: Failed to save chunks to {:?}: {}", cache_dir, e);
+                } else {
+                    // Chunks saved successfully, now update file cache for these files
+                    let mut files_in_this_batch = HashSet::new();
+                    for chunk in chunks {
+                        files_in_this_batch.insert(chunk.source_file);
+                    }
+                    
+                    for file_path_str in files_in_this_batch {
+                        if let Some((crc, count)) = chunks_by_file.get(&file_path_str) {
+                            let cache_entry = FileCacheEntry {
+                                file_path: file_path_str.clone(),
+                                crc32: *crc,
+                                chunk_count: *count,
+                                indexed_at: chrono::Utc::now().timestamp(),
+                            };
+                            if let Err(e) = self.save_file_cache_to_table(&conn.file_cache_table, &cache_entry).await {
+                                println!("RagActor ERROR: Failed to update file cache for {}: {}", file_path_str, e);
+                            }
+                        }
+                    }
                 }
             }
         }

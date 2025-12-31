@@ -20,3 +20,8 @@
 - Philosophy: **every end-user UI setting has a command-line argument equivalent** (clap/argparse). When adding a UI toggle/field, add a matching CLI flag and keep behaviors in sync.
 - Key flags: `--system-prompt`, `--initial-prompt`, `--model`, `--tool-search`, `--python-execution`, `--python-tool-calling`, `--legacy-tool-call-format`, `--tool-call-enabled`, `--tool-call-primary`, `--tool-system-prompt`, `--mcp-server` (JSON or @file), `--tools` (allowlist).
 - CLI overrides are ephemeral for the current launch (not persisted to the config file) but are visible via `get_launch_overrides` for the frontend to honor.
+
+### Dynamic Port Addressing (CRITICAL)
+- **Directive**: NEVER use fixed IP ports (e.g., `localhost:1234`, `127.0.0.1:8080`) in any strings, constants, or hardcoded URLs.
+- **Reasoning**: Every server in the ecosystem, especially **Microsoft Foundry Local**, is dynamic. Ports are assigned at runtime and may change on every launch.
+- **Action**: Always use dynamic port discovery, relative paths, or configuration-driven addressing. Check for `port` fields in server manifests or status payloads rather than assuming a default.

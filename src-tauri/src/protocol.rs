@@ -872,6 +872,9 @@ pub struct RagIndexResult {
 /// Event payload for RAG indexing progress
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RagProgressEvent {
+    pub phase: String,
+    pub total_files: usize,
+    pub processed_files: usize,
     pub total_chunks: usize,
     pub processed_chunks: usize,
     pub current_file: String,

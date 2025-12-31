@@ -30,3 +30,8 @@
   - **Trigger**: Press `Ctrl+Shift+L` in the app.
   - **Implementation**: `debugLayout` function in `App.tsx`.
 - **Backend Logging**: The `log_to_terminal` Tauri command is available to pipe frontend logs to the backend terminal for easier debugging.
+
+## Dynamic Port Addressing (CRITICAL)
+- **Directive**: NEVER hardcode IP ports in API calls or websocket URLs.
+- **Reasoning**: All local backend services and external tool servers (Foundry, MCP) are dynamic.
+- **Action**: Use relative paths for Tauri IPC (`invoke`) or resolve ports from the application state/settings store.

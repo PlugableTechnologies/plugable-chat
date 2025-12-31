@@ -634,6 +634,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ragIndexedFiles: [],
                 ragChunkCount: 0,
             });
+            // Fire-and-forget clear of backend RAG context for new chats
+            invoke<boolean>('clear_rag_context').catch(e => 
+                console.error('[ChatStore] Failed to clear RAG context for new chat:', e)
+            );
         } else {
             set({ currentChatId: id });
         }
@@ -707,6 +711,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ragIndexedFiles: [],
                 ragChunkCount: 0,
             });
+            // Fire-and-forget clear of backend RAG context
+            invoke<boolean>('clear_rag_context').catch(e => 
+                console.error('[ChatStore] Failed to clear RAG context on model switch:', e)
+            );
         }
 
         set({
@@ -1044,6 +1052,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     ragIndexedFiles: [],
                     ragChunkCount: 0,
                 });
+                // Fire-and-forget clear of backend RAG context
+                invoke<boolean>('clear_rag_context').catch(e => 
+                    console.error('[ChatStore] Failed to clear RAG context on setModel:', e)
+                );
             }
         } catch (e) {
             console.error("Failed to set model", e);
@@ -1147,6 +1159,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     ragIndexedFiles: [],
                     ragChunkCount: 0,
                 });
+                // Fire-and-forget clear of backend RAG context
+                invoke<boolean>('clear_rag_context').catch(e => 
+                    console.error('[ChatStore] Failed to clear RAG context on deleteChat:', e)
+                );
             }
             // Clear from pending summaries (important for newly created chats)
             get().clearPendingSummary(id);
@@ -1255,6 +1271,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         isSettingUp = true;
         const myGeneration = listenerGeneration;
 
+        // Clear RAG context on app start to ensure fresh state
+        console.log('[ChatStore] Clearing RAG context on app startup...');
+        try {
+            await invoke<boolean>('clear_rag_context');
+            set({ attachedPaths: [], ragChunkCount: 0, ragIndexedFiles: [] });
+        } catch (e: any) {
+            console.error('[ChatStore] Failed to clear RAG context on startup:', e);
+        }
+
         // Clean up any existing listeners just in case (defensive)
         if (unlistenToken) { unlistenToken(); unlistenToken = undefined; }
         if (unlistenFinished) { unlistenFinished(); unlistenFinished = undefined; }
@@ -1263,6 +1288,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         try {
             const tokenListener = await listen<string>('chat-token', (event) => {
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'chat-store.ts:1291',message:'chat-token event received',data:{tokenLen:event.payload?.length,tokenPreview:event.payload?.slice(0,20)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
+                // #endregion
                 const snapshot = get();
                 const targetChatId = snapshot.streamingChatId || snapshot.currentChatId;
                 if (targetChatId && (!tokenLogRecorded || tokenLogChatId !== targetChatId)) {
@@ -1319,6 +1347,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
 
             const finishedListener = await listen('chat-finished', () => {
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'chat-store.ts:1350',message:'chat-finished event received',data:{},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
+                // #endregion
                 const snapshot = get();
                 void snapshot; // Preserve for potential debugging
                 tokenLogRecorded = false;
@@ -1408,20 +1439,62 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
 
             // RAG progress listener
-            const ragProgressListener = await listen<{ total_chunks: number; processed_chunks: number; current_file: string; is_complete: boolean }>('rag-progress', (event) => {
-                const { total_chunks, processed_chunks, current_file, is_complete } = event.payload;
-                const progress = total_chunks > 0 ? (processed_chunks / total_chunks) * 100 : 0;
+            const ragProgressListener = await listen<{ 
+                phase: string; 
+                total_files: number; 
+                processed_files: number; 
+                total_chunks: number; 
+                processed_chunks: number; 
+                current_file: string; 
+                is_complete: boolean 
+            }>('rag-progress', (event) => {
+                const { phase, total_files, processed_files, total_chunks, processed_chunks, current_file, is_complete } = event.payload;
+                
+                let message = 'Processing documents...';
+                let progress = 0;
+
+                switch (phase) {
+                    case 'collecting_files':
+                        message = 'Scanning directories...';
+                        break;
+                    case 'reading_files':
+                        message = `Reading file ${processed_files + 1} of ${total_files}`;
+                        progress = total_files > 0 ? (processed_files / total_files) * 100 : 0;
+                        break;
+                    case 'extracting_text':
+                        message = `Extracting text from ${current_file.split('/').pop() || current_file}`;
+                        progress = total_files > 0 ? (processed_files / total_files) * 100 : 0;
+                        break;
+                    case 'chunking':
+                        message = `Chunking ${current_file.split('/').pop() || current_file}...`;
+                        progress = total_files > 0 ? (processed_files / total_files) * 100 : 0;
+                        break;
+                    case 'checking_cache':
+                        message = 'Checking embedding cache...';
+                        break;
+                    case 'generating_embeddings':
+                        message = `Generating embeddings: ${processed_chunks} / ${total_chunks}`;
+                        progress = total_chunks > 0 ? (processed_chunks / total_chunks) * 100 : 0;
+                        break;
+                    case 'saving':
+                        message = 'Saving to database...';
+                        break;
+                    case 'complete':
+                        message = 'Indexing complete';
+                        progress = 100;
+                        break;
+                }
                 
                 set((state) => ({
                     operationStatus: {
                         type: 'indexing',
-                        message: `Processing Chunk ${processed_chunks} / ${total_chunks}`,
+                        message,
                         currentFile: current_file,
                         progress,
                         completed: is_complete,
                         startTime: state.operationStatus?.startTime || Date.now(),
                     },
-                    ragChunkCount: processed_chunks,
+                    ragChunkCount: processed_chunks || state.ragChunkCount,
                 }));
 
                 if (is_complete) {
@@ -1824,6 +1897,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenServiceRestartComplete = serviceRestartCompleteListener;
 
             set({ isListening: true });
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'chat-store.ts:1899',message:'setupListeners complete, isListening=true',data:{generation:myGeneration},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A,B'})}).catch(()=>{});
+            // #endregion
             console.log(`[ChatStore] Event listeners active (Gen: ${myGeneration}).`);
             
             // Initialize models on startup
@@ -1955,7 +2031,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     addAttachment: async (path: string) => {
         const state = get();
         // Avoid duplicates
-        if (state.attachedPaths.includes(path)) {
+        if (state.attachedPaths.includes(path) || state.ragIndexedFiles.includes(path)) {
             return;
         }
         console.log(`[ChatStore] Adding attachment and indexing immediately: ${path}`);
@@ -1968,18 +2044,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
             isIndexingRag: true,
             operationStatus: {
                 type: 'indexing',
-                message: 'Preparing documents...',
+                message: 'Starting document processing...',
                 startTime: Date.now(),
             }
         });
         try {
-            const result = await invoke<RagIndexResult>('process_rag_documents', { paths: get().attachedPaths });
+            // Get the paths we're about to index
+            const pathsToIndex = get().attachedPaths;
+            const result = await invoke<RagIndexResult>('process_rag_documents', { paths: pathsToIndex });
             console.log(`[ChatStore] RAG indexing complete: ${result.total_chunks} chunks from ${result.files_processed} files`);
-            // FIX: Also clear operationStatus on success (the rag-progress listener handles this too, but ensure it's cleared)
-            set({ ragChunkCount: result.total_chunks, isIndexingRag: false, attachedPaths: [], operationStatus: null });
             
-            // Fetch updated list of indexed files
-            await get().fetchRagIndexedFiles();
+            // Update ragIndexedFiles with the paths we just indexed (append to existing)
+            // Don't fetch from backend - track locally to avoid picking up stale cached files
+            set((s) => ({ 
+                ragChunkCount: s.ragChunkCount + result.total_chunks, 
+                isIndexingRag: false, 
+                attachedPaths: [],  // Clear pending paths
+                ragIndexedFiles: [...s.ragIndexedFiles, ...pathsToIndex],  // Add newly indexed files
+                operationStatus: null 
+            }));
         } catch (e: any) {
             console.error('[ChatStore] RAG processing failed:', e);
             // FIX: Also clear operationStatus on error
@@ -1995,6 +2078,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearAttachments: () => {
         console.log('[ChatStore] Clearing all attachments');
         set({ attachedPaths: [], ragChunkCount: 0, ragIndexedFiles: [] });
+        // Fire-and-forget clear of backend RAG context
+        invoke<boolean>('clear_rag_context').catch(e => 
+            console.error('[ChatStore] Failed to clear RAG context in clearAttachments:', e)
+        );
     },
     
     clearAttachedPaths: () => {
@@ -2013,7 +2100,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             isIndexingRag: true,
             operationStatus: {
                 type: 'indexing',
-                message: 'Preparing documents...',
+                message: 'Starting document processing...',
                 startTime: Date.now(),
             }
         });
@@ -2073,9 +2160,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         try {
             const result = await invoke<{ chunks_removed: number; remaining_chunks: number }>('remove_rag_file', { sourceFile });
             console.log(`[ChatStore] Removed ${result.chunks_removed} chunks, ${result.remaining_chunks} remaining`);
-            set({ ragChunkCount: result.remaining_chunks });
-            // Refresh the indexed files list
-            await get().fetchRagIndexedFiles();
+            // Update local state - remove the file from ragIndexedFiles and update chunk count
+            set((s) => ({ 
+                ragChunkCount: result.remaining_chunks,
+                ragIndexedFiles: s.ragIndexedFiles.filter(f => f !== sourceFile)
+            }));
         } catch (e: any) {
             console.error('[ChatStore] Failed to remove RAG file:', e);
         }

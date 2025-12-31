@@ -66,6 +66,12 @@ Key log prefixes to watch:
 - **Enabled**: Controls parsing/execution. Python blocks execute if Code Mode is enabled.
 - **Primary**: Affects advertisement in the system prompt. Does not disable other enabled formats.
 
+## Dynamic Port Addressing (CRITICAL)
+- **Invariant**: Hardcoded IP ports are forbidden.
+- **Guideline**: Servers like Microsoft Foundry Local and MCP hosts use dynamic port allocation. All backend logic must resolve the current port from process output, registry files, or initialization handshake.
+- **Prohibited**: `let url = "http://localhost:8080/..."`
+- **Preferred**: `let url = format!("http://localhost:{}/...", current_foundry_port)`
+
 ## Attachment Visibility Principle (CRITICAL)
 
 **Invariant**: The user's visible attachments (pills in the UI) must exactly match what is enabled and explained in the system prompt.
