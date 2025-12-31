@@ -369,6 +369,7 @@ let unlistenModelStuck: (() => void) | undefined;
 let unlistenEmbeddingInit: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
+let hasInitializedRagContext = false; // Only clear RAG context once on true app startup
 let modelFetchPromise: Promise<void> | null = null;
 let modelFetchRetryTimer: ReturnType<typeof setTimeout> | null = null;
 const MODEL_FETCH_MAX_RETRIES = 3;
@@ -1304,12 +1305,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const myGeneration = listenerGeneration;
 
         // Clear RAG context on app start to ensure fresh state
-        console.log('[ChatStore] Clearing RAG context on app startup...');
-        try {
-            await invoke<boolean>('clear_rag_context');
+        // IMPORTANT: Only do this ONCE on true app startup, not on stall detector reconnections
+        if (!hasInitializedRagContext) {
+            hasInitializedRagContext = true;
+            console.log('[ChatStore] Clearing RAG context on app startup...');
             set({ attachedPaths: [], ragChunkCount: 0, ragIndexedFiles: [] });
-        } catch (e: any) {
-            console.error('[ChatStore] Failed to clear RAG context on startup:', e);
+            invoke<boolean>('clear_rag_context').catch(e => 
+                console.error('[ChatStore] Failed to clear RAG context on startup:', e)
+            );
         }
 
         // Clean up any existing listeners just in case (defensive)
