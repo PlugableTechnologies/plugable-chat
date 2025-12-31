@@ -39,6 +39,10 @@ fn main() {
     // Get git commit count and hash for versioning
     set_git_version_info(project_root);
 
+    // Clean up macOS AppleDouble files (._*) from capabilities directory before tauri_build scans it.
+    // These files are created when extracting a zip on Windows that was created on macOS.
+    clean_apple_double_files(manifest_path.join("capabilities").as_path());
+
     tauri_build::build()
 }
 
@@ -195,6 +199,36 @@ fn build_python_sandbox_wasm(manifest_path: &Path) {
         Err(e) => {
             println!("cargo:warning=Could not run cargo for WASM build: {}", e);
             println!("cargo:warning=code_execution will use RustPython directly");
+        }
+    }
+}
+
+/// Remove macOS AppleDouble files (._*) from a directory.
+/// These files are created when copying files to non-HFS volumes (e.g., when extracting a zip).
+/// They contain invalid UTF-8 and cause tauri_build to fail when scanning the capabilities directory.
+fn clean_apple_double_files(dir: &Path) {
+    if !dir.exists() {
+        return;
+    }
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            if file_name_str.starts_with("._") {
+                let path = entry.path();
+                if let Err(e) = fs::remove_file(&path) {
+                    println!(
+                        "cargo:warning=Failed to remove AppleDouble file {:?}: {}",
+                        path, e
+                    );
+                } else {
+                    println!(
+                        "cargo:warning=Removed macOS AppleDouble file: {:?}",
+                        file_name_str
+                    );
+                }
+            }
         }
     }
 }

@@ -66,12 +66,69 @@ function Test-Winget {
     }
 }
 
-# Check if a package is installed via winget
+# Initialize winget on first run (updates sources, accepts agreements)
+# This prevents hangs during the first package check on fresh systems
+function Initialize-Winget {
+    Write-Host "Initializing winget package sources..." -ForegroundColor Gray
+    Write-Host "  (This may take a moment on first run)" -ForegroundColor Gray
+    
+    # Accept source agreements and update sources in the background
+    # Using 'winget source update' to ensure the package database is ready
+    try {
+        $job = Start-Job -ScriptBlock {
+            # Force winget to initialize by listing sources
+            winget source update --accept-source-agreements 2>&1 | Out-Null
+        }
+        
+        # Wait up to 60 seconds for initialization
+        $completed = Wait-Job -Job $job -Timeout 60
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        
+        if ($completed) {
+            Write-Host "  Package sources ready" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  Source update timed out (continuing anyway)" -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "  Could not update sources: $_" -ForegroundColor Yellow
+        Write-Host "  (Continuing with installation)" -ForegroundColor Gray
+    }
+    
+    Write-Host ""
+}
+
+# Check if a package is installed via winget (with timeout protection)
 function Test-WingetPackage {
     param([string]$PackageId)
     
-    $result = winget list --id $PackageId 2>&1
-    return $LASTEXITCODE -eq 0 -and $result -match $PackageId
+    try {
+        # Use a job with timeout to prevent hangs on slow/uninitialized systems
+        $job = Start-Job -ScriptBlock {
+            param($id)
+            $result = winget list --id $id 2>&1
+            @{ ExitCode = $LASTEXITCODE; Result = ($result -join "`n") }
+        } -ArgumentList $PackageId
+        
+        $completed = Wait-Job -Job $job -Timeout 30
+        
+        if ($completed) {
+            $output = Receive-Job -Job $job
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            return $output.ExitCode -eq 0 -and $output.Result -match $PackageId
+        }
+        else {
+            # Job timed out - kill it and assume not installed
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            Write-Host "(check timed out) " -NoNewline -ForegroundColor Yellow
+            return $false
+        }
+    }
+    catch {
+        return $false
+    }
 }
 
 # Install a package via winget if not already installed
@@ -447,25 +504,29 @@ function Install-Requirements {
         exit 1
     }
     
+    # Initialize winget sources first (prevents hangs on fresh systems)
+    Initialize-Winget
+    
     Write-Host "Using winget to install dependencies..." -ForegroundColor White
     Write-Host ""
     
     $allSucceeded = $true
+    
+    # Visual Studio Build Tools - Required for compiling native Rust dependencies on Windows
+    # MUST be installed BEFORE Rust to avoid "installing msvc toolchain without its prerequisites" warning
+    # This includes the MSVC compiler and Windows SDK
+    # We use a custom install to include the C++ workload automatically
+    if (-not (Install-BuildToolsWithCpp)) {
+        $allSucceeded = $false
+    }
     
     # Node.js LTS - Required for frontend build (React/Vite)
     if (-not (Install-WingetPackage -PackageId "OpenJS.NodeJS.LTS" -DisplayName "Node.js LTS" -TrackVariable "Node")) {
         $allSucceeded = $false
     }
     
-    # Rust - Required for Tauri backend
+    # Rust - Required for Tauri backend (installed after Build Tools to avoid MSVC warning)
     if (-not (Install-WingetPackage -PackageId "Rustlang.Rustup" -DisplayName "Rust (rustup)" -TrackVariable "Rust")) {
-        $allSucceeded = $false
-    }
-    
-    # Visual Studio Build Tools - Required for compiling native Rust dependencies on Windows
-    # This includes the MSVC compiler and Windows SDK
-    # We use a custom install to include the C++ workload automatically
-    if (-not (Install-BuildToolsWithCpp)) {
         $allSucceeded = $false
     }
 
