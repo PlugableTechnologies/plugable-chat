@@ -13,7 +13,7 @@ import {
 export type ReasoningEffort = 'low' | 'medium' | 'high';
 
 // Operation status types for the status bar
-export type OperationType = 'none' | 'downloading' | 'loading' | 'streaming' | 'reloading' | 'indexing';
+export type OperationType = 'none' | 'downloading' | 'loading' | 'streaming' | 'reloading' | 'indexing' | 'error';
 
 export interface OperationStatus {
     type: OperationType;
@@ -114,10 +114,16 @@ export interface RagChunk {
     score: number;
 }
 
+export interface FileError {
+    file: string;
+    error: string;
+}
+
 export interface RagIndexResult {
     total_chunks: number;
     files_processed: number;
     cache_hits: number;
+    file_errors: FileError[];
 }
 
 export interface AttachedTable {
@@ -1314,9 +1320,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         try {
             const tokenListener = await listen<string>('chat-token', (event) => {
-                // #region agent log
-                fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'chat-store.ts:1291',message:'chat-token event received',data:{tokenLen:event.payload?.length,tokenPreview:event.payload?.slice(0,20)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
-                // #endregion
                 const snapshot = get();
                 const targetChatId = snapshot.streamingChatId || snapshot.currentChatId;
                 if (targetChatId && (!tokenLogRecorded || tokenLogChatId !== targetChatId)) {
@@ -1326,9 +1329,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 set((state) => {
                     // Ignore tokens if generation was stopped
                     if (!state.assistantStreamingActive) {
-                        // #region agent log
-                        fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'chat-store.ts:1304',message:'TOKEN IGNORED - assistantStreamingActive is false',data:{streamingChatId:state.streamingChatId,currentChatId:state.currentChatId},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'F'})}).catch(()=>{});
-                        // #endregion
                         return state;
                     }
                     const now = Date.now();
@@ -1376,9 +1376,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
 
             const finishedListener = await listen('chat-finished', () => {
-                // #region agent log
-                fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'chat-store.ts:1350',message:'chat-finished event received',data:{},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
-                // #endregion
                 const snapshot = get();
                 void snapshot; // Preserve for potential debugging
                 tokenLogRecorded = false;
@@ -1926,9 +1923,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenServiceRestartComplete = serviceRestartCompleteListener;
 
             set({ isListening: true });
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/94c42ad2-8d49-47ca-bf15-e6e37a3ccd05',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'chat-store.ts:1899',message:'setupListeners complete, isListening=true',data:{generation:myGeneration},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A,B'})}).catch(()=>{});
-            // #endregion
             console.log(`[ChatStore] Event listeners active (Gen: ${myGeneration}).`);
             
             // Initialize models on startup
@@ -2082,15 +2076,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const pathsToIndex = get().attachedPaths;
             const result = await invoke<RagIndexResult>('process_rag_documents', { paths: pathsToIndex });
             console.log(`[ChatStore] RAG indexing complete: ${result.total_chunks} chunks from ${result.files_processed} files`);
-            
-            // Update ragIndexedFiles with the paths we just indexed (append to existing)
+
+            // Check for errors
+            if (result.file_errors && result.file_errors.length > 0) {
+                const failedCount = result.file_errors.length;
+                const successCount = pathsToIndex.length - failedCount;
+
+                if (successCount === 0) {
+                    // All files failed
+                    set({
+                        operationStatus: {
+                            type: 'error',
+                            message: `Failed to index: ${result.file_errors[0].error}`,
+                            startTime: Date.now(),
+                        },
+                        isIndexingRag: false,
+                        attachedPaths: [], // Clear pending paths since they failed
+                        statusBarDismissed: false,
+                    });
+                    return;
+                } else {
+                    // Partial success
+                    set((s) => ({
+                        ragChunkCount: s.ragChunkCount + result.total_chunks,
+                        isIndexingRag: false,
+                        attachedPaths: [],  // Clear pending paths
+                        ragIndexedFiles: [...s.ragIndexedFiles, ...pathsToIndex.filter(p => !result.file_errors.some(fe => fe.file === p))],
+                        operationStatus: {
+                            type: 'indexing',
+                            message: `Indexed ${successCount} file(s), ${failedCount} failed`,
+                            startTime: Date.now(),
+                            completed: true,
+                        },
+                        statusBarDismissed: false,
+                    }));
+                    return;
+                }
+            }
+
+            // Full success - Update ragIndexedFiles with the paths we just indexed (append to existing)
             // Don't fetch from backend - track locally to avoid picking up stale cached files
-            set((s) => ({ 
-                ragChunkCount: s.ragChunkCount + result.total_chunks, 
-                isIndexingRag: false, 
+            set((s) => ({
+                ragChunkCount: s.ragChunkCount + result.total_chunks,
+                isIndexingRag: false,
                 attachedPaths: [],  // Clear pending paths
                 ragIndexedFiles: [...s.ragIndexedFiles, ...pathsToIndex],  // Add newly indexed files
-                operationStatus: null 
+                operationStatus: null
             }));
         } catch (e: any) {
             console.error('[ChatStore] RAG processing failed:', e);
@@ -2137,8 +2168,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
         try {
             const result = await invoke<RagIndexResult>('process_rag_documents', { paths });
             console.log(`[ChatStore] RAG indexing complete: ${result.total_chunks} chunks from ${result.files_processed} files`);
-            // FIX: Also clear operationStatus on success
-            set({ ragChunkCount: result.total_chunks, isIndexingRag: false, operationStatus: null });
+            
+            // Check for errors
+            if (result.file_errors && result.file_errors.length > 0) {
+                const failedCount = result.file_errors.length;
+                const successCount = paths.length - failedCount;
+
+                if (successCount === 0) {
+                    // All files failed
+                    set({
+                        operationStatus: {
+                            type: 'error',
+                            message: `Failed to index: ${result.file_errors[0].error}`,
+                            startTime: Date.now(),
+                        },
+                        isIndexingRag: false,
+                        statusBarDismissed: false,
+                    });
+                } else {
+                    // Partial success
+                    set((s) => ({
+                        ragChunkCount: result.total_chunks,
+                        isIndexingRag: false,
+                        ragIndexedFiles: [...s.ragIndexedFiles, ...paths.filter(p => !result.file_errors.some(fe => fe.file === p))],
+                        operationStatus: {
+                            type: 'indexing',
+                            message: `Indexed ${successCount} file(s), ${failedCount} failed`,
+                            startTime: Date.now(),
+                            completed: true,
+                        },
+                        statusBarDismissed: false,
+                    }));
+                }
+            } else {
+                // Full success
+                set((s) => ({ 
+                    ragChunkCount: result.total_chunks, 
+                    isIndexingRag: false, 
+                    ragIndexedFiles: [...s.ragIndexedFiles, ...paths],
+                    operationStatus: null 
+                }));
+            }
             return result;
         } catch (e: any) {
             console.error('[ChatStore] RAG processing failed:', e);

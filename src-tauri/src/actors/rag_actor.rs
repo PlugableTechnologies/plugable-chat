@@ -1,4 +1,4 @@
-use crate::protocol::{RagChunk, RagIndexResult, RagMsg, RagProgressEvent, RemoveFileResult};
+use crate::protocol::{FileError, RagChunk, RagIndexResult, RagMsg, RagProgressEvent, RemoveFileResult};
 use arrow_array::types::Float32Type;
 use arrow_array::{
     Array, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
@@ -38,6 +38,9 @@ const RAG_FILE_CACHE_TABLE: &str = "rag_file_cache";
 
 /// LRU cache capacity for embeddings (~150MB for 384-dim vectors at 10k entries)
 const EMBEDDING_LRU_CAPACITY: usize = 10_000;
+
+/// Central cache directory name under ~/.plugable-chat/
+const CENTRAL_RAG_CACHE_DIR: &str = "rag-cache";
 
 // ============================================================================
 // DOCUMENT ELEMENT TYPES (for hierarchical parsing)
@@ -190,7 +193,7 @@ impl RagRetrievalActor {
             // Try to create .plugable-rag-cache directory
             let is_readonly = if let Err(e) = tokio::fs::create_dir_all(&cache_dir).await {
                 println!(
-                    "RagActor WARNING: Could not create sidecar directory {:?}. Falling back to in-memory: {}",
+                    "RagActor WARNING: Could not create sidecar directory {:?}. Falling back to central cache: {}",
                     cache_dir, e
                 );
                 true
@@ -199,7 +202,21 @@ impl RagRetrievalActor {
             };
 
             let db_path_str = if is_readonly {
-                "memory://".to_string()
+                // Fallback to central cache instead of volatile memory
+                let central_cache = dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".plugable-chat")
+                    .join(CENTRAL_RAG_CACHE_DIR)
+                    .join(Self::hash_path(&cache_dir)); // Hash to avoid collisions
+
+                if let Err(e) = std::fs::create_dir_all(&central_cache) {
+                    // If even central cache fails, then use memory as last resort
+                    println!("RagActor WARNING: Central cache also failed: {}. Using memory://", e);
+                    "memory://".to_string()
+                } else {
+                    println!("RagActor: Using central cache at {:?}", central_cache);
+                    central_cache.to_string_lossy().to_string()
+                }
             } else {
                 cache_dir.to_string_lossy().to_string()
             };
@@ -641,6 +658,7 @@ impl RagRetrievalActor {
         let indexing_start = Instant::now();
         let mut cache_hits = 0;
         let mut files_processed_count = 0;
+        let mut file_errors = Vec::new();
 
         println!("\n╔══════════════════════════════════════════════════════════════╗");
         println!("║                    RAG INDEXING STARTED                      ║");
@@ -662,8 +680,15 @@ impl RagRetrievalActor {
         for path_str in &paths {
             let path = Path::new(path_str);
             if path.is_dir() {
-                if let Ok(entries) = self.collect_files_recursive(path).await {
-                    files_to_process.extend(entries);
+                match self.collect_files_recursive(path).await {
+                    Ok(entries) => files_to_process.extend(entries),
+                    Err(e) => {
+                        println!("[RAG] Error collecting files from {:?}: {}", path, e);
+                        file_errors.push(FileError { 
+                            file: path_str.clone(), 
+                            error: e 
+                        });
+                    }
                 }
             } else if path.is_file() {
                 files_to_process.push(path.to_path_buf());
@@ -710,7 +735,16 @@ impl RagRetrievalActor {
             let bytes = match tokio::fs::read(file_path).await {
                 Ok(b) => b,
                 Err(e) => {
-                    println!("RagActor: Error reading {:?}: {}", file_path, e);
+                    let error_msg = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        "Permission denied: cannot read file".to_string()
+                    } else {
+                        format!("Failed to read file: {}", e)
+                    };
+                    println!("[RAG] Error reading {:?}: {}", file_path, error_msg);
+                    file_errors.push(FileError { 
+                        file: file_path_str.clone(), 
+                        error: error_msg 
+                    });
                     continue;
                 }
             };
@@ -767,48 +801,55 @@ impl RagRetrievalActor {
             };
 
             // Extract text and parse into elements
-            if let Ok(text_content) = self.extract_text(file_path, &content) {
-                if let Some(ref handle) = self.app_handle {
-                    let _ = handle.emit("rag-progress", RagProgressEvent {
-                        phase: "chunking".to_string(),
-                        total_files,
-                        processed_files: i,
-                        total_chunks: 0,
-                        processed_chunks: 0,
-                        current_file: file_path_str.clone(),
-                        is_complete: false,
-                    });
+            match self.extract_text(file_path, &content) {
+                Ok(text_content) => {
+                    if let Some(ref handle) = self.app_handle {
+                        let _ = handle.emit("rag-progress", RagProgressEvent {
+                            phase: "chunking".to_string(),
+                            total_files,
+                            processed_files: i,
+                            total_chunks: 0,
+                            processed_chunks: 0,
+                            current_file: file_path_str.clone(),
+                            is_complete: false,
+                        });
+                    }
+
+                    // Parse document into elements (with heading detection)
+                    let elements = self.parse_document(&ext, &text_content);
+
+                    // Chunk semantically with heading detection
+                    let chunks_with_context = self.semantic_chunk(&elements);
+
+                    total_chunks_in_index += chunks_with_context.len();
+
+                    let mut chunks_for_this_file = Vec::new();
+                    for (idx, (heading_ctx, chunk_content)) in chunks_with_context.into_iter().enumerate()
+                    {
+                        let chunk_hash = self.compute_hash(&chunk_content);
+                        chunks_for_this_file.push(IndexedChunk {
+                            id: format!("{}:{}:{}", chunk_hash, file_path_str, idx),
+                            hash: chunk_hash,
+                            file_crc32: current_crc,
+                            content: chunk_content,
+                            heading_context: heading_ctx,
+                            source_file: file_path_str.clone(),
+                            chunk_index: idx,
+                            vector: Vec::new(),
+                        });
+                    }
+
+                    // Track chunk count for cache update later
+                    chunks_by_file.insert(file_path_str.clone(), (current_crc, chunks_for_this_file.len()));
+                    
+                    all_pending_chunks.extend(chunks_for_this_file);
+                    files_processed_count += 1;
                 }
-
-                // Parse document into elements (with heading detection)
-                let elements = self.parse_document(&ext, &text_content);
-
-                // Chunk semantically with heading detection
-                let chunks_with_context = self.semantic_chunk(&elements);
-
-                total_chunks_in_index += chunks_with_context.len();
-
-                let mut chunks_for_this_file = Vec::new();
-                for (idx, (heading_ctx, chunk_content)) in chunks_with_context.into_iter().enumerate()
-                {
-                    let chunk_hash = self.compute_hash(&chunk_content);
-                    chunks_for_this_file.push(IndexedChunk {
-                        id: format!("{}:{}:{}", chunk_hash, file_path_str, idx),
-                        hash: chunk_hash,
-                        file_crc32: current_crc,
-                        content: chunk_content,
-                        heading_context: heading_ctx,
-                        source_file: file_path_str.clone(),
-                        chunk_index: idx,
-                        vector: Vec::new(),
-                    });
+                Err(e) => {
+                    println!("[RAG] Error extracting {}: {}", file_path_str, e);
+                    file_errors.push(FileError { file: file_path_str.clone(), error: e });
+                    continue;
                 }
-
-                // Track chunk count for cache update later
-                chunks_by_file.insert(file_path_str.clone(), (current_crc, chunks_for_this_file.len()));
-                
-                all_pending_chunks.extend(chunks_for_this_file);
-                files_processed_count += 1;
             }
         }
 
@@ -835,6 +876,7 @@ impl RagRetrievalActor {
                 total_chunks: total_chunks_in_index,
                 files_processed: files_processed_count,
                 cache_hits,
+                file_errors,
             });
         }
 
@@ -986,6 +1028,7 @@ impl RagRetrievalActor {
             total_chunks: total_chunks_in_index,
             files_processed: files_processed_count,
             cache_hits,
+            file_errors,
         })
     }
 
@@ -1493,9 +1536,15 @@ impl RagRetrievalActor {
     async fn collect_files_recursive(&self, dir: &Path) -> Result<Vec<PathBuf>, String> {
         let mut files = Vec::new();
 
-        let mut entries = tokio::fs::read_dir(dir)
-            .await
-            .map_err(|e| format!("Failed to read directory: {}", e))?;
+        let mut entries = match tokio::fs::read_dir(dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(format!("Permission denied: cannot read directory"));
+            }
+            Err(e) => {
+                return Err(format!("Failed to read directory: {}", e));
+            }
+        };
 
         while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
             let path = entry.path();
@@ -1548,7 +1597,16 @@ impl RagRetrievalActor {
     }
 
     fn extract_pdf_text(&self, file_path: &Path) -> Result<String, String> {
-        pdf_extract::extract_text(file_path).map_err(|e| format!("PDF extraction failed: {}", e))
+        // Wrap in catch_unwind because pdf_extract can panic on malformed PDFs
+        let path_owned = file_path.to_path_buf();
+        let result = std::panic::catch_unwind(|| {
+            pdf_extract::extract_text(&path_owned)
+        });
+        match result {
+            Ok(Ok(text)) => Ok(text),
+            Ok(Err(e)) => Err(format!("PDF extraction failed: {}", e)),
+            Err(_) => Err("PDF extraction panicked - file may be malformed or unsupported".to_string()),
+        }
     }
 
     fn extract_docx_text(&self, file_path: &Path) -> Result<String, String> {
@@ -1643,6 +1701,13 @@ impl RagRetrievalActor {
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
         format!("{:x}", hasher.finalize())
+    }
+
+    /// Hash a directory path to create a unique, safe directory name for central cache
+    fn hash_path(path: &Path) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(path.to_string_lossy().as_bytes());
+        format!("{:x}", hasher.finalize())[..16].to_string() // First 16 chars
     }
 
     // ========================================================================
@@ -1863,6 +1928,113 @@ mod tests {
         
         // New H1 should clear everything
         assert_eq!(stack.get_context(), "H1: Chapter 2");
+    }
+
+    // ========================================================================
+    // PERMISSION & ACCESS TESTS
+    // ========================================================================
+
+    #[tokio::test]
+    #[cfg(unix)] // chmod only works on Unix
+    async fn test_file_no_read_permission_returns_error() {
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        // Create temp directory and file
+        let temp_dir = tempdir().unwrap();
+        let test_file = temp_dir.path().join("unreadable.txt");
+        std::fs::write(&test_file, "test content").unwrap();
+
+        // Remove read permission (write-only)
+        std::fs::set_permissions(&test_file, std::fs::Permissions::from_mode(0o200)).unwrap();
+
+        // Verify the file read fails with PermissionDenied
+        let bytes_result = tokio::fs::read(&test_file).await;
+        assert!(bytes_result.is_err());
+        assert_eq!(
+            bytes_result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        // Cleanup: restore permissions so tempdir can delete
+        std::fs::set_permissions(&test_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_directory_no_read_permission_returns_error() {
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().unwrap();
+        let sub_dir = temp_dir.path().join("unreadable_dir");
+        std::fs::create_dir(&sub_dir).unwrap();
+
+        // Remove read+execute permission (can't list contents)
+        std::fs::set_permissions(&sub_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let actor = create_test_actor();
+        let result = actor.collect_files_recursive(&sub_dir).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Permission denied"));
+
+        // Cleanup
+        std::fs::set_permissions(&sub_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_readonly_directory_uses_central_cache() {
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+        std::fs::write(&test_file, "test content").unwrap();
+
+        // Make the directory read-only (can read files, can't create new ones)
+        std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Verify we can't create the sidecar directory
+        let sidecar_path = temp_dir.path().join(".plugable-rag-cache");
+        let create_result = std::fs::create_dir(&sidecar_path);
+        assert!(create_result.is_err());
+
+        // The actor should fall back to central cache
+        // Test the hash_path function
+        let hash = RagRetrievalActor::hash_path(temp_dir.path());
+        assert_eq!(hash.len(), 16); // First 16 chars of SHA256
+
+        // Verify central cache path would be created
+        let central_path = dirs::home_dir()
+            .unwrap()
+            .join(".plugable-chat")
+            .join(CENTRAL_RAG_CACHE_DIR)
+            .join(&hash);
+
+        // Central cache should be writable (unless home is also readonly, which is unlikely)
+        let central_create = std::fs::create_dir_all(&central_path);
+        assert!(central_create.is_ok());
+
+        // Cleanup
+        std::fs::remove_dir_all(&central_path).ok();
+        std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn test_hash_path_deterministic() {
+        let path1 = Path::new("/some/test/path");
+        let path2 = Path::new("/some/test/path");
+        let path3 = Path::new("/different/path");
+
+        let hash1 = RagRetrievalActor::hash_path(path1);
+        let hash2 = RagRetrievalActor::hash_path(path2);
+        let hash3 = RagRetrievalActor::hash_path(path3);
+
+        assert_eq!(hash1, hash2); // Same path = same hash
+        assert_ne!(hash1, hash3); // Different path = different hash
+        assert_eq!(hash1.len(), 16); // Consistent length
     }
 
     // ========================================================================

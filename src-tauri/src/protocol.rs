@@ -867,6 +867,13 @@ pub struct RagIndexResult {
     pub total_chunks: usize,
     pub files_processed: usize,
     pub cache_hits: usize,
+    pub file_errors: Vec<FileError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileError {
+    pub file: String,
+    pub error: String,
 }
 
 /// Event payload for RAG indexing progress

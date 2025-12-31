@@ -1495,7 +1495,7 @@ mod tests {
         // User explicitly attaches a table. The state machine should enable
         // SqlRetrieval mode and include SQL guidance.
         let mut settings = AppSettings::default();
-        settings.sql_select_enabled = true;
+        settings.always_on_builtin_tools.push("sql_select".to_string());
         
         let filter = ToolLaunchFilter::default();
         let settings_sm = SettingsStateMachine::from_settings(&settings, &filter);

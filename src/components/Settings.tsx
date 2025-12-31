@@ -2325,7 +2325,7 @@ function ToolsTab({
     onRegisterSave?: (handler: () => Promise<void>) => void;
     onSavingChange?: (saving: boolean) => void;
 }) {
-    const { settings, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error, serverStatuses, addAlwaysOnBuiltinTool, removeAlwaysOnBuiltinTool } = useSettingsStore();
+    const { settings, addMcpServer, updateMcpServer, removeMcpServer, updateToolSystemPrompt, error, serverStatuses } = useSettingsStore();
     const servers = settings?.mcp_servers || [];
 
     const [serverDirtyMap, setServerDirtyMap] = useState<Record<string, boolean>>({});
