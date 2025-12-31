@@ -1,0 +1,30 @@
+# Auto-detect text files and normalize line endings
+* text=auto
+
+# Ensure consistent LF line endings for source files across all platforms
+# This prevents "modified" status on Windows due to CRLF conversion
+*.rs text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Shell scripts must have LF endings to work on Unix
+*.sh text eol=lf
+
+# Windows scripts should have CRLF endings
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files - don't touch
+*.png binary
+*.ico binary
+*.icns binary
+*.wasm binary

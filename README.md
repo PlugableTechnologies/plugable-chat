@@ -181,6 +181,30 @@ This runs automatically during builds, so you only need to run it manually if yo
 
 ---
 
+## Troubleshooting
+
+### Git Pull Shows Conflicts in `src-tauri/Cargo.toml`
+
+If `git pull` reports conflicts or shows `Cargo.toml` as modified when you haven't changed it, this is usually caused by line ending differences between platforms. To fix:
+
+```bash
+# Reset line endings for the affected file
+git checkout -- src-tauri/Cargo.toml
+
+# Then pull normally
+git pull
+```
+
+For a complete line ending refresh (one-time fix for existing clones):
+
+```bash
+# Re-normalize all files according to .gitattributes
+git rm --cached -r .
+git reset --hard
+```
+
+---
+
 ## Prerequisites (Manual Installation)
 
 If you prefer to install dependencies manually instead of using the requirements scripts:
