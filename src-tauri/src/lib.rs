@@ -40,10 +40,10 @@ use actors::rag_actor::RagRetrievalActor;
 use actors::schema_vector_actor::{SchemaVectorStoreActor, SchemaVectorMsg};
 use actors::vector_actor::ChatVectorStoreActor;
 use app_state::{
-    ActorHandles, CancellationState, EmbeddingModelState, HeartbeatState, LaunchConfigState,
-    LoggingPersistence, PendingApprovals, SettingsState, SettingsStateMachineState,
-    SystemPromptEvent, ToolApprovalDecision, ToolApprovalState, TurnProgress, TurnTrackerState,
-    ToolRegistryState,
+    ActorHandles, CancellationState, EmbeddingModelState, GpuResourceGuard, HeartbeatState,
+    LaunchConfigState, LoggingPersistence, PendingApprovals, SettingsState,
+    SettingsStateMachineState, SystemPromptEvent, ToolApprovalDecision, ToolApprovalState,
+    ToolRegistryState, TurnProgress, TurnTrackerState,
 };
 use clap::Parser;
 use cli::{apply_cli_overrides, is_builtin_tool, parse_tool_filter, CliArgs};
@@ -1256,14 +1256,6 @@ pub(crate) async fn run_agentic_loop(
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
         // Send chat request to Foundry
-        // #region agent log
-        let foundry_send_start = std::time::Instant::now();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H0","location":"lib.rs:before_foundry_send","message":"about_to_send_to_foundry","data":{{"iteration":{},"history_len":{},"model":"{}"}},"timestamp":{}}}"#, 
-                iteration, full_history.len(), model_name,
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-        }
-        // #endregion
         println!("[AgenticLoop] 📤 Sending chat request to Foundry...");
         let _ = std::io::stdout().flush();
         // Strip any local-only metadata (like system_prompt) before sending to Foundry
@@ -1327,17 +1319,9 @@ pub(crate) async fn run_agentic_loop(
                         Some(token) => {
                             if first_token_time.is_none() {
                                 let ttft = iteration_start.elapsed();
-                                let ttft_from_foundry_send = foundry_send_start.elapsed();
                                 first_token_time = Some(std::time::Instant::now());
                                 println!("[AgenticLoop] 🎯 First token received! TTFT: {:.2}s", ttft.as_secs_f64());
                                 let _ = std::io::stdout().flush();
-                                // #region agent log
-                                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                                    let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H0","location":"lib.rs:first_token_agentic","message":"first_token_in_agentic_loop","data":{{"ttft_from_iteration_ms":{},"ttft_from_foundry_send_ms":{},"iteration":{}}},"timestamp":{}}}"#, 
-                                        ttft.as_millis(), ttft_from_foundry_send.as_millis(), iteration,
-                                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                                }
-                                // #endregion
                             }
                             token_count += 1;
                             assistant_response.push_str(&token);
@@ -2728,15 +2712,6 @@ async fn chat(
         current_generation
     };
 
-    // #region agent log
-    let chat_start_time = std::time::Instant::now();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H0","location":"lib.rs:chat_entry","message":"chat_command_started","data":{{"chat_id":"{}","history_len":{},"message_len":{},"attached_tables":{},"attached_tools":{},"attached_files":{}}},"timestamp":{}}}"#, 
-            chat_id, history.len(), message.len(), attached_tables.len(), attached_tools.len(), attached_files.len(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
-
     println!("\n[chat] =============================================================");
     println!(
         "[chat] 💬 New chat | id={} | gen={} | history_len={} | user_chars={} | preview=\"{}{}\"",
@@ -2805,27 +2780,8 @@ async fn chat(
     
     drop(settings);
 
-    // #region agent log
-    let settings_read_elapsed = chat_start_time.elapsed();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H0","location":"lib.rs:after_settings_read","message":"settings_read_complete","data":{{"elapsed_ms":{}}},"timestamp":{}}}"#, 
-            settings_read_elapsed.as_millis(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
-
     // Build ChatTurnContext with attachments
     // Generate embedding for user prompt (for semantic column search)
-    // #region agent log
-    let embed_start = std::time::Instant::now();
-    let will_run_embedding = !message.trim().is_empty() && !attached_tables.is_empty();
-    let is_macos = cfg!(target_os = "macos");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H8","location":"lib.rs:before_embed","message":"embedding_about_to_start","data":{{"will_run":{},"attached_tables":{},"message_len":{},"is_macos":{}}},"timestamp":{}}}"#, 
-            will_run_embedding, attached_tables.len(), message.len(), is_macos,
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
     let user_prompt_embedding: Option<Vec<f32>> = if !message.trim().is_empty() && !attached_tables.is_empty() {
         // Use CPU model for semantic column search during chat (avoids evicting LLM from GPU)
         let model_guard = embedding_state.cpu_model.read().await;
@@ -2833,33 +2789,10 @@ async fn chat(
             let model_clone = Arc::clone(model);
             let query = message.clone();
             drop(model_guard);
-            // #region agent log
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H8","location":"lib.rs:embed_gpu_start","message":"embedding_gpu_operation_starting","data":{{"is_macos":{},"using_coreml_on_mac":{}}},"timestamp":{}}}"#, 
-                    is_macos, is_macos,
-                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-            }
-            // #endregion
             match tokio::task::spawn_blocking(move || model_clone.embed(vec![query], None)).await {
-                Ok(Ok(embeddings)) => {
-                    // #region agent log
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H8","location":"lib.rs:embed_gpu_done","message":"embedding_gpu_operation_complete","data":{{"elapsed_ms":{},"success":true,"is_macos":{}}},"timestamp":{}}}"#, 
-                            embed_start.elapsed().as_millis(), is_macos,
-                            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                    }
-                    // #endregion
-                    embeddings.into_iter().next()
-                }
+                Ok(Ok(embeddings)) => embeddings.into_iter().next(),
                 Ok(Err(e)) => {
                     println!("[Chat] Warning: Failed to embed user prompt for column search: {}", e);
-                    // #region agent log
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H8","location":"lib.rs:embed_gpu_done","message":"embedding_gpu_operation_complete","data":{{"elapsed_ms":{},"success":false,"error":"{}","is_macos":{}}},"timestamp":{}}}"#, 
-                            embed_start.elapsed().as_millis(), e, is_macos,
-                            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                    }
-                    // #endregion
                     None
                 }
                 Err(e) => {
@@ -2874,16 +2807,6 @@ async fn chat(
     } else {
         None
     };
-
-    // #region agent log
-    let embed_elapsed = embed_start.elapsed();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H8","location":"lib.rs:after_embedding","message":"user_prompt_embedding_complete","data":{{"elapsed_ms":{},"had_embedding":{},"attached_tables":{},"is_macos":{}}},"timestamp":{}}}"#, 
-            embed_elapsed.as_millis(), user_prompt_embedding.is_some(), attached_tables.len(), is_macos,
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    let table_fetch_start = std::time::Instant::now();
-    // #endregion
 
     let mut turn_attached_tables = Vec::new();
     for table in attached_tables {
@@ -2949,15 +2872,6 @@ async fn chat(
         }
     }
 
-    // #region agent log
-    let table_fetch_elapsed = table_fetch_start.elapsed();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H5","location":"lib.rs:after_table_fetch","message":"table_schema_fetch_complete","data":{{"elapsed_ms":{},"table_count":{}}},"timestamp":{}}}"#, 
-            table_fetch_elapsed.as_millis(), turn_attached_tables.len(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
-
     let turn_context = ChatTurnContext {
         attached_files: attached_files.clone(),
         attached_tables: turn_attached_tables.clone(),
@@ -2971,14 +2885,35 @@ async fn chat(
         sm_guard.compute_for_turn(&settings_guard, &tool_filter, &turn_context)
     };
 
-    let enabled_db_sources: Vec<String> = server_configs
+    // Compute enabled database sources:
+    // 1. Sources marked as enabled in settings (when db tools are always-on)
+    // 2. PLUS sources whose tables are attached to this chat turn
+    let mut enabled_db_sources: Vec<String> = server_configs
         .iter()
         .filter(|s| s.is_database_source && s.enabled)
         .map(|s| s.id.clone())
         .collect();
+    
+    // Add sources for attached tables (enables sql_select for per-chat attachments)
+    // Use turn_attached_tables which was built from the original attached_tables
+    for table in &turn_attached_tables {
+        if !enabled_db_sources.contains(&table.source_id) {
+            enabled_db_sources.push(table.source_id.clone());
+        }
+    }
+    
+    // Also enable these sources in server_configs so MCP sync doesn't disconnect them
+    for source_id in &enabled_db_sources {
+        if let Some(config) = server_configs.iter_mut().find(|s| &s.id == source_id && s.is_database_source) {
+            if !config.enabled {
+                println!("[Chat] Enabling database source '{}' for attached tables", source_id);
+                config.enabled = true;
+            }
+        }
+    }
 
-    println!("[Chat] Turn Configuration: Mode={}, Enabled Tools={:?}", 
-        turn_config.mode.name(), turn_config.enabled_tools);
+    println!("[Chat] Turn Configuration: Mode={}, Enabled Tools={:?}, DB Sources={:?}", 
+        turn_config.mode.name(), turn_config.enabled_tools, enabled_db_sources);
 
     // Initialize turn tracker for this generation
     {
@@ -3012,9 +2947,6 @@ async fn chat(
     }
 
     // Ensure all enabled MCP servers (regular + database) are connected before proceeding with discovery
-    // #region agent log
-    let mcp_sync_start = std::time::Instant::now();
-    // #endregion
     let (sync_tx, sync_rx) = oneshot::channel();
     if let Err(e) = handles.mcp_host_tx.send(McpHostMsg::SyncEnabledServers {
         configs: server_configs.clone(),
@@ -3024,14 +2956,6 @@ async fn chat(
     } else {
         let _ = sync_rx.await;
     }
-    // #region agent log
-    let mcp_sync_elapsed = mcp_sync_start.elapsed();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H2","location":"lib.rs:after_mcp_sync","message":"mcp_sync_complete","data":{{"elapsed_ms":{},"server_count":{}}},"timestamp":{}}}"#, 
-            mcp_sync_elapsed.as_millis(), server_configs.len(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
 
     // Look up model info for the frontend-provided model to check capabilities
     // Frontend is the source of truth for model selection
@@ -4096,6 +4020,10 @@ pub fn run() {
             let mcp_host_tx_for_handles = mcp_host_tx.clone();
             let logging_persistence = Arc::new(LoggingPersistence::default());
             let logging_persistence_for_foundry = logging_persistence.clone();
+            
+            // Create GPU resource guard for serializing GPU operations
+            let gpu_guard = Arc::new(GpuResourceGuard::new());
+            let gpu_guard_for_foundry = gpu_guard.clone();
 
             // Store handles in state
             app.manage(ActorHandles {
@@ -4107,6 +4035,7 @@ pub fn run() {
                 database_toolbox_tx: database_toolbox_tx.clone(),
                 schema_tx: schema_tx.clone(),
                 logging_persistence,
+                gpu_guard,
             });
 
             // Initialize shared embedding model state (dual models for GPU/CPU)
@@ -4270,6 +4199,7 @@ pub fn run() {
                     gpu_embedding_model_arc_for_foundry,
                     cpu_embedding_model_arc_for_foundry,
                     logging_persistence_for_foundry,
+                    gpu_guard_for_foundry,
                 );
                 actor.run().await;
             });

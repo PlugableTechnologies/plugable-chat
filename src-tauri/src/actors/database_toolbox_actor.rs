@@ -365,12 +365,6 @@ impl DatabaseToolboxActor {
                 return Ok(Value::String(data.clone()));
             }
             if let Some(text) = &first.text {
-                // #region agent log H1
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                    use std::io::Write;
-                    let _ = writeln!(f, r#"{{"hypothesisId":"H1","location":"database_toolbox_actor.rs:call_mcp_tool_value","message":"NDJSON input size","data":{{"text_len":{},"has_newline":{},"line_count":{}}},"timestamp":{}}}"#, text.len(), text.contains('\n'), text.lines().count(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-                }
-                // #endregion
                 // Handle NDJSON format (newline-separated JSON objects)
                 // Common for SQL result sets from MCP toolbox
                 if text.contains('\n') && text.trim_start().starts_with('{') {
@@ -379,12 +373,6 @@ impl DatabaseToolboxActor {
                         .filter(|line| !line.trim().is_empty())
                         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
                         .collect();
-                    // #region agent log H1
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                        use std::io::Write;
-                        let _ = writeln!(f, r#"{{"hypothesisId":"H1","location":"database_toolbox_actor.rs:ndjson_parsed","message":"NDJSON parsed lines","data":{{"parsed_count":{}}},"timestamp":{}}}"#, lines.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-                    }
-                    // #endregion
                     if !lines.is_empty() {
                         return Ok(Value::Array(lines));
                     }
@@ -1104,13 +1092,6 @@ impl DatabaseToolboxActor {
         } else {
             return Err(format!("No rows in column info response: {}", response));
         };
-
-        // #region agent log H5
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            use std::io::Write;
-            let _ = writeln!(f, r#"{{"hypothesisId":"H5","location":"database_toolbox_actor.rs:parse_column_info","message":"Column rows to parse","data":{{"row_count":{}}},"timestamp":{}}}"#, rows.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-        }
-        // #endregion
 
         Ok(rows
             .iter()

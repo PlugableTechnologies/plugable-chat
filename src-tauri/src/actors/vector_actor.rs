@@ -356,14 +356,6 @@ async fn upsert_chat_record_with_embedding(
     pinned: bool,
     model: Option<String>,
 ) {
-    // #region agent log
-    use std::io::Write;
-    let upsert_start = std::time::Instant::now();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"vector_actor.rs:upsert","message":"upsert_start","data":{{"id":"{}","vec_len":{},"msg_len":{},"model":{:?}}},"timestamp":{}}}"#, &id[..8.min(id.len())], embedding_vector.len(), messages.len(), model, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    // #endregion
-
     let schema = match chat_table.schema().await {
         Ok(s) => s,
         Err(e) => {
@@ -415,22 +407,12 @@ async fn upsert_chat_record_with_embedding(
 
     // Perform upsert by deleting existing record (if any) and adding new one
     // This is a workaround for merge_insert API issues in lancedb 0.4
-    // #region agent log
-    let delete_start = std::time::Instant::now();
-    // #endregion
     if let Err(e) = chat_table.delete(&format!("id = '{}'", id)).await {
         println!(
             "VectorActor WARNING: Delete before upsert failed (may be ok if new): {}",
             e
         );
     }
-    // #region agent log
-    let delete_elapsed = delete_start.elapsed().as_millis();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"vector_actor.rs:upsert","message":"delete_complete","data":{{"id":"{}","elapsed_ms":{}}},"timestamp":{}}}"#, &id[..8.min(id.len())], delete_elapsed, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-    }
-    let add_start = std::time::Instant::now();
-    // #endregion
 
     match chat_table
         .add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
@@ -438,13 +420,6 @@ async fn upsert_chat_record_with_embedding(
         .await
     {
         Ok(_) => {
-            // #region agent log
-            let add_elapsed = add_start.elapsed().as_millis();
-            let total_elapsed = upsert_start.elapsed().as_millis();
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"vector_actor.rs:upsert","message":"upsert_complete","data":{{"id":"{}","add_elapsed_ms":{},"total_elapsed_ms":{}}},"timestamp":{}}}"#, &id[..8.min(id.len())], add_elapsed, total_elapsed, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-            }
-            // #endregion
             println!(
                 "VectorActor: Successfully saved chat '{}' to LanceDB",
                 title

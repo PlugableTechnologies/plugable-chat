@@ -3,7 +3,7 @@
 //! Commands for managing document indexing and context retrieval
 //! for RAG-based chat augmentation.
 
-use crate::app_state::ActorHandles;
+use crate::app_state::{ActorHandles, EmbeddingModelState};
 use crate::protocol::{FoundryMsg, RagChunk, RagIndexResult, RagMsg, RemoveFileResult};
 use tauri::State;
 use tokio::sync::oneshot;
@@ -24,28 +24,56 @@ pub async fn select_folder() -> Result<Option<String>, String> {
 }
 
 /// Process documents and add them to the RAG index
+///
+/// Tries to use GPU embedding model for speed, but falls back to CPU if GPU is busy.
 #[tauri::command]
 pub async fn process_rag_documents(
     paths: Vec<String>,
     handles: State<'_, ActorHandles>,
+    embedding_state: State<'_, EmbeddingModelState>,
 ) -> Result<RagIndexResult, String> {
     println!("[RAG] Processing {} paths", paths.len());
 
-    // Request GPU embedding model from Foundry actor (lazy-loaded on demand)
-    // This avoids GPU memory contention at startup - model is loaded fresh when needed
-    let (model_tx, model_rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetGpuEmbeddingModel {
-            respond_to: model_tx,
-        })
-        .await
-        .map_err(|e| format!("Failed to request GPU embedding model: {}", e))?;
+    // Try to get GPU embedding model, but fall back to CPU if GPU is busy
+    // This prevents GPU memory contention with LLM prewarm/chat operations
+    let (embedding_model, use_gpu) = match handles.gpu_guard.mutex.try_lock() {
+        Ok(_guard) => {
+            // GPU is available - request GPU embedding model
+            drop(_guard);
+            
+            let (model_tx, model_rx) = oneshot::channel();
+            handles
+                .foundry_tx
+                .send(FoundryMsg::GetGpuEmbeddingModel {
+                    respond_to: model_tx,
+                })
+                .await
+                .map_err(|e| format!("Failed to request GPU embedding model: {}", e))?;
 
-    let embedding_model = model_rx
-        .await
-        .map_err(|_| "Foundry actor died while getting GPU embedding model")?
-        .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
+            let model = model_rx
+                .await
+                .map_err(|_| "Foundry actor died while getting GPU embedding model")?
+                .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
+            
+            (model, true)
+        }
+        Err(_) => {
+            // GPU is busy - fall back to CPU
+            let current_op = handles.gpu_guard.current_operation.read().await;
+            let op_desc = current_op.clone().unwrap_or_else(|| "unknown operation".to_string());
+            drop(current_op);
+            
+            println!("[RAG] GPU busy with '{}', falling back to CPU embeddings", op_desc);
+            
+            let model_guard = embedding_state.cpu_model.read().await;
+            let model = model_guard
+                .clone()
+                .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
+            drop(model_guard);
+            
+            (model, false)
+        }
+    };
 
     let (tx, rx) = oneshot::channel();
     handles
@@ -53,7 +81,7 @@ pub async fn process_rag_documents(
         .send(RagMsg::IndexRagDocuments {
             paths,
             embedding_model,
-            use_gpu: true, // RAG indexing uses GPU model
+            use_gpu,
             respond_to: tx,
         })
         .await
@@ -61,10 +89,9 @@ pub async fn process_rag_documents(
 
     let result = rx.await.map_err(|_| "RAG actor died".to_string())?;
 
-    // After successful RAG indexing, re-warm the LLM model that may have been
-    // evicted from GPU memory by the embedding operations
-    if result.is_ok() {
-        println!("[RAG] Indexing complete, triggering LLM re-warm");
+    // Only re-warm LLM if we used GPU embeddings (which may have evicted the LLM)
+    if result.is_ok() && use_gpu {
+        println!("[RAG] Indexing complete (GPU), triggering LLM re-warm");
         let (rewarm_tx, _) = oneshot::channel();
         let _ = handles
             .foundry_tx
@@ -72,6 +99,8 @@ pub async fn process_rag_documents(
                 respond_to: rewarm_tx,
             })
             .await;
+    } else if result.is_ok() {
+        println!("[RAG] Indexing complete (CPU), no re-warm needed");
     }
 
     result

@@ -3,7 +3,7 @@ use crate::protocol::{
     CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus, ModelFamily,
     ModelInfo, OpenAITool, ParsedToolCall, ReasoningFormat, ToolFormat,
 };
-use crate::app_state::LoggingPersistence;
+use crate::app_state::{GpuResourceGuard, LoggingPersistence};
 use serde::Deserialize;
 use crate::settings::ChatFormatName;
 use crate::tool_adapters::parse_combined_tool_name;
@@ -417,6 +417,8 @@ pub struct ModelGatewayActor {
     logging_persistence: Arc<LoggingPersistence>,
     /// Shared HTTP client for all Foundry API requests (connection pooling)
     http_client: reqwest::Client,
+    /// GPU resource guard for serializing GPU operations (prevents memory contention)
+    gpu_guard: Arc<GpuResourceGuard>,
 }
 
 impl ModelGatewayActor {
@@ -426,6 +428,7 @@ impl ModelGatewayActor {
         shared_gpu_embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
         shared_cpu_embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
         logging_persistence: Arc<LoggingPersistence>,
+        gpu_guard: Arc<GpuResourceGuard>,
     ) -> Self {
         // Create HTTP client with connection pooling optimized for local service
         let http_client = reqwest::Client::builder()
@@ -448,6 +451,7 @@ impl ModelGatewayActor {
             valid_eps: Vec::new(),
             logging_persistence,
             http_client,
+            gpu_guard,
         }
     }
 
@@ -508,13 +512,27 @@ impl ModelGatewayActor {
     /// Pre-load a model into VRAM to reduce time-to-first-token.
     /// This is fire-and-forget - we don't wait for completion.
     /// The model load happens in the background and will be ready for the first chat.
+    /// 
+    /// IMPORTANT: Acquires GPU mutex to prevent contention with embedding operations.
     fn prewarm_model_in_background(&self, model_name: String) {
         if let Some(port) = self.port {
             let client = self.http_client.clone();
             let app_handle = self.app_handle.clone();
+            let gpu_guard = self.gpu_guard.clone();
             
             // Spawn a background task to load the model
             tokio::spawn(async move {
+                // Acquire GPU mutex to prevent contention with embedding operations
+                let _gpu_lock = gpu_guard.mutex.lock().await;
+                *gpu_guard.current_operation.write().await = Some(format!("Pre-warming LLM: {}", model_name));
+                
+                // Emit GPU status event
+                let _ = app_handle.emit("gpu-status", json!({
+                    "operation": "prewarm",
+                    "model": &model_name,
+                    "status": "started"
+                }));
+                
                 let encoded_name = urlencoding::encode(&model_name);
                 let url = format!(
                     "http://127.0.0.1:{}/openai/load/{}?ttl=0",
@@ -548,48 +566,30 @@ impl ModelGatewayActor {
                             model_name,
                             elapsed
                         );
-                        // #region agent log
-                        use std::io::Write as _;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                            let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H7","location":"foundry_actor.rs:prewarm_complete","message":"prewarm_model_success","data":{{"model":"{}","elapsed_ms":{}}},"timestamp":{}}}"#, 
-                                model_name, elapsed.as_millis(),
-                                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                        }
-                        // #endregion
                     }
                     Ok(resp) => {
-                        let elapsed = start.elapsed();
                         println!(
                             "FoundryActor: ⚠️ Model pre-warm returned status {}: {}",
                             resp.status(),
                             model_name
                         );
-                        // #region agent log
-                        use std::io::Write as _;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                            let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H7","location":"foundry_actor.rs:prewarm_complete","message":"prewarm_model_failed_status","data":{{"model":"{}","status":"{}","elapsed_ms":{}}},"timestamp":{}}}"#, 
-                                model_name, resp.status(), elapsed.as_millis(),
-                                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                        }
-                        // #endregion
                     }
                     Err(e) => {
-                        let elapsed = start.elapsed();
                         // This is non-fatal - the model will be loaded on first use
                         println!(
                             "FoundryActor: ⚠️ Model pre-warm failed (non-fatal): {} - {}",
                             model_name, e
                         );
-                        // #region agent log
-                        use std::io::Write as _;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                            let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H7","location":"foundry_actor.rs:prewarm_complete","message":"prewarm_model_failed_error","data":{{"model":"{}","error":"{}","elapsed_ms":{}}},"timestamp":{}}}"#, 
-                                model_name, e, elapsed.as_millis(),
-                                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                        }
-                        // #endregion
                     }
                 }
+                
+                // Clear GPU operation status and emit completion
+                *gpu_guard.current_operation.write().await = None;
+                let _ = app_handle.emit("gpu-status", json!({
+                    "operation": "prewarm",
+                    "model": &model_name,
+                    "status": "completed"
+                }));
             });
         }
     }
@@ -598,13 +598,6 @@ impl ModelGatewayActor {
     /// IMPORTANT: We always load fresh to avoid stale GPU state after LLM operations.
     /// Caching caused hangs when the cached model's GPU resources were evicted by LLM prewarm.
     async fn ensure_gpu_embedding_model_loaded(&self) -> Result<Arc<TextEmbedding>, String> {
-        // #region agent log H6
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            use std::io::Write;
-            let _ = writeln!(f, r#"{{"hypothesisId":"H6","location":"foundry_actor.rs:ensure_gpu_embedding","message":"GPU embedding model requested - loading fresh","data":{{}},"timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-        }
-        // #endregion
-        
         // NOTE: We intentionally do NOT cache the GPU embedding model.
         // Previously, caching caused hangs because:
         // 1. GPU model was loaded and cached
@@ -659,12 +652,6 @@ impl ModelGatewayActor {
         .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
 
         let elapsed = start.elapsed();
-        // #region agent log H6
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            use std::io::Write;
-            let _ = writeln!(f, r#"{{"hypothesisId":"H6","location":"foundry_actor.rs:gpu_model_loaded","message":"GPU embedding model loaded fresh","data":{{"elapsed_ms":{}}},"timestamp":{}}}"#, elapsed.as_millis(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-        }
-        // #endregion
         println!(
             "FoundryActor: GPU embedding model loaded in {:.2}s",
             elapsed.as_secs_f64()
@@ -686,15 +673,6 @@ impl ModelGatewayActor {
     pub async fn run(mut self) {
         println!("Initializing Foundry Local Manager via CLI...");
 
-        // #region agent log
-        use std::io::Write as _;
-        let startup_start = std::time::Instant::now();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H7","location":"foundry_actor.rs:run_start","message":"foundry_actor_starting","data":{{}},"timestamp":{}}}"#, 
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-        }
-        // #endregion
-
         // Try to start the service or ensure it's running
         if let Err(e) = self.ensure_service_running().await {
             println!(
@@ -703,28 +681,10 @@ impl ModelGatewayActor {
             );
         }
 
-        // #region agent log
-        let ensure_service_elapsed = startup_start.elapsed();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H7","location":"foundry_actor.rs:after_ensure_service","message":"ensure_service_complete","data":{{"elapsed_ms":{}}},"timestamp":{}}}"#, 
-                ensure_service_elapsed.as_millis(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-        }
-        // #endregion
-
         // Try to get the port and EPs with retries
         // Foundry may take time to start up, so we retry with exponential backoff
         self.update_connection_info_with_retry(5, Duration::from_secs(2))
             .await;
-
-        // #region agent log
-        let connection_info_elapsed = startup_start.elapsed();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H7","location":"foundry_actor.rs:after_connection_info","message":"connection_info_complete","data":{{"elapsed_ms":{},"port":{:?},"models_count":{},"valid_eps":"{:?}"}},"timestamp":{}}}"#, 
-                connection_info_elapsed.as_millis(), self.port, self.available_models.len(), self.valid_eps,
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-        }
-        // #endregion
 
         // Pre-warm the HTTP connection pool so first chat request doesn't pay connection cost
         self.prewarm_http_connection().await;
@@ -733,21 +693,7 @@ impl ModelGatewayActor {
         // This loads the model into VRAM in the background
         if let Some(first_model) = self.available_models.first().cloned() {
             println!("FoundryActor: Pre-warming first available model: {}", first_model);
-            // #region agent log
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H7","location":"foundry_actor.rs:prewarm_start","message":"prewarm_model_starting","data":{{"model":"{}"}},"timestamp":{}}}"#, 
-                    first_model,
-                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-            }
-            // #endregion
             self.prewarm_model_in_background(first_model);
-        } else {
-            // #region agent log
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H7","location":"foundry_actor.rs:prewarm_skip","message":"prewarm_skipped_no_models","data":{{}},"timestamp":{}}}"#, 
-                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-            }
-            // #endregion
         }
 
         // Initialize CPU embedding model at startup for search during chat.
@@ -813,6 +759,15 @@ impl ModelGatewayActor {
                     // - GPU model: For RAG indexing (background, can evict LLM)
                     // - CPU model: For search during chat (avoids LLM eviction)
                     let model_type = if use_gpu { "GPU" } else { "CPU" };
+                    
+                    // For GPU embeddings, acquire the GPU mutex to prevent contention
+                    let _gpu_lock = if use_gpu {
+                        *self.gpu_guard.current_operation.write().await = Some("GPU embedding inference".to_string());
+                        Some(self.gpu_guard.mutex.lock().await)
+                    } else {
+                        None
+                    };
+                    
                     let model_guard = if use_gpu {
                         self.shared_gpu_embedding_model.read().await
                     } else {
@@ -865,6 +820,11 @@ impl ModelGatewayActor {
                         );
                         let _ = respond_to.send(vec![0.0; EMBEDDING_DIM]);
                     }
+                    
+                    // Clear GPU operation status if we held the lock
+                    if use_gpu {
+                        *self.gpu_guard.current_operation.write().await = None;
+                    }
                 }
                 FoundryMsg::RewarmCurrentModel { respond_to } => {
                     // Re-warm the currently selected LLM model after GPU-intensive operations
@@ -878,10 +838,26 @@ impl ModelGatewayActor {
                     let _ = respond_to.send(());
                 }
                 FoundryMsg::GetGpuEmbeddingModel { respond_to } => {
+                    // Acquire GPU mutex to prevent contention with LLM operations
+                    let _gpu_lock = self.gpu_guard.mutex.lock().await;
+                    *self.gpu_guard.current_operation.write().await = Some("Loading GPU embedding model".to_string());
+                    
+                    let _ = self.app_handle.emit("gpu-status", json!({
+                        "operation": "embed_load",
+                        "status": "started"
+                    }));
+                    
                     // Lazy-load GPU embedding model on demand for RAG indexing
                     // This avoids GPU memory contention at startup and ensures
                     // the model is fresh when needed (not stale from LLM eviction)
                     let result = self.ensure_gpu_embedding_model_loaded().await;
+                    
+                    *self.gpu_guard.current_operation.write().await = None;
+                    let _ = self.app_handle.emit("gpu-status", json!({
+                        "operation": "embed_load",
+                        "status": "completed"
+                    }));
+                    
                     let _ = respond_to.send(result);
                 }
                 FoundryMsg::GetModels { respond_to } => {
@@ -936,6 +912,18 @@ impl ModelGatewayActor {
                     respond_to,
                     mut stream_cancel_rx,
                 } => {
+                    // Clone GPU guard to avoid borrow conflicts with self
+                    let gpu_guard = self.gpu_guard.clone();
+                    
+                    // Acquire GPU mutex for LLM inference - this serializes with embedding operations
+                    let _gpu_lock = gpu_guard.mutex.lock().await;
+                    *gpu_guard.current_operation.write().await = Some("LLM chat inference".to_string());
+                    
+                    let _ = self.app_handle.emit("gpu-status", json!({
+                        "operation": "chat",
+                        "status": "started"
+                    }));
+                    
                     // Emit status immediately when chat request is received
                     let _ = self.app_handle.emit(
                         "chat-stream-status",
@@ -944,17 +932,6 @@ impl ModelGatewayActor {
                             "message": "Preparing model request..."
                         }),
                     );
-
-                    // #region agent log
-                    use std::io::Write as _;
-                    let send_chat_start = std::time::Instant::now();
-                    let needs_restart = self.port.is_none() || self.available_models.is_empty();
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H1","location":"foundry_actor.rs:SendChat","message":"send_chat_received","data":{{"port_is_some":{},"models_count":{},"needs_restart":{},"requested_model":"{}"}},"timestamp":{}}}"#, 
-                            self.port.is_some(), self.available_models.len(), needs_restart, requested_model,
-                            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                    }
-                    // #endregion
 
                     // Check if we need to restart/reconnect
                     if self.port.is_none() || self.available_models.is_empty() {
@@ -984,14 +961,6 @@ impl ModelGatewayActor {
                                 continue;
                             }
                         }
-                        // #region agent log
-                        let restart_elapsed = send_chat_start.elapsed();
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                            let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H1","location":"foundry_actor.rs:after_restart","message":"service_restart_complete","data":{{"elapsed_ms":{}}},"timestamp":{}}}"#, 
-                                restart_elapsed.as_millis(),
-                                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                        }
-                        // #endregion
                     }
 
                     if let Some(port) = self.port {
@@ -1260,15 +1229,6 @@ impl ModelGatewayActor {
                             // Note: Request body logging moved to log_with_diff for system prompt and tools JSON
                             // to keep logs clean. Enable RUST_LOG=debug for full request body if needed.
 
-                            // #region agent log
-                            let time_to_http_send = send_chat_start.elapsed();
-                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                                let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H3","location":"foundry_actor.rs:before_http_send","message":"about_to_send_http","data":{{"time_from_send_chat_ms":{},"attempt":{},"model":"{}"}},"timestamp":{}}}"#, 
-                                    time_to_http_send.as_millis(), attempt, model,
-                                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                            }
-                            // #endregion
-
                             let send_start = std::time::Instant::now();
                             match client_clone
                                 .post(&current_url)
@@ -1358,16 +1318,6 @@ impl ModelGatewayActor {
                                         let mut token_count: usize = 0;
                                         let mut last_token_time = stream_start;
                                         let mut last_progress_log = stream_start;
-                                        // #region agent log
-                                        let mut first_token_logged = false;
-                                        let http_response_time = send_start.elapsed();
-                                        // Log time from HTTP send to first bytes (stream start) - indicates connection latency
-                                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                                            let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H6","location":"foundry_actor.rs:stream_start","message":"http_response_received","data":{{"http_response_ms":{},"model":"{}"}},"timestamp":{}}}"#, 
-                                                http_response_time.as_millis(), model,
-                                                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                                        }
-                                        // #endregion
                                         println!(
                                             "[FoundryActor] 📡 Stream started (time_to_first_response={:?})",
                                             request_start.elapsed()
@@ -1426,23 +1376,6 @@ impl ModelGatewayActor {
                                                                             if !content.is_empty() {
                                                                                 token_count += 1;
                                                                                 last_token_time = std::time::Instant::now();
-
-                                                                                // #region agent log
-                                                                                if !first_token_logged {
-                                                                                    first_token_logged = true;
-                                                                                    let ttft_from_send_chat = send_chat_start.elapsed();
-                                                                                    let ttft_from_http = send_start.elapsed();
-                                                                                    let ttft_from_stream_start = stream_start.elapsed();
-                                                                                    // H6: If ttft_from_stream_start is very high (>5s), model was likely being loaded
-                                                                                    // This could indicate GPU contention with embedding model
-                                                                                    let model_loading_suspected = ttft_from_stream_start.as_millis() > 5000;
-                                                                                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                                                                                        let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H3_H6","location":"foundry_actor.rs:first_token","message":"first_token_received","data":{{"ttft_from_send_chat_ms":{},"ttft_from_http_send_ms":{},"ttft_from_stream_start_ms":{},"model_loading_suspected":{},"model":"{}"}},"timestamp":{}}}"#, 
-                                                                                            ttft_from_send_chat.as_millis(), ttft_from_http.as_millis(), ttft_from_stream_start.as_millis(), model_loading_suspected, model,
-                                                                                            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                                                                                    }
-                                                                                }
-                                                                                // #endregion
 
                                                                                 let _ = respond_to_clone.send(content);
 
@@ -1582,6 +1515,13 @@ impl ModelGatewayActor {
                         }
                         let _ = respond_to.send("The local model service is not available. Please check if Foundry is installed and running.".to_string());
                     }
+                    
+                    // Clear GPU operation status (use cloned guard)
+                    *gpu_guard.current_operation.write().await = None;
+                    let _ = self.app_handle.emit("gpu-status", json!({
+                        "operation": "chat",
+                        "status": "completed"
+                    }));
                 }
                 FoundryMsg::DownloadModel {
                     model_name,
@@ -1610,6 +1550,16 @@ impl ModelGatewayActor {
                     model_name,
                     respond_to,
                 } => {
+                    // Acquire GPU mutex for model loading
+                    let _gpu_lock = self.gpu_guard.mutex.lock().await;
+                    *self.gpu_guard.current_operation.write().await = Some(format!("Loading model: {}", model_name));
+                    
+                    let _ = self.app_handle.emit("gpu-status", json!({
+                        "operation": "load_model",
+                        "model": &model_name,
+                        "status": "started"
+                    }));
+                    
                     println!("FoundryActor: Loading model into VRAM: {}", model_name);
                     if let Some(port) = self.port {
                         let result = self.load_model_impl(&self.http_client, port, &model_name).await;
@@ -1622,6 +1572,13 @@ impl ModelGatewayActor {
                     } else {
                         let _ = respond_to.send(Err("Foundry service not available".to_string()));
                     }
+                    
+                    *self.gpu_guard.current_operation.write().await = None;
+                    let _ = self.app_handle.emit("gpu-status", json!({
+                        "operation": "load_model",
+                        "model": &model_name,
+                        "status": "completed"
+                    }));
                 }
                 FoundryMsg::GetLoadedModels { respond_to } => {
                     println!("FoundryActor: Getting loaded models");
@@ -1678,6 +1635,10 @@ impl ModelGatewayActor {
                     model_name,
                     respond_to,
                 } => {
+                    // Acquire GPU mutex for model unloading
+                    let _gpu_lock = self.gpu_guard.mutex.lock().await;
+                    *self.gpu_guard.current_operation.write().await = Some(format!("Unloading model: {}", model_name));
+                    
                     println!("FoundryActor: Unloading model: {}", model_name);
                     if let Some(port) = self.port {
                         let result = self.unload_model_impl(&self.http_client, port, &model_name).await;
@@ -1685,6 +1646,8 @@ impl ModelGatewayActor {
                     } else {
                         let _ = respond_to.send(Err("Foundry service not available".to_string()));
                     }
+                    
+                    *self.gpu_guard.current_operation.write().await = None;
                 }
                 FoundryMsg::GetServiceStatus { respond_to } => {
                     println!("FoundryActor: Getting service status");
@@ -2288,14 +2251,6 @@ impl ModelGatewayActor {
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let status = self.parse_service_status(&stdout);
-                // #region agent log
-                use std::io::Write as _;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"sessionId":"debug-session","runId":"ttft-debug","hypothesisId":"H7","location":"foundry_actor.rs:detect_port_and_eps","message":"service_status_parsed","data":{{"port":{:?},"registered_eps_count":{},"valid_eps_count":{},"valid_eps":"{:?}","stdout_len":{}}},"timestamp":{}}}"#, 
-                        status.port, status.registered_eps.len(), status.valid_eps.len(), status.valid_eps, stdout.len(),
-                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0));
-                }
-                // #endregion
                 status
             }
             Ok(Err(e)) => {

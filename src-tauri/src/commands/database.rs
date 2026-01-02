@@ -67,11 +67,12 @@ pub struct SchemaRefreshSummary {
 
 /// Refresh database schemas for a given configuration
 ///
-/// NOTE: Uses GPU embedding model for bulk caching (not CPU), then re-warms LLM after.
+/// NOTE: Tries to use GPU embedding model for bulk caching, but falls back to CPU
+/// if GPU is busy with LLM operations (prevents memory contention).
 pub async fn refresh_database_schemas_for_config(
     app_handle: &AppHandle,
     handles: &State<'_, ActorHandles>,
-    _embedding_state: &State<'_, EmbeddingModelState>,
+    embedding_state: &State<'_, EmbeddingModelState>,
     toolbox_config: &DatabaseToolboxConfig,
 ) -> Result<SchemaRefreshSummary, String> {
     let sources: Vec<DatabaseSourceConfig> = toolbox_config
@@ -88,21 +89,61 @@ pub async fn refresh_database_schemas_for_config(
         });
     }
 
-    // Request GPU embedding model from Foundry actor (lazy-loaded on demand)
-    // Schema caching is a bulk operation - uses GPU for speed, not during chat turns
-    let (model_tx, model_rx) = oneshot::channel();
-    handles
-        .foundry_tx
-        .send(FoundryMsg::GetGpuEmbeddingModel {
-            respond_to: model_tx,
-        })
-        .await
-        .map_err(|e| format!("Failed to request GPU embedding model: {}", e))?;
+    // Try to get GPU embedding model, but fall back to CPU if GPU is busy
+    // This prevents GPU memory contention with LLM prewarm/chat operations
+    let (embedding_model, using_gpu) = match handles.gpu_guard.mutex.try_lock() {
+        Ok(_guard) => {
+            // GPU is available - request GPU embedding model
+            // Note: The guard is dropped here, but GetGpuEmbeddingModel will acquire it again
+            drop(_guard);
+            
+            let (model_tx, model_rx) = oneshot::channel();
+            handles
+                .foundry_tx
+                .send(FoundryMsg::GetGpuEmbeddingModel {
+                    respond_to: model_tx,
+                })
+                .await
+                .map_err(|e| format!("Failed to request GPU embedding model: {}", e))?;
 
-    let embedding_model = model_rx
-        .await
-        .map_err(|_| "Foundry actor died while getting GPU embedding model")?
-        .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
+            let model = model_rx
+                .await
+                .map_err(|_| "Foundry actor died while getting GPU embedding model")?
+                .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
+            
+            (model, true)
+        }
+        Err(_) => {
+            // GPU is busy - check what operation is running and fall back to CPU
+            let current_op = handles.gpu_guard.current_operation.read().await;
+            let op_desc = current_op.clone().unwrap_or_else(|| "unknown operation".to_string());
+            drop(current_op);
+            
+            println!("[SchemaRefresh] GPU busy with '{}', falling back to CPU embeddings", op_desc);
+            
+            let _ = app_handle.emit(
+                "schema-refresh-progress",
+                SchemaRefreshProgress {
+                    message: format!("GPU busy ({}), using CPU for embeddings", op_desc),
+                    source_name: "".to_string(),
+                    current_table: None,
+                    tables_done: 0,
+                    tables_total: 0,
+                    is_complete: false,
+                    error: None,
+                },
+            );
+            
+            // Use CPU embedding model instead
+            let model_guard = embedding_state.cpu_model.read().await;
+            let model = model_guard
+                .clone()
+                .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
+            drop(model_guard);
+            
+            (model, false)
+        }
+    };
 
     ensure_toolbox_running(&handles.database_toolbox_tx, toolbox_config).await?;
 
@@ -138,16 +179,19 @@ pub async fn refresh_database_schemas_for_config(
         },
     );
 
-    // After schema caching, re-warm the LLM model that may have been
-    // evicted from GPU memory by the embedding operations
-    println!("[SchemaRefresh] Caching complete, triggering LLM re-warm");
-    let (rewarm_tx, _) = oneshot::channel();
-    let _ = handles
-        .foundry_tx
-        .send(FoundryMsg::RewarmCurrentModel {
-            respond_to: rewarm_tx,
-        })
-        .await;
+    // Only re-warm LLM if we used GPU embeddings (which may have evicted the LLM)
+    if using_gpu {
+        println!("[SchemaRefresh] Caching complete (GPU), triggering LLM re-warm");
+        let (rewarm_tx, _) = oneshot::channel();
+        let _ = handles
+            .foundry_tx
+            .send(FoundryMsg::RewarmCurrentModel {
+                respond_to: rewarm_tx,
+            })
+            .await;
+    } else {
+        println!("[SchemaRefresh] Caching complete (CPU), no re-warm needed");
+    }
 
     Ok(SchemaRefreshSummary {
         sources: refreshed_sources,
@@ -677,33 +721,9 @@ pub async fn embed_table_and_columns(
     to_embed.push(table_text);
     to_embed.extend(column_texts);
 
-    // #region agent log H3a
-    let total_chars: usize = to_embed.iter().map(|s| s.len()).sum();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        use std::io::Write;
-        let _ = writeln!(f, r#"{{"hypothesisId":"H3a","location":"database.rs:embed_table_and_columns","message":"Preparing embed call","data":{{"text_count":{},"total_chars":{},"table":"{}"}},"timestamp":{}}}"#, to_embed.len(), total_chars, schema.fully_qualified_name, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    }
-    // #endregion
-
     let model_clone = model.clone();
-    let table_name = schema.fully_qualified_name.clone();
     let embeddings = tokio::task::spawn_blocking(move || {
-        // #region agent log H3b
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            use std::io::Write;
-            let _ = writeln!(f, r#"{{"hypothesisId":"H3b","location":"database.rs:spawn_blocking_start","message":"Inside spawn_blocking, calling model.embed","data":{{"table":"{}"}},"timestamp":{}}}"#, table_name, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-        }
-        // #endregion
-        let result = model_clone.embed(to_embed, None);
-        // #region agent log H3c
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            use std::io::Write;
-            let is_ok = result.is_ok();
-            let count = result.as_ref().map(|v| v.len()).unwrap_or(0);
-            let _ = writeln!(f, r#"{{"hypothesisId":"H3c","location":"database.rs:spawn_blocking_end","message":"model.embed returned","data":{{"is_ok":{},"embedding_count":{}}},"timestamp":{}}}"#, is_ok, count, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-        }
-        // #endregion
-        result
+        model_clone.embed(to_embed, None)
     })
         .await
         .map_err(|e| format!("Embedding task panicked: {}", e))?
@@ -714,13 +734,6 @@ pub async fn embed_table_and_columns(
         .next()
         .ok_or_else(|| "No table embedding returned".to_string())?;
     let column_embeddings: Vec<Vec<f32>> = iter.collect();
-
-    // #region agent log H3d
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        use std::io::Write;
-        let _ = writeln!(f, r#"{{"hypothesisId":"H3d","location":"database.rs:embed_complete","message":"Embedding function complete","data":{{"table_embedding_len":{},"column_count":{}}},"timestamp":{}}}"#, table_embedding.len(), column_embeddings.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    }
-    // #endregion
 
     Ok((table_embedding, column_embeddings))
 }
@@ -988,14 +1001,7 @@ pub async fn refresh_schema_cache_for_source(
 
     let tables_total = all_tables_to_process.len();
     let mut tables_done = 0;
-    
-    // #region agent log H2
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        use std::io::Write;
-        let _ = writeln!(f, r#"{{"hypothesisId":"H2","location":"database.rs:refresh_schema_cache_for_source","message":"Tables to process","data":{{"source":"{}","dataset_count":{},"table_count":{}}},"timestamp":{}}}"#, source.id, datasets.len(), tables_total, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    }
-    // #endregion
-    
+
     println!(
         "[SchemaRefresh] Source '{}': found {} tables to process",
         source.name, tables_total
@@ -1035,32 +1041,11 @@ pub async fn refresh_schema_cache_for_source(
                 let primary_set: HashSet<String> =
                     table_schema.primary_keys.iter().cloned().collect();
 
-                // #region agent log H3
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                    use std::io::Write;
-                    let _ = writeln!(f, r#"{{"hypothesisId":"H3","location":"database.rs:before_embed","message":"About to embed","data":{{"table":"{}","column_count":{}}},"timestamp":{}}}"#, fq_name, table_schema.columns.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-                }
-                // #endregion
-                
                 let (table_embedding, column_embeddings) =
                     match embed_table_and_columns(embedding_model.clone(), &table_schema).await
                     {
-                        Ok(res) => {
-                            // #region agent log H3
-                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                                use std::io::Write;
-                                let _ = writeln!(f, r#"{{"hypothesisId":"H3","location":"database.rs:after_embed","message":"Embedding complete","data":{{"table":"{}","column_embeddings_count":{}}},"timestamp":{}}}"#, fq_name, res.1.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-                            }
-                            // #endregion
-                            res
-                        },
+                        Ok(res) => res,
                         Err(err) => {
-                            // #region agent log H3e
-                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                                use std::io::Write;
-                                let _ = writeln!(f, r#"{{"hypothesisId":"H3e","location":"database.rs:embed_error","message":"Embedding FAILED","data":{{"table":"{}","error":"{}"}},"timestamp":{}}}"#, fq_name, err.replace('"', "'"), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-                            }
-                            // #endregion
                             println!(
                                 "[SchemaRefresh] Failed to embed table {}: {}",
                                 fq_name, err
@@ -1110,13 +1095,6 @@ pub async fn refresh_schema_cache_for_source(
         }
     }
 
-    // #region agent log H2
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-        use std::io::Write;
-        let _ = writeln!(f, r#"{{"hypothesisId":"H2","location":"database.rs:refresh_complete","message":"Source refresh complete","data":{{"source":"{}","cached_count":{}}},"timestamp":{}}}"#, source.id, tables_status.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    }
-    // #endregion
-    
     println!(
         "[SchemaRefresh] Source '{}' complete: {} tables cached",
         source.name, tables_status.len()

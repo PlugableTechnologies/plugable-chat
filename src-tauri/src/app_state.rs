@@ -17,7 +17,34 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+
+/// GPU resource guard to serialize all GPU operations.
+/// 
+/// Only one GPU-intensive operation can run at a time to avoid
+/// Metal/CUDA memory contention between LLM inference and embedding models.
+/// This prevents silent model eviction that causes operations to hang.
+pub struct GpuResourceGuard {
+    /// The mutex that serializes GPU access
+    pub mutex: Mutex<()>,
+    /// Current operation description (for status feedback to UI)
+    pub current_operation: RwLock<Option<String>>,
+}
+
+impl GpuResourceGuard {
+    pub fn new() -> Self {
+        Self {
+            mutex: Mutex::new(()),
+            current_operation: RwLock::new(None),
+        }
+    }
+}
+
+impl Default for GpuResourceGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Approval decision for tool calls
 #[derive(Debug, Clone)]
@@ -43,6 +70,8 @@ pub struct ActorHandles {
     pub schema_tx: mpsc::Sender<SchemaVectorMsg>,
     #[allow(dead_code)]
     pub logging_persistence: Arc<LoggingPersistence>,
+    /// GPU resource guard for serializing GPU operations (LLM inference, embeddings)
+    pub gpu_guard: Arc<GpuResourceGuard>,
 }
 
 /// Shared tool registry state
