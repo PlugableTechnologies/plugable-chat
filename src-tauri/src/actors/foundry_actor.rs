@@ -1589,6 +1589,8 @@ impl ModelGatewayActor {
                                 "FoundryActor: Refreshed models list after download, {} models available",
                                 self.available_models.len()
                             );
+                            // Notify frontend that available models have changed
+                            self.emit_available_models_changed(&self.available_models);
                         }
                         let _ = respond_to.send(result);
                     } else {
@@ -1699,6 +1701,8 @@ impl ModelGatewayActor {
                                 "FoundryActor: Refreshed models list after removal, {} models available",
                                 self.available_models.len()
                             );
+                            // Notify frontend that available models have changed
+                            self.emit_available_models_changed(&self.available_models);
                         }
                     }
                     let _ = respond_to.send(result);
@@ -1977,6 +1981,16 @@ impl ModelGatewayActor {
                 "error": error
             }),
         );
+    }
+
+    /// Emit an event when the available models list changes (after download, removal, or reload).
+    /// The frontend listens to update the model dropdown in real-time.
+    fn emit_available_models_changed(&self, models: &[String]) {
+        println!(
+            "[FoundryActor] Emitting available-models-changed: {} models",
+            models.len()
+        );
+        let _ = self.app_handle.emit("available-models-changed", models.to_vec());
     }
 
     /// Logs the content with a diff if it has changed since the last log.

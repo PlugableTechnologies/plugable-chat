@@ -369,6 +369,7 @@ let unlistenModelStuck: (() => void) | undefined;
 let unlistenModelFallback: (() => void) | undefined;
 let unlistenEmbeddingInit: (() => void) | undefined;
 let unlistenChatStreamStatus: (() => void) | undefined;
+let unlistenAvailableModelsChanged: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
 let hasInitializedRagContext = false; // Only clear RAG context once on true app startup
@@ -1638,6 +1639,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const modelSelectedListener = await listen<string>('model-selected', (event) => {
                 set({ currentModel: event.payload });
             });
+
+            // Available models changed - update dropdown after download/removal
+            const availableModelsChangedListener = await listen<string[]>('available-models-changed', (event) => {
+                const models = event.payload;
+                console.log(`[ChatStore] Available models changed: ${models.length} models`);
+                set((state) => ({
+                    availableModels: models,
+                    // Update currentModel if it was "No models" and now we have models
+                    currentModel: state.currentModel === 'No models' && models.length > 0
+                        ? models[0]
+                        : state.currentModel
+                }));
+            });
             
             // Tool blocked by state machine - show error in status bar
             const toolBlockedListener = await listen<{ tool: string; state: string; message: string }>('tool-blocked', (event) => {
@@ -2068,6 +2082,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 serviceRestartCompleteListener();
                 embeddingInitListener();
                 chatStreamStatusListener();
+                availableModelsChangedListener();
                 isSettingUp = false;
                 return;
             }
@@ -2098,6 +2113,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenServiceStartComplete = serviceStartCompleteListener;
             unlistenServiceRestartStarted = serviceRestartStartedListener;
             unlistenServiceRestartComplete = serviceRestartCompleteListener;
+            unlistenAvailableModelsChanged = availableModelsChangedListener;
 
             set({ isListening: true });
             console.log(`[ChatStore] Event listeners active (Gen: ${myGeneration}).`);
@@ -2213,6 +2229,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenChatStreamStatus) {
             unlistenChatStreamStatus();
             unlistenChatStreamStatus = undefined;
+        }
+        if (unlistenAvailableModelsChanged) {
+            unlistenAvailableModelsChanged();
+            unlistenAvailableModelsChanged = undefined;
         }
         set({ isListening: false });
         isSettingUp = false; // Reset setup guard
