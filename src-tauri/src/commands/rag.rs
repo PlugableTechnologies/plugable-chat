@@ -32,11 +32,11 @@ pub async fn process_rag_documents(
 ) -> Result<RagIndexResult, String> {
     println!("[RAG] Processing {} paths", paths.len());
 
-    // Get the embedding model
-    let model_guard = embedding_state.model.read().await;
+    // Get the GPU embedding model (RAG indexing is a background operation, can use GPU)
+    let model_guard = embedding_state.gpu_model.read().await;
     let embedding_model = model_guard
         .clone()
-        .ok_or_else(|| "Embedding model not initialized".to_string())?;
+        .ok_or_else(|| "GPU embedding model not initialized".to_string())?;
     drop(model_guard);
 
     let (tx, rx) = oneshot::channel();
@@ -50,7 +50,22 @@ pub async fn process_rag_documents(
         .await
         .map_err(|e| e.to_string())?;
 
-    rx.await.map_err(|_| "RAG actor died".to_string())?
+    let result = rx.await.map_err(|_| "RAG actor died".to_string())?;
+
+    // After successful RAG indexing, re-warm the LLM model that may have been
+    // evicted from GPU memory by the embedding operations
+    if result.is_ok() {
+        println!("[RAG] Indexing complete, triggering LLM re-warm");
+        let (rewarm_tx, _) = oneshot::channel();
+        let _ = handles
+            .foundry_tx
+            .send(FoundryMsg::RewarmCurrentModel {
+                respond_to: rewarm_tx,
+            })
+            .await;
+    }
+
+    result
 }
 
 /// Search the RAG index for relevant context
@@ -65,12 +80,13 @@ pub async fn search_rag_context(
         query.len()
     );
 
-    // First, get embedding for the query
+    // First, get embedding for the query (use CPU to avoid evicting LLM from GPU)
     let (emb_tx, emb_rx) = oneshot::channel();
     handles
         .foundry_tx
         .send(FoundryMsg::GetEmbedding {
             text: query,
+            use_gpu: false, // CPU model for search during chat
             respond_to: emb_tx,
         })
         .await

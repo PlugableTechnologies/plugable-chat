@@ -962,10 +962,21 @@ pub enum VectorMsg {
 }
 
 pub enum FoundryMsg {
-    /// Generate an embedding for a string
+    /// Generate an embedding for a string.
+    ///
+    /// The `use_gpu` flag determines which embedding model to use:
+    /// - `true`: GPU model (CoreML/CUDA) - for background RAG indexing
+    /// - `false`: CPU model - for search during chat (avoids LLM eviction)
     GetEmbedding {
         text: String,
+        /// Whether to use GPU-accelerated embedding (true for RAG indexing, false for search)
+        use_gpu: bool,
         respond_to: oneshot::Sender<Vec<f32>>,
+    },
+    /// Re-warm the currently selected LLM model after GPU-intensive operations.
+    /// This should be called after RAG indexing completes to reload the LLM into GPU memory.
+    RewarmCurrentModel {
+        respond_to: oneshot::Sender<()>,
     },
     /// Chat with the model (streaming)
     Chat {

@@ -20,12 +20,13 @@ pub async fn search_history(
     handles: State<'_, ActorHandles>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    // Ask Foundry Actor for embedding
+    // Ask Foundry Actor for embedding (use CPU to avoid evicting LLM from GPU)
     let (emb_tx, emb_rx) = oneshot::channel();
     handles
         .foundry_tx
         .send(FoundryMsg::GetEmbedding {
             text: query,
+            use_gpu: false, // CPU model for search during chat
             respond_to: emb_tx,
         })
         .await

@@ -83,10 +83,11 @@ pub async fn refresh_database_schemas_for_config(
         });
     }
 
-    let model_guard = embedding_state.model.read().await;
+    // Use CPU model for schema search during chat (avoids evicting LLM from GPU)
+    let model_guard = embedding_state.cpu_model.read().await;
     let embedding_model = model_guard
         .clone()
-        .ok_or_else(|| "Embedding model not initialized".to_string())?;
+        .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
     drop(model_guard);
 
     ensure_toolbox_running(&handles.database_toolbox_tx, toolbox_config).await?;
@@ -168,10 +169,11 @@ pub async fn search_database_tables(
         return get_all_tables_alphabetically(&handles, &settings_state, limit).await;
     }
 
-    let model_guard = embedding_state.model.read().await;
+    // Use CPU model for schema search during chat (avoids evicting LLM from GPU)
+    let model_guard = embedding_state.cpu_model.read().await;
     let embedding_model = model_guard
         .clone()
-        .ok_or_else(|| "Embedding model not initialized".to_string())?;
+        .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
     drop(model_guard);
 
     // Embed the query
@@ -393,10 +395,11 @@ pub async fn set_schema_table_enabled(
         Ok(schema) => schema,
         Err(_) => {
             // Table not cached, try to fetch and cache it
-            let model_guard = embedding_state.model.read().await;
+            // Use CPU model for schema operations during chat (avoids evicting LLM from GPU)
+            let model_guard = embedding_state.cpu_model.read().await;
             let embedding_model = model_guard
                 .clone()
-                .ok_or_else(|| "Embedding model not initialized".to_string())?;
+                .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
             drop(model_guard);
 
             ensure_toolbox_running(&handles.database_toolbox_tx, &toolbox_config).await?;

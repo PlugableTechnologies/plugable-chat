@@ -50,9 +50,18 @@ pub struct ToolRegistryState {
     pub registry: SharedToolRegistry,
 }
 
-/// Shared embedding model for RAG operations
+/// Shared embedding models for vector operations.
+///
+/// We maintain two separate embedding models to avoid GPU memory contention:
+/// - GPU model: Used for background RAG indexing (CoreML on Mac, CUDA on Windows)
+/// - CPU model: Used for search during chat (avoids evicting the LLM from GPU)
 pub struct EmbeddingModelState {
-    pub model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+    /// GPU-accelerated model for background RAG document indexing.
+    /// Uses CoreML on macOS, CUDA/DirectML on Windows.
+    pub gpu_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+    /// CPU-only model for search operations during active chat.
+    /// Avoids GPU contention that would evict the pre-warmed LLM.
+    pub cpu_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
 }
 
 /// Shared settings state
