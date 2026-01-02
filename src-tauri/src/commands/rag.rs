@@ -3,7 +3,7 @@
 //! Commands for managing document indexing and context retrieval
 //! for RAG-based chat augmentation.
 
-use crate::app_state::{ActorHandles, EmbeddingModelState};
+use crate::app_state::ActorHandles;
 use crate::protocol::{FoundryMsg, RagChunk, RagIndexResult, RagMsg, RemoveFileResult};
 use tauri::State;
 use tokio::sync::oneshot;
@@ -28,16 +28,24 @@ pub async fn select_folder() -> Result<Option<String>, String> {
 pub async fn process_rag_documents(
     paths: Vec<String>,
     handles: State<'_, ActorHandles>,
-    embedding_state: State<'_, EmbeddingModelState>,
 ) -> Result<RagIndexResult, String> {
     println!("[RAG] Processing {} paths", paths.len());
 
-    // Get the GPU embedding model (RAG indexing is a background operation, can use GPU)
-    let model_guard = embedding_state.gpu_model.read().await;
-    let embedding_model = model_guard
-        .clone()
-        .ok_or_else(|| "GPU embedding model not initialized".to_string())?;
-    drop(model_guard);
+    // Request GPU embedding model from Foundry actor (lazy-loaded on demand)
+    // This avoids GPU memory contention at startup - model is loaded fresh when needed
+    let (model_tx, model_rx) = oneshot::channel();
+    handles
+        .foundry_tx
+        .send(FoundryMsg::GetGpuEmbeddingModel {
+            respond_to: model_tx,
+        })
+        .await
+        .map_err(|e| format!("Failed to request GPU embedding model: {}", e))?;
+
+    let embedding_model = model_rx
+        .await
+        .map_err(|_| "Foundry actor died while getting GPU embedding model")?
+        .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
 
     let (tx, rx) = oneshot::channel();
     handles
@@ -45,6 +53,7 @@ pub async fn process_rag_documents(
         .send(RagMsg::IndexRagDocuments {
             paths,
             embedding_model,
+            use_gpu: true, // RAG indexing uses GPU model
             respond_to: tx,
         })
         .await
@@ -158,4 +167,33 @@ pub async fn get_rag_indexed_files(handles: State<'_, ActorHandles>) -> Result<V
         .map_err(|e| e.to_string())?;
 
     rx.await.map_err(|_| "RAG actor died".to_string())
+}
+
+/// Get the default test-data directory path for file dialogs
+#[tauri::command]
+pub fn get_test_data_directory() -> Option<String> {
+    // Try to find test-data directory relative to executable or current directory
+    let candidates = [
+        // Development: relative to current working directory
+        std::path::PathBuf::from("test-data"),
+        // macOS app bundle: relative to Resources
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join("../Resources/test-data")))
+            .unwrap_or_default(),
+        // Fallback: user's Downloads directory
+        dirs::download_dir().unwrap_or_default(),
+    ];
+
+    for candidate in &candidates {
+        if candidate.exists() && candidate.is_dir() {
+            if let Some(path_str) = candidate.canonicalize().ok().and_then(|p| p.to_str().map(String::from)) {
+                println!("[RAG] Test data directory: {}", path_str);
+                return Some(path_str);
+            }
+        }
+    }
+
+    // If nothing found, return Downloads as fallback
+    dirs::download_dir().and_then(|p| p.to_str().map(String::from))
 }

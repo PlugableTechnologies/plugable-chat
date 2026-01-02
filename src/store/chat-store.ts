@@ -1521,6 +1521,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 is_complete: boolean;
                 extraction_progress?: number;
                 extraction_total_pages?: number;
+                compute_device?: string;
             }>('rag-progress', (event) => {
                 const { 
                     phase, 
@@ -1531,11 +1532,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     current_file, 
                     is_complete,
                     extraction_progress,
-                    extraction_total_pages
+                    extraction_total_pages,
+                    compute_device
                 } = event.payload;
+                
+                console.log(`[ChatStore] rag-progress: phase=${phase}, is_complete=${is_complete}, device=${compute_device}`);
+                
+                // Guard: ignore stale events if indexing is no longer active
+                // This prevents race conditions where events arrive after invoke completes
+                const currentState = get();
+                if (!currentState.isIndexingRag && !is_complete) {
+                    console.log('[ChatStore] rag-progress: ignoring stale event (isIndexingRag=false)');
+                    return;
+                }
                 
                 let message = 'Processing documents...';
                 let progress = 0;
+                const deviceSuffix = compute_device ? ` [${compute_device}]` : '';
 
                 switch (phase) {
                     case 'collecting_files':
@@ -1563,7 +1576,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         message = 'Checking embedding cache...';
                         break;
                     case 'generating_embeddings':
-                        message = `Generating embeddings: ${processed_chunks} / ${total_chunks}`;
+                        message = `Generating embeddings${deviceSuffix}: ${processed_chunks} / ${total_chunks}`;
                         progress = total_chunks > 0 ? (processed_chunks / total_chunks) * 100 : 0;
                         break;
                     case 'saving':

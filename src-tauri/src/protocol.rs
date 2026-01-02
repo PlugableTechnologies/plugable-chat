@@ -890,6 +890,9 @@ pub struct RagProgressEvent {
     pub extraction_progress: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extraction_total_pages: Option<u32>,
+    /// Compute device being used: "GPU" or "CPU"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_device: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -977,6 +980,12 @@ pub enum FoundryMsg {
     /// This should be called after RAG indexing completes to reload the LLM into GPU memory.
     RewarmCurrentModel {
         respond_to: oneshot::Sender<()>,
+    },
+    /// Get GPU embedding model for RAG indexing (lazy-loaded on demand).
+    /// This loads the model if not already loaded, avoiding startup overhead
+    /// and GPU memory contention with the LLM until actually needed.
+    GetGpuEmbeddingModel {
+        respond_to: oneshot::Sender<Result<Arc<TextEmbedding>, String>>,
     },
     /// Chat with the model (streaming)
     Chat {
@@ -1178,6 +1187,8 @@ pub enum RagMsg {
     IndexRagDocuments {
         paths: Vec<String>,
         embedding_model: Arc<TextEmbedding>,
+        /// Whether the embedding model is GPU-accelerated (for progress reporting)
+        use_gpu: bool,
         respond_to: oneshot::Sender<Result<RagIndexResult, String>>,
     },
     /// Search indexed documents for relevant chunks

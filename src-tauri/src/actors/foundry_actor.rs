@@ -458,6 +458,7 @@ impl ModelGatewayActor {
     }
 
     /// Check if Foundry reports GPU execution providers are available
+    #[allow(dead_code)] // May be useful for future GPU detection logic
     fn has_gpu_eps(valid_eps: &[String]) -> bool {
         for ep in valid_eps {
             let ep_lower = ep.to_lowercase();
@@ -593,6 +594,86 @@ impl ModelGatewayActor {
         }
     }
 
+    /// Lazily load the GPU embedding model on demand for RAG indexing.
+    /// This ensures the model is fresh and not stale from LLM eviction.
+    async fn ensure_gpu_embedding_model_loaded(&self) -> Result<Arc<TextEmbedding>, String> {
+        // Check if already loaded
+        {
+            let guard = self.shared_gpu_embedding_model.read().await;
+            if let Some(model) = guard.as_ref() {
+                println!("FoundryActor: GPU embedding model already loaded, reusing");
+                return Ok(Arc::clone(model));
+            }
+        }
+
+        // Need to load the model
+        println!("╔══════════════════════════════════════════════════════════════╗");
+        println!("║  LOADING GPU EMBEDDING MODEL (on-demand for RAG)            ║");
+        println!("╚══════════════════════════════════════════════════════════════╝");
+
+        let start = std::time::Instant::now();
+        
+        // Emit progress event
+        let _ = self.app_handle.emit("embedding-init-progress", serde_json::json!({
+            "message": "Loading GPU embedding model for RAG indexing...",
+            "is_complete": false
+        }));
+
+        // Build GPU execution providers
+        let gpu_result = tokio::task::spawn_blocking(move || {
+            let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
+            options.show_download_progress = true;
+            
+            let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
+            
+            // On macOS, use CoreML (Metal GPU acceleration)
+            #[cfg(target_os = "macos")]
+            {
+                eps.push(CoreMLExecutionProvider::default().into());
+                println!("FoundryActor: GPU embedding model using CoreML (Metal)");
+            }
+            
+            // On Windows/Linux, try CUDA and DirectML
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Try CUDA first, then DirectML
+                eps.push(CUDAExecutionProvider::default().into());
+                eps.push(DirectMLExecutionProvider::default().into());
+                println!("FoundryActor: GPU embedding model trying CUDA/DirectML");
+            }
+            
+            if !eps.is_empty() {
+                options.execution_providers = eps;
+            }
+
+            TextEmbedding::try_new(options)
+        })
+        .await
+        .map_err(|e| format!("GPU embedding model init task panicked: {}", e))?
+        .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
+
+        let elapsed = start.elapsed();
+        println!(
+            "FoundryActor: GPU embedding model loaded in {:.2}s",
+            elapsed.as_secs_f64()
+        );
+
+        // Store in shared state
+        let model = Arc::new(gpu_result);
+        {
+            let mut guard = self.shared_gpu_embedding_model.write().await;
+            *guard = Some(Arc::clone(&model));
+        }
+
+        // Emit completion
+        let _ = self.app_handle.emit("embedding-init-progress", serde_json::json!({
+            "message": "GPU embedding model loaded",
+            "is_complete": true
+        }));
+
+        Ok(model)
+    }
+
     pub async fn run(mut self) {
         println!("Initializing Foundry Local Manager via CLI...");
 
@@ -660,108 +741,26 @@ impl ModelGatewayActor {
             // #endregion
         }
 
-        // Initialize BOTH embedding models to avoid GPU contention:
-        // - GPU model: For background RAG indexing (CoreML on Mac, CUDA on Windows)
-        // - CPU model: For search during chat (avoids evicting the pre-warmed LLM)
-        println!("FoundryActor: Initializing dual embedding models (BGE-Base-EN-v1.5)...");
-        
-        // Detect platform for GPU acceleration
-        let is_macos = cfg!(target_os = "macos");
-        let has_foundry_gpu = Self::has_gpu_eps(&self.valid_eps);
-        
-        // On Mac, GPU (Metal/CoreML) is available even if Foundry doesn't report it in valid_eps
-        let platform_has_gpu = is_macos || has_foundry_gpu;
-        
-        println!(
-            "FoundryActor: Platform detection - is_macos={}, foundry_reports_gpu={}, platform_has_gpu={}",
-            is_macos, has_foundry_gpu, platform_has_gpu
-        );
-        
-        if platform_has_gpu {
-            println!("FoundryActor: GPU available - will use GPU model for RAG indexing, CPU model for search");
-        } else {
-            println!("FoundryActor: No GPU detected - both models will use CPU");
-        }
+        // Initialize CPU embedding model at startup for search during chat.
+        // GPU embedding model is loaded on-demand when RAG indexing is requested,
+        // to avoid GPU memory contention with the LLM at startup.
+        println!("FoundryActor: Initializing CPU embedding model (BGE-Base-EN-v1.5)...");
+        println!("FoundryActor: GPU embedding model will be loaded on-demand for RAG indexing");
 
-        let shared_gpu_model = Arc::clone(&self.shared_gpu_embedding_model);
         let shared_cpu_model = Arc::clone(&self.shared_cpu_embedding_model);
-        let valid_eps_clone = self.valid_eps.clone();
         let app_handle_clone = self.app_handle.clone();
         
-        // Initialize both embedding models in a separate task to avoid blocking the actor message loop
+        // Initialize CPU embedding model in a separate task to avoid blocking the actor message loop
         tokio::spawn(async move {
             let _ = app_handle_clone.emit("embedding-init-progress", json!({
-                "message": "Initializing embedding models (GPU + CPU)...",
+                "message": "Initializing CPU embedding model...",
                 "is_complete": false
             }));
-
-            // Clone for the blocking tasks (used on non-macOS platforms)
-            #[cfg(not(target_os = "macos"))]
-            let valid_eps_for_gpu = valid_eps_clone.clone();
-            let _ = &valid_eps_clone; // Suppress unused warning on macOS
-            
-            // Initialize GPU model first (with GPU execution providers)
-            let gpu_result = tokio::task::spawn_blocking(move || {
-                let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
-                options.show_download_progress = true;
-                
-                // Build GPU execution providers list
-                let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
-                let mut ep_names: Vec<String> = Vec::new();
-                
-                // On macOS, use CoreML (Metal GPU acceleration)
-                #[cfg(target_os = "macos")]
-                {
-                    eps.push(CoreMLExecutionProvider::default().into());
-                    ep_names.push("CoreML".to_string());
-                    println!("FoundryActor: GPU model - adding CoreML for macOS Metal");
-                }
-                
-                // On Windows/Linux, use Foundry-detected EPs
-                #[cfg(not(target_os = "macos"))]
-                for ep_str in &valid_eps_for_gpu {
-                    match ep_str.as_str() {
-                        s if s.contains("CUDA") => {
-                            eps.push(CUDAExecutionProvider::default().into());
-                            ep_names.push("CUDA".to_string());
-                        }
-                        s if s.contains("DirectML") => {
-                            eps.push(DirectMLExecutionProvider::default().into());
-                            ep_names.push("DirectML".to_string());
-                        }
-                        _ => {}
-                    }
-                }
-                
-                println!("FoundryActor: GPU model configured with EPs: {:?}", ep_names);
-                
-                if !eps.is_empty() {
-                    options.execution_providers = eps;
-                }
-
-                TextEmbedding::try_new(options)
-            })
-            .await;
-
-            // Store GPU model result
-            match gpu_result {
-                Ok(Ok(model)) => {
-                    println!("FoundryActor: GPU embedding model loaded successfully");
-                    let mut guard = shared_gpu_model.write().await;
-                    *guard = Some(Arc::new(model));
-                }
-                Ok(Err(e)) => {
-                    println!("FoundryActor ERROR: Failed to load GPU embedding model: {}", e);
-                }
-                Err(e) => {
-                    println!("FoundryActor ERROR: GPU embedding model init task panicked: {}", e);
-                }
-            }
 
             // Initialize CPU model (no GPU execution providers - pure CPU)
             let cpu_result = tokio::task::spawn_blocking(move || {
                 let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
-                options.show_download_progress = false; // Already downloaded by GPU model
+                options.show_download_progress = true;
                 // Don't set any execution providers - defaults to CPU
                 println!("FoundryActor: CPU model - using CPU only (no GPU EPs configured)");
                 TextEmbedding::try_new(options)
@@ -775,7 +774,7 @@ impl ModelGatewayActor {
                     let mut guard = shared_cpu_model.write().await;
                     *guard = Some(Arc::new(model));
                     let _ = app_handle_clone.emit("embedding-init-progress", json!({
-                        "message": "Embedding models loaded (GPU + CPU)",
+                        "message": "CPU embedding model loaded (GPU model loads on-demand)",
                         "is_complete": true
                     }));
                 }
@@ -868,6 +867,13 @@ impl ModelGatewayActor {
                         println!("FoundryActor: No model selected, skipping re-warm");
                     }
                     let _ = respond_to.send(());
+                }
+                FoundryMsg::GetGpuEmbeddingModel { respond_to } => {
+                    // Lazy-load GPU embedding model on demand for RAG indexing
+                    // This avoids GPU memory contention at startup and ensures
+                    // the model is fresh when needed (not stale from LLM eviction)
+                    let result = self.ensure_gpu_embedding_model_loaded().await;
+                    let _ = respond_to.send(result);
                 }
                 FoundryMsg::GetModels { respond_to } => {
                     if self.port.is_none() {

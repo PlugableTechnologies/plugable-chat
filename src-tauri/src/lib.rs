@@ -4358,6 +4358,7 @@ pub fn run() {
             clear_rag_context,
             remove_rag_file,
             get_rag_indexed_files,
+            get_test_data_directory,
             // Settings commands
             get_settings,
             get_default_mcp_test_server,

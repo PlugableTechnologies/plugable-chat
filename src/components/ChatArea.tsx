@@ -1949,8 +1949,11 @@ export function ChatArea() {
     const handleAttachFiles = async () => {
         try {
             const { open } = await import('@tauri-apps/plugin-dialog');
+            // Get default directory from backend (test-data for development)
+            const defaultPath = await invoke<string | null>('get_test_data_directory');
             const selected = await open({
                 multiple: true,
+                defaultPath: defaultPath || undefined,
                 filters: [{
                     name: 'Documents',
                     extensions: ['txt', 'csv', 'tsv', 'md', 'json', 'pdf', 'docx']
@@ -1972,9 +1975,12 @@ export function ChatArea() {
     const handleAttachFolder = async () => {
         try {
             const { open } = await import('@tauri-apps/plugin-dialog');
+            // Get default directory from backend (test-data for development)
+            const defaultPath = await invoke<string | null>('get_test_data_directory');
             const selected = await open({
                 directory: true,
-                multiple: false
+                multiple: false,
+                defaultPath: defaultPath || undefined
             });
             if (selected && typeof selected === 'string') {
                 await addAttachment(selected);

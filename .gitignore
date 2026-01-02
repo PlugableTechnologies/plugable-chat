@@ -40,6 +40,9 @@ src-tauri/icons/StoreLogo.png
 data/
 src-tauri/data/
 
+# RAG sidecar cache directories (created next to indexed files)
+**/.plugable-rag-cache/
+
 
 # Editor directories and files
 .vscode/*

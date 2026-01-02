@@ -377,10 +377,11 @@ impl RagRetrievalActor {
                 RagMsg::IndexRagDocuments {
                     paths,
                     embedding_model,
+                    use_gpu,
                     respond_to,
                 } => {
-                    println!("RagActor: Processing {} paths", paths.len());
-                    let result = self.process_documents(paths, embedding_model).await;
+                    println!("RagActor: Processing {} paths ({})", paths.len(), if use_gpu { "GPU" } else { "CPU" });
+                    let result = self.process_documents(paths, embedding_model, use_gpu).await;
                     let _ = respond_to.send(result);
                 }
                 RagMsg::SearchRagChunksByEmbedding {
@@ -654,8 +655,10 @@ impl RagRetrievalActor {
         &mut self,
         paths: Vec<String>,
         embedding_model: Arc<TextEmbedding>,
+        use_gpu: bool,
     ) -> Result<RagIndexResult, String> {
         let indexing_start = Instant::now();
+        let compute_device = if use_gpu { "GPU" } else { "CPU" }.to_string();
         let mut cache_hits = 0;
         let mut files_processed_count = 0;
         let mut file_errors = Vec::new();
@@ -676,6 +679,7 @@ impl RagRetrievalActor {
                     is_complete: false,
                     extraction_progress: None,
                     extraction_total_pages: None,
+                    compute_device: Some(compute_device.clone()),
                 });
         }
         let mut files_to_process: Vec<PathBuf> = Vec::new();
@@ -722,6 +726,7 @@ impl RagRetrievalActor {
                     is_complete: false,
                     extraction_progress: None,
                     extraction_total_pages: None,
+                    compute_device: Some(compute_device.clone()),
                 });
             }
 
@@ -796,6 +801,7 @@ impl RagRetrievalActor {
                         is_complete: false,
                         extraction_progress: None,
                         extraction_total_pages: None,
+                        compute_device: Some(compute_device.clone()),
                     });
                 }
             }
@@ -820,6 +826,7 @@ impl RagRetrievalActor {
                             is_complete: false,
                             extraction_progress: None,
                             extraction_total_pages: None,
+                            compute_device: Some(compute_device.clone()),
                         });
                     }
 
@@ -880,6 +887,7 @@ impl RagRetrievalActor {
                     is_complete: true,
                     extraction_progress: None,
                     extraction_total_pages: None,
+                    compute_device: Some(compute_device.clone()),
                 });
             }
             return Ok(RagIndexResult {
@@ -902,6 +910,7 @@ impl RagRetrievalActor {
                 is_complete: false,
                 extraction_progress: None,
                 extraction_total_pages: None,
+                compute_device: Some(compute_device.clone()),
             });
         }
         let all_hashes: Vec<String> = all_pending_chunks.iter()
@@ -925,11 +934,42 @@ impl RagRetrievalActor {
             }
         }
 
-        println!("RagActor: Generating embeddings for {} chunks", chunks_to_embed.len());
-
         // Phase 4: Batch generate embeddings for uncached chunks
-        if !chunks_to_embed.is_empty() {
-            for batch in chunks_to_embed.chunks_mut(100) {
+        // Use smaller batches (10) to provide frequent progress updates to the UI
+        const EMBEDDING_BATCH_SIZE: usize = 10;
+        let chunks_to_embed_count = chunks_to_embed.len();
+        
+        if chunks_to_embed_count > 0 {
+            println!(
+                "╔══════════════════════════════════════════════════════════════╗\n\
+                 ║  EMBEDDING GENERATION: {} chunks via {}                      \n\
+                 ╚══════════════════════════════════════════════════════════════╝",
+                chunks_to_embed_count, compute_device
+            );
+            
+            // Emit initial progress event BEFORE starting embedding loop
+            if let Some(ref handle) = self.app_handle {
+                let _ = handle.emit("rag-progress", RagProgressEvent {
+                    phase: "generating_embeddings".to_string(),
+                    total_files,
+                    processed_files: total_files,
+                    total_chunks: total_pending_chunks,
+                    processed_chunks: final_chunks.len(),
+                    current_file: String::new(),
+                    is_complete: false,
+                    extraction_progress: None,
+                    extraction_total_pages: None,
+                    compute_device: Some(compute_device.clone()),
+                });
+            }
+            
+            let embedding_start = Instant::now();
+            let mut batch_count = 0;
+            
+            for batch in chunks_to_embed.chunks_mut(EMBEDDING_BATCH_SIZE) {
+                batch_count += 1;
+                let batch_start = Instant::now();
+                
                 // Prepend heading context to content for better embeddings
                 let texts: Vec<String> = batch.iter()
                     .map(|c| {
@@ -940,6 +980,7 @@ impl RagRetrievalActor {
                         }
                     })
                     .collect();
+                let batch_size = texts.len();
                 let model = Arc::clone(&embedding_model);
                 
                 let embeddings = tokio::task::spawn_blocking(move || {
@@ -955,8 +996,22 @@ impl RagRetrievalActor {
                     self.embedding_lru_cache.put(chunk.hash.clone(), vector);
                     final_chunks.push(chunk.clone());
                 }
+                
+                let batch_elapsed = batch_start.elapsed();
+                let progress_pct = (final_chunks.len() as f64 / total_pending_chunks as f64 * 100.0) as u32;
+                
+                println!(
+                    "RagActor: [{}] Batch {} ({} chunks) in {:?} | Progress: {}/{} ({}%)",
+                    compute_device,
+                    batch_count,
+                    batch_size,
+                    batch_elapsed,
+                    final_chunks.len(),
+                    total_pending_chunks,
+                    progress_pct
+                );
 
-                // Emit progress
+                // Emit progress after every batch for responsive UI
                 if let Some(ref handle) = self.app_handle {
                     let _ = handle.emit("rag-progress", RagProgressEvent {
                         phase: "generating_embeddings".to_string(),
@@ -968,9 +1023,20 @@ impl RagRetrievalActor {
                         is_complete: final_chunks.len() == total_pending_chunks,
                         extraction_progress: None,
                         extraction_total_pages: None,
+                        compute_device: Some(compute_device.clone()),
                     });
                 }
             }
+            
+            let total_embedding_time = embedding_start.elapsed();
+            let chunks_per_sec = chunks_to_embed_count as f64 / total_embedding_time.as_secs_f64();
+            println!(
+                "RagActor: [{}] Embedding complete: {} chunks in {:.1}s ({:.1} chunks/sec)",
+                compute_device,
+                chunks_to_embed_count,
+                total_embedding_time.as_secs_f64(),
+                chunks_per_sec
+            );
         } else if !final_chunks.is_empty() {
             // FIX: All embeddings were cached, emit progress event with is_complete=true
             if let Some(ref handle) = self.app_handle {
@@ -984,6 +1050,7 @@ impl RagRetrievalActor {
                     is_complete: true,
                     extraction_progress: None,
                     extraction_total_pages: None,
+                    compute_device: Some(compute_device.clone()),
                 });
             }
         }
@@ -1000,6 +1067,7 @@ impl RagRetrievalActor {
                 is_complete: false,
                 extraction_progress: None,
                 extraction_total_pages: None,
+                compute_device: Some(compute_device.clone()),
             });
         }
         println!("RagActor: Saving {} chunks to databases", final_chunks.len());
@@ -1041,6 +1109,22 @@ impl RagRetrievalActor {
 
         let total_time = indexing_start.elapsed();
         println!("RagActor: Indexing complete in {} ms", total_time.as_millis());
+
+        // Emit final completion event so frontend clears status bar
+        if let Some(ref handle) = self.app_handle {
+            let _ = handle.emit("rag-progress", RagProgressEvent {
+                phase: "complete".to_string(),
+                total_files,
+                processed_files: total_files,
+                total_chunks: total_chunks_in_index,
+                processed_chunks: total_chunks_in_index,
+                current_file: String::new(),
+                is_complete: true,
+                extraction_progress: None,
+                extraction_total_pages: None,
+                compute_device: Some(compute_device.clone()),
+            });
+        }
 
         Ok(RagIndexResult {
             total_chunks: total_chunks_in_index,
@@ -1654,6 +1738,7 @@ impl RagRetrievalActor {
                             is_complete: false,
                             extraction_progress: Some(progress),
                             extraction_total_pages: Some(total_pages),
+                            compute_device: None, // Not applicable during text extraction
                         },
                     );
                 }

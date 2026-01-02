@@ -2,13 +2,16 @@
 //!
 //! Commands for managing database schema cache, table discovery, and
 //! embedding generation for schema search functionality.
+//!
+//! NOTE: Schema *caching* uses the GPU embedding model (bulk indexing operation),
+//! while schema *search* during chat uses the CPU model (avoids LLM eviction).
 
 use crate::actors::database_toolbox_actor::DatabaseToolboxMsg;
-use crate::actors::schema_vector_actor::{SchemaVectorMsg};
+use crate::actors::schema_vector_actor::SchemaVectorMsg;
 use crate::app_state::{ActorHandles, EmbeddingModelState, SettingsState};
+use crate::protocol::FoundryMsg;
 use crate::settings::{
-    DatabaseSourceConfig, DatabaseToolboxConfig,
-    SupportedDatabaseKind, CachedTableSchema,
+    CachedTableSchema, DatabaseSourceConfig, DatabaseToolboxConfig, SupportedDatabaseKind,
 };
 use fastembed::TextEmbedding;
 use std::collections::{HashMap, HashSet};
@@ -63,10 +66,12 @@ pub struct SchemaRefreshSummary {
 }
 
 /// Refresh database schemas for a given configuration
+///
+/// NOTE: Uses GPU embedding model for bulk caching (not CPU), then re-warms LLM after.
 pub async fn refresh_database_schemas_for_config(
     app_handle: &AppHandle,
     handles: &State<'_, ActorHandles>,
-    embedding_state: &State<'_, EmbeddingModelState>,
+    _embedding_state: &State<'_, EmbeddingModelState>,
     toolbox_config: &DatabaseToolboxConfig,
 ) -> Result<SchemaRefreshSummary, String> {
     let sources: Vec<DatabaseSourceConfig> = toolbox_config
@@ -83,12 +88,21 @@ pub async fn refresh_database_schemas_for_config(
         });
     }
 
-    // Use CPU model for schema search during chat (avoids evicting LLM from GPU)
-    let model_guard = embedding_state.cpu_model.read().await;
-    let embedding_model = model_guard
-        .clone()
-        .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
-    drop(model_guard);
+    // Request GPU embedding model from Foundry actor (lazy-loaded on demand)
+    // Schema caching is a bulk operation - uses GPU for speed, not during chat turns
+    let (model_tx, model_rx) = oneshot::channel();
+    handles
+        .foundry_tx
+        .send(FoundryMsg::GetGpuEmbeddingModel {
+            respond_to: model_tx,
+        })
+        .await
+        .map_err(|e| format!("Failed to request GPU embedding model: {}", e))?;
+
+    let embedding_model = model_rx
+        .await
+        .map_err(|_| "Foundry actor died while getting GPU embedding model")?
+        .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
 
     ensure_toolbox_running(&handles.database_toolbox_tx, toolbox_config).await?;
 
@@ -96,7 +110,9 @@ pub async fn refresh_database_schemas_for_config(
     let mut errors = Vec::new();
 
     for source in sources {
-        match refresh_schema_cache_for_source(app_handle, handles, &source, embedding_model.clone()).await {
+        match refresh_schema_cache_for_source(app_handle, handles, &source, embedding_model.clone())
+            .await
+        {
             Ok(status) => refreshed_sources.push(status),
             Err(err) => {
                 let msg = format!("{} ({}): {}", source.name, source.id, err);
@@ -121,6 +137,17 @@ pub async fn refresh_database_schemas_for_config(
             error: None,
         },
     );
+
+    // After schema caching, re-warm the LLM model that may have been
+    // evicted from GPU memory by the embedding operations
+    println!("[SchemaRefresh] Caching complete, triggering LLM re-warm");
+    let (rewarm_tx, _) = oneshot::channel();
+    let _ = handles
+        .foundry_tx
+        .send(FoundryMsg::RewarmCurrentModel {
+            respond_to: rewarm_tx,
+        })
+        .await;
 
     Ok(SchemaRefreshSummary {
         sources: refreshed_sources,
