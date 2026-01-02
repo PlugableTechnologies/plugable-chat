@@ -677,8 +677,34 @@ pub async fn embed_table_and_columns(
     to_embed.push(table_text);
     to_embed.extend(column_texts);
 
+    // #region agent log H3a
+    let total_chars: usize = to_embed.iter().map(|s| s.len()).sum();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        use std::io::Write;
+        let _ = writeln!(f, r#"{{"hypothesisId":"H3a","location":"database.rs:embed_table_and_columns","message":"Preparing embed call","data":{{"text_count":{},"total_chars":{},"table":"{}"}},"timestamp":{}}}"#, to_embed.len(), total_chars, schema.fully_qualified_name, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+    }
+    // #endregion
+
     let model_clone = model.clone();
-    let embeddings = tokio::task::spawn_blocking(move || model_clone.embed(to_embed, None))
+    let table_name = schema.fully_qualified_name.clone();
+    let embeddings = tokio::task::spawn_blocking(move || {
+        // #region agent log H3b
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+            use std::io::Write;
+            let _ = writeln!(f, r#"{{"hypothesisId":"H3b","location":"database.rs:spawn_blocking_start","message":"Inside spawn_blocking, calling model.embed","data":{{"table":"{}"}},"timestamp":{}}}"#, table_name, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+        }
+        // #endregion
+        let result = model_clone.embed(to_embed, None);
+        // #region agent log H3c
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+            use std::io::Write;
+            let is_ok = result.is_ok();
+            let count = result.as_ref().map(|v| v.len()).unwrap_or(0);
+            let _ = writeln!(f, r#"{{"hypothesisId":"H3c","location":"database.rs:spawn_blocking_end","message":"model.embed returned","data":{{"is_ok":{},"embedding_count":{}}},"timestamp":{}}}"#, is_ok, count, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+        }
+        // #endregion
+        result
+    })
         .await
         .map_err(|e| format!("Embedding task panicked: {}", e))?
         .map_err(|e| format!("Failed to embed schema: {}", e))?;
@@ -688,6 +714,13 @@ pub async fn embed_table_and_columns(
         .next()
         .ok_or_else(|| "No table embedding returned".to_string())?;
     let column_embeddings: Vec<Vec<f32>> = iter.collect();
+
+    // #region agent log H3d
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        use std::io::Write;
+        let _ = writeln!(f, r#"{{"hypothesisId":"H3d","location":"database.rs:embed_complete","message":"Embedding function complete","data":{{"table_embedding_len":{},"column_count":{}}},"timestamp":{}}}"#, table_embedding.len(), column_embeddings.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+    }
+    // #endregion
 
     Ok((table_embedding, column_embeddings))
 }
@@ -955,10 +988,26 @@ pub async fn refresh_schema_cache_for_source(
 
     let tables_total = all_tables_to_process.len();
     let mut tables_done = 0;
+    
+    // #region agent log H2
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        use std::io::Write;
+        let _ = writeln!(f, r#"{{"hypothesisId":"H2","location":"database.rs:refresh_schema_cache_for_source","message":"Tables to process","data":{{"source":"{}","dataset_count":{},"table_count":{}}},"timestamp":{}}}"#, source.id, datasets.len(), tables_total, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+    }
+    // #endregion
+    
+    println!(
+        "[SchemaRefresh] Source '{}': found {} tables to process",
+        source.name, tables_total
+    );
 
     for (dataset_clean, table_clean) in all_tables_to_process {
         tables_done += 1;
         let fq_name = build_fully_qualified_table_name(source, &dataset_clean, &table_clean);
+        println!(
+            "[SchemaRefresh] Processing table {}/{}: {}",
+            tables_done, tables_total, fq_name
+        );
         
         let _ = app_handle.emit(
             "schema-refresh-progress",
@@ -986,11 +1035,32 @@ pub async fn refresh_schema_cache_for_source(
                 let primary_set: HashSet<String> =
                     table_schema.primary_keys.iter().cloned().collect();
 
+                // #region agent log H3
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                    use std::io::Write;
+                    let _ = writeln!(f, r#"{{"hypothesisId":"H3","location":"database.rs:before_embed","message":"About to embed","data":{{"table":"{}","column_count":{}}},"timestamp":{}}}"#, fq_name, table_schema.columns.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                }
+                // #endregion
+                
                 let (table_embedding, column_embeddings) =
                     match embed_table_and_columns(embedding_model.clone(), &table_schema).await
                     {
-                        Ok(res) => res,
+                        Ok(res) => {
+                            // #region agent log H3
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                                use std::io::Write;
+                                let _ = writeln!(f, r#"{{"hypothesisId":"H3","location":"database.rs:after_embed","message":"Embedding complete","data":{{"table":"{}","column_embeddings_count":{}}},"timestamp":{}}}"#, fq_name, res.1.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                            }
+                            // #endregion
+                            res
+                        },
                         Err(err) => {
+                            // #region agent log H3e
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                                use std::io::Write;
+                                let _ = writeln!(f, r#"{{"hypothesisId":"H3e","location":"database.rs:embed_error","message":"Embedding FAILED","data":{{"table":"{}","error":"{}"}},"timestamp":{}}}"#, fq_name, err.replace('"', "'"), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                            }
+                            // #endregion
                             println!(
                                 "[SchemaRefresh] Failed to embed table {}: {}",
                                 fq_name, err
@@ -1017,6 +1087,11 @@ pub async fn refresh_schema_cache_for_source(
                     continue;
                 }
 
+                println!(
+                    "[SchemaRefresh] ✓ Cached table {} ({} columns)",
+                    fq_name, table_schema.columns.len()
+                );
+                
                 tables_status.push(SchemaTableStatus {
                     source_id: source.id.clone(),
                     source_name: source.name.clone(),
@@ -1034,6 +1109,18 @@ pub async fn refresh_schema_cache_for_source(
             }
         }
     }
+
+    // #region agent log H2
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+        use std::io::Write;
+        let _ = writeln!(f, r#"{{"hypothesisId":"H2","location":"database.rs:refresh_complete","message":"Source refresh complete","data":{{"source":"{}","cached_count":{}}},"timestamp":{}}}"#, source.id, tables_status.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+    }
+    // #endregion
+    
+    println!(
+        "[SchemaRefresh] Source '{}' complete: {} tables cached",
+        source.name, tables_status.len()
+    );
 
     Ok(SchemaSourceStatus {
         source_id: source.id.clone(),

@@ -119,6 +119,15 @@ pub struct CliArgs {
         value_parser = clap::builder::BoolishValueParser::new()
     )]
     pub enable_mcp_test: Option<bool>,
+    
+    /// Enable the built-in Chicago Crimes demo database (off by default)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        env = "PLUGABLE_ENABLE_DEMO_DB",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub enable_demo_db: Option<bool>,
     /// Run only the dev MCP test server (no app; blocks until exit)
     #[arg(
         long,
@@ -481,6 +490,31 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
                     .to_string(),
             );
         }
+    }
+
+    // Enable built-in demo database when requested
+    if args.enable_demo_db == Some(true) {
+        ensure_default_servers(settings);
+        
+        // Enable the database toolbox
+        settings.database_toolbox.enabled = true;
+        
+        // Enable the embedded-demo source
+        if let Some(demo_source) = settings
+            .database_toolbox
+            .sources
+            .iter_mut()
+            .find(|s| s.id == "embedded-demo")
+        {
+            demo_source.enabled = true;
+        }
+        
+        // Ensure sql_select is in always-on builtins for querying
+        if !settings.always_on_builtin_tools.contains(&"sql_select".to_string()) {
+            settings.always_on_builtin_tools.push("sql_select".to_string());
+        }
+        
+        println!("[Launch] Demo database enabled (--enable-demo-db)");
     }
 
     LaunchOverrides {

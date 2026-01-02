@@ -1,4 +1,5 @@
 pub mod database_toolbox_actor;
+pub mod embedded_sqlite_actor;
 pub mod foundry_actor;
 pub mod mcp_host_actor;
 pub mod python_actor;

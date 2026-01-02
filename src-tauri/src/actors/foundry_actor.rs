@@ -595,16 +595,22 @@ impl ModelGatewayActor {
     }
 
     /// Lazily load the GPU embedding model on demand for RAG indexing.
-    /// This ensures the model is fresh and not stale from LLM eviction.
+    /// IMPORTANT: We always load fresh to avoid stale GPU state after LLM operations.
+    /// Caching caused hangs when the cached model's GPU resources were evicted by LLM prewarm.
     async fn ensure_gpu_embedding_model_loaded(&self) -> Result<Arc<TextEmbedding>, String> {
-        // Check if already loaded
-        {
-            let guard = self.shared_gpu_embedding_model.read().await;
-            if let Some(model) = guard.as_ref() {
-                println!("FoundryActor: GPU embedding model already loaded, reusing");
-                return Ok(Arc::clone(model));
-            }
+        // #region agent log H6
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+            use std::io::Write;
+            let _ = writeln!(f, r#"{{"hypothesisId":"H6","location":"foundry_actor.rs:ensure_gpu_embedding","message":"GPU embedding model requested - loading fresh","data":{{}},"timestamp":{}}}"#, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
         }
+        // #endregion
+        
+        // NOTE: We intentionally do NOT cache the GPU embedding model.
+        // Previously, caching caused hangs because:
+        // 1. GPU model was loaded and cached
+        // 2. LLM prewarm evicted the embedding model's GPU resources  
+        // 3. Calling embed() on the stale cached model hung indefinitely
+        // By always loading fresh, we ensure GPU resources are properly allocated.
 
         // Need to load the model
         println!("╔══════════════════════════════════════════════════════════════╗");
@@ -653,17 +659,20 @@ impl ModelGatewayActor {
         .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
 
         let elapsed = start.elapsed();
+        // #region agent log H6
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+            use std::io::Write;
+            let _ = writeln!(f, r#"{{"hypothesisId":"H6","location":"foundry_actor.rs:gpu_model_loaded","message":"GPU embedding model loaded fresh","data":{{"elapsed_ms":{}}},"timestamp":{}}}"#, elapsed.as_millis(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+        }
+        // #endregion
         println!(
             "FoundryActor: GPU embedding model loaded in {:.2}s",
             elapsed.as_secs_f64()
         );
 
-        // Store in shared state
+        // NOTE: We intentionally do NOT cache the model to avoid stale GPU state issues.
+        // Each RAG indexing operation gets a fresh model with properly allocated GPU resources.
         let model = Arc::new(gpu_result);
-        {
-            let mut guard = self.shared_gpu_embedding_model.write().await;
-            *guard = Some(Arc::clone(&model));
-        }
 
         // Emit completion
         let _ = self.app_handle.emit("embedding-init-progress", serde_json::json!({

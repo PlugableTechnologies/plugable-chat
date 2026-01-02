@@ -333,6 +333,13 @@ verify_commands() {
         all_available=false
     fi
     
+    echo -n "  toolbox: "
+    if command_exists toolbox; then
+        echo -e "${GREEN}$(toolbox --version 2>&1 | head -1)${NC}"
+    else
+        echo -e "${YELLOW}not found (optional - for database demo)${NC}"
+    fi
+    
     if $all_available; then
         return 0
     else
@@ -391,6 +398,12 @@ install_requirements() {
     # Step 7: Protocol Buffers (protoc) - Required for compiling lance-embedding
     if ! install_brew_formula "protobuf" "Protocol Buffers (protoc)"; then
         all_succeeded=false
+    fi
+    
+    # Step 8: MCP Toolbox - Required for database demo and MCP database integrations
+    if ! install_brew_formula "mcp-toolbox" "MCP Database Toolbox"; then
+        # This is optional - don't fail the whole install
+        echo -e "  ${YELLOW}(Optional: needed for database demo/integrations)${NC}"
     fi
     
     echo ""

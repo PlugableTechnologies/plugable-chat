@@ -6,12 +6,12 @@
 //! - Routing schema discovery and SQL execution requests through MCP
 //! - Caching discovered schemas for embedding
 
+use crate::actors::mcp_host_actor::McpTool;
 use crate::protocol::McpHostMsg;
 use crate::settings::{
     CachedColumnSchema, CachedTableSchema, DatabaseSourceConfig, DatabaseToolboxConfig,
     McpServerConfig, SupportedDatabaseKind,
 };
-use crate::actors::mcp_host_actor::McpTool;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -365,6 +365,31 @@ impl DatabaseToolboxActor {
                 return Ok(Value::String(data.clone()));
             }
             if let Some(text) = &first.text {
+                // #region agent log H1
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                    use std::io::Write;
+                    let _ = writeln!(f, r#"{{"hypothesisId":"H1","location":"database_toolbox_actor.rs:call_mcp_tool_value","message":"NDJSON input size","data":{{"text_len":{},"has_newline":{},"line_count":{}}},"timestamp":{}}}"#, text.len(), text.contains('\n'), text.lines().count(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                }
+                // #endregion
+                // Handle NDJSON format (newline-separated JSON objects)
+                // Common for SQL result sets from MCP toolbox
+                if text.contains('\n') && text.trim_start().starts_with('{') {
+                    let lines: Vec<Value> = text
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                        .collect();
+                    // #region agent log H1
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                        use std::io::Write;
+                        let _ = writeln!(f, r#"{{"hypothesisId":"H1","location":"database_toolbox_actor.rs:ndjson_parsed","message":"NDJSON parsed lines","data":{{"parsed_count":{}}},"timestamp":{}}}"#, lines.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    }
+                    // #endregion
+                    if !lines.is_empty() {
+                        return Ok(Value::Array(lines));
+                    }
+                }
+                // Single JSON value
                 if let Ok(val) = serde_json::from_str::<Value>(text) {
                     return Ok(val);
                 }
@@ -914,12 +939,28 @@ impl DatabaseToolboxActor {
 
     fn parse_sql_column_response(&self, response: Value, column_name: &str) -> Result<Vec<String>, String> {
         // Parse SQL result set and extract a single column
-        let rows = response
+        // Handle multiple response formats:
+        // 1. {"rows": [...]} or {"result": [...]} or {"data": [...]}
+        // 2. Direct array: [{"name": "value"}, ...]
+        // 3. Single object: {"name": "value"} (single row result)
+        
+        let rows: Vec<&Value> = if let Some(arr) = response
             .get("rows")
             .or_else(|| response.get("result"))
             .or_else(|| response.get("data"))
             .and_then(|r| r.as_array())
-            .ok_or("No rows in response")?;
+        {
+            // Case 1: Wrapped in rows/result/data key
+            arr.iter().collect()
+        } else if let Some(arr) = response.as_array() {
+            // Case 2: Direct array
+            arr.iter().collect()
+        } else if response.is_object() && response.get(column_name).is_some() {
+            // Case 3: Single object (single row result from MCP toolbox)
+            vec![&response]
+        } else {
+            return Err(format!("No rows in response: {}", response));
+        };
 
         Ok(rows
             .iter()
@@ -1045,17 +1086,48 @@ impl DatabaseToolboxActor {
         kind: SupportedDatabaseKind,
         response: &Value,
     ) -> Result<Vec<CachedColumnSchema>, String> {
-        let rows = response
+        // Handle multiple response formats:
+        // 1. {"rows": [...]} or {"result": [...]}
+        // 2. Direct array: [...]
+        // 3. Single object for single-row results
+        let rows: Vec<&Value> = if let Some(arr) = response
             .get("rows")
             .or_else(|| response.get("result"))
             .and_then(|r| r.as_array())
-            .ok_or("No rows in column info response")?;
+        {
+            arr.iter().collect()
+        } else if let Some(arr) = response.as_array() {
+            arr.iter().collect()
+        } else if response.is_object() {
+            // Single row result
+            vec![response]
+        } else {
+            return Err(format!("No rows in column info response: {}", response));
+        };
+
+        // #region agent log H5
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+            use std::io::Write;
+            let _ = writeln!(f, r#"{{"hypothesisId":"H5","location":"database_toolbox_actor.rs:parse_column_info","message":"Column rows to parse","data":{{"row_count":{}}},"timestamp":{}}}"#, rows.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+        }
+        // #endregion
 
         Ok(rows
             .iter()
             .filter_map(|row| {
                 if kind == SupportedDatabaseKind::Sqlite {
-                    // SQLite PRAGMA table_info format
+                    // SQLite PRAGMA table_info returns objects with these fields:
+                    // {"cid": 0, "name": "col_name", "type": "INTEGER", "notnull": 0, "dflt_value": null, "pk": 0}
+                    if let Some(obj) = row.as_object() {
+                        // MCP toolbox returns object format from PRAGMA
+                        return Some(CachedColumnSchema {
+                            name: obj.get("name")?.as_str()?.to_string(),
+                            data_type: obj.get("type")?.as_str()?.to_string(),
+                            nullable: obj.get("notnull")?.as_i64()? == 0,
+                            description: None,
+                        });
+                    }
+                    // Legacy array format
                     let arr = row.as_array()?;
                     Some(CachedColumnSchema {
                         name: arr.get(1)?.as_str()?.to_string(),

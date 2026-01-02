@@ -83,6 +83,12 @@ lopdf = "0.36"
 # DOCX parsing (DOCX = ZIP with XML)
 zip = "0.6"
 
+# Embedded SQLite for demo database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# CSV parsing for demo data loading
+csv = "1.3"
+
 [dependencies.tauri-plugin-opener]
 version = "2"
 

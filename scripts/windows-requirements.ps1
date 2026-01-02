@@ -53,6 +53,7 @@ $script:InstalledRust = $false
 $script:InstalledGit = $false
 $script:InstalledProtoc = $false
 $script:InstalledBuildTools = $false
+$script:InstalledToolbox = $false
 $script:InstalledAnything = $false
 
 # Check if winget is available
@@ -374,6 +375,75 @@ function Probe-KnownPaths {
     }
 }
 
+# Install MCP Database Toolbox from Google's storage (not available via winget)
+function Install-McpToolbox {
+    $displayName = "MCP Database Toolbox"
+    $toolboxDir = "$env:LOCALAPPDATA\Programs\mcp-toolbox"
+    $toolboxExe = "$toolboxDir\toolbox.exe"
+    $toolboxVersion = "0.24.0"
+    $downloadUrl = "https://storage.googleapis.com/genai-toolbox/v$toolboxVersion/windows/amd64/toolbox.exe"
+    
+    Write-Host "Checking $displayName... " -NoNewline
+    
+    # Check if already installed and in PATH
+    if (Test-CommandExists "toolbox") {
+        Write-Host "already installed" -ForegroundColor Green
+        return $true
+    }
+    
+    # Check if installed in our directory
+    if (Test-Path $toolboxExe) {
+        Write-Host "already downloaded" -ForegroundColor Green
+        # Add to PATH for current session
+        if ($env:Path -notlike "*$toolboxDir*") {
+            $env:Path = "$toolboxDir;$env:Path"
+        }
+        return $true
+    }
+    
+    Write-Host "downloading..." -ForegroundColor Yellow
+    
+    try {
+        # Create directory
+        if (-not (Test-Path $toolboxDir)) {
+            New-Item -ItemType Directory -Path $toolboxDir -Force | Out-Null
+        }
+        
+        # Download the binary
+        Write-Host "  -> Downloading from Google Storage..." -ForegroundColor Gray
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $toolboxExe -UseBasicParsing
+        
+        if (Test-Path $toolboxExe) {
+            Write-Host "  -> Downloaded successfully" -ForegroundColor Green
+            
+            # Add to user PATH permanently
+            $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+            if ($userPath -notlike "*$toolboxDir*") {
+                [Environment]::SetEnvironmentVariable("Path", "$toolboxDir;$userPath", "User")
+                Write-Host "  -> Added to user PATH" -ForegroundColor Green
+            }
+            
+            # Add to current session
+            if ($env:Path -notlike "*$toolboxDir*") {
+                $env:Path = "$toolboxDir;$env:Path"
+            }
+            
+            $script:InstalledToolbox = $true
+            $script:InstalledAnything = $true
+            return $true
+        }
+        else {
+            Write-Host "  -> Download failed" -ForegroundColor Red
+            return $false
+        }
+    }
+    catch {
+        Write-Host "  -> Download failed: $_" -ForegroundColor Red
+        Write-Host "  -> (Optional: needed for database demo/integrations)" -ForegroundColor Yellow
+        return $false
+    }
+}
+
 # Install the wasm32-wasip1 target for WASM sandboxing
 # Note: wasm32-wasi was renamed to wasm32-wasip1 in Rust 1.78+
 function Install-WasmTarget {
@@ -491,6 +561,15 @@ function Test-AllCommands {
         $allAvailable = $false
     }
     
+    Write-Host "  toolbox: " -NoNewline
+    if (Test-CommandExists "toolbox") {
+        $version = toolbox --version 2>&1
+        Write-Host "$version" -ForegroundColor Green
+    }
+    else {
+        Write-Host "not found (optional - for database demo)" -ForegroundColor Yellow
+    }
+    
     return $allAvailable
 }
 
@@ -544,6 +623,9 @@ function Install-Requirements {
     if (-not (Install-WingetPackage -PackageId "Google.Protobuf" -DisplayName "Protocol Buffers (protoc)" -TrackVariable "Protoc")) {
         $allSucceeded = $false
     }
+    
+    # MCP Database Toolbox - For database demo and MCP database integrations (downloaded from Google Storage)
+    Install-McpToolbox  # Optional, don't fail if this doesn't work
     
     Write-Host ""
     

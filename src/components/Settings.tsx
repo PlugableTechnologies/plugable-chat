@@ -2951,29 +2951,40 @@ function DatabasesTab({
 
             <div className="space-y-4">
                 {toolboxConfig.sources.map((source, idx) => (
-                    <div key={source.id} className="database-source-card border border-gray-200 rounded-lg p-4 space-y-3 bg-white">
+                    <div key={source.id} className={`database-source-card border rounded-lg p-4 space-y-3 ${source.id === 'embedded-demo' ? 'border-green-200 bg-green-50/30' : 'border-gray-200 bg-white'}`}>
                         <div className="flex justify-between items-start">
                             <div className="flex items-center gap-2">
                                 <span className="text-xs font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded uppercase">
                                     {source.kind}
                                 </span>
-                                <input
-                                    type="text"
-                                    value={source.name}
-                                    onChange={(e) => updateSource(idx, { name: e.target.value })}
-                                    className="font-medium text-gray-900 border-b border-transparent hover:border-gray-300 focus:border-blue-500 focus:outline-none px-1"
-                                />
-                                <select
-                                    value={source.kind}
-                                    onChange={(e) => updateSource(idx, { kind: e.target.value as SupportedDatabaseKind })}
-                                    className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 bg-white"
-                                >
-                                    <option value="bigquery">BigQuery</option>
-                                    <option value="postgres">PostgreSQL</option>
-                                    <option value="mysql">MySQL</option>
-                                    <option value="sqlite">SQLite</option>
-                                    <option value="spanner">Spanner</option>
-                                </select>
+                                {source.id === 'embedded-demo' && (
+                                    <span className="text-xs font-semibold bg-green-100 text-green-700 px-2 py-0.5 rounded">
+                                        Built-in Demo
+                                    </span>
+                                )}
+                                {source.id === 'embedded-demo' ? (
+                                    <span className="font-medium text-gray-900 px-1">{source.name}</span>
+                                ) : (
+                                    <input
+                                        type="text"
+                                        value={source.name}
+                                        onChange={(e) => updateSource(idx, { name: e.target.value })}
+                                        className="font-medium text-gray-900 border-b border-transparent hover:border-gray-300 focus:border-blue-500 focus:outline-none px-1"
+                                    />
+                                )}
+                                {source.id !== 'embedded-demo' && (
+                                    <select
+                                        value={source.kind}
+                                        onChange={(e) => updateSource(idx, { kind: e.target.value as SupportedDatabaseKind })}
+                                        className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 bg-white"
+                                    >
+                                        <option value="bigquery">BigQuery</option>
+                                        <option value="postgres">PostgreSQL</option>
+                                        <option value="mysql">MySQL</option>
+                                        <option value="sqlite">SQLite</option>
+                                        <option value="spanner">Spanner</option>
+                                    </select>
+                                )}
                             </div>
                             <div className="flex items-center gap-3">
                                 <label className="flex items-center gap-2 text-sm text-gray-600">
@@ -3000,50 +3011,90 @@ function DatabasesTab({
                                         Refresh
                                     </button>
                                 )}
-                                <button onClick={() => removeSource(idx)} className="text-gray-400 hover:text-red-500">
-                                    <Trash2 size={16} />
-                                </button>
+                                {source.id !== 'embedded-demo' && (
+                                    <button onClick={() => removeSource(idx)} className="text-gray-400 hover:text-red-500">
+                                        <Trash2 size={16} />
+                                    </button>
+                                )}
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-xs font-medium text-gray-700 mb-1.5">Transport</label>
-                                <div className="flex gap-2">
-                                    <button
-                                        onClick={() => updateSource(idx, { transport: { type: 'stdio' } })}
-                                        className={`px-3 py-1.5 text-xs rounded-lg border ${source.transport.type === 'stdio'
-                                            ? 'bg-blue-50 border-blue-300 text-blue-700'
-                                            : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
-                                            }`}
-                                    >
-                                        Stdio (subprocess)
-                                    </button>
-                                    <button
-                                        onClick={() => updateSource(idx, { transport: { type: 'sse', url: (source.transport as any).url || '' } })}
-                                        className={`px-3 py-1.5 text-xs rounded-lg border ${source.transport.type === 'sse'
-                                            ? 'bg-blue-50 border-blue-300 text-blue-700'
-                                            : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
-                                            }`}
-                                    >
-                                        SSE (HTTP)
-                                    </button>
+                        {/* Show description and simplified config for embedded demo sources */}
+                        {source.id === 'embedded-demo' && (
+                            <div className="space-y-3">
+                                <div className="text-sm text-gray-600 bg-green-50 rounded-lg p-3 border border-green-100">
+                                    <p className="font-medium text-green-800 mb-1">Built-in Demo Database</p>
+                                    <p className="text-xs text-green-700">
+                                        Chicago Crimes dataset (2025) with ~23,000 records. Uses the Google MCP Database Toolbox for SQLite access.
+                                        Set the path to your toolbox binary below, enable this source, and click "Refresh" to cache the schema.
+                                    </p>
                                 </div>
-                            </div>
-
-                            {source.transport.type === 'sse' && (
                                 <div>
-                                    <label className="block text-xs font-medium text-gray-700 mb-1.5">Server URL</label>
+                                    <label className="block text-xs font-medium text-gray-700 mb-1.5">
+                                        Toolbox Binary Path <span className="text-red-500">*</span>
+                                    </label>
                                     <input
                                         type="text"
-                                        value={(source.transport as any).url || ''}
-                                        onChange={(e) => updateSource(idx, { transport: { type: 'sse', url: e.target.value } })}
-                                        placeholder="http://localhost:3000/sse"
-                                        className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                                        value={source.command || ''}
+                                        onChange={(e) => updateSource(idx, { command: e.target.value })}
+                                        placeholder="/opt/homebrew/bin/toolbox"
+                                        className={`w-full text-sm rounded-md shadow-sm focus:ring-1 ${
+                                            source.enabled && !(source.command?.trim())
+                                                ? 'border-red-300 focus:border-red-500 focus:ring-red-500'
+                                                : 'border-gray-300 focus:border-blue-500 focus:ring-blue-500'
+                                        }`}
                                     />
+                                    <p className="text-[11px] text-gray-500 mt-1">
+                                        Path to the Google MCP Database Toolbox binary. Install from{' '}
+                                        <a href="https://github.com/googleapis/genai-toolbox" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                                            googleapis/genai-toolbox
+                                        </a>
+                                    </p>
                                 </div>
-                            )}
-                        </div>
+                            </div>
+                        )}
+
+                        {/* Hide transport/command config for non-embedded sources */}
+                        {source.id !== 'embedded-demo' && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-700 mb-1.5">Transport</label>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => updateSource(idx, { transport: { type: 'stdio' } })}
+                                            className={`px-3 py-1.5 text-xs rounded-lg border ${source.transport.type === 'stdio'
+                                                ? 'bg-blue-50 border-blue-300 text-blue-700'
+                                                : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                                                }`}
+                                        >
+                                            Stdio (subprocess)
+                                        </button>
+                                        <button
+                                            onClick={() => updateSource(idx, { transport: { type: 'sse', url: (source.transport as any).url || '' } })}
+                                            className={`px-3 py-1.5 text-xs rounded-lg border ${source.transport.type === 'sse'
+                                                ? 'bg-blue-50 border-blue-300 text-blue-700'
+                                                : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                                                }`}
+                                        >
+                                            SSE (HTTP)
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {source.transport.type === 'sse' && (
+                                    <div>
+                                        <label className="block text-xs font-medium text-gray-700 mb-1.5">Server URL</label>
+                                        <input
+                                            type="text"
+                                            value={(source.transport as any).url || ''}
+                                            onChange={(e) => updateSource(idx, { transport: { type: 'sse', url: e.target.value } })}
+                                            placeholder="http://localhost:3000/sse"
+                                            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                                        />
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                             {source.kind === 'bigquery' && (
                                 <div>
@@ -3061,7 +3112,7 @@ function DatabasesTab({
                                 </div>
                             )}
 
-                        {source.transport.type === 'stdio' && (
+                        {source.transport.type === 'stdio' && source.id !== 'embedded-demo' && (
                             <>
                                 <div>
                                     <label className="block text-xs font-medium text-gray-700 mb-1.5">Command</label>

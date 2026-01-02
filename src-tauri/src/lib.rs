@@ -13,6 +13,7 @@ pub mod actors;
 pub mod agentic_state;
 pub mod app_state;
 pub mod cli;
+pub mod demo_schema;
 pub mod mid_turn_state;
 pub mod model_profiles;
 pub mod protocol;
