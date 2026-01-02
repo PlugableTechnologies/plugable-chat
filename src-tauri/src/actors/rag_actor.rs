@@ -60,6 +60,239 @@ enum DocumentElement {
 }
 
 // ============================================================================
+// PDF STRUCTURE EXTRACTION (Hybrid: Bookmarks + Font Size)
+// ============================================================================
+
+/// Extracted heading from PDF with explicit level (from bookmarks or font size)
+#[derive(Debug, Clone)]
+struct PdfHeading {
+    level: u8,      // 1-4
+    title: String,
+    #[allow(dead_code)]
+    page: Option<u32>,
+}
+
+/// Extract structure from PDF using hybrid approach:
+/// 1. Try bookmarks/outlines first (explicit hierarchy from PDF metadata)
+/// 2. Fall back to font-size detection (infer hierarchy from typography)
+fn extract_pdf_structure(path: &Path) -> Result<Vec<PdfHeading>, String> {
+    // Tier 1: Try bookmarks first (most reliable when available)
+    match extract_pdf_bookmarks(path) {
+        Ok(headings) if !headings.is_empty() => {
+            println!("RagActor: Found {} bookmarks in PDF", headings.len());
+            return Ok(headings);
+        }
+        Ok(_) => {
+            println!("RagActor: No bookmarks found, trying font-size detection");
+        }
+        Err(e) => {
+            println!("RagActor: Bookmark extraction failed ({}), trying font-size detection", e);
+        }
+    }
+    
+    // Tier 2: Fall back to font-size detection
+    match extract_pdf_by_font_size(path) {
+        Ok(headings) if !headings.is_empty() => {
+            println!("RagActor: Detected {} headings from font sizes", headings.len());
+            Ok(headings)
+        }
+        Ok(_) => {
+            println!("RagActor: No font-size headings detected, will use text heuristics");
+            Ok(Vec::new())
+        }
+        Err(e) => {
+            println!("RagActor: Font-size detection failed ({}), will use text heuristics", e);
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// Extract PDF bookmarks/outlines (Tier 1)
+/// Uses lopdf to read the document outline tree
+fn extract_pdf_bookmarks(path: &Path) -> Result<Vec<PdfHeading>, String> {
+    let doc = lopdf::Document::load(path)
+        .map_err(|e| format!("Failed to load PDF: {}", e))?;
+    
+    let mut headings = Vec::new();
+    
+    // Recursively traverse bookmark tree
+    fn traverse_bookmarks(
+        doc: &lopdf::Document,
+        bookmark_ids: &[u32],
+        level: u8,
+        headings: &mut Vec<PdfHeading>,
+    ) {
+        for &id in bookmark_ids {
+            if let Some(bookmark) = doc.bookmark_table.get(&id) {
+                // bookmark.page is (page_num, y_offset) tuple - extract page number
+                let page_num = Some(bookmark.page.0);
+                headings.push(PdfHeading {
+                    level: level.min(4), // Cap at H4
+                    title: bookmark.title.clone(),
+                    page: page_num,
+                });
+                // Recurse into children
+                traverse_bookmarks(doc, &bookmark.children, level + 1, headings);
+            }
+        }
+    }
+    
+    traverse_bookmarks(&doc, &doc.bookmarks, 1, &mut headings);
+    Ok(headings)
+}
+
+/// Extract headings by font size (Tier 2)
+/// Parses PDF content streams to find text with different font sizes,
+/// then maps the largest fonts to heading levels H1-H4
+fn extract_pdf_by_font_size(path: &Path) -> Result<Vec<PdfHeading>, String> {
+    use lopdf::{Document, Object};
+    
+    let doc = Document::load(path)
+        .map_err(|e| format!("Failed to load PDF: {}", e))?;
+    
+    // Collect all text runs with their font sizes
+    let mut text_runs: Vec<(f32, String)> = Vec::new();
+    
+    for (page_num, page_id) in doc.get_pages() {
+        if let Ok(content) = doc.get_page_content(page_id) {
+            let operations = lopdf::content::Content::decode(&content)
+                .map(|c| c.operations)
+                .unwrap_or_default();
+            
+            let mut current_font_size: f32 = 12.0; // Default
+            let mut current_text = String::new();
+            
+            for op in operations {
+                match op.operator.as_str() {
+                    // Tf: Set text font and size
+                    "Tf" => {
+                        // Flush previous text if any
+                        if !current_text.trim().is_empty() {
+                            text_runs.push((current_font_size, current_text.trim().to_string()));
+                            current_text.clear();
+                        }
+                        // Extract font size (second operand)
+                        if let Some(Object::Real(size)) = op.operands.get(1) {
+                            current_font_size = *size as f32;
+                        } else if let Some(Object::Integer(size)) = op.operands.get(1) {
+                            current_font_size = *size as f32;
+                        }
+                    }
+                    // Tj: Show text string
+                    "Tj" => {
+                        if let Some(Object::String(bytes, _)) = op.operands.first() {
+                            if let Ok(text) = String::from_utf8(bytes.clone()) {
+                                current_text.push_str(&text);
+                            }
+                        }
+                    }
+                    // TJ: Show text array (with kerning)
+                    "TJ" => {
+                        if let Some(Object::Array(arr)) = op.operands.first() {
+                            for item in arr {
+                                if let Object::String(bytes, _) = item {
+                                    if let Ok(text) = String::from_utf8(bytes.clone()) {
+                                        current_text.push_str(&text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Text positioning operators that indicate new line/block
+                    "Td" | "TD" | "T*" | "'" | "\"" => {
+                        // Flush current text as a separate run
+                        if !current_text.trim().is_empty() {
+                            text_runs.push((current_font_size, current_text.trim().to_string()));
+                            current_text.clear();
+                        }
+                    }
+                    // BT/ET: Begin/End text object
+                    "BT" => {
+                        current_text.clear();
+                    }
+                    "ET" => {
+                        if !current_text.trim().is_empty() {
+                            text_runs.push((current_font_size, current_text.trim().to_string()));
+                            current_text.clear();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            
+            // Flush any remaining text
+            if !current_text.trim().is_empty() {
+                text_runs.push((current_font_size, current_text.trim().to_string()));
+            }
+        }
+        
+        // Limit to first few pages to avoid excessive processing
+        if page_num > 10 {
+            break;
+        }
+    }
+    
+    if text_runs.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    // Determine heading levels based on font size distribution
+    // Collect unique font sizes and sort descending
+    let mut sizes: Vec<f32> = text_runs.iter().map(|(s, _)| *s).collect();
+    sizes.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    sizes.dedup_by(|a, b| (*a - *b).abs() < 0.5); // Treat similar sizes as same
+    
+    // Find the body text size (most common size, typically)
+    let mut size_counts: HashMap<i32, usize> = HashMap::new();
+    for (size, _) in &text_runs {
+        *size_counts.entry((*size * 10.0) as i32).or_insert(0) += 1;
+    }
+    let body_size = size_counts.iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(size, _)| *size as f32 / 10.0)
+        .unwrap_or(12.0);
+    
+    // Only consider sizes larger than body text as headings
+    let heading_sizes: Vec<f32> = sizes.into_iter()
+        .filter(|&s| s > body_size + 1.0)
+        .take(4) // Max 4 heading levels
+        .collect();
+    
+    if heading_sizes.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    // Map font sizes to heading levels
+    let size_to_level: HashMap<i32, u8> = heading_sizes.iter()
+        .enumerate()
+        .map(|(i, &s)| ((s * 10.0) as i32, (i + 1) as u8))
+        .collect();
+    
+    // Convert text runs to headings (only for heading-sized text)
+    let headings: Vec<PdfHeading> = text_runs.iter()
+        .filter_map(|(size, text)| {
+            let size_key = (*size * 10.0) as i32;
+            size_to_level.get(&size_key).map(|&level| PdfHeading {
+                level,
+                title: text.clone(),
+                page: None,
+            })
+        })
+        .filter(|h| !h.title.is_empty() && h.title.len() < 200) // Filter out very long text
+        .collect();
+    
+    Ok(headings)
+}
+
+/// Normalize text for matching (lowercase, collapse whitespace)
+fn normalize_text_for_matching(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+// ============================================================================
 // HEADING STACK MANAGER
 // ============================================================================
 
@@ -831,7 +1064,8 @@ impl RagRetrievalActor {
                     }
 
                     // Parse document into elements (with heading detection)
-                    let elements = self.parse_document(&ext, &text_content);
+                    // Pass file_path for PDF hybrid structure extraction
+                    let elements = self.parse_document(&ext, &text_content, Some(file_path));
 
                     // Chunk semantically with heading detection
                     let chunks_with_context = self.semantic_chunk(&elements);
@@ -1192,11 +1426,12 @@ impl RagRetrievalActor {
     // ========================================================================
 
     /// Parse document into structured elements based on file type
-    fn parse_document(&self, extension: &str, content: &str) -> Vec<DocumentElement> {
+    /// For PDFs, also accepts file_path for hybrid structure extraction
+    fn parse_document(&self, extension: &str, content: &str, file_path: Option<&Path>) -> Vec<DocumentElement> {
         match extension {
             "md" => self.parse_markdown(content),
             "docx" => self.parse_docx_elements(content),
-            "pdf" => self.parse_pdf_elements(content),
+            "pdf" => self.parse_pdf_elements(content, file_path),
             "txt" => self.parse_plaintext(content),
             _ => self.parse_plaintext(content),
         }
@@ -1322,13 +1557,42 @@ impl RagRetrievalActor {
         self.parse_plaintext(content)
     }
 
-    /// Parse PDF content (already extracted to text)
-    fn parse_pdf_elements(&self, content: &str) -> Vec<DocumentElement> {
+    /// Parse PDF content using hybrid structure extraction
+    /// 1. Try extracting bookmarks/outlines (explicit hierarchy from PDF)
+    /// 2. Fall back to font-size detection
+    /// 3. Fall back to text-based heuristics
+    fn parse_pdf_elements(&self, content: &str, file_path: Option<&Path>) -> Vec<DocumentElement> {
+        // Try hybrid structure extraction if file path is available
+        if let Some(path) = file_path {
+            if let Ok(headings) = extract_pdf_structure(path) {
+                if !headings.is_empty() {
+                    return self.merge_headings_with_content(&headings, content);
+                }
+            }
+        }
+        
+        // Fall back to text-based heuristics
+        self.parse_pdf_elements_by_heuristics(content)
+    }
+    
+    /// Merge extracted PDF headings with text content
+    /// Matches headings to their positions in the text stream
+    fn merge_headings_with_content(
+        &self,
+        headings: &[PdfHeading],
+        content: &str,
+    ) -> Vec<DocumentElement> {
         let mut elements = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
+        
+        // Create a map of normalized heading titles to their levels
+        let heading_map: HashMap<String, u8> = headings.iter()
+            .map(|h| (normalize_text_for_matching(&h.title), h.level))
+            .collect();
+        
         let mut current_paragraph = String::new();
         
-        for (i, line) in lines.iter().enumerate() {
+        for line in lines {
             let trimmed = line.trim();
             
             if trimmed.is_empty() {
@@ -1339,17 +1603,89 @@ impl RagRetrievalActor {
                 continue;
             }
             
-            // Heuristic: Short lines followed by longer content may be headings
-            // Also: ALL CAPS lines, or lines that look like titles
-            if self.looks_like_heading_pdf(trimmed, lines.get(i + 1).copied()) {
+            let normalized = normalize_text_for_matching(trimmed);
+            
+            // Check if this line matches a known heading
+            if let Some(&level) = heading_map.get(&normalized) {
+                // Flush paragraph before heading
                 if !current_paragraph.is_empty() {
                     elements.push(DocumentElement::Paragraph(current_paragraph.trim().to_string()));
                     current_paragraph.clear();
                 }
                 elements.push(DocumentElement::Heading { 
-                    level: 2, // Default to level 2 since we can't detect hierarchy from PDF
+                    level, 
                     text: trimmed.to_string() 
                 });
+            } else {
+                // Also check for partial matches (heading might be truncated in bookmark)
+                let is_heading = heading_map.iter().any(|(h_title, _)| {
+                    normalized.starts_with(h_title) || h_title.starts_with(&normalized)
+                });
+                
+                if is_heading {
+                    // Find the level for this partial match
+                    let level = heading_map.iter()
+                        .find(|(h_title, _)| normalized.starts_with(*h_title) || h_title.starts_with(&normalized))
+                        .map(|(_, &l)| l)
+                        .unwrap_or(2);
+                    
+                    if !current_paragraph.is_empty() {
+                        elements.push(DocumentElement::Paragraph(current_paragraph.trim().to_string()));
+                        current_paragraph.clear();
+                    }
+                    elements.push(DocumentElement::Heading { 
+                        level, 
+                        text: trimmed.to_string() 
+                    });
+                } else {
+                    // Accumulate paragraph
+                    if !current_paragraph.is_empty() {
+                        current_paragraph.push(' ');
+                    }
+                    current_paragraph.push_str(trimmed);
+                }
+            }
+        }
+        
+        // Flush final paragraph
+        if !current_paragraph.is_empty() {
+            elements.push(DocumentElement::Paragraph(current_paragraph.trim().to_string()));
+        }
+        
+        elements
+    }
+    
+    /// Parse PDF content using text-based heuristics (fallback)
+    fn parse_pdf_elements_by_heuristics(&self, content: &str) -> Vec<DocumentElement> {
+        let mut elements = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut current_paragraph = String::new();
+        let mut prev_blank = true; // Start of document counts as preceded by blank
+        
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            
+            if trimmed.is_empty() {
+                if !current_paragraph.is_empty() {
+                    elements.push(DocumentElement::Paragraph(current_paragraph.trim().to_string()));
+                    current_paragraph.clear();
+                }
+                prev_blank = true;
+                continue;
+            }
+            
+            // Detect heading level (H1-H4) using multi-level heuristics
+            let next_line = lines.get(i + 1).copied();
+            if let Some(level) = self.detect_pdf_heading_level(trimmed, prev_blank, next_line) {
+                if !current_paragraph.is_empty() {
+                    elements.push(DocumentElement::Paragraph(current_paragraph.trim().to_string()));
+                    current_paragraph.clear();
+                }
+                elements.push(DocumentElement::Heading { 
+                    level,
+                    text: trimmed.to_string() 
+                });
+                prev_blank = false;
                 continue;
             }
             
@@ -1358,6 +1694,7 @@ impl RagRetrievalActor {
                 current_paragraph.push(' ');
             }
             current_paragraph.push_str(trimmed);
+            prev_blank = false;
         }
         
         if !current_paragraph.is_empty() {
@@ -1367,20 +1704,87 @@ impl RagRetrievalActor {
         elements
     }
 
-    fn looks_like_heading_pdf(&self, line: &str, next_line: Option<&str>) -> bool {
-        // Heuristics for PDF heading detection:
-        // 1. ALL CAPS and short
-        // 2. Short line followed by blank or much longer line
-        // 3. Ends with no punctuation and is relatively short
+    /// Detect PDF heading level (H1-H4) based on structural heuristics.
+    /// 
+    /// Since PDF text extraction loses font size/style information, we use:
+    /// - ALL CAPS patterns (often used for major headings)
+    /// - Line length and word count
+    /// - Surrounding blank lines (standalone vs inline)
+    /// - Punctuation (headings rarely end with sentence punctuation)
+    /// - Title Case patterns
+    /// 
+    /// Returns None if the line doesn't look like a heading.
+    fn detect_pdf_heading_level(
+        &self,
+        line: &str,
+        prev_blank: bool,
+        next_line: Option<&str>,
+    ) -> Option<u8> {
+        let len = line.len();
+        let has_alpha = line.chars().any(|c| c.is_alphabetic());
         
-        let is_all_caps = line.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase())
-            && line.len() > 3 && line.len() < 80;
+        // Must have alphabetic content and reasonable length for a heading
+        if !has_alpha || len < 3 || len > 100 {
+            return None;
+        }
         
-        let is_short = line.len() < 60;
-        let no_end_punct = !line.ends_with('.') && !line.ends_with(',') && !line.ends_with(';');
-        let next_is_longer = next_line.map_or(true, |n| n.len() > line.len() * 2 || n.trim().is_empty());
+        // Structural signals
+        let is_all_caps = line.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase());
+        let ends_with_sentence_punct = line.ends_with('.') || line.ends_with('?') || line.ends_with('!');
+        let ends_with_colon = line.ends_with(':');
+        let next_is_blank = next_line.map_or(true, |n| n.trim().is_empty());
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let word_count = words.len();
         
-        is_all_caps || (is_short && no_end_punct && next_is_longer && line.len() > 5)
+        // Headings typically don't end with sentence punctuation
+        if ends_with_sentence_punct {
+            return None;
+        }
+        
+        // Count Title Case words (first letter uppercase)
+        let title_case_count = words.iter().filter(|w| {
+            w.chars().next().map_or(false, |c| c.is_uppercase())
+        }).count();
+        // Require more than half the words to be Title Case
+        // This allows lowercase articles/prepositions ("and", "the", "of") in longer titles
+        let is_title_case = word_count >= 2 && title_case_count > word_count / 2;
+        
+        // H1: ALL CAPS, short, standalone (surrounded by blank lines)
+        // This pattern is commonly used for major document sections
+        if is_all_caps && len < 40 && prev_blank && next_is_blank {
+            return Some(1);
+        }
+        
+        // H2: ALL CAPS (not standalone) or short standalone Title Case
+        // ALL CAPS sections that aren't surrounded by blanks
+        if is_all_caps && len > 3 && len < 60 {
+            return Some(2);
+        }
+        // Short Title Case, standalone (preceded by blank)
+        if is_title_case && len < 40 && prev_blank && word_count <= 6 {
+            return Some(2);
+        }
+        
+        // H3: Title Case, medium length, or ends with colon (sub-section marker)
+        if is_title_case && len < 60 && word_count >= 2 && word_count <= 8 {
+            return Some(3);
+        }
+        if ends_with_colon && len < 50 && word_count <= 6 {
+            return Some(3);
+        }
+        
+        // H4: Short lines that look like labels/headers but don't fit above
+        // First word capitalized, short, no sentence punctuation
+        if len < 50 && word_count >= 2 && word_count <= 8 {
+            let first_cap = words.first()
+                .and_then(|w| w.chars().next())
+                .map_or(false, |c| c.is_uppercase());
+            if first_cap && next_is_blank {
+                return Some(4);
+            }
+        }
+        
+        None
     }
 
     /// Parse plain text document
@@ -2348,12 +2752,214 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_pdf_heading_detection_all_caps() {
+    fn test_pdf_heading_level_h1_all_caps_standalone() {
         let actor = create_test_actor();
         
-        assert!(actor.looks_like_heading_pdf("INTRODUCTION", None));
-        assert!(actor.looks_like_heading_pdf("CHAPTER ONE", Some("This is content")));
-        assert!(!actor.looks_like_heading_pdf("This is a normal sentence.", None));
+        // H1: ALL CAPS, standalone (surrounded by blank lines)
+        assert_eq!(actor.detect_pdf_heading_level("INTRODUCTION", true, Some("")), Some(1));
+        assert_eq!(actor.detect_pdf_heading_level("CHAPTER ONE", true, Some("")), Some(1));
+        assert_eq!(actor.detect_pdf_heading_level("SUMMARY", true, Some("")), Some(1));
+        
+        // Not H1 if not standalone (becomes H2)
+        assert_eq!(actor.detect_pdf_heading_level("INTRODUCTION", false, Some("")), Some(2));
+        assert_eq!(actor.detect_pdf_heading_level("INTRODUCTION", true, Some("content follows")), Some(2));
+    }
+
+    #[test]
+    fn test_pdf_heading_level_h2_caps_or_title() {
+        let actor = create_test_actor();
+        
+        // H2: ALL CAPS not standalone
+        assert_eq!(actor.detect_pdf_heading_level("TECHNICAL OVERVIEW", false, Some("Details")), Some(2));
+        assert_eq!(actor.detect_pdf_heading_level("KEY FEATURES", true, Some("Feature list")), Some(2));
+        
+        // H2: Short Title Case, standalone (preceded by blank)
+        assert_eq!(actor.detect_pdf_heading_level("Product Overview", true, Some("")), Some(2));
+        assert_eq!(actor.detect_pdf_heading_level("Key Features", true, Some("")), Some(2));
+    }
+
+    #[test]
+    fn test_pdf_heading_level_h3_title_case() {
+        let actor = create_test_actor();
+        
+        // H3: Title Case, medium length
+        assert_eq!(actor.detect_pdf_heading_level("Display Specifications", false, Some("")), Some(3));
+        assert_eq!(actor.detect_pdf_heading_level("Power Management Options", false, Some("")), Some(3));
+        
+        // H3: Lines ending with colon (sub-section markers)
+        assert_eq!(actor.detect_pdf_heading_level("Features:", false, Some("")), Some(3));
+        assert_eq!(actor.detect_pdf_heading_level("System Requirements:", false, Some("")), Some(3));
+    }
+
+    #[test]
+    fn test_pdf_heading_level_h4_short_labels() {
+        let actor = create_test_actor();
+        
+        // H4: Short lines that look like labels but don't match H2/H3 patterns
+        // These have first word capitalized but aren't full Title Case
+        assert_eq!(actor.detect_pdf_heading_level("Memory and storage", false, Some("")), Some(4));
+        assert_eq!(actor.detect_pdf_heading_level("Ports available", false, Some("")), Some(4));
+        
+        // Note: Full Title Case like "Memory Configuration" is detected as H3
+        // This is expected since we can't distinguish H3/H4 without font info
+        assert_eq!(actor.detect_pdf_heading_level("Memory Configuration", false, Some("")), Some(3));
+    }
+
+    #[test]
+    fn test_pdf_heading_level_not_heading() {
+        let actor = create_test_actor();
+        
+        // Sentences ending with punctuation are not headings
+        assert_eq!(actor.detect_pdf_heading_level("This is a complete sentence.", false, Some("")), None);
+        assert_eq!(actor.detect_pdf_heading_level("What is this?", false, Some("")), None);
+        assert_eq!(actor.detect_pdf_heading_level("Amazing!", false, Some("")), None);
+        
+        // Too short
+        assert_eq!(actor.detect_pdf_heading_level("Hi", false, Some("")), None);
+        
+        // Too long
+        let long_line = "A".repeat(110);
+        assert_eq!(actor.detect_pdf_heading_level(&long_line, false, Some("")), None);
+    }
+
+    #[test]
+    fn test_pdf_parse_elements_multilevel_hierarchy() {
+        let actor = create_test_actor();
+        
+        // Simulate a typical document structure with multiple heading levels
+        let content = r#"
+CHAPTER ONE
+
+Introduction
+
+Overview:
+
+The Background
+
+This is a paragraph of content that should not be detected as a heading because it is longer and more prose-like in nature.
+"#;
+        
+        // Test with None for file_path to use text-based heuristics
+        let elements = actor.parse_pdf_elements(content, None);
+        
+        // Verify we get multiple heading levels
+        let h1_count = elements.iter().filter(|e| matches!(e, DocumentElement::Heading { level: 1, .. })).count();
+        let h2_count = elements.iter().filter(|e| matches!(e, DocumentElement::Heading { level: 2, .. })).count();
+        let h3_count = elements.iter().filter(|e| matches!(e, DocumentElement::Heading { level: 3, .. })).count();
+        let para_count = elements.iter().filter(|e| matches!(e, DocumentElement::Paragraph(_))).count();
+        
+        // Should detect multiple heading levels
+        assert!(h1_count >= 1, "Should detect at least 1 H1 heading (ALL CAPS standalone)");
+        assert!(h2_count + h3_count >= 1, "Should detect H2 or H3 headings");
+        assert!(para_count >= 1, "Should detect paragraph content");
+    }
+
+    #[test]
+    fn test_pdf_hierarchy_context_multilevel() {
+        let actor = create_test_actor();
+        
+        // Test that chunking produces multi-level context
+        let content = r#"
+MAIN SECTION
+
+Subsection Title
+
+Details And Specifications
+
+This is content that should be associated with the heading hierarchy above it.
+"#;
+        
+        // Test with None for file_path to use text-based heuristics
+        let elements = actor.parse_pdf_elements(content, None);
+        let chunks = actor.semantic_chunk(&elements);
+        
+        // At least one chunk should have multi-level context (contains " > ")
+        let has_multilevel = chunks.iter().any(|(ctx, _)| ctx.contains(" > "));
+        assert!(has_multilevel, "Should produce chunks with multi-level hierarchy context. Chunks: {:?}", 
+            chunks.iter().map(|(ctx, _)| ctx).collect::<Vec<_>>());
+    }
+
+    // ========================================================================
+    // HYBRID PDF EXTRACTION TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_pdf_heading_struct() {
+        // Test PdfHeading struct creation
+        let heading = PdfHeading {
+            level: 1,
+            title: "Chapter 1".to_string(),
+            page: Some(1),
+        };
+        assert_eq!(heading.level, 1);
+        assert_eq!(heading.title, "Chapter 1");
+    }
+
+    #[test]
+    fn test_normalize_text_for_matching() {
+        // Test text normalization
+        assert_eq!(normalize_text_for_matching("  Hello   World  "), "hello world");
+        assert_eq!(normalize_text_for_matching("CHAPTER ONE"), "chapter one");
+        assert_eq!(normalize_text_for_matching("A\t\tB"), "a b");
+    }
+
+    #[test]
+    fn test_merge_headings_with_content() {
+        let actor = create_test_actor();
+        
+        // Simulate headings from bookmarks
+        let headings = vec![
+            PdfHeading { level: 1, title: "Introduction".to_string(), page: Some(1) },
+            PdfHeading { level: 2, title: "Background".to_string(), page: Some(2) },
+            PdfHeading { level: 3, title: "Details".to_string(), page: Some(3) },
+        ];
+        
+        let content = r#"
+Introduction
+
+This is the introduction paragraph.
+
+Background
+
+Some background information here.
+
+Details
+
+Detailed explanation follows.
+"#;
+        
+        let elements = actor.merge_headings_with_content(&headings, content);
+        
+        // Should find the headings
+        let h1_count = elements.iter().filter(|e| matches!(e, DocumentElement::Heading { level: 1, .. })).count();
+        let h2_count = elements.iter().filter(|e| matches!(e, DocumentElement::Heading { level: 2, .. })).count();
+        let h3_count = elements.iter().filter(|e| matches!(e, DocumentElement::Heading { level: 3, .. })).count();
+        let para_count = elements.iter().filter(|e| matches!(e, DocumentElement::Paragraph(_))).count();
+        
+        assert_eq!(h1_count, 1, "Should detect 1 H1 heading");
+        assert_eq!(h2_count, 1, "Should detect 1 H2 heading");
+        assert_eq!(h3_count, 1, "Should detect 1 H3 heading");
+        assert!(para_count >= 3, "Should detect paragraph content");
+    }
+
+    #[test]
+    fn test_hybrid_extraction_fallback() {
+        let actor = create_test_actor();
+        
+        // Test with None for file_path - should use heuristics fallback
+        let content = r#"
+MAIN SECTION
+
+Subsection Title
+
+This is paragraph content.
+"#;
+        
+        let elements = actor.parse_pdf_elements(content, None);
+        
+        // Should still detect headings via heuristics
+        let heading_count = elements.iter().filter(|e| matches!(e, DocumentElement::Heading { .. })).count();
+        assert!(heading_count >= 1, "Should detect headings via heuristics fallback");
     }
 
     #[test]

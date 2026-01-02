@@ -77,6 +77,9 @@ mcp-test-server = { path = "../mcp-test-server" }
 # PDF text extraction (pdf-extract has better font encoding handling than raw lopdf)
 pdf-extract = "0.9"
 
+# PDF structure extraction (bookmarks, outlines, font sizes)
+lopdf = "0.36"
+
 # DOCX parsing (DOCX = ZIP with XML)
 zip = "0.6"
 
