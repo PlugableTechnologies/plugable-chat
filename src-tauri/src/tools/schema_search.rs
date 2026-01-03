@@ -70,6 +70,12 @@ pub struct ColumnOutput {
     pub data_type: String,
     pub relevance: f32,
     pub description: Option<String>,
+    /// Special attributes: "primary_key", "foreign_key", "partition", "cluster"
+    #[serde(default)]
+    pub special_attributes: Vec<String>,
+    /// Top 3 most common values with percentage (e.g., "THEFT (23.5%)")
+    #[serde(default)]
+    pub top_values: Vec<String>,
 }
 
 /// Output from schema_search
@@ -181,6 +187,8 @@ impl SchemaSearchExecutor {
                     data_type: c.data_type,
                     relevance: c.relevance_score,
                     description: c.description,
+                    special_attributes: c.special_attributes,
+                    top_values: c.top_values,
                 })
                 .collect();
 
@@ -292,6 +300,8 @@ mod tests {
                         data_type: "FLOAT64".to_string(),
                         relevance: 0.75,
                         description: None,
+                        special_attributes: Vec::new(),
+                        top_values: vec!["100.00 (15%)".to_string()],
                     },
                 ],
             }],

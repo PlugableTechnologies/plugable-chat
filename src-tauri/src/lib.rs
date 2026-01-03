@@ -198,10 +198,29 @@ fn build_filtered_schema_text(
     let was_truncated = included_columns.len() > MAX_ATTACHED_TABLE_COLUMNS;
     included_columns.truncate(MAX_ATTACHED_TABLE_COLUMNS);
     
-    // Build columns section
+    // Build columns section with enhanced metadata
     schema_text.push_str("Columns:\n");
     for col in &included_columns {
-        schema_text.push_str(&format!("- {} ({})", col.name, col.data_type));
+        // Build type with special attributes
+        let mut type_parts = vec![col.data_type.clone()];
+        for attr in &col.special_attributes {
+            match attr.as_str() {
+                "primary_key" => type_parts.push("PK".to_string()),
+                "partition" => type_parts.push("PART".to_string()),
+                "cluster" => type_parts.push("CLUST".to_string()),
+                "foreign_key" => type_parts.push("FK".to_string()),
+                _ => {}
+            }
+        }
+        
+        schema_text.push_str(&format!("- {} ({})", col.name, type_parts.join(" ")));
+        
+        // Add top values inline for enum-like columns (compact format)
+        if !col.top_values.is_empty() {
+            let vals: String = col.top_values.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+            schema_text.push_str(&format!(" [{}]", vals));
+        }
+        
         if let Some(ref d) = col.description {
             schema_text.push_str(&format!(": {}", d));
         }
@@ -2092,6 +2111,8 @@ pub(crate) async fn run_agentic_loop(
                                     data_type: c.data_type.clone(),
                                     nullable: false,
                                     description: c.description.clone(),
+                                    special_attributes: c.special_attributes.clone(),
+                                    top_values: c.top_values.clone(),
                                 }).collect(),
                                 description: t.description.clone(),
                             }
@@ -3521,7 +3542,9 @@ async fn chat(
                 name: c.name.clone(),
                 data_type: c.data_type.clone(),
                 nullable: true, // Default to true if not known
-                description: None,
+                description: c.description.clone(),
+                special_attributes: c.special_attributes.clone(),
+                top_values: c.top_values.clone(),
             }).collect(),
         }).collect())
         .unwrap_or_default();
@@ -3946,7 +3969,9 @@ async fn get_system_prompt_preview(
                 name: c.name.clone(),
                 data_type: c.data_type.clone(),
                 nullable: true,
-                description: None,
+                description: c.description.clone(),
+                special_attributes: c.special_attributes.clone(),
+                top_values: c.top_values.clone(),
             }).collect(),
         }).collect())
         .unwrap_or_default();

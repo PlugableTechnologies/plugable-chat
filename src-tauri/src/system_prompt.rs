@@ -4,7 +4,7 @@
 //! consolidating guidance, format-specific syntax, and tool documentation.
 
 use std::collections::HashSet;
-use crate::agentic_state::{Capability, McpToolInfo, TableInfo, RagChunk};
+use crate::agentic_state::{Capability, ColumnInfo, McpToolInfo, TableInfo, RagChunk};
 use crate::protocol::{ToolSchema, ToolFormat};
 use crate::settings::ToolCallFormatName;
 use crate::tool_registry::ToolSearchResult;
@@ -407,6 +407,36 @@ pub fn build_auto_tool_search_section(tools: &[ToolSearchResult]) -> Option<Stri
     Some(format!("### Auto tool search\n{}", body))
 }
 
+/// Format a column from schema search output (compact, token-efficient)
+fn format_column_output_compact(col: &crate::tools::schema_search::ColumnOutput) -> String {
+    let mut type_parts = vec![col.data_type.clone()];
+
+    // Add key suffixes for special attributes
+    for attr in &col.special_attributes {
+        match attr.as_str() {
+            "primary_key" => type_parts.push("PK".to_string()),
+            "partition" => type_parts.push("PART".to_string()),
+            "cluster" => type_parts.push("CLUST".to_string()),
+            "foreign_key" => type_parts.push("FK".to_string()),
+            _ => {}
+        }
+    }
+
+    // Add top values inline if present (compact format)
+    if !col.top_values.is_empty() {
+        let vals: String = col
+            .top_values
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{} ({}: {})", col.name, type_parts.join(" "), vals)
+    } else {
+        format!("{} ({})", col.name, type_parts.join(" "))
+    }
+}
+
 /// Build auto-discovery schema search section.
 pub fn build_auto_schema_search_section(
     tables: &[crate::tools::schema_search::TableMatchOutput],
@@ -453,19 +483,45 @@ pub fn build_auto_schema_search_section(
                 line.push_str(&format!(" — {}", desc.trim()));
             }
         }
+
+        // Collect key columns for quick reference
+        let key_cols: Vec<String> = table
+            .relevant_columns
+            .iter()
+            .filter(|c| !c.special_attributes.is_empty())
+            .map(|c| {
+                let attr = c.special_attributes.first().map(|a| match a.as_str() {
+                    "primary_key" => "PK",
+                    "partition" => "PART",
+                    "cluster" => "CLUST",
+                    "foreign_key" => "FK",
+                    _ => "",
+                }).unwrap_or("");
+                if attr.is_empty() {
+                    c.name.clone()
+                } else {
+                    format!("{} ({})", c.name, attr)
+                }
+            })
+            .collect();
+
+        if !key_cols.is_empty() {
+            line.push_str(&format!("\n  Key columns: {}", key_cols.join(", ")));
+        }
+
         if !table.relevant_columns.is_empty() {
             let cols: Vec<String> = table
                 .relevant_columns
                 .iter()
                 .take(40) // Show up to 40 columns
-                .map(|c| format!("{} ({})", c.name, c.data_type))
+                .map(|c| format_column_output_compact(c))
                 .collect();
             let cols_str = if cols.len() < table.relevant_columns.len() {
                 format!("{}, ... ({} more)", cols.join(", "), table.relevant_columns.len() - cols.len())
             } else {
                 cols.join(", ")
             };
-            line.push_str(&format!("\n  cols: {}", cols_str));
+            line.push_str(&format!("\n  Columns: {}", cols_str));
         }
         body.push_str(&line);
     }
@@ -598,6 +654,37 @@ pub fn build_retrieved_sql_context(relevancy: f32, table_list: &str, sql_instruc
     )
 }
 
+/// Format a single column for the system prompt (compact, token-efficient)
+fn format_column_compact(col: &ColumnInfo) -> String {
+    let mut type_parts = vec![col.data_type.clone()];
+
+    // Add key suffixes for special attributes
+    for attr in &col.special_attributes {
+        match attr.as_str() {
+            "primary_key" => type_parts.push("PK".to_string()),
+            "partition" => type_parts.push("PART".to_string()),
+            "cluster" => type_parts.push("CLUST".to_string()),
+            "foreign_key" => type_parts.push("FK".to_string()),
+            _ => {}
+        }
+    }
+
+    // Add top values inline if present (compact format)
+    if !col.top_values.is_empty() {
+        // Just show the values, formatted compactly
+        let vals: String = col
+            .top_values
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{} ({}: {})", col.name, type_parts.join(" "), vals)
+    } else {
+        format!("{} ({})", col.name, type_parts.join(" "))
+    }
+}
+
 /// Format a list of tables for the prompt.
 pub fn format_table_list(tables: &[TableInfo]) -> String {
     if tables.is_empty() {
@@ -607,24 +694,59 @@ pub fn format_table_list(tables: &[TableInfo]) -> String {
     tables
         .iter()
         .map(|table| {
+            // Collect key columns (those with special_attributes)
+            let key_cols: Vec<String> = table
+                .columns
+                .iter()
+                .filter(|c| !c.special_attributes.is_empty())
+                .map(|c| {
+                    let attr = c.special_attributes.first().map(|a| match a.as_str() {
+                        "primary_key" => "PK",
+                        "partition" => "PART",
+                        "cluster" => "CLUST",
+                        "foreign_key" => "FK",
+                        _ => "",
+                    }).unwrap_or("");
+                    if attr.is_empty() {
+                        c.name.clone()
+                    } else {
+                        format!("{} ({})", c.name, attr)
+                    }
+                })
+                .collect();
+
             let cols: Vec<String> = table
                 .columns
                 .iter()
                 .take(40) // Show up to 40 columns to give model enough context
-                .map(|c| format!("{} ({})", c.name, c.data_type))
+                .map(|c| format_column_compact(c))
                 .collect();
             let cols_str = if cols.len() < table.columns.len() {
                 format!("{}, ... ({} more)", cols.join(", "), table.columns.len() - cols.len())
             } else {
                 cols.join(", ")
             };
-            format!(
-                "- **{}** [{} Syntax] (queryable via `sql_select`, relevancy: {:.2})\n  Columns: {}",
+
+            // Build the table entry with optional description and key columns
+            let mut entry = format!(
+                "- **{}** [{} Syntax] (queryable via `sql_select`, relevancy: {:.2})",
                 table.fully_qualified_name,
                 table.sql_dialect,
-                table.relevancy,
-                cols_str
-            )
+                table.relevancy
+            );
+
+            if let Some(desc) = &table.description {
+                if !desc.is_empty() {
+                    entry.push_str(&format!("\n  Description: {}", desc));
+                }
+            }
+
+            if !key_cols.is_empty() {
+                entry.push_str(&format!("\n  Key columns: {}", key_cols.join(", ")));
+            }
+
+            entry.push_str(&format!("\n  Columns: {}", cols_str));
+            entry
         })
         .collect::<Vec<_>>()
         .join("\n")

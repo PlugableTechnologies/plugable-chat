@@ -247,6 +247,12 @@ pub struct ColumnInfo {
     pub data_type: String,
     pub nullable: bool,
     pub description: Option<String>,
+    /// Special attributes: "primary_key", "foreign_key", "partition", "cluster"
+    #[serde(default)]
+    pub special_attributes: Vec<String>,
+    /// Top 3 most common values with percentage (e.g., "THEFT (23.5%)")
+    #[serde(default)]
+    pub top_values: Vec<String>,
 }
 
 /// Table info with relevancy for state machine

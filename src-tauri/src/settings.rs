@@ -498,6 +498,12 @@ pub struct CachedColumnSchema {
     pub nullable: bool,
     #[serde(default)]
     pub description: Option<String>,
+    /// Special attributes: "primary_key", "foreign_key", "partition", "cluster"
+    #[serde(default)]
+    pub special_attributes: Vec<String>,
+    /// Top 3 most common values with percentage (e.g., "THEFT (23.5%)")
+    #[serde(default)]
+    pub top_values: Vec<String>,
 }
 
 /// Configuration for a single MCP server

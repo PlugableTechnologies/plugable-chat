@@ -692,16 +692,43 @@ pub fn build_table_embedding_text(schema: &CachedTableSchema) -> String {
 
 /// Build embedding text for a column
 pub fn build_column_embedding_text(table_name: &str, column: &crate::settings::CachedColumnSchema) -> String {
+    // Add special attributes (e.g., "primary_key") to help with semantic search for joins
+    let attrs = if column.special_attributes.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", column.special_attributes.join(", "))
+    };
+
+    // Add top values for better semantic matching (e.g., finding "crime type" columns)
+    let top_vals = if column.top_values.is_empty() {
+        String::new()
+    } else {
+        // Extract just the value names without percentages for cleaner embedding
+        let vals: Vec<String> = column
+            .top_values
+            .iter()
+            .take(3)
+            .filter_map(|v| v.split(" (").next().map(|s| s.to_string()))
+            .collect();
+        if vals.is_empty() {
+            String::new()
+        } else {
+            format!("; examples: {}", vals.join(", "))
+        }
+    };
+
     format!(
-        "column {}.{} type {} {}; description: {}",
+        "column {}.{} type {} {}{}; description: {}{}",
         table_name,
         column.name,
         column.data_type,
         if column.nullable { "nullable" } else { "not null" },
+        attrs,
         column
             .description
             .clone()
-            .unwrap_or_else(|| "none".to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        top_vals
     )
 }
 

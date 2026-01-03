@@ -342,6 +342,11 @@ impl DatabaseToolboxActor {
             return Err(err_msg);
         }
 
+        // Empty content array is valid - means query returned zero rows
+        if result.content.is_empty() {
+            return Ok(Value::Array(vec![]));
+        }
+
         if let Some(first) = result.content.first() {
             // If there are multiple text items, treat them as an array.
             // Try to parse each as JSON if possible, otherwise keep as string.
@@ -733,7 +738,7 @@ impl DatabaseToolboxActor {
             .clone();
         drop(state);
 
-        match source.kind {
+        let mut schema = match source.kind {
             SupportedDatabaseKind::Bigquery => {
                 let parts: Vec<&str> = fully_qualified_table.split('.').collect();
                 if parts.len() < 2 {
@@ -769,12 +774,64 @@ impl DatabaseToolboxActor {
                     )
                     .await?;
 
-                self.parse_bigquery_table_info(&source.id, source.kind, source.get_sql_dialect(), &response)
+                self.parse_bigquery_table_info(&source.id, source.kind, source.get_sql_dialect(), &response)?
             }
             _ => {
                 // For other databases, use INFORMATION_SCHEMA
                 self.get_table_info_via_information_schema(&source, fully_qualified_table)
-                    .await
+                    .await?
+            }
+        };
+
+        // Enrich columns with special_attributes and top_values
+        self.enrich_columns_with_metadata(&mut schema).await;
+
+        Ok(schema)
+    }
+
+    /// Enrich columns with special_attributes (from key lists) and top_values (from queries)
+    async fn enrich_columns_with_metadata(&self, schema: &mut CachedTableSchema) {
+        // Build sets for quick lookup
+        let primary_keys: std::collections::HashSet<&str> = 
+            schema.primary_keys.iter().map(|s| s.as_str()).collect();
+        let partition_cols: std::collections::HashSet<&str> = 
+            schema.partition_columns.iter().map(|s| s.as_str()).collect();
+        let cluster_cols: std::collections::HashSet<&str> = 
+            schema.cluster_columns.iter().map(|s| s.as_str()).collect();
+
+        for column in &mut schema.columns {
+            // Set special_attributes based on key membership
+            let mut attrs = Vec::new();
+            if primary_keys.contains(column.name.as_str()) {
+                attrs.push("primary_key".to_string());
+            }
+            if partition_cols.contains(column.name.as_str()) {
+                attrs.push("partition".to_string());
+            }
+            if cluster_cols.contains(column.name.as_str()) {
+                attrs.push("cluster".to_string());
+            }
+            column.special_attributes = attrs;
+
+            // Query top values for this column
+            match self
+                .query_column_top_values(
+                    &schema.source_id,
+                    &schema.fully_qualified_name,
+                    &column.name,
+                )
+                .await
+            {
+                Ok(top_vals) => {
+                    column.top_values = top_vals;
+                }
+                Err(e) => {
+                    // Log but don't fail - top values are optional
+                    println!(
+                        "[DatabaseToolboxActor] Could not get top values for {}.{}: {}",
+                        schema.fully_qualified_name, column.name, e
+                    );
+                }
             }
         }
     }
@@ -905,6 +962,164 @@ impl DatabaseToolboxActor {
         Ok(())
     }
 
+    /// Query top 3 most common values for a column with percentages
+    /// Returns formatted strings like "THEFT (23.5%)"
+    pub async fn query_column_top_values(
+        &self,
+        source_id: &str,
+        fully_qualified_table: &str,
+        column_name: &str,
+    ) -> Result<Vec<String>, String> {
+        let source = {
+            let state = self.state.read().await;
+            let config = state.config.as_ref().ok_or("Toolbox not configured")?;
+            config
+                .sources
+                .iter()
+                .find(|s| s.id == source_id)
+                .ok_or_else(|| format!("Source not found: {}", source_id))?
+                .clone()
+        };
+
+        // Build the SQL query based on database kind
+        // We use a subquery to get total count, then compute percentage
+        let sql = match source.kind {
+            SupportedDatabaseKind::Bigquery => format!(
+                r#"SELECT `{col}` AS val, COUNT(*) * 100.0 / (SELECT COUNT(*) FROM `{table}`) AS pct
+                   FROM `{table}`
+                   WHERE `{col}` IS NOT NULL
+                   GROUP BY `{col}`
+                   ORDER BY COUNT(*) DESC
+                   LIMIT 3"#,
+                col = column_name,
+                table = fully_qualified_table
+            ),
+            SupportedDatabaseKind::Postgres => format!(
+                r#"SELECT "{col}" AS val, COUNT(*) * 100.0 / (SELECT COUNT(*) FROM {table}) AS pct
+                   FROM {table}
+                   WHERE "{col}" IS NOT NULL
+                   GROUP BY "{col}"
+                   ORDER BY COUNT(*) DESC
+                   LIMIT 3"#,
+                col = column_name,
+                table = fully_qualified_table
+            ),
+            SupportedDatabaseKind::Mysql => format!(
+                r#"SELECT `{col}` AS val, COUNT(*) * 100.0 / (SELECT COUNT(*) FROM {table}) AS pct
+                   FROM {table}
+                   WHERE `{col}` IS NOT NULL
+                   GROUP BY `{col}`
+                   ORDER BY COUNT(*) DESC
+                   LIMIT 3"#,
+                col = column_name,
+                table = fully_qualified_table
+            ),
+            SupportedDatabaseKind::Sqlite => format!(
+                r#"SELECT "{col}" AS val, COUNT(*) * 100.0 / (SELECT COUNT(*) FROM {table}) AS pct
+                   FROM {table}
+                   WHERE "{col}" IS NOT NULL
+                   GROUP BY "{col}"
+                   ORDER BY COUNT(*) DESC
+                   LIMIT 3"#,
+                col = column_name,
+                table = fully_qualified_table
+            ),
+            SupportedDatabaseKind::Spanner => format!(
+                r#"SELECT `{col}` AS val, COUNT(*) * 100.0 / (SELECT COUNT(*) FROM {table}) AS pct
+                   FROM {table}
+                   WHERE `{col}` IS NOT NULL
+                   GROUP BY `{col}`
+                   ORDER BY COUNT(*) DESC
+                   LIMIT 3"#,
+                col = column_name,
+                table = fully_qualified_table
+            ),
+        };
+
+        let execute_candidates: Vec<&str> = if source.kind == SupportedDatabaseKind::Bigquery {
+            vec!["sql_select", "execute_sql", "bigquery-execute-sql"]
+        } else {
+            vec![source.kind.execute_tool_name(), "execute_sql"]
+        };
+
+        let result = self
+            .call_mcp_tool_value_checked(
+                &source.id,
+                "query top values",
+                &execute_candidates,
+                json!({ "sql": sql }),
+            )
+            .await;
+
+        match result {
+            Ok(response) => self.parse_top_values_response(&response),
+            Err(e) => {
+                // Log but don't fail - top values are optional enhancement
+                println!(
+                    "[DatabaseToolboxActor] Failed to query top values for {}.{}: {}",
+                    fully_qualified_table, column_name, e
+                );
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Parse the response from a top values query into formatted strings
+    fn parse_top_values_response(&self, response: &Value) -> Result<Vec<String>, String> {
+        let rows: Vec<&Value> = if let Some(arr) = response
+            .get("rows")
+            .or_else(|| response.get("result"))
+            .or_else(|| response.get("data"))
+            .and_then(|r| r.as_array())
+        {
+            arr.iter().collect()
+        } else if let Some(arr) = response.as_array() {
+            arr.iter().collect()
+        } else if response.is_object() && response.get("val").is_some() {
+            // Single row result
+            vec![response]
+        } else {
+            return Ok(Vec::new());
+        };
+
+        let mut results = Vec::new();
+        for row in rows.iter().take(3) {
+            if let Some(obj) = row.as_object() {
+                let val = obj
+                    .get("val")
+                    .or_else(|| obj.get("VAL"))
+                    .and_then(|v| {
+                        if v.is_string() {
+                            v.as_str().map(|s| s.to_string())
+                        } else if v.is_number() {
+                            Some(v.to_string())
+                        } else if v.is_boolean() {
+                            Some(if v.as_bool().unwrap_or(false) { "true" } else { "false" }.to_string())
+                        } else {
+                            None
+                        }
+                    });
+
+                let pct = obj
+                    .get("pct")
+                    .or_else(|| obj.get("PCT"))
+                    .and_then(|v| v.as_f64());
+
+                if let (Some(val_str), Some(pct_val)) = (val, pct) {
+                    // Truncate long values for readability
+                    let display_val = if val_str.len() > 30 {
+                        format!("{}...", &val_str[..27])
+                    } else {
+                        val_str
+                    };
+                    results.push(format!("{} ({:.1}%)", display_val, pct_val));
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     // ========== Response Parsing Helpers ==========
 
     fn parse_list_response(&self, response: Value) -> Result<Vec<String>, String> {
@@ -995,6 +1210,8 @@ impl DatabaseToolboxActor {
                         .and_then(|d| d.as_str())
                         .filter(|s| !s.is_empty())
                         .map(String::from),
+                    special_attributes: Vec::new(),
+                    top_values: Vec::new(),
                 })
             })
             .collect();
@@ -1106,6 +1323,8 @@ impl DatabaseToolboxActor {
                             data_type: obj.get("type")?.as_str()?.to_string(),
                             nullable: obj.get("notnull")?.as_i64()? == 0,
                             description: None,
+                            special_attributes: Vec::new(),
+                            top_values: Vec::new(),
                         });
                     }
                     // Legacy array format
@@ -1115,6 +1334,8 @@ impl DatabaseToolboxActor {
                         data_type: arr.get(2)?.as_str()?.to_string(),
                         nullable: arr.get(3)?.as_i64()? == 0,
                         description: None,
+                        special_attributes: Vec::new(),
+                        top_values: Vec::new(),
                     })
                 } else {
                     // Standard INFORMATION_SCHEMA format
@@ -1124,6 +1345,8 @@ impl DatabaseToolboxActor {
                         data_type: obj.get("data_type")?.as_str()?.to_string(),
                         nullable: obj.get("is_nullable")?.as_str()? == "YES",
                         description: None,
+                        special_attributes: Vec::new(),
+                        top_values: Vec::new(),
                     })
                 }
             })

@@ -110,6 +110,12 @@ pub struct ColumnSearchResult {
     pub data_type: String,
     pub relevance_score: f32,
     pub description: Option<String>,
+    /// Special attributes: "primary_key", "foreign_key", "partition", "cluster"
+    #[serde(default)]
+    pub special_attributes: Vec<String>,
+    /// Top 3 most common values with percentage (e.g., "THEFT (23.5%)")
+    #[serde(default)]
+    pub top_values: Vec<String>,
 }
 
 /// Schema Vector Store Actor
@@ -278,6 +284,8 @@ fn columns_table_schema() -> Arc<Schema> {
         Field::new("data_type", DataType::Utf8, false),
         Field::new("nullable", DataType::Boolean, false),
         Field::new("description", DataType::Utf8, true),
+        Field::new("special_attributes", DataType::Utf8, false), // JSON array
+        Field::new("top_values", DataType::Utf8, false),         // JSON array
         Field::new("chunk_key", DataType::Utf8, false),
         Field::new(
             "vector",
@@ -486,6 +494,12 @@ async fn upsert_column_schema(
     let type_array = StringArray::from(vec![column.data_type.clone()]);
     let nullable_array = BooleanArray::from(vec![column.nullable]);
     let desc_array = StringArray::from(vec![column.description.clone().unwrap_or_default()]);
+    let special_attrs_array = StringArray::from(vec![
+        serde_json::to_string(&column.special_attributes).unwrap_or_else(|_| "[]".to_string())
+    ]);
+    let top_values_array = StringArray::from(vec![
+        serde_json::to_string(&column.top_values).unwrap_or_else(|_| "[]".to_string())
+    ]);
     let chunk_array = StringArray::from(vec![chunk_key.to_string()]);
 
     let vector_values = Float32Array::from(embedding);
@@ -510,6 +524,8 @@ async fn upsert_column_schema(
             Arc::new(type_array),
             Arc::new(nullable_array),
             Arc::new(desc_array),
+            Arc::new(special_attrs_array),
+            Arc::new(top_values_array),
             Arc::new(chunk_array),
             Arc::new(vector_array),
         ],
@@ -695,6 +711,12 @@ async fn search_columns(
         let descriptions = batch
             .column_by_name("description")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let special_attrs = batch
+            .column_by_name("special_attributes")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let top_vals = batch
+            .column_by_name("top_values")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let distances = batch
             .column_by_name("_distance")
             .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
@@ -710,6 +732,12 @@ async fn search_columns(
                     data_type: ty.value(i).to_string(),
                     relevance_score: score,
                     description: descriptions.map(|d| d.value(i).to_string()).filter(|s| !s.is_empty()),
+                    special_attributes: special_attrs
+                        .and_then(|s| serde_json::from_str(s.value(i)).ok())
+                        .unwrap_or_default(),
+                    top_values: top_vals
+                        .and_then(|s| serde_json::from_str(s.value(i)).ok())
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -998,6 +1026,8 @@ mod tests {
             data_type: "FLOAT64".to_string(),
             relevance_score: 0.75,
             description: Some("Order total in USD".to_string()),
+            special_attributes: vec!["primary_key".to_string()],
+            top_values: vec!["100.00 (15%)".to_string(), "50.00 (10%)".to_string()],
         };
 
         let json = serde_json::to_string(&result).unwrap();
