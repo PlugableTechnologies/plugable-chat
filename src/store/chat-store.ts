@@ -1420,6 +1420,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     return;
                 }
                 
+                // Clear status when prewarm completes
+                if (phase === 'prewarm_complete') {
+                    set((state) => {
+                        // Only clear if currently showing a loading status (prewarm)
+                        if (state.operationStatus?.type === 'loading') {
+                            return { operationStatus: null };
+                        }
+                        return state;
+                    });
+                    return;
+                }
+                
                 set((state) => {
                     // Only update if we're actively streaming
                     if (!state.assistantStreamingActive) {

@@ -566,6 +566,14 @@ impl ModelGatewayActor {
                             model_name,
                             elapsed
                         );
+                        // Clear the loading status in UI
+                        let _ = app_handle.emit(
+                            "chat-stream-status",
+                            serde_json::json!({
+                                "phase": "prewarm_complete",
+                                "message": format!("{} ready", model_name)
+                            }),
+                        );
                     }
                     Ok(resp) => {
                         println!(
