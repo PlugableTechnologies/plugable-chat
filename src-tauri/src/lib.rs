@@ -4339,6 +4339,7 @@ pub fn run() {
             update_database_toolbox_config,
             get_cached_database_schemas,
             refresh_database_schemas,
+            refresh_database_schema_for_source,
             search_database_tables,
             set_schema_table_enabled,
             // MCP commands

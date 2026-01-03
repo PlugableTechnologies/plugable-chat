@@ -790,7 +790,15 @@ impl DatabaseToolboxActor {
     }
 
     /// Enrich columns with special_attributes (from key lists) and top_values (from queries)
+    /// 
+    /// NOTE: Top values queries are expensive (one SQL query per column). To avoid
+    /// overwhelming the MCP server or causing memory issues, we limit:
+    /// - Max 20 columns will have top_values queried
+    /// - Only query for TEXT/STRING columns (numeric columns rarely benefit from top values)
+    /// - Skip columns with names suggesting they are IDs, timestamps, or coordinates
     async fn enrich_columns_with_metadata(&self, schema: &mut CachedTableSchema) {
+        const MAX_TOP_VALUES_COLUMNS: usize = 20;
+        
         // Build sets for quick lookup
         let primary_keys: std::collections::HashSet<&str> = 
             schema.primary_keys.iter().map(|s| s.as_str()).collect();
@@ -799,8 +807,8 @@ impl DatabaseToolboxActor {
         let cluster_cols: std::collections::HashSet<&str> = 
             schema.cluster_columns.iter().map(|s| s.as_str()).collect();
 
+        // First pass: set special_attributes for all columns (fast, no queries)
         for column in &mut schema.columns {
-            // Set special_attributes based on key membership
             let mut attrs = Vec::new();
             if primary_keys.contains(column.name.as_str()) {
                 attrs.push("primary_key".to_string());
@@ -812,28 +820,110 @@ impl DatabaseToolboxActor {
                 attrs.push("cluster".to_string());
             }
             column.special_attributes = attrs;
+        }
 
-            // Query top values for this column
+        // Helper to check if a column is likely to benefit from top values
+        let is_candidate_for_top_values = |col: &CachedColumnSchema| -> bool {
+            let name_lower = col.name.to_lowercase();
+            let type_lower = col.data_type.to_lowercase();
+            
+            // Skip columns that are likely IDs, timestamps, coordinates, or numeric aggregates
+            let skip_patterns = [
+                "_id", "id_", "_key", "_pk", "_fk",
+                "timestamp", "created_at", "updated_at", "date_",
+                "latitude", "longitude", "_lat", "_lng", "_lon",
+                "coordinate", "_x", "_y", "_z",
+                "_sum", "_avg", "_count", "_min", "_max", "_mean", "_std",
+                "_prev_", "_yoy_", "_mom_", "_qoq_",  // Time-series aggregates
+            ];
+            
+            for pattern in skip_patterns {
+                if name_lower.contains(pattern) {
+                    return false;
+                }
+            }
+            
+            // Prefer text/string columns over numeric
+            let is_text = type_lower.contains("string") 
+                || type_lower.contains("text") 
+                || type_lower.contains("varchar")
+                || type_lower.contains("char");
+            
+            // Include boolean-like columns (often have meaningful top values)
+            let is_boolean = type_lower.contains("bool") 
+                || name_lower.starts_with("is_") 
+                || name_lower.starts_with("has_");
+            
+            is_text || is_boolean
+        };
+
+        // Select columns for top values querying
+        let candidates: Vec<usize> = schema
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, col)| is_candidate_for_top_values(col))
+            .map(|(idx, _)| idx)
+            .take(MAX_TOP_VALUES_COLUMNS)
+            .collect();
+
+        if candidates.is_empty() {
+            println!(
+                "[DatabaseToolboxActor] No suitable columns for top_values in {}",
+                schema.fully_qualified_name
+            );
+            return;
+        }
+
+        println!(
+            "[DatabaseToolboxActor] Querying top_values for {}/{} columns in {} (candidates: {})",
+            candidates.len(),
+            schema.columns.len(),
+            schema.fully_qualified_name,
+            candidates.iter()
+                .map(|&i| schema.columns[i].name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        // Second pass: query top values for selected columns
+        for (query_num, &col_idx) in candidates.iter().enumerate() {
+            let column = &schema.columns[col_idx];
+            let col_name = column.name.clone();
+            
+            println!(
+                "[DatabaseToolboxActor] Top values query {}/{}: {}.{}",
+                query_num + 1,
+                candidates.len(),
+                schema.fully_qualified_name,
+                col_name
+            );
+
             match self
                 .query_column_top_values(
                     &schema.source_id,
                     &schema.fully_qualified_name,
-                    &column.name,
+                    &col_name,
                 )
                 .await
             {
                 Ok(top_vals) => {
-                    column.top_values = top_vals;
+                    schema.columns[col_idx].top_values = top_vals;
                 }
                 Err(e) => {
                     // Log but don't fail - top values are optional
                     println!(
-                        "[DatabaseToolboxActor] Could not get top values for {}.{}: {}",
-                        schema.fully_qualified_name, column.name, e
+                        "[DatabaseToolboxActor] ⚠️ Could not get top values for {}.{}: {}",
+                        schema.fully_qualified_name, col_name, e
                     );
                 }
             }
         }
+        
+        println!(
+            "[DatabaseToolboxActor] ✓ Completed top_values enrichment for {}",
+            schema.fully_qualified_name
+        );
     }
 
     /// Get table info using INFORMATION_SCHEMA queries

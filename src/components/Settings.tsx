@@ -2704,6 +2704,20 @@ interface SchemaRefreshStatus extends SchemaRefreshProgress {
     startTime: number;
 }
 
+// Per-source error information from schema refresh
+interface SchemaRefreshError {
+    source_id: string;
+    source_name: string;
+    error: string;
+    details: string | null;
+}
+
+// Schema refresh result with detailed per-source status
+interface SchemaRefreshResult {
+    sources: unknown[];
+    errors: SchemaRefreshError[];
+}
+
 function SchemaRefreshStatusBar({ status }: { status: SchemaRefreshStatus }) {
     const [elapsed, setElapsed] = useState(0);
 
@@ -2766,6 +2780,8 @@ function DatabasesTab({
     const [saveError, setSaveError] = useState<string | null>(null);
     const [refreshingSources, setRefreshingSources] = useState<Record<string, boolean>>({});
     const [refreshStatus, setRefreshStatus] = useState<SchemaRefreshStatus | null>(null);
+    // Per-source errors from the last refresh attempt
+    const [sourceErrors, setSourceErrors] = useState<Record<string, SchemaRefreshError>>({});
 
     useEffect(() => {
         const unlistenPromise = listen<SchemaRefreshProgress>('schema-refresh-progress', (event) => {
@@ -2862,13 +2878,41 @@ function DatabasesTab({
     const handleRefreshSchemas = async (sourceId: string) => {
         setRefreshingSources(prev => ({ ...prev, [sourceId]: true }));
         setSaveError(null);
+        // Clear any previous error for this source
+        setSourceErrors(prev => {
+            const next = { ...prev };
+            delete next[sourceId];
+            return next;
+        });
         try {
-            // Backend refresh_database_schemas refreshes all enabled sources
-            // For now we'll just call it and it will refresh all enabled ones
-            // In the future we might want a per-source refresh command
-            await invoke('refresh_database_schemas');
+            // Use per-source refresh command to only refresh the clicked source
+            const result = await invoke<SchemaRefreshResult>('refresh_database_schema_for_source', {
+                sourceId
+            });
+            
+            // Check for errors in the result
+            if (result.errors && result.errors.length > 0) {
+                const error = result.errors[0]; // There should be at most one for single-source refresh
+                setSourceErrors(prev => ({
+                    ...prev,
+                    [sourceId]: error
+                }));
+                setSaveError(`Refresh failed for '${error.source_name}': ${error.error}`);
+            }
         } catch (err: any) {
-            setSaveError(`Refresh failed: ${err?.message || String(err)}`);
+            const errorMessage = err?.message || String(err);
+            setSaveError(`Refresh failed: ${errorMessage}`);
+            // Also set a source-specific error
+            const source = toolboxConfig.sources.find(s => s.id === sourceId);
+            setSourceErrors(prev => ({
+                ...prev,
+                [sourceId]: {
+                    source_id: sourceId,
+                    source_name: source?.name || sourceId,
+                    error: errorMessage,
+                    details: null
+                }
+            }));
         } finally {
             setRefreshingSources(prev => ({ ...prev, [sourceId]: false }));
         }
@@ -3018,6 +3062,41 @@ function DatabasesTab({
                                 )}
                             </div>
                         </div>
+
+                        {/* Per-source error display */}
+                        {sourceErrors[source.id] && (
+                            <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm">
+                                <AlertCircle className="text-red-500 flex-shrink-0 mt-0.5" size={14} />
+                                <div className="flex-1 min-w-0">
+                                    <div className="font-medium text-red-800 text-xs">Schema refresh failed</div>
+                                    <p className="text-xs text-red-700 break-words">{sourceErrors[source.id].error}</p>
+                                    {sourceErrors[source.id].details && (
+                                        <p className="text-[10px] text-red-600 mt-1 break-words">{sourceErrors[source.id].details}</p>
+                                    )}
+                                    {sourceErrors[source.id].error.includes('not connected') && (
+                                        <p className="text-[10px] text-red-600 mt-1">
+                                            💡 Tip: Make sure the toolbox command path is correct and the binary exists.
+                                            Save settings first, then try refreshing again.
+                                        </p>
+                                    )}
+                                    {sourceErrors[source.id].error.includes('No command specified') && (
+                                        <p className="text-[10px] text-red-600 mt-1">
+                                            💡 Tip: Set the path to your MCP toolbox binary (e.g., /opt/homebrew/bin/toolbox).
+                                        </p>
+                                    )}
+                                </div>
+                                <button
+                                    onClick={() => setSourceErrors(prev => {
+                                        const next = { ...prev };
+                                        delete next[source.id];
+                                        return next;
+                                    })}
+                                    className="text-red-400 hover:text-red-600 flex-shrink-0"
+                                >
+                                    <X size={14} />
+                                </button>
+                            </div>
+                        )}
 
                         {/* Show description and simplified config for embedded demo sources */}
                         {source.id === 'embedded-demo' && (

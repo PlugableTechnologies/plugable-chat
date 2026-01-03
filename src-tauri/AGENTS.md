@@ -43,3 +43,13 @@ The "Cursor for SQL" feature enables the agent to interact with SQL databases th
 
 ### Supported Databases
 The Toolbox supports: BigQuery, PostgreSQL, MySQL, SQLite, and Google Cloud Spanner.
+
+### Embedded Demo Database Philosophy
+The `embedded-demo` source provides a built-in Chicago Crimes SQLite database for testing and demonstration. **Design principle: the embedded demo should use the same MCP Toolbox code paths as any other database source.** Avoid special-casing or creating separate code paths for the demo:
+
+- The demo database uses the same `DatabaseToolboxActor` → MCP Host → Toolbox binary flow as external databases
+- Schema refresh, SQL execution, and table enumeration all go through the standard MCP protocol
+- The only "special" configuration is pre-populated in `settings.rs::default_demo_database_source()`
+- Users must still configure the toolbox binary path (e.g., `/opt/homebrew/bin/toolbox`)
+
+This design ensures that testing with the demo database validates the same code paths used in production with real databases.

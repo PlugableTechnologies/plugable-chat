@@ -735,22 +735,56 @@ impl McpToolRouterActor {
     ) -> Vec<(String, Result<(), String>)> {
         let mut results = Vec::new();
 
+        println!(
+            "McpHostActor: SyncEnabledServers called with {} configs",
+            configs.len()
+        );
+        for cfg in &configs {
+            println!(
+                "McpHostActor:   Config: '{}' (id={}, enabled={}, transport={:?}, command={:?})",
+                cfg.name,
+                cfg.id,
+                cfg.enabled,
+                cfg.transport,
+                cfg.command
+            );
+        }
+
         // Get currently connected server IDs
         let connected_ids: Vec<String> = {
             let connections = self.connections.read().await;
             connections.keys().cloned().collect()
         };
 
+        println!(
+            "McpHostActor: Currently connected servers: {:?}",
+            connected_ids
+        );
 
         // Connect enabled servers that aren't connected
         for config in &configs {
             if config.enabled && !connected_ids.contains(&config.id) {
                 println!(
-                    "McpHostActor: Auto-connecting enabled server: {} ({})",
-                    config.name, config.id
+                    "McpHostActor: ➡️ Connecting enabled server: '{}' (id={}, command={:?}, args={:?})",
+                    config.name, config.id, config.command, config.args
                 );
                 let result = self.connect_server(config.clone()).await;
+                match &result {
+                    Ok(()) => println!(
+                        "McpHostActor: ✓ Successfully connected: '{}' ({})",
+                        config.name, config.id
+                    ),
+                    Err(e) => println!(
+                        "McpHostActor: ❌ Failed to connect '{}' ({}): {}",
+                        config.name, config.id, e
+                    ),
+                }
                 results.push((config.id.clone(), result));
+            } else if config.enabled {
+                println!(
+                    "McpHostActor: ⏭️ Skipping already connected server: '{}' ({})",
+                    config.name, config.id
+                );
             }
         }
 
@@ -764,7 +798,7 @@ impl McpToolRouterActor {
         for connected_id in &connected_ids {
             if disabled_ids.contains(&connected_id.as_str()) {
                 println!(
-                    "McpHostActor: Disconnecting disabled server: {}",
+                    "McpHostActor: ⏹️ Disconnecting disabled server: {}",
                     connected_id
                 );
                 let result = self.disconnect_server(connected_id).await;
@@ -772,16 +806,21 @@ impl McpToolRouterActor {
             }
         }
 
-        // Log summary only if connections changed
+        // Log summary
         let connected_count = {
             let connections = self.connections.read().await;
             connections.len()
         };
-        if !results.is_empty() {
-            println!(
-                "McpHostActor: Sync complete - {} servers connected",
-                connected_count
-            );
+        println!(
+            "McpHostActor: Sync complete - {} operations performed, {} servers now connected",
+            results.len(),
+            connected_count
+        );
+        for (id, res) in &results {
+            match res {
+                Ok(()) => println!("McpHostActor:   ✓ {} - OK", id),
+                Err(e) => println!("McpHostActor:   ❌ {} - {}", id, e),
+            }
         }
 
         results

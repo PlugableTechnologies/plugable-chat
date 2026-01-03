@@ -82,7 +82,26 @@ pub async fn refresh_database_schemas_for_config(
         .filter(|s| s.enabled)
         .collect();
 
+    println!(
+        "[SchemaRefresh] Config has {} total sources, {} enabled",
+        toolbox_config.sources.len(),
+        sources.len()
+    );
+
+    for (idx, source) in sources.iter().enumerate() {
+        println!(
+            "[SchemaRefresh]   {}. '{}' (id={}, kind={:?}, transport={:?}, command={:?})",
+            idx + 1,
+            source.name,
+            source.id,
+            source.kind,
+            source.transport,
+            source.command
+        );
+    }
+
     if sources.is_empty() {
+        println!("[SchemaRefresh] No enabled sources to refresh");
         return Ok(SchemaRefreshSummary {
             sources: Vec::new(),
             errors: Vec::new(),
@@ -199,29 +218,163 @@ pub async fn refresh_database_schemas_for_config(
     })
 }
 
-/// Refresh database schemas
+/// Result of schema refresh operation with detailed per-source status
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SchemaRefreshResult {
+    pub sources: Vec<SchemaSourceStatus>,
+    pub errors: Vec<SchemaRefreshError>,
+}
+
+/// Per-source error information for schema refresh
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SchemaRefreshError {
+    pub source_id: String,
+    pub source_name: String,
+    pub error: String,
+    pub details: Option<String>,
+}
+
+/// Refresh database schemas for ALL enabled sources
 #[tauri::command]
 pub async fn refresh_database_schemas(
     app_handle: AppHandle,
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
     embedding_state: State<'_, EmbeddingModelState>,
-) -> Result<Vec<SchemaSourceStatus>, String> {
+) -> Result<SchemaRefreshResult, String> {
     let settings_guard = settings_state.settings.read().await;
     let toolbox_config = settings_guard.database_toolbox.clone();
     drop(settings_guard);
 
+    println!("[SchemaRefresh] Starting refresh for ALL enabled sources");
+
     let summary =
         refresh_database_schemas_for_config(&app_handle, &handles, &embedding_state, &toolbox_config).await?;
 
-    if !summary.errors.is_empty() {
+    let errors: Vec<SchemaRefreshError> = summary
+        .errors
+        .iter()
+        .map(|e| {
+            // Parse error string format: "Name (id): error message"
+            let parts: Vec<&str> = e.splitn(2, ": ").collect();
+            let (source_info, error_msg) = if parts.len() == 2 {
+                (parts[0], parts[1])
+            } else {
+                ("Unknown", e.as_str())
+            };
+            // Try to extract source_id from "Name (id)" format
+            let (source_name, source_id) = if let Some(paren_start) = source_info.rfind('(') {
+                let name = source_info[..paren_start].trim();
+                let id = source_info[paren_start + 1..].trim_end_matches(')');
+                (name.to_string(), id.to_string())
+            } else {
+                (source_info.to_string(), source_info.to_string())
+            };
+            SchemaRefreshError {
+                source_id,
+                source_name,
+                error: error_msg.to_string(),
+                details: None,
+            }
+        })
+        .collect();
+
+    if !errors.is_empty() {
         println!(
-            "[SchemaRefresh] Completed with errors: {}",
-            summary.errors.join("; ")
+            "[SchemaRefresh] Completed with {} errors:",
+            errors.len()
+        );
+        for err in &errors {
+            println!(
+                "[SchemaRefresh]   - {} ({}): {}",
+                err.source_name, err.source_id, err.error
+            );
+        }
+    } else {
+        println!("[SchemaRefresh] All sources refreshed successfully");
+    }
+
+    Ok(SchemaRefreshResult {
+        sources: summary.sources,
+        errors,
+    })
+}
+
+/// Refresh database schema for a SINGLE source by ID
+#[tauri::command]
+pub async fn refresh_database_schema_for_source(
+    app_handle: AppHandle,
+    handles: State<'_, ActorHandles>,
+    settings_state: State<'_, SettingsState>,
+    embedding_state: State<'_, EmbeddingModelState>,
+    source_id: String,
+) -> Result<SchemaRefreshResult, String> {
+    let settings_guard = settings_state.settings.read().await;
+    let toolbox_config = settings_guard.database_toolbox.clone();
+    drop(settings_guard);
+
+    println!(
+        "[SchemaRefresh] Starting refresh for SINGLE source: {}",
+        source_id
+    );
+
+    // Find the source by ID
+    let source = toolbox_config
+        .sources
+        .iter()
+        .find(|s| s.id == source_id)
+        .cloned()
+        .ok_or_else(|| format!("Source not found: {}", source_id))?;
+
+    if !source.enabled {
+        return Err(format!(
+            "Source '{}' is disabled. Enable it in settings first.",
+            source.name
+        ));
+    }
+
+    // Create a config with just this one source
+    let single_source_config = DatabaseToolboxConfig {
+        enabled: toolbox_config.enabled,
+        sources: vec![source.clone()],
+    };
+
+    let summary = refresh_database_schemas_for_config(
+        &app_handle,
+        &handles,
+        &embedding_state,
+        &single_source_config,
+    )
+    .await?;
+
+    let errors: Vec<SchemaRefreshError> = summary
+        .errors
+        .iter()
+        .map(|e| SchemaRefreshError {
+            source_id: source.id.clone(),
+            source_name: source.name.clone(),
+            error: e.clone(),
+            details: None,
+        })
+        .collect();
+
+    if !errors.is_empty() {
+        println!(
+            "[SchemaRefresh] Source '{}' refresh failed: {}",
+            source.name,
+            errors.iter().map(|e| e.error.as_str()).collect::<Vec<_>>().join("; ")
+        );
+    } else {
+        println!(
+            "[SchemaRefresh] Source '{}' refreshed successfully",
+            source.name
         );
     }
 
-    Ok(summary.sources)
+    Ok(SchemaRefreshResult {
+        sources: summary.sources,
+        errors,
+    })
 }
 
 /// Search for relevant database tables using embedding similarity.
@@ -525,9 +678,15 @@ pub async fn ensure_toolbox_running(
     toolbox_tx: &tokio::sync::mpsc::Sender<DatabaseToolboxMsg>,
     config: &DatabaseToolboxConfig,
 ) -> Result<(), String> {
+    println!(
+        "[SchemaRefresh] Ensuring toolbox is running (enabled={}, sources={})",
+        config.enabled,
+        config.sources.len()
+    );
+
     if !config.enabled {
         println!(
-            "[SchemaRefresh] Database toolbox is disabled in settings; attempting to start anyway"
+            "[SchemaRefresh] ⚠️ Database toolbox is disabled in settings; attempting to start anyway"
         );
     }
 
@@ -537,13 +696,52 @@ pub async fn ensure_toolbox_running(
             reply_to: status_tx,
         })
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            println!("[SchemaRefresh] ❌ Failed to send GetStatus: {}", e);
+            e.to_string()
+        })?;
     let status = status_rx
         .await
-        .map_err(|_| "Database toolbox actor unavailable".to_string())?;
+        .map_err(|_| {
+            println!("[SchemaRefresh] ❌ Database toolbox actor unavailable (GetStatus)");
+            "Database toolbox actor unavailable".to_string()
+        })?;
+
+    println!(
+        "[SchemaRefresh] Toolbox status: running={}, connected_sources={:?}, error={:?}",
+        status.running,
+        status.connected_sources,
+        status.error
+    );
 
     if status.running {
-        return Ok(());
+        // Check if all requested sources are connected
+        let missing: Vec<String> = config
+            .sources
+            .iter()
+            .filter(|s| s.enabled && !status.connected_sources.contains(&s.id))
+            .map(|s| format!("'{}' ({})", s.name, s.id))
+            .collect();
+        
+        if !missing.is_empty() {
+            println!(
+                "[SchemaRefresh] ⚠️ Toolbox running but missing connections for: {}",
+                missing.join(", ")
+            );
+            // Force a restart to sync connections
+            println!("[SchemaRefresh] Forcing toolbox restart to sync connections...");
+        } else {
+            println!("[SchemaRefresh] ✓ Toolbox already running with all sources connected");
+            return Ok(());
+        }
+    }
+
+    println!("[SchemaRefresh] Starting toolbox with {} sources...", config.sources.len());
+    for source in &config.sources {
+        println!(
+            "[SchemaRefresh]   Starting: '{}' (id={}, enabled={}, command={:?})",
+            source.name, source.id, source.enabled, source.command
+        );
     }
 
     let (tx, rx) = oneshot::channel();
@@ -553,16 +751,31 @@ pub async fn ensure_toolbox_running(
             reply_to: tx,
         })
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            println!("[SchemaRefresh] ❌ Failed to send Start: {}", e);
+            e.to_string()
+        })?;
 
     let start_result = rx
         .await
-        .map_err(|_| "Database toolbox actor unavailable".to_string())?;
+        .map_err(|_| {
+            println!("[SchemaRefresh] ❌ Database toolbox actor unavailable (Start)");
+            "Database toolbox actor unavailable".to_string()
+        })?;
 
     match start_result {
-        Ok(()) => Ok(()),
-        Err(msg) if msg.contains("already running") => Ok(()),
-        Err(err) => Err(err),
+        Ok(()) => {
+            println!("[SchemaRefresh] ✓ Toolbox started successfully");
+            Ok(())
+        }
+        Err(msg) if msg.contains("already running") => {
+            println!("[SchemaRefresh] ✓ Toolbox already running");
+            Ok(())
+        }
+        Err(err) => {
+            println!("[SchemaRefresh] ❌ Toolbox start failed: {}", err);
+            Err(err)
+        }
     }
 }
 
@@ -733,36 +946,94 @@ pub fn build_column_embedding_text(table_name: &str, column: &crate::settings::C
 }
 
 /// Embed table and its columns
+/// 
+/// NOTE: For tables with many columns, we batch the embeddings to avoid
+/// overwhelming CoreML/GPU memory. This prevents "Context leak" crashes on macOS.
 pub async fn embed_table_and_columns(
     model: Arc<TextEmbedding>,
     schema: &CachedTableSchema,
 ) -> Result<(Vec<f32>, Vec<Vec<f32>>), String> {
+    // Batch size for embedding - prevents CoreML context exhaustion
+    const EMBEDDING_BATCH_SIZE: usize = 32;
+    
+    let table_name = &schema.fully_qualified_name;
+    let column_count = schema.columns.len();
+    
+    println!(
+        "[SchemaRefresh] Embedding table '{}' ({} columns, {} batches)...",
+        table_name,
+        column_count,
+        (column_count + EMBEDDING_BATCH_SIZE) / EMBEDDING_BATCH_SIZE
+    );
+
+    // First, embed just the table (separate batch to isolate errors)
     let table_text = build_table_embedding_text(schema);
+    let model_for_table = model.clone();
+    let table_text_clone = table_text.clone();
+    
+    let table_embedding = tokio::task::spawn_blocking(move || {
+        model_for_table.embed(vec![table_text_clone], None)
+    })
+        .await
+        .map_err(|e| format!("Table embedding task panicked: {}", e))?
+        .map_err(|e| format!("Failed to embed table '{}': {}", table_name, e))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("No embedding returned for table '{}'", table_name))?;
+
+    println!(
+        "[SchemaRefresh] ✓ Embedded table '{}', now embedding {} columns...",
+        table_name, column_count
+    );
+
+    // Build column texts
     let column_texts: Vec<String> = schema
         .columns
         .iter()
         .map(|c| build_column_embedding_text(&schema.fully_qualified_name, c))
         .collect();
 
-    let mut to_embed = Vec::with_capacity(1 + column_texts.len());
-    to_embed.push(table_text);
-    to_embed.extend(column_texts);
+    // Embed columns in batches to prevent CoreML context exhaustion
+    let mut all_column_embeddings: Vec<Vec<f32>> = Vec::with_capacity(column_count);
+    
+    for (batch_idx, batch) in column_texts.chunks(EMBEDDING_BATCH_SIZE).enumerate() {
+        let batch_start = batch_idx * EMBEDDING_BATCH_SIZE;
+        let batch_end = batch_start + batch.len();
+        
+        println!(
+            "[SchemaRefresh]   Embedding columns {}-{} of {} for '{}'",
+            batch_start + 1,
+            batch_end,
+            column_count,
+            table_name
+        );
 
-    let model_clone = model.clone();
-    let embeddings = tokio::task::spawn_blocking(move || {
-        model_clone.embed(to_embed, None)
-    })
-        .await
-        .map_err(|e| format!("Embedding task panicked: {}", e))?
-        .map_err(|e| format!("Failed to embed schema: {}", e))?;
+        let batch_texts: Vec<String> = batch.to_vec();
+        let model_clone = model.clone();
+        let table_name_clone = table_name.clone();
+        
+        let batch_embeddings = tokio::task::spawn_blocking(move || {
+            model_clone.embed(batch_texts, None)
+        })
+            .await
+            .map_err(|e| format!(
+                "Column embedding task panicked for '{}' batch {}: {}",
+                table_name_clone, batch_idx + 1, e
+            ))?
+            .map_err(|e| format!(
+                "Failed to embed columns for '{}' batch {}: {}",
+                table_name, batch_idx + 1, e
+            ))?;
 
-    let mut iter = embeddings.into_iter();
-    let table_embedding = iter
-        .next()
-        .ok_or_else(|| "No table embedding returned".to_string())?;
-    let column_embeddings: Vec<Vec<f32>> = iter.collect();
+        all_column_embeddings.extend(batch_embeddings);
+    }
 
-    Ok((table_embedding, column_embeddings))
+    println!(
+        "[SchemaRefresh] ✓ Completed embedding for '{}' ({} + {} embeddings)",
+        table_name, 1, all_column_embeddings.len()
+    );
+
+    Ok((table_embedding, all_column_embeddings))
 }
 
 /// Cache table and columns in the schema vector store
