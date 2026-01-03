@@ -141,6 +141,99 @@ fn extract_pdf_bookmarks(path: &Path) -> Result<Vec<PdfHeading>, String> {
     Ok(headings)
 }
 
+/// Decode PDF string bytes to a Rust String
+/// PDF strings can be UTF-8, UTF-16BE (with BOM 0xFEFF), or PDFDocEncoding
+fn decode_pdf_string(bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+    
+    // Check for UTF-16BE BOM (0xFE 0xFF)
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        // UTF-16BE with BOM - skip the BOM and decode
+        let utf16_chars: Vec<u16> = bytes[2..]
+            .chunks(2)
+            .filter_map(|chunk| {
+                if chunk.len() == 2 {
+                    Some(u16::from_be_bytes([chunk[0], chunk[1]]))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        return String::from_utf16(&utf16_chars).ok();
+    }
+    
+    // Check for UTF-16LE pattern (common: alternating null bytes with ASCII)
+    // Pattern: 0xXX 0x00 0xYY 0x00 where XX, YY are ASCII
+    if bytes.len() >= 4 {
+        let looks_like_utf16le = bytes.chunks(2).take(4).all(|chunk| {
+            chunk.len() == 2 && chunk[1] == 0 && chunk[0] < 128
+        });
+        if looks_like_utf16le {
+            let utf16_chars: Vec<u16> = bytes
+                .chunks(2)
+                .filter_map(|chunk| {
+                    if chunk.len() == 2 {
+                        Some(u16::from_le_bytes([chunk[0], chunk[1]]))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if let Ok(s) = String::from_utf16(&utf16_chars) {
+                // Filter out control characters
+                let cleaned: String = s.chars().filter(|c| !c.is_control() || *c == ' ').collect();
+                if !cleaned.is_empty() {
+                    return Some(cleaned);
+                }
+            }
+        }
+    }
+    
+    // Check for UTF-16BE pattern without BOM (alternating 0x00 0xXX)
+    if bytes.len() >= 4 {
+        let looks_like_utf16be = bytes.chunks(2).take(4).all(|chunk| {
+            chunk.len() == 2 && chunk[0] == 0 && chunk[1] < 128
+        });
+        if looks_like_utf16be {
+            let utf16_chars: Vec<u16> = bytes
+                .chunks(2)
+                .filter_map(|chunk| {
+                    if chunk.len() == 2 {
+                        Some(u16::from_be_bytes([chunk[0], chunk[1]]))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if let Ok(s) = String::from_utf16(&utf16_chars) {
+                let cleaned: String = s.chars().filter(|c| !c.is_control() || *c == ' ').collect();
+                if !cleaned.is_empty() {
+                    return Some(cleaned);
+                }
+            }
+        }
+    }
+    
+    // Try UTF-8 first
+    if let Ok(s) = String::from_utf8(bytes.to_vec()) {
+        let cleaned: String = s.chars().filter(|c| !c.is_control() || *c == ' ').collect();
+        if !cleaned.is_empty() {
+            return Some(cleaned);
+        }
+    }
+    
+    // Fall back to Latin-1 / PDFDocEncoding (treat each byte as Unicode codepoint)
+    let s: String = bytes.iter()
+        .filter_map(|&b| {
+            let c = b as char;
+            if c.is_control() && c != ' ' { None } else { Some(c) }
+        })
+        .collect();
+    if !s.is_empty() { Some(s) } else { None }
+}
+
 /// Extract headings by font size (Tier 2)
 /// Parses PDF content streams to find text with different font sizes,
 /// then maps the largest fonts to heading levels H1-H4
@@ -181,7 +274,7 @@ fn extract_pdf_by_font_size(path: &Path) -> Result<Vec<PdfHeading>, String> {
                     // Tj: Show text string
                     "Tj" => {
                         if let Some(Object::String(bytes, _)) = op.operands.first() {
-                            if let Ok(text) = String::from_utf8(bytes.clone()) {
+                            if let Some(text) = decode_pdf_string(bytes) {
                                 current_text.push_str(&text);
                             }
                         }
@@ -191,7 +284,7 @@ fn extract_pdf_by_font_size(path: &Path) -> Result<Vec<PdfHeading>, String> {
                         if let Some(Object::Array(arr)) = op.operands.first() {
                             for item in arr {
                                 if let Object::String(bytes, _) = item {
-                                    if let Ok(text) = String::from_utf8(bytes.clone()) {
+                                    if let Some(text) = decode_pdf_string(bytes) {
                                         current_text.push_str(&text);
                                     }
                                 }
@@ -1573,14 +1666,30 @@ impl RagRetrievalActor {
 
     /// Parse PDF content using hybrid structure extraction
     /// 1. Try extracting bookmarks/outlines (explicit hierarchy from PDF)
-    /// 2. Fall back to font-size detection
+    /// 2. Fall back to font-size detection (with validation)
     /// 3. Fall back to text-based heuristics
     fn parse_pdf_elements(&self, content: &str, file_path: Option<&Path>) -> Vec<DocumentElement> {
         // Try hybrid structure extraction if file path is available
         if let Some(path) = file_path {
             if let Ok(headings) = extract_pdf_structure(path) {
                 if !headings.is_empty() {
-                    return self.merge_headings_with_content(&headings, content);
+                    // Validate that heading titles actually appear in the content
+                    // If font encoding wasn't properly decoded, titles won't match
+                    let normalized_content = normalize_text_for_matching(content);
+                    let matching_headings: Vec<_> = headings.iter()
+                        .filter(|h| {
+                            let normalized_title = normalize_text_for_matching(&h.title);
+                            // Title should appear somewhere in the content
+                            normalized_content.contains(&normalized_title)
+                        })
+                        .cloned()
+                        .collect();
+                    
+                    // Only use font-size headings if most of them match the content
+                    // (indicating proper font encoding decoding)
+                    if matching_headings.len() >= headings.len() / 2 && !matching_headings.is_empty() {
+                        return self.merge_headings_with_content(&matching_headings, content);
+                    }
                 }
             }
         }
@@ -2190,15 +2299,6 @@ impl RagRetrievalActor {
         file_index: usize,
         total_files: usize,
     ) -> Result<String, String> {
-        // #region agent log
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-            let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
-            let _ = writeln!(f, r#"{{"location":"rag_actor.rs:2111","message":"PDF extraction starting","data":{{"file_path":"{}","file_size":{},"file_index":{},"total_files":{}}},"hypothesisId":"A","timestamp":{}}}"#,
-                file_path.display(), file_size, file_index, total_files, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-        }
-        // #endregion
-        
         // pdf-extract has better font encoding handling than raw lopdf
         // It properly handles ToUnicode CMaps and custom font encodings
         // Use catch_unwind to capture panics from pdf-extract library
@@ -2207,33 +2307,12 @@ impl RagRetrievalActor {
         }));
         
         let pages = match pages_result {
-            Ok(Ok(pages)) => {
-                // #region agent log
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"location":"rag_actor.rs:2119","message":"PDF extraction succeeded","data":{{"page_count":{},"file_path":"{}"}},"hypothesisId":"A","timestamp":{}}}"#,
-                        pages.len(), file_path.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-                }
-                // #endregion
-                pages
-            }
+            Ok(Ok(pages)) => pages,
             Ok(Err(e)) => {
-                // #region agent log
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"location":"rag_actor.rs:2119","message":"PDF extraction error, trying lopdf fallback","data":{{"error":"{}","file_path":"{}"}},"hypothesisId":"B","timestamp":{}}}"#,
-                        e, file_path.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-                }
-                // #endregion
-                
                 // Try lopdf fallback
                 println!("[RAG] pdf-extract failed for {:?}, trying lopdf fallback: {}", file_path.file_name().unwrap_or_default(), e);
                 match self.extract_pdf_text_with_lopdf(file_path) {
                     Ok(text) => {
-                        // #region agent log
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                            let _ = writeln!(f, r#"{{"location":"rag_actor.rs:fallback","message":"lopdf fallback succeeded","data":{{"text_len":{},"file_path":"{}"}},"hypothesisId":"B","timestamp":{}}}"#,
-                                text.len(), file_path.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-                        }
-                        // #endregion
                         println!("[RAG] lopdf fallback succeeded, extracted {} chars", text.len());
                         return Ok(text);
                     }
@@ -2257,23 +2336,10 @@ impl RagRetrievalActor {
                     "Unknown panic".to_string()
                 };
                 
-                // #region agent log
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                    let _ = writeln!(f, r#"{{"location":"rag_actor.rs:2119","message":"PDF extraction PANIC caught, trying lopdf fallback","data":{{"panic_msg":"{}","file_path":"{}"}},"hypothesisId":"A","timestamp":{}}}"#,
-                        panic_msg.replace('"', "'"), file_path.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-                }
-                // #endregion
-                
                 // Try lopdf fallback after panic
                 println!("[RAG] pdf-extract panicked for {:?}, trying lopdf fallback: {}", file_path.file_name().unwrap_or_default(), panic_msg);
                 match self.extract_pdf_text_with_lopdf(file_path) {
                     Ok(text) => {
-                        // #region agent log
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
-                            let _ = writeln!(f, r#"{{"location":"rag_actor.rs:fallback","message":"lopdf fallback succeeded after panic","data":{{"text_len":{},"file_path":"{}"}},"hypothesisId":"A","timestamp":{}}}"#,
-                                text.len(), file_path.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-                        }
-                        // #endregion
                         println!("[RAG] lopdf fallback succeeded, extracted {} chars", text.len());
                         return Ok(text);
                     }
