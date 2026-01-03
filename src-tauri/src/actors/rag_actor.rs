@@ -2108,16 +2108,173 @@ impl RagRetrievalActor {
         }
     }
 
+    /// Fallback PDF text extraction using lopdf when pdf-extract fails.
+    /// Less accurate for complex fonts but more tolerant of malformed PDFs.
+    fn extract_pdf_text_with_lopdf(&self, file_path: &Path) -> Result<String, String> {
+        use lopdf::{Document, Object};
+        
+        let doc = Document::load(file_path)
+            .map_err(|e| format!("Failed to load PDF: {}", e))?;
+        
+        let mut all_text = String::new();
+        let pages = doc.get_pages();
+        
+        for (_page_num, page_id) in pages {
+            if let Ok(content) = doc.get_page_content(page_id) {
+                let operations = lopdf::content::Content::decode(&content)
+                    .map(|c| c.operations)
+                    .unwrap_or_default();
+                
+                for op in operations {
+                    match op.operator.as_str() {
+                        // Tj: Show text string
+                        "Tj" => {
+                            if let Some(Object::String(bytes, _)) = op.operands.first() {
+                                // Try UTF-8 first, then Latin-1 fallback
+                                let text = String::from_utf8(bytes.clone())
+                                    .unwrap_or_else(|_| bytes.iter().map(|&b| b as char).collect());
+                                all_text.push_str(&text);
+                            }
+                        }
+                        // TJ: Show text array (with kerning)
+                        "TJ" => {
+                            if let Some(Object::Array(arr)) = op.operands.first() {
+                                for item in arr {
+                                    if let Object::String(bytes, _) = item {
+                                        let text = String::from_utf8(bytes.clone())
+                                            .unwrap_or_else(|_| bytes.iter().map(|&b| b as char).collect());
+                                        all_text.push_str(&text);
+                                    }
+                                }
+                            }
+                        }
+                        // Text positioning that indicates new line/paragraph
+                        "Td" | "TD" | "T*" | "'" | "\"" => {
+                            if !all_text.ends_with('\n') && !all_text.ends_with(' ') {
+                                all_text.push(' ');
+                            }
+                        }
+                        "ET" => {
+                            // End of text block - add newline
+                            if !all_text.ends_with('\n') {
+                                all_text.push('\n');
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            all_text.push('\n'); // Page break
+        }
+        
+        Ok(all_text)
+    }
+    
     fn extract_pdf_text_with_progress(
         &self,
         file_path: &Path,
         file_index: usize,
         total_files: usize,
     ) -> Result<String, String> {
+        // #region agent log
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+            let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+            let _ = writeln!(f, r#"{{"location":"rag_actor.rs:2111","message":"PDF extraction starting","data":{{"file_path":"{}","file_size":{},"file_index":{},"total_files":{}}},"hypothesisId":"A","timestamp":{}}}"#,
+                file_path.display(), file_size, file_index, total_files, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+        }
+        // #endregion
+        
         // pdf-extract has better font encoding handling than raw lopdf
         // It properly handles ToUnicode CMaps and custom font encodings
-        let pages = pdf_extract::extract_text_by_pages(file_path)
-            .map_err(|e| format!("Failed to extract PDF text: {}", e))?;
+        // Use catch_unwind to capture panics from pdf-extract library
+        let pages_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pdf_extract::extract_text_by_pages(file_path)
+        }));
+        
+        let pages = match pages_result {
+            Ok(Ok(pages)) => {
+                // #region agent log
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                    let _ = writeln!(f, r#"{{"location":"rag_actor.rs:2119","message":"PDF extraction succeeded","data":{{"page_count":{},"file_path":"{}"}},"hypothesisId":"A","timestamp":{}}}"#,
+                        pages.len(), file_path.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                }
+                // #endregion
+                pages
+            }
+            Ok(Err(e)) => {
+                // #region agent log
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                    let _ = writeln!(f, r#"{{"location":"rag_actor.rs:2119","message":"PDF extraction error, trying lopdf fallback","data":{{"error":"{}","file_path":"{}"}},"hypothesisId":"B","timestamp":{}}}"#,
+                        e, file_path.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                }
+                // #endregion
+                
+                // Try lopdf fallback
+                println!("[RAG] pdf-extract failed for {:?}, trying lopdf fallback: {}", file_path.file_name().unwrap_or_default(), e);
+                match self.extract_pdf_text_with_lopdf(file_path) {
+                    Ok(text) => {
+                        // #region agent log
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                            let _ = writeln!(f, r#"{{"location":"rag_actor.rs:fallback","message":"lopdf fallback succeeded","data":{{"text_len":{},"file_path":"{}"}},"hypothesisId":"B","timestamp":{}}}"#,
+                                text.len(), file_path.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                        }
+                        // #endregion
+                        println!("[RAG] lopdf fallback succeeded, extracted {} chars", text.len());
+                        return Ok(text);
+                    }
+                    Err(_fallback_err) => {
+                        let filename = file_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+                        return Err(format!(
+                            "Cannot read '{}': This PDF has an incompatible format. Re-attaching it won't help. Try re-exporting the PDF from its source application.",
+                            filename
+                        ));
+                    }
+                }
+            }
+            Err(panic_payload) => {
+                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                
+                // #region agent log
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                    let _ = writeln!(f, r#"{{"location":"rag_actor.rs:2119","message":"PDF extraction PANIC caught, trying lopdf fallback","data":{{"panic_msg":"{}","file_path":"{}"}},"hypothesisId":"A","timestamp":{}}}"#,
+                        panic_msg.replace('"', "'"), file_path.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                }
+                // #endregion
+                
+                // Try lopdf fallback after panic
+                println!("[RAG] pdf-extract panicked for {:?}, trying lopdf fallback: {}", file_path.file_name().unwrap_or_default(), panic_msg);
+                match self.extract_pdf_text_with_lopdf(file_path) {
+                    Ok(text) => {
+                        // #region agent log
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/bernie/git/plugable-chat/.cursor/debug.log") {
+                            let _ = writeln!(f, r#"{{"location":"rag_actor.rs:fallback","message":"lopdf fallback succeeded after panic","data":{{"text_len":{},"file_path":"{}"}},"hypothesisId":"A","timestamp":{}}}"#,
+                                text.len(), file_path.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                        }
+                        // #endregion
+                        println!("[RAG] lopdf fallback succeeded, extracted {} chars", text.len());
+                        return Ok(text);
+                    }
+                    Err(_fallback_err) => {
+                        let filename = file_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+                        return Err(format!(
+                            "Cannot read '{}': This PDF has an incompatible format. Re-attaching it won't help. Try re-exporting the PDF from its source application.",
+                            filename
+                        ));
+                    }
+                }
+            }
+        };
 
         let total_pages = pages.len() as u32;
         let mut extracted_text = String::new();
