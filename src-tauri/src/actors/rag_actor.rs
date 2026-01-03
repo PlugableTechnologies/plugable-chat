@@ -643,7 +643,7 @@ impl RagRetrievalActor {
                     existing_field_count,
                     expected_field_count
                 );
-                let _ = db.drop_table(table_name).await;
+                let _ = db.drop_table(table_name, &[]).await;
                 let batch = RecordBatch::new_empty(schema.clone());
                 db.create_table(
                     table_name,

@@ -300,7 +300,7 @@ async fn ensure_chats_table_schema(db_connection: &Connection) -> Table {
                         );
 
                         // Drop and recreate the table
-                        if let Err(e) = db_connection.drop_table("chats").await {
+                        if let Err(e) = db_connection.drop_table("chats", &[]).await {
                             println!("VectorActor WARNING: Failed to drop old table: {}", e);
                         }
 

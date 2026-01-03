@@ -1752,6 +1752,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         
                         try {
                             await get().loadModel(fallbackModelInfo.model_id);
+                            
+                            // CRITICAL: Persist the model selection to settings so the app
+                            // doesn't restart into the same broken state
+                            try {
+                                await invoke('set_model', { model: fallbackModelInfo.model_id });
+                                console.log('[ChatStore] Fallback model selection persisted to settings:', fallbackModelInfo.model_id);
+                            } catch (persistError: any) {
+                                console.error('[ChatStore] Failed to persist fallback model selection:', persistError);
+                                // Continue anyway - the model is loaded, just not persisted
+                            }
+                            
                             set({
                                 operationStatus: {
                                     type: 'loading',
@@ -1804,6 +1815,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         
                         if (downloadedModel) {
                             await get().loadModel(downloadedModel.model_id);
+                            
+                            // CRITICAL: Persist the model selection to settings so the app
+                            // doesn't restart into the same broken state
+                            try {
+                                await invoke('set_model', { model: downloadedModel.model_id });
+                                console.log('[ChatStore] Fallback model selection persisted to settings:', downloadedModel.model_id);
+                            } catch (persistError: any) {
+                                console.error('[ChatStore] Failed to persist fallback model selection:', persistError);
+                                // Continue anyway - the model is loaded, just not persisted
+                            }
                         }
                     } catch (downloadError: any) {
                         console.error('[ChatStore] Failed to download fallback model:', downloadError);

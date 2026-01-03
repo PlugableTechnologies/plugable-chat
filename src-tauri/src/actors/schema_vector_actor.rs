@@ -342,7 +342,7 @@ async fn ensure_tables_table_schema(db_connection: &Connection) -> Table {
                             existing_field_count,
                             expected_field_count
                         );
-                        let _ = db_connection.drop_table(table_name).await;
+                        let _ = db_connection.drop_table(table_name, &[]).await;
                         create_empty_table(db_connection, table_name, expected_schema).await
                     } else {
                         table
@@ -386,7 +386,7 @@ async fn ensure_columns_table_schema(db_connection: &Connection) -> Table {
                             existing_field_count,
                             expected_field_count
                         );
-                        let _ = db_connection.drop_table(table_name).await;
+                        let _ = db_connection.drop_table(table_name, &[]).await;
                         create_empty_table(db_connection, table_name, expected_schema).await
                     } else {
                         table

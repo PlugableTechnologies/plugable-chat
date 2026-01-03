@@ -21,13 +21,13 @@ json5 = "0.4"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 uuid = { version = "1.0", features = ["v4", "serde"] }
-chrono = "=0.4.38"
+chrono = "0.4"
 
-# LanceDB & Arrow Stack (Pinning versions as per plan)
-lancedb = "0.4"
-arrow = "51.0" 
-arrow-array = "51.0"
-arrow-schema = "51.0"
+# LanceDB & Arrow Stack
+lancedb = { version = "0.23", default-features = false }
+arrow = "56" 
+arrow-array = "56"
+arrow-schema = "56"
 reqwest = { version = "0.12.24", features = ["json"] }
 
 # Local embeddings via ONNX Runtime
@@ -98,15 +98,18 @@ version = "2"
 [dev-dependencies]
 tempfile = "3"
 
+# Pin ort-sys to match ort version (required for compatibility)
+ort-sys = "=2.0.0-rc.9"
+
 # ONNX Runtime with platform-specific GPU support:
 # - Windows: CUDA + TensorRT (NVIDIA GPUs)
 # - macOS: CoreML only (Apple Silicon/Intel GPUs)
 # - Linux: CUDA + TensorRT (NVIDIA GPUs)
 [target.'cfg(target_os = "windows")'.dependencies]
-ort = { version = "2.0.0-rc.9", features = ["cuda", "tensorrt"] }
+ort = { version = "=2.0.0-rc.9", features = ["cuda", "tensorrt"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "2.0.0-rc.9", features = ["coreml"] }
+ort = { version = "=2.0.0-rc.9", features = ["coreml"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ort = { version = "2.0.0-rc.9", features = ["cuda", "tensorrt"] }
+ort = { version = "=2.0.0-rc.9", features = ["cuda", "tensorrt"] }

@@ -2737,6 +2737,13 @@ impl ModelGatewayActor {
                 }),
             );
 
+            // On 5XX server errors, emit fallback event so the frontend can auto-switch
+            // to a known-good model. This prevents users from getting stuck with a broken
+            // model that always returns 500 errors.
+            if status.is_server_error() && !model_name.to_lowercase().contains(DEFAULT_FALLBACK_MODEL) {
+                self.emit_model_fallback_required(model_name, &error_msg);
+            }
+
             Err(error_msg)
         }
     }
