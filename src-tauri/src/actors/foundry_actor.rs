@@ -698,11 +698,13 @@ impl ModelGatewayActor {
         // Pre-warm the HTTP connection pool so first chat request doesn't pay connection cost
         self.prewarm_http_connection().await;
 
-        // Pre-warm the first available model to reduce time-to-first-token
-        // This loads the model into VRAM in the background
-        if let Some(first_model) = self.available_models.first().cloned() {
-            println!("FoundryActor: Pre-warming first available model: {}", first_model);
-            self.prewarm_model_in_background(first_model);
+        // Pre-warm the SELECTED model (from settings or fallback), NOT the first model!
+        // The model_id is set by update_connection_info() which respects settings.
+        if let Some(selected_model) = self.model_id.clone() {
+            println!("FoundryActor: Pre-warming selected model: {}", selected_model);
+            self.prewarm_model_in_background(selected_model);
+        } else {
+            println!("FoundryActor: No model selected yet, skipping pre-warm");
         }
 
         // Initialize CPU embedding model at startup for search during chat.
@@ -1853,55 +1855,63 @@ impl ModelGatewayActor {
                 })
                 .collect();
 
-            // Select model at startup
-            // Priority:
-            // 1. Persisted selected_model from settings (if available in cached models)
-            // 2. Phi-4-mini-instruct (the default fallback)
-            // 3. First available model
+            // Select model at startup - SIMPLE LOGIC:
+            // 1. Read selected_model from settings
+            // 2. If not set or not available, use phi-4-mini-instruct
+            // NO "first model" fallback - that causes problems!
             if self.model_id.is_none() {
                 use std::io::Write;
                 
-                // Try to read persisted model selection from settings
+                println!("\n[FoundryActor] ========== MODEL SELECTION AT STARTUP ==========");
+                println!("[FoundryActor] Available models: {:?}", self.available_models);
+                let _ = std::io::stdout().flush();
+                
+                // Step 1: Read persisted model from settings
                 let persisted_model: Option<String> = if let Some(settings_state) = self.app_handle.try_state::<SettingsState>() {
-                    // Use blocking read since we're in async context but need sync access
                     let guard = futures::executor::block_on(settings_state.settings.read());
                     let persisted = guard.selected_model.clone();
-                    println!("[FoundryActor] Persisted selected_model from settings: {:?}", persisted);
+                    println!("[FoundryActor] Settings selected_model: {:?}", persisted);
                     let _ = std::io::stdout().flush();
                     persisted
                 } else {
-                    println!("[FoundryActor] Could not access SettingsState at startup");
+                    println!("[FoundryActor] ❌ Could not access SettingsState!");
                     let _ = std::io::stdout().flush();
                     None
                 };
                 
-                // Check if persisted model is available
+                // Step 2: Check if persisted model exists in available models
                 let persisted_available = persisted_model.as_ref().and_then(|pm| {
                     self.available_models.iter().find(|m| *m == pm).cloned()
                 });
                 
-                // Fallback: try to find the default fallback model (phi-4-mini-instruct)
-                let preferred_model = self.available_models.iter().find(|m| {
+                // Step 3: Find phi-4-mini-instruct as fallback
+                let fallback_model = self.available_models.iter().find(|m| {
                     m.to_lowercase().contains(DEFAULT_FALLBACK_MODEL)
-                });
+                }).cloned();
                 
+                println!("[FoundryActor] Persisted model available: {:?}", persisted_available);
+                println!("[FoundryActor] Fallback model (phi-4-mini): {:?}", fallback_model);
+                let _ = std::io::stdout().flush();
+                
+                // Step 4: Choose model - settings OR phi-4-mini-instruct ONLY
                 let selected = if let Some(model) = persisted_available {
-                    println!("[FoundryActor] ✅ Using persisted model from settings: {}", model);
+                    println!("[FoundryActor] ✅ SELECTED: {} (from settings)", model);
                     let _ = std::io::stdout().flush();
                     model
-                } else if let Some(model) = preferred_model {
-                    println!("[FoundryActor] Using default fallback model: {}", model);
+                } else if let Some(model) = fallback_model {
+                    println!("[FoundryActor] ✅ SELECTED: {} (fallback - settings model not available)", model);
                     let _ = std::io::stdout().flush();
-                    model.clone()
-                } else if let Some(first) = self.available_models.first() {
-                    println!("[FoundryActor] Using first available model: {}", first);
-                    let _ = std::io::stdout().flush();
-                    first.clone()
+                    model
                 } else {
-                    println!("[FoundryActor] No models available");
+                    // No phi-4-mini available - this is a problem, but don't pick random model
+                    println!("[FoundryActor] ❌ Neither settings model nor phi-4-mini-instruct available!");
+                    println!("[FoundryActor] Available models: {:?}", self.available_models);
                     let _ = std::io::stdout().flush();
-                    return true; // No models available
+                    return true; // Don't select anything - let user choose
                 };
+                
+                println!("[FoundryActor] =================================================\n");
+                let _ = std::io::stdout().flush();
                 
                 self.model_id = Some(selected.clone());
                 self.emit_model_selected(&selected);

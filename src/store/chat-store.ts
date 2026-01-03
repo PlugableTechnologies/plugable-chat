@@ -478,12 +478,20 @@ async function initializeModelsOnStartup(
                 await get().fetchCachedModels();
                 await get().fetchModels();
                 
-                // Now load the model
+                // Now load the model - use phi-4-mini-instruct (what we just downloaded)
                 const updatedState = get();
-                if (updatedState.cachedModels.length > 0) {
-                    const modelToLoad = updatedState.cachedModels[0].model_id;
-                    console.log('[ChatStore] Loading downloaded model:', modelToLoad);
-                    await get().loadModel(modelToLoad);
+                const DEFAULT_FALLBACK = 'phi-4-mini-instruct';
+                const downloadedModel = updatedState.cachedModels.find(m => 
+                    m.model_id.toLowerCase().includes(DEFAULT_FALLBACK.toLowerCase())
+                );
+                
+                if (downloadedModel) {
+                    console.log('[ChatStore] Loading downloaded model:', downloadedModel.model_id);
+                    await get().loadModel(downloadedModel.model_id);
+                } else if (updatedState.cachedModels.length > 0) {
+                    // Fallback - shouldn't happen since we just downloaded phi-4-mini
+                    console.warn('[ChatStore] Could not find phi-4-mini, unexpected state');
+                    set({ currentModel: 'No models' });
                 } else {
                     // Download succeeded but no models found - unusual
                     set({
@@ -511,53 +519,27 @@ async function initializeModelsOnStartup(
                 }, 10000);
             }
         } else {
-            // Models are available - check if any are loaded into VRAM
-            console.log('[ChatStore] Found', cachedModels.length, 'cached models. Checking loaded models...');
+            // Models are available - TRUST THE BACKEND for model selection!
+            // Backend handles: settings → phi-4-mini-instruct fallback
+            // Frontend just reflects what backend says via get_current_model and model-selected events.
+            console.log('[ChatStore] Found', cachedModels.length, 'cached models. Getting current model from backend...');
             
             try {
-                const loadedModels = await get().getLoadedModels();
+                // Ask backend what the current model is
+                const currentModelInfo = await invoke<{ id: string } | null>('get_current_model');
                 
-                if (loadedModels.length > 0) {
-                    // Use the first loaded model
-                    const activeModel = loadedModels[0];
-                    console.log('[ChatStore] Found loaded model:', activeModel);
-                    set({ currentModel: activeModel });
+                if (currentModelInfo) {
+                    console.log('[ChatStore] ✅ Backend selected model:', currentModelInfo.id);
+                    set({ currentModel: currentModelInfo.id });
                 } else {
-                    // No models loaded - check for persisted model selection from settings
-                    let modelToLoad = cachedModels[0].model_id;
-                    
-                    try {
-                        const { useSettingsStore } = await import('./settings-store');
-                        // Fetch settings if not already loaded
-                        let settings = useSettingsStore.getState().settings;
-                        if (!settings) {
-                            await useSettingsStore.getState().fetchSettings();
-                            settings = useSettingsStore.getState().settings;
-                        }
-                        
-                        if (settings?.selected_model) {
-                            // Check if persisted model exists in cached models
-                            const persistedModelExists = cachedModels.some(
-                                m => m.model_id === settings!.selected_model
-                            );
-                            if (persistedModelExists) {
-                                console.log('[ChatStore] Using persisted model selection:', settings.selected_model);
-                                modelToLoad = settings.selected_model;
-                            } else {
-                                console.log('[ChatStore] Persisted model not available, using first cached model');
-                            }
-                        }
-                    } catch (settingsError) {
-                        console.warn('[ChatStore] Failed to load persisted model selection:', settingsError);
-                    }
-                    
-                    console.log('[ChatStore] Loading model:', modelToLoad);
-                    await get().loadModel(modelToLoad);
+                    // Backend hasn't selected yet - this means it's still initializing
+                    // The model-selected event listener will update currentModel when backend is ready
+                    console.log('[ChatStore] Backend has not selected a model yet, waiting for model-selected event...');
+                    set({ currentModel: 'Loading...' });
                 }
             } catch (loadError: any) {
-                console.error('[ChatStore] Failed to check/load models:', loadError);
-                // Still set the first cached model as current (even if not loaded into VRAM)
-                set({ currentModel: cachedModels[0].model_id });
+                console.error('[ChatStore] Failed to get current model from backend:', loadError);
+                set({ backendError: `Failed to get model: ${loadError?.message || loadError}` });
             }
         }
 
@@ -762,7 +744,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             statusBarDismissed: false,
         });
         try {
-            await invoke('load_model', { modelName });
+            // Use set_model which BOTH loads the model AND persists to settings
+            // This ensures the selection survives app restart
+            await invoke('set_model', { model: modelName });
             set({
                 operationStatus: {
                     type: 'loading',
@@ -772,6 +756,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 },
                 currentModel: modelName,
             });
+            console.log('[ChatStore] Model loaded and persisted to settings:', modelName);
             // Auto-dismiss after 3 seconds
             setTimeout(() => {
                 const state = get();
@@ -1068,34 +1053,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
     },
     setModel: async (model) => {
-        try {
-            const state = get();
-            if (state.currentModel === model) return;
-
-            await invoke('set_model', { model });
-            set({ currentModel: model });
-
-            // Start new chat on model change
-            if (state.currentChatId || state.chatMessages.length > 0) {
-                console.log('[ChatStore] Model set, starting new chat');
-                set({ 
-                    currentChatId: null, 
-                    chatMessages: [],
-                    // Clear all per-chat attachments
-                    attachedDatabaseTables: [],
-                    attachedTools: [],
-                    attachedPaths: [],
-                    ragIndexedFiles: [],
-                    ragChunkCount: 0,
-                });
-                // Fire-and-forget clear of backend RAG context
-                invoke<boolean>('clear_rag_context').catch(e => 
-                    console.error('[ChatStore] Failed to clear RAG context on setModel:', e)
-                );
-            }
-        } catch (e) {
-            console.error("Failed to set model", e);
-        }
+        // Delegate to loadModel which handles UI feedback and persistence
+        await get().loadModel(model);
     },
     setReasoningEffort: (effort: ReasoningEffort) => set({ reasoningEffort: effort }),
 
