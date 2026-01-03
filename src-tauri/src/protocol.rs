@@ -1051,6 +1051,12 @@ pub enum FoundryMsg {
         model_name: String,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
+    /// Unload the currently selected LLM to free GPU memory for embedding operations.
+    /// This should be called before GPU-intensive embedding to avoid Metal context contention.
+    /// Returns the model name that was unloaded (if any) so it can be re-warmed after.
+    UnloadCurrentLlm {
+        respond_to: oneshot::Sender<Result<Option<String>, String>>,
+    },
     /// Get service status including cache location (GET /openai/status)
     GetServiceStatus {
         respond_to: oneshot::Sender<Result<FoundryServiceStatus, String>>,

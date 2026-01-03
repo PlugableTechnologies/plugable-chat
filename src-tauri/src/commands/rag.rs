@@ -26,6 +26,8 @@ pub async fn select_folder() -> Result<Option<String>, String> {
 /// Process documents and add them to the RAG index
 ///
 /// Tries to use GPU embedding model for speed, but falls back to CPU if GPU is busy.
+/// When using GPU, explicitly unloads the LLM first to free GPU/Metal memory and avoid
+/// context contention between Foundry Local's LLM and fastembed's ONNX Runtime + CoreML.
 #[tauri::command]
 pub async fn process_rag_documents(
     paths: Vec<String>,
@@ -38,9 +40,37 @@ pub async fn process_rag_documents(
     // This prevents GPU memory contention with LLM prewarm/chat operations
     let (embedding_model, use_gpu) = match handles.gpu_guard.mutex.try_lock() {
         Ok(_guard) => {
-            // GPU is available - request GPU embedding model
+            // GPU is available - first unload the LLM to free GPU memory
             drop(_guard);
             
+            // Unload LLM to free GPU/Metal memory before loading embedding model
+            // This prevents Metal context contention between the two model frameworks
+            let (unload_tx, unload_rx) = oneshot::channel();
+            handles
+                .foundry_tx
+                .send(FoundryMsg::UnloadCurrentLlm {
+                    respond_to: unload_tx,
+                })
+                .await
+                .map_err(|e| format!("Failed to request LLM unload: {}", e))?;
+            
+            // Wait for unload to complete (best-effort, don't fail on error)
+            match unload_rx.await {
+                Ok(Ok(Some(model_name))) => {
+                    println!("[RAG] LLM '{}' unloaded, GPU memory freed for embedding", model_name);
+                }
+                Ok(Ok(None)) => {
+                    println!("[RAG] No LLM was loaded, proceeding with GPU embedding");
+                }
+                Ok(Err(e)) => {
+                    println!("[RAG] WARNING: Failed to unload LLM: {}. Continuing anyway.", e);
+                }
+                Err(_) => {
+                    println!("[RAG] WARNING: LLM unload channel closed. Continuing anyway.");
+                }
+            }
+            
+            // Now request the GPU embedding model
             let (model_tx, model_rx) = oneshot::channel();
             handles
                 .foundry_tx

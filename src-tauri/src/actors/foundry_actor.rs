@@ -1657,6 +1657,41 @@ impl ModelGatewayActor {
                     
                     *self.gpu_guard.current_operation.write().await = None;
                 }
+                FoundryMsg::UnloadCurrentLlm { respond_to } => {
+                    // Unload the currently selected LLM to free GPU memory for embedding operations
+                    // This prevents Metal context contention between Foundry Local's LLM and
+                    // fastembed's ONNX Runtime + CoreML for GPU embeddings.
+                    if let Some(ref model_name) = self.model_id {
+                        println!("╔══════════════════════════════════════════════════════════════╗");
+                        println!("║  UNLOADING LLM FOR GPU EMBEDDING: {}  ", model_name);
+                        println!("╚══════════════════════════════════════════════════════════════╝");
+                        
+                        *self.gpu_guard.current_operation.write().await = Some(format!("Unloading LLM for embedding: {}", model_name));
+                        
+                        let model_name_clone = model_name.clone();
+                        if let Some(port) = self.port {
+                            match self.unload_model_impl(&self.http_client, port, &model_name_clone).await {
+                                Ok(()) => {
+                                    println!("FoundryActor: LLM unloaded successfully, GPU memory freed for embedding");
+                                    let _ = respond_to.send(Ok(Some(model_name_clone)));
+                                }
+                                Err(e) => {
+                                    println!("FoundryActor: WARNING - Failed to unload LLM: {}", e);
+                                    // Return Ok anyway - the embedding may still work, just slower
+                                    let _ = respond_to.send(Ok(Some(model_name_clone)));
+                                }
+                            }
+                        } else {
+                            // No port means service isn't running, so nothing to unload
+                            let _ = respond_to.send(Ok(Some(model_name_clone)));
+                        }
+                        
+                        *self.gpu_guard.current_operation.write().await = None;
+                    } else {
+                        println!("FoundryActor: No LLM currently loaded, nothing to unload");
+                        let _ = respond_to.send(Ok(None));
+                    }
+                }
                 FoundryMsg::GetServiceStatus { respond_to } => {
                     println!("FoundryActor: Getting service status");
                     if let Some(port) = self.port {

@@ -110,12 +110,40 @@ pub async fn refresh_database_schemas_for_config(
 
     // Try to get GPU embedding model, but fall back to CPU if GPU is busy
     // This prevents GPU memory contention with LLM prewarm/chat operations
+    // When using GPU, we explicitly unload the LLM first to free GPU/Metal memory
     let (embedding_model, using_gpu) = match handles.gpu_guard.mutex.try_lock() {
         Ok(_guard) => {
-            // GPU is available - request GPU embedding model
-            // Note: The guard is dropped here, but GetGpuEmbeddingModel will acquire it again
+            // GPU is available - first unload the LLM to free GPU memory
             drop(_guard);
             
+            // Unload LLM to free GPU/Metal memory before loading embedding model
+            // This prevents Metal context contention between the two model frameworks
+            let (unload_tx, unload_rx) = oneshot::channel();
+            handles
+                .foundry_tx
+                .send(FoundryMsg::UnloadCurrentLlm {
+                    respond_to: unload_tx,
+                })
+                .await
+                .map_err(|e| format!("Failed to request LLM unload: {}", e))?;
+            
+            // Wait for unload to complete (best-effort, don't fail on error)
+            match unload_rx.await {
+                Ok(Ok(Some(model_name))) => {
+                    println!("[SchemaRefresh] LLM '{}' unloaded, GPU memory freed for embedding", model_name);
+                }
+                Ok(Ok(None)) => {
+                    println!("[SchemaRefresh] No LLM was loaded, proceeding with GPU embedding");
+                }
+                Ok(Err(e)) => {
+                    println!("[SchemaRefresh] WARNING: Failed to unload LLM: {}. Continuing anyway.", e);
+                }
+                Err(_) => {
+                    println!("[SchemaRefresh] WARNING: LLM unload channel closed. Continuing anyway.");
+                }
+            }
+            
+            // Now request the GPU embedding model
             let (model_tx, model_rx) = oneshot::channel();
             handles
                 .foundry_tx

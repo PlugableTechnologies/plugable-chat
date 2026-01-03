@@ -1215,6 +1215,12 @@ impl RagRetrievalActor {
                     })
                     .collect();
                 let batch_size = texts.len();
+                
+                // Calculate batch size metrics for diagnostics
+                let batch_total_chars: usize = texts.iter().map(|t| t.len()).sum();
+                let _batch_total_bytes: usize = texts.iter().map(|t| t.as_bytes().len()).sum();
+                let batch_avg_chars = if batch_size > 0 { batch_total_chars / batch_size } else { 0 };
+                
                 let model = Arc::clone(&embedding_model);
                 
                 let embeddings = tokio::task::spawn_blocking(move || {
@@ -1233,12 +1239,20 @@ impl RagRetrievalActor {
                 
                 let batch_elapsed = batch_start.elapsed();
                 let progress_pct = (final_chunks.len() as f64 / total_pending_chunks as f64 * 100.0) as u32;
+                let chars_per_sec = if batch_elapsed.as_secs_f64() > 0.0 {
+                    batch_total_chars as f64 / batch_elapsed.as_secs_f64()
+                } else {
+                    0.0
+                };
                 
                 println!(
-                    "RagActor: [{}] Batch {} ({} chunks) in {:?} | Progress: {}/{} ({}%)",
+                    "RagActor: [{}] Batch {} ({} chunks, {} chars, avg {} chars/chunk, {:.0} chars/sec) in {:?} | Progress: {}/{} ({}%)",
                     compute_device,
                     batch_count,
                     batch_size,
+                    batch_total_chars,
+                    batch_avg_chars,
+                    chars_per_sec,
                     batch_elapsed,
                     final_chunks.len(),
                     total_pending_chunks,
