@@ -3,7 +3,8 @@ use crate::protocol::{
     CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus, ModelFamily,
     ModelInfo, OpenAITool, ParsedToolCall, ReasoningFormat, ToolFormat,
 };
-use crate::app_state::{GpuResourceGuard, LoggingPersistence};
+use crate::app_state::{GpuResourceGuard, LoggingPersistence, SettingsState};
+use crate::settings;
 use serde::Deserialize;
 use crate::settings::ChatFormatName;
 use crate::tool_adapters::parse_combined_tool_name;
@@ -17,7 +18,7 @@ use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{sleep, timeout};
@@ -1982,12 +1983,78 @@ impl ModelGatewayActor {
     }
 
     /// Emit an event to request fallback to the default model due to errors.
-    /// The frontend will handle the actual model switch.
+    /// Also DIRECTLY updates and saves settings to ensure the fallback persists across restarts.
     fn emit_model_fallback_required(&self, current_model: &str, error: &str) {
+        use std::io::Write;
+        
         println!(
-            "[FoundryActor] Emitting model-fallback-required: current={}, fallback={}, error={}",
-            current_model, DEFAULT_FALLBACK_MODEL, error
+            "\n[FoundryActor] ⚠️  MODEL FALLBACK TRIGGERED ⚠️"
         );
+        println!(
+            "[FoundryActor] Current model: {}", current_model
+        );
+        println!(
+            "[FoundryActor] Fallback model: {}", DEFAULT_FALLBACK_MODEL
+        );
+        println!(
+            "[FoundryActor] Error: {}", error
+        );
+        let _ = std::io::stdout().flush();
+        
+        // CRITICAL: Directly update settings to prevent restart loop
+        // Don't rely on frontend event handler - do it here in the backend
+        let app_handle = self.app_handle.clone();
+        let fallback_model = DEFAULT_FALLBACK_MODEL.to_string();
+        let current = current_model.to_string();
+        
+        // Spawn a task to update settings (we can't block here in the actor)
+        tokio::spawn(async move {
+            println!("[FoundryActor] Attempting to persist fallback model to settings...");
+            let _ = std::io::stdout().flush();
+            
+            // Access SettingsState through the app handle
+            if let Some(settings_state) = app_handle.try_state::<SettingsState>() {
+                let mut guard = settings_state.settings.write().await;
+                let old_model = guard.selected_model.clone();
+                guard.selected_model = Some(fallback_model.clone());
+                
+                println!(
+                    "[FoundryActor] 📝 Updating settings: selected_model '{}' -> '{}'",
+                    old_model.as_deref().unwrap_or("<none>"),
+                    fallback_model
+                );
+                let _ = std::io::stdout().flush();
+                
+                // Save immediately
+                match settings::save_settings(&guard).await {
+                    Ok(()) => {
+                        println!(
+                            "[FoundryActor] ✅ SUCCESS: Fallback model '{}' persisted to settings file!",
+                            fallback_model
+                        );
+                        println!(
+                            "[FoundryActor] On next restart, app will use '{}' instead of '{}'",
+                            fallback_model, current
+                        );
+                        let _ = std::io::stdout().flush();
+                    }
+                    Err(e) => {
+                        println!(
+                            "[FoundryActor] ❌ FAILED to save settings: {}",
+                            e
+                        );
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+            } else {
+                println!(
+                    "[FoundryActor] ❌ Could not access SettingsState - fallback not persisted!"
+                );
+                let _ = std::io::stdout().flush();
+            }
+        });
+        
+        // Also emit event for frontend (backup mechanism)
         let _ = self.app_handle.emit(
             "model-fallback-required",
             json!({
