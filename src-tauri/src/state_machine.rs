@@ -1065,6 +1065,104 @@ impl AgenticStateMachine {
     fn format_tool_schemas(&self, schemas: &[ToolSchema]) -> String {
         system_prompt::format_tool_schemas(schemas)
     }
+
+    /// Get a compact schema summary for error recovery prompts.
+    /// 
+    /// This extracts column names and types from the current context
+    /// (auto_schema_search, discovered_tables, or attached_tables) and formats
+    /// them in a compact, readable format for injection into error messages.
+    ///
+    /// IMPORTANT: Returns ALL tables, not just the first one. When the model
+    /// uses the wrong table, it needs to see all available tables to pick
+    /// the correct one.
+    ///
+    /// This is part of the "Cursor for SQL" approach: when a query fails,
+    /// we re-inject the schema directly so small models don't have to look
+    /// back in context.
+    pub fn get_compact_schema_context(&self) -> Option<String> {
+        let mut table_sections: Vec<String> = Vec::new();
+        
+        // Helper to format a single table's columns
+        fn format_table_columns(table_name: &str, columns: &[(&str, &str, &[String])]) -> String {
+            let mut section = format!("**Table: {}**\n", table_name);
+            for (name, data_type, top_values) in columns {
+                let mut col_str = format!("  - {} ({})", name, data_type);
+                if !top_values.is_empty() {
+                    let vals: String = top_values.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+                    col_str.push_str(&format!(" [{}]", vals));
+                }
+                section.push_str(&col_str);
+                section.push('\n');
+            }
+            section
+        }
+        
+        // Priority 1: Auto-discovered schema from schema_search - include ALL tables
+        if let Some(ref output) = self.auto_schema_search {
+            for table in &output.tables {
+                let columns: Vec<(&str, &str, &[String])> = table.relevant_columns.iter()
+                    .map(|c| (c.name.as_str(), c.data_type.as_str(), c.top_values.as_slice()))
+                    .collect();
+                if !columns.is_empty() {
+                    table_sections.push(format_table_columns(&table.table_name, &columns));
+                }
+            }
+        }
+        
+        // Priority 2: Discovered tables from state (SqlRetrieval, SchemaContextInjected)
+        if table_sections.is_empty() {
+            match &self.current_state {
+                AgenticState::SqlRetrieval { discovered_tables, .. } => {
+                    for table in discovered_tables {
+                        let columns: Vec<(&str, &str, &[String])> = table.columns.iter()
+                            .map(|c| (c.name.as_str(), c.data_type.as_str(), c.top_values.as_slice()))
+                            .collect();
+                        if !columns.is_empty() {
+                            table_sections.push(format_table_columns(&table.fully_qualified_name, &columns));
+                        }
+                    }
+                }
+                AgenticState::SchemaContextInjected { tables, .. } => {
+                    for table in tables {
+                        let columns: Vec<(&str, &str, &[String])> = table.columns.iter()
+                            .map(|c| (c.name.as_str(), c.data_type.as_str(), c.top_values.as_slice()))
+                            .collect();
+                        if !columns.is_empty() {
+                            table_sections.push(format_table_columns(&table.fully_qualified_name, &columns));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        // Priority 3: Attached tables - format them in our compact style
+        // Don't just return turn_config.schema_context as-is because it's in a
+        // different format that won't trigger the multi-table hints
+        if table_sections.is_empty() && !self.attached_tables.is_empty() {
+            for attached in &self.attached_tables {
+                if let Some(ref schema_text) = attached.schema_text {
+                    // Format the attached table's schema in our compact style
+                    table_sections.push(format!("**Table: {}**\n{}", attached.table_fq_name, schema_text));
+                }
+            }
+        }
+        
+        // Fallback: use turn_config.schema_context if we have nothing else
+        if table_sections.is_empty() {
+            if let Some(ref config) = self.turn_config {
+                if let Some(ref schema_ctx) = config.schema_context {
+                    return Some(schema_ctx.clone());
+                }
+            }
+        }
+        
+        if table_sections.is_empty() {
+            return None;
+        }
+        
+        Some(table_sections.join("\n"))
+    }
 }
 
 // ============ State Preview for Settings UI ============

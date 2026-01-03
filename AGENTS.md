@@ -48,3 +48,23 @@
   - `FoundryActor` provides `GetGpuEmbeddingModel` for lazy-loading the GPU embedding model
   - `process_rag_documents` and `refresh_database_schemas` request the GPU model on-demand, then trigger LLM re-warm after completion
   - CPU embedding model is always available for search without GPU contention
+
+### Agentic Loop Philosophy: Cursor for SQL and RAG
+
+Plugable Chat is designed as **"Cursor for SQL and RAG"** - the orchestration layer does the heavy lifting so small local models can succeed at complex tasks.
+
+**Core Principles**:
+1. **Plan and decompose** - Break complex queries into manageable steps
+2. **Provide rich context** - Give the model exactly what it needs, when it needs it
+3. **Recover from errors** - When something fails, don't give up; guide the model to fix it
+4. **Learn from patterns** - Detect repeated failures and adapt the approach
+
+**Implementation Pattern - Error Recovery**:
+When a tool fails, don't just return the error. Re-inject the context the model needs to fix it:
+- For SQL errors: Include the failed query, error message, AND the schema columns
+- For Python errors: Include the traceback AND available imports/functions
+- For MCP tool errors: Include the error AND the valid parameter schema
+
+The goal is always: **don't make the model figure it out; tell it exactly what to do**.
+
+See `build_sql_error_recovery_prompt()` in `system_prompt.rs` for the reference implementation.

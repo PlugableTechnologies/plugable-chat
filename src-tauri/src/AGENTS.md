@@ -53,6 +53,29 @@ The `run_agentic_loop()` function handles tool execution:
 2. **Auto-Approval**: Check built-in auto-approval and MCP server configs.
 3. **Execution**: Routing to `PythonActor`, `ToolRegistry`, or `McpHostActor`.
 4. **Result Formatting**: `format_tool_result()` formats results per `ToolFormat`.
+5. **Error Recovery**: For SQL errors, injects schema context via `build_sql_error_recovery_prompt()`.
+
+## Error Recovery Pattern
+
+When tool execution fails, the agentic loop helps the model recover rather than giving up. This is the "Cursor for SQL" approach: the orchestration layer does the heavy lifting.
+
+### The Pattern
+1. **Detect error** - Tool returns `is_error: true`
+2. **Extract context** - Get schema/parameters from state machine via `get_compact_schema_context()`
+3. **Build recovery prompt** - Use `build_sql_error_recovery_prompt()` or equivalent
+4. **Inject into tool response** - Model sees error + context + clear next action
+
+### Key Functions
+- `system_prompt::build_sql_error_recovery_prompt()` - SQL-specific recovery with schema injection
+- `state_machine::get_compact_schema_context()` - Extract compact schema for error prompts
+- `tool_adapters::format_tool_result()` - Routes to appropriate recovery builder based on tool type
+
+### Why This Matters
+Small models (Phi-4-mini, Llama 3.2) don't look back in context when they see an error. If we just say "check the schema above," they repeat the same mistake. By re-injecting the schema directly into the error response, we give them everything they need in their immediate context.
+
+### Tests
+- `test_sql_error_recovery_with_schema_injection` - Integration test that validates recovery
+- `test_get_compact_schema_context` - Unit test for schema extraction
 
 ## Debugging Tool Calls
 Key log prefixes to watch:

@@ -1529,6 +1529,7 @@ pub(crate) async fn run_agentic_loop(
                             true,
                             tool_format,
                             Some(&original_message),
+                            None, // No schema context for server resolution errors
                         ));
                         continue;
                     }
@@ -1581,6 +1582,7 @@ pub(crate) async fn run_agentic_loop(
                     true,
                     tool_format,
                     Some(&original_message),
+                    None, // No schema context for state validation errors
                 ));
                 continue;
             }
@@ -1674,6 +1676,7 @@ pub(crate) async fn run_agentic_loop(
                             true,
                             tool_format,
                             Some(&original_message),
+                            None, // No schema context for approval errors
                         ));
                         continue;
                     }
@@ -1685,6 +1688,7 @@ pub(crate) async fn run_agentic_loop(
                             true,
                             tool_format,
                             Some(&original_message),
+                            None, // No schema context for approval errors
                         ));
                         continue;
                     }
@@ -1696,6 +1700,7 @@ pub(crate) async fn run_agentic_loop(
                             true,
                             tool_format,
                             Some(&original_message),
+                            None, // No schema context for approval errors
                         ));
                         continue;
                     }
@@ -2219,6 +2224,15 @@ pub(crate) async fn run_agentic_loop(
             // Include original user prompt in error cases to help model retry
             let user_prompt_for_error = if is_error { Some(original_message.as_str()) } else { None };
             
+            // For SQL errors, extract schema context for enhanced error recovery
+            // This is the "Cursor for SQL" approach: re-inject schema so small models
+            // don't have to look back in context
+            let schema_context_for_error = if is_error && resolved_call.tool == "sql_select" {
+                state_machine.get_compact_schema_context()
+            } else {
+                None
+            };
+            
             if use_native_tool_results {
                 // Native format: create individual tool result messages
                 if let Some(ref tool_call_id) = resolved_call.id {
@@ -2234,6 +2248,7 @@ pub(crate) async fn run_agentic_loop(
                         is_error,
                         tool_format,
                         user_prompt_for_error,
+                        schema_context_for_error.as_deref(),
                     ));
                 }
             } else {
@@ -2244,6 +2259,7 @@ pub(crate) async fn run_agentic_loop(
                     is_error,
                     tool_format,
                     user_prompt_for_error,
+                    schema_context_for_error.as_deref(),
                 ));
             }
             any_executed = true;
@@ -4744,7 +4760,7 @@ mod inline_tests {
             ToolCallFormatName::Hermes,
         );
         let calls = unwrap_tool_calls(action);
-        let formatted = format_tool_result(&calls[0], "echo: hi", false, ToolFormat::Hermes, None);
+        let formatted = format_tool_result(&calls[0], "echo: hi", false, ToolFormat::Hermes, None, None);
 
         assert!(
             formatted.contains("echo: hi"),

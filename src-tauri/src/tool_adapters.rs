@@ -978,15 +978,26 @@ pub fn parse_granite_tool_calls(content: &str) -> Vec<ParsedToolCall> {
 /// When `is_error` is true and `original_user_prompt` is provided, the error guidance
 /// will include a reminder of what the user originally asked, helping the model
 /// understand the context for its retry.
+///
+/// For SQL errors, if `schema_context` is provided, uses the enhanced
+/// `build_sql_error_recovery_prompt()` which injects the schema directly into
+/// the error response. This is the "Cursor for SQL" approach: small models
+/// don't look back in context, so we re-inject what they need.
 pub fn format_tool_result(
     call: &ParsedToolCall,
     result: &str,
     is_error: bool,
     tool_format: ToolFormat,
     original_user_prompt: Option<&str>,
+    schema_context: Option<&str>,
 ) -> String {
     let guidance = if is_error {
-        system_prompt::build_error_guidance(&call.tool, original_user_prompt)
+        // For SQL errors with schema context, use enhanced recovery prompt
+        if call.tool == "sql_select" && schema_context.is_some() {
+            build_sql_error_recovery_guidance(result, original_user_prompt, schema_context)
+        } else {
+            system_prompt::build_error_guidance(&call.tool, original_user_prompt)
+        }
     } else if call.tool == "sql_select" {
         system_prompt::SQL_SUCCESS_GUIDANCE.to_string()
     } else {
@@ -1066,6 +1077,43 @@ pub fn format_tool_result(
             }
         }
     }
+}
+
+/// Build SQL error recovery guidance by extracting SQL and error from the result JSON.
+/// 
+/// This parses the sql_select output format and uses the enhanced recovery prompt
+/// that injects schema context directly.
+fn build_sql_error_recovery_guidance(
+    result: &str,
+    original_user_prompt: Option<&str>,
+    schema_context: Option<&str>,
+) -> String {
+    // Try to parse the result as JSON to extract sql_executed and error
+    let (sql_executed, error_message) = if let Ok(json) = serde_json::from_str::<serde_json::Value>(result) {
+        let sql = json.get("sql_executed")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let error = json.get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or(result);
+        (sql.to_string(), error.to_string())
+    } else {
+        // If not JSON, use the raw result as the error message
+        (String::new(), result.to_string())
+    };
+    
+    let user_prompt = original_user_prompt.unwrap_or("");
+    
+    // Use the enhanced recovery prompt with schema injection
+    format!(
+        "\n\n{}",
+        system_prompt::build_sql_error_recovery_prompt(
+            &sql_executed,
+            &error_message,
+            schema_context,
+            user_prompt,
+        )
+    )
 }
 
 // Helper functions
@@ -1665,7 +1713,7 @@ Done."#;
             id: None,
         };
 
-        let result = format_tool_result(&call, "Hello, World!", false, ToolFormat::Hermes, None);
+        let result = format_tool_result(&call, "Hello, World!", false, ToolFormat::Hermes, None, None);
         assert!(result.contains("<tool_response>"));
         assert!(result.contains("Hello, World!"));
         // Success case should NOT include error guidance
@@ -1692,7 +1740,7 @@ Done."#;
             ToolFormat::TextBased,
             ToolFormat::Gemini,
         ] {
-            let result = format_tool_result(&call, sql_result, false, format, None);
+            let result = format_tool_result(&call, sql_result, false, format, None, None);
             assert!(
                 result.contains("already been displayed to the user"),
                 "Format {:?} should tell model results were shown to user, got: {}",
@@ -1736,7 +1784,7 @@ Done."#;
             ToolFormat::TextBased,
             ToolFormat::Gemini,
         ] {
-            let result = format_tool_result(&call, error_msg, true, format, Some(user_prompt));
+            let result = format_tool_result(&call, error_msg, true, format, Some(user_prompt), None);
             assert!(
                 result.contains("TOOL ERROR"),
                 "Format {:?} should include error guidance, got: {}",
@@ -1783,7 +1831,8 @@ Done."#;
         let error_msg = r#"{"success": false, "error": "Function not found: TO_CHAR", "sql_executed": "SELECT TO_CHAR..."}"#;
         let user_prompt = "what are my 2025 sales by month?";
 
-        let result = format_tool_result(&call, error_msg, true, ToolFormat::Hermes, Some(user_prompt));
+        // Without schema context, should use generic SQL error guidance
+        let result = format_tool_result(&call, error_msg, true, ToolFormat::Hermes, Some(user_prompt), None);
         
         // Should include SQL-specific error guidance
         assert!(

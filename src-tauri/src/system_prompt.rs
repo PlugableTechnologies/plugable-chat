@@ -218,7 +218,10 @@ pub fn build_schema_search_documentation() -> String {
      Returns table names, columns, and descriptions relevant to the query.".to_string()
 }
 
-/// Build error guidance string, optionally including the original user prompt
+/// Build error guidance string, optionally including the original user prompt.
+/// 
+/// NOTE: For SQL errors with schema context available, prefer `build_sql_error_recovery_prompt()`
+/// which provides explicit schema injection for better error recovery with small models.
 pub fn build_error_guidance(tool_name: &str, original_user_prompt: Option<&str>) -> String {
     let base_guidance = if tool_name == "sql_select" {
         format!(
@@ -255,6 +258,151 @@ pub fn build_error_guidance(tool_name: &str, original_user_prompt: Option<&str>)
             base_guidance
         ),
     }
+}
+
+/// Build an explicit SQL error recovery prompt with schema context.
+/// 
+/// This is the "Cursor for SQL" approach: give the model everything it needs
+/// to fix the error in a single, focused prompt. Small models don't look back
+/// in context, so we re-inject the schema directly into the error response.
+///
+/// Uses Chain-of-Thought (CoT) prompting to force the model to reason about
+/// the error BEFORE outputting the corrected query. This prevents blind retries.
+///
+/// # Arguments
+/// * `sql_executed` - The SQL query that failed
+/// * `error_message` - The error message from the database
+/// * `schema_context` - Compact schema summary (column names and types)
+/// * `user_prompt` - The original user question
+///
+/// # Returns
+/// A formatted error recovery prompt that includes all context needed to fix the query.
+pub fn build_sql_error_recovery_prompt(
+    sql_executed: &str,
+    error_message: &str,
+    schema_context: Option<&str>,
+    user_prompt: &str,
+) -> String {
+    let mut prompt = String::new();
+    
+    // Header - make it clear we need REASONING first
+    prompt.push_str("## SQL ERROR - STOP AND ANALYZE\n\n");
+    
+    // Show the failed query
+    prompt.push_str("**Your failed query**:\n```sql\n");
+    prompt.push_str(sql_executed);
+    prompt.push_str("\n```\n\n");
+    
+    // Show the error
+    prompt.push_str("**Database error**: ");
+    prompt.push_str(error_message);
+    prompt.push_str("\n\n");
+    
+    // Inject schema context if available
+    if let Some(schema) = schema_context {
+        prompt.push_str("**AVAILABLE TABLES AND COLUMNS**:\n");
+        prompt.push_str(schema);
+        prompt.push_str("\n\n");
+    }
+    
+    // Parse error and build CoT prompt
+    let error_lower = error_message.to_lowercase();
+    let bad_column = if error_lower.contains("unrecognized name") || error_lower.contains("unknown column") {
+        extract_bad_column_name(error_message)
+    } else {
+        None
+    };
+    
+    // Chain-of-Thought: Force the model to reason step by step
+    prompt.push_str("**BEFORE you retry, you MUST answer these questions:**\n\n");
+    
+    if let Some(ref col) = bad_column {
+        // Specific guidance for column not found errors
+        prompt.push_str(&format!("1. **What column caused the error?** The column \"{}\" was not found.\n\n", col));
+        prompt.push_str("2. **Which table did you query?** Look at the FROM clause in your failed query.\n\n");
+        prompt.push_str("3. **Does that column exist in that table?** Check the AVAILABLE TABLES above.\n\n");
+        
+        // Check if there are multiple tables
+        if let Some(schema) = schema_context {
+            let table_count = schema.matches("**Table:").count();
+            if table_count > 1 {
+                prompt.push_str("4. **Could the column exist in a DIFFERENT table?** You have multiple tables available. The column you need might be in another table.\n\n");
+                
+                // Check if column exists in schema (wrong table scenario)
+                if schema.to_lowercase().contains(&col.to_lowercase()) {
+                    prompt.push_str(&format!(
+                        "   ⚠️ **IMPORTANT**: I can see \"{}\" exists in one of the tables listed above. You may be querying the WRONG table!\n\n",
+                        col
+                    ));
+                }
+            } else {
+                prompt.push_str(&format!(
+                    "4. **What similar column exists?** Look at the columns in the table - find one similar to \"{}\".\n\n",
+                    col
+                ));
+            }
+        }
+    } else if error_lower.contains("function not found") || error_lower.contains("unknown function") {
+        prompt.push_str("1. **What function caused the error?** Identify the unsupported function.\n\n");
+        prompt.push_str("2. **What is the correct alternative?** Use CAST(column AS STRING) instead of TO_CHAR, etc.\n\n");
+    } else if error_lower.contains("syntax") {
+        prompt.push_str("1. **Where is the syntax error?** Look at the position indicated in the error.\n\n");
+        prompt.push_str("2. **What is the correct syntax?** Check quoting, parentheses, and keywords.\n\n");
+    } else {
+        prompt.push_str("1. **What exactly went wrong?** Read the error message carefully.\n\n");
+        prompt.push_str("2. **How do you fix it?** Identify the specific issue and correction.\n\n");
+    }
+    
+    // Remind of the user's goal
+    if !user_prompt.is_empty() {
+        prompt.push_str(&format!("**Original question**: \"{}\"\n\n", user_prompt));
+    }
+    
+    // Final instruction with explicit format
+    prompt.push_str("**NOW respond in this format:**\n");
+    prompt.push_str("First, briefly explain what was wrong and how you're fixing it.\n");
+    prompt.push_str("Then, call `sql_select` with your corrected query.\n");
+    prompt.push_str("\nExample response format:\n");
+    prompt.push_str("The error was [explanation]. The correct column/table is [correction].\n");
+    prompt.push_str("<tool_call>{\"name\": \"sql_select\", \"arguments\": {\"sql\": \"CORRECTED QUERY\"}}</tool_call>");
+    
+    prompt
+}
+
+/// Extract the bad column name from common SQL error messages.
+/// 
+/// Handles patterns like:
+/// - "Unrecognized name: product at [1:8]"
+/// - "Unknown column 'product' in 'field list'"
+fn extract_bad_column_name(error_message: &str) -> Option<String> {
+    // Pattern: "Unrecognized name: COLUMN_NAME at [...]"
+    if let Some(start) = error_message.find("Unrecognized name:") {
+        let rest = &error_message[start + "Unrecognized name:".len()..];
+        let trimmed = rest.trim_start();
+        let end = trimmed.find(|c: char| c == ' ' || c == '\n' || c == '\t').unwrap_or(trimmed.len());
+        let column = &trimmed[..end];
+        if !column.is_empty() {
+            return Some(column.to_string());
+        }
+    }
+    
+    // Pattern: "Unknown column 'COLUMN_NAME' in ..."
+    if let Some(start) = error_message.find("Unknown column '") {
+        let rest = &error_message[start + "Unknown column '".len()..];
+        if let Some(end) = rest.find('\'') {
+            return Some(rest[..end].to_string());
+        }
+    }
+    
+    // Pattern: "column \"COLUMN_NAME\" does not exist"
+    if let Some(start) = error_message.find("column \"") {
+        let rest = &error_message[start + "column \"".len()..];
+        if let Some(end) = rest.find('"') {
+            return Some(rest[..end].to_string());
+        }
+    }
+    
+    None
 }
 
 /// Build the Capabilities section based on enabled capabilities.
