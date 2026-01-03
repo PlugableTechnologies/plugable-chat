@@ -16,7 +16,8 @@ import {
     X, 
     Loader2, 
     AlertCircle,
-    Layout
+    Layout,
+    ChevronRight
 } from 'lucide-react';
 // Icons replaced with unicode characters
 import ReactMarkdown from 'react-markdown';
@@ -2470,6 +2471,11 @@ const DatabaseAttachmentModal = ({
                             results.map((res) => {
                                 const table = res.table;
                                 const attached = isAttached(table.table_fq_name);
+                                // Parse fully qualified name into components (e.g., project.dataset.table)
+                                const nameParts = table.table_fq_name.split('.');
+                                const tableName = nameParts.pop() || table.table_fq_name;
+                                const pathParts = nameParts; // remaining parts (project, dataset, etc.)
+                                
                                 return (
                                     <div 
                                         key={table.table_fq_name}
@@ -2491,7 +2497,7 @@ const DatabaseAttachmentModal = ({
                                                 : 'bg-white border-gray-100 hover:border-amber-200 hover:bg-gray-50'
                                         }`}
                                     >
-                                        <div className={`mt-0.5 w-5 h-5 rounded border flex items-center justify-center transition-colors ${
+                                        <div className={`mt-0.5 w-5 h-5 rounded border flex-shrink-0 flex items-center justify-center transition-colors ${
                                             attached 
                                                 ? 'bg-amber-500 border-amber-500 text-white' 
                                                 : 'bg-white border-gray-300 group-hover:border-amber-400'
@@ -2499,29 +2505,43 @@ const DatabaseAttachmentModal = ({
                                             {attached && <Check size={14} />}
                                         </div>
                                         <div className="flex-1 min-w-0">
-                                            <div className="flex items-center gap-2 mb-1">
-                                                <span className="font-medium text-gray-900 truncate">
-                                                    {table.table_fq_name}
-                                                </span>
-                                                <span className="px-1.5 py-0.5 rounded bg-gray-100 text-[10px] font-semibold text-gray-500 uppercase">
+                                            {/* Path breadcrumb (project / dataset) */}
+                                            {pathParts.length > 0 && (
+                                                <div className="flex flex-wrap items-center gap-1 mb-1.5 text-xs text-gray-500">
+                                                    {pathParts.map((part, idx) => (
+                                                        <span key={idx} className="flex items-center gap-1">
+                                                            <span className="break-all">{part}</span>
+                                                            {idx < pathParts.length - 1 && (
+                                                                <ChevronRight size={12} className="text-gray-300 flex-shrink-0" />
+                                                            )}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            {/* Table name - prominent */}
+                                            <div className="font-semibold text-gray-900 break-words leading-snug mb-2">
+                                                {tableName}
+                                            </div>
+                                            {/* Metadata row */}
+                                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                                                <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium flex-shrink-0">
                                                     {table.source_id}
                                                 </span>
+                                                <span className="flex items-center gap-1 text-gray-500 flex-shrink-0">
+                                                    <Layout size={12} /> {table.column_count} columns
+                                                </span>
                                                 {hasPrompt && res.relevance_score > 0 && (
-                                                    <span className="text-[10px] text-amber-600 font-medium">
+                                                    <span className="text-amber-600 font-medium flex-shrink-0">
                                                         {(res.relevance_score * 100).toFixed(0)}% match
                                                     </span>
                                                 )}
                                             </div>
-                                            <div className="flex items-center gap-3 text-xs text-gray-500">
-                                                <span className="flex items-center gap-1">
-                                                    <Layout size={12} /> {table.column_count} columns
-                                                </span>
-                                                {table.description && (
-                                                    <span className="truncate flex-1">
-                                                        {table.description}
-                                                    </span>
-                                                )}
-                                            </div>
+                                            {/* Description - wraps naturally */}
+                                            {table.description && (
+                                                <p className="mt-2 text-xs text-gray-500 leading-relaxed">
+                                                    {table.description}
+                                                </p>
+                                            )}
                                         </div>
                                     </div>
                                 );
