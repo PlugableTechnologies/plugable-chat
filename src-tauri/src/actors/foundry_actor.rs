@@ -1853,21 +1853,53 @@ impl ModelGatewayActor {
                 })
                 .collect();
 
-            // Select default model if none selected
-            // Prefer Phi-4-mini-instruct (the model we auto-download) if available
+            // Select model at startup
+            // Priority:
+            // 1. Persisted selected_model from settings (if available in cached models)
+            // 2. Phi-4-mini-instruct (the default fallback)
+            // 3. First available model
             if self.model_id.is_none() {
-                // First, try to find the default fallback model (phi-4-mini-instruct)
+                use std::io::Write;
+                
+                // Try to read persisted model selection from settings
+                let persisted_model: Option<String> = if let Some(settings_state) = self.app_handle.try_state::<SettingsState>() {
+                    // Use blocking read since we're in async context but need sync access
+                    let guard = futures::executor::block_on(settings_state.settings.read());
+                    let persisted = guard.selected_model.clone();
+                    println!("[FoundryActor] Persisted selected_model from settings: {:?}", persisted);
+                    let _ = std::io::stdout().flush();
+                    persisted
+                } else {
+                    println!("[FoundryActor] Could not access SettingsState at startup");
+                    let _ = std::io::stdout().flush();
+                    None
+                };
+                
+                // Check if persisted model is available
+                let persisted_available = persisted_model.as_ref().and_then(|pm| {
+                    self.available_models.iter().find(|m| *m == pm).cloned()
+                });
+                
+                // Fallback: try to find the default fallback model (phi-4-mini-instruct)
                 let preferred_model = self.available_models.iter().find(|m| {
                     m.to_lowercase().contains(DEFAULT_FALLBACK_MODEL)
                 });
                 
-                let selected = if let Some(model) = preferred_model {
-                    println!("Selected preferred default model: {}", model);
+                let selected = if let Some(model) = persisted_available {
+                    println!("[FoundryActor] ✅ Using persisted model from settings: {}", model);
+                    let _ = std::io::stdout().flush();
+                    model
+                } else if let Some(model) = preferred_model {
+                    println!("[FoundryActor] Using default fallback model: {}", model);
+                    let _ = std::io::stdout().flush();
                     model.clone()
                 } else if let Some(first) = self.available_models.first() {
-                    println!("Selected first available model as default: {}", first);
+                    println!("[FoundryActor] Using first available model: {}", first);
+                    let _ = std::io::stdout().flush();
                     first.clone()
                 } else {
+                    println!("[FoundryActor] No models available");
+                    let _ = std::io::stdout().flush();
                     return true; // No models available
                 };
                 
