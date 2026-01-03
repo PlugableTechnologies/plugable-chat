@@ -10,6 +10,89 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::actors::schema_vector_actor::{SchemaVectorMsg, SchemaStoreStats};
+use crate::settings::CachedColumnSchema;
+
+/// Returns true if the SQL data type is numeric.
+/// Used to separate columns for the hybrid column selection strategy:
+/// - Non-numeric columns are always included
+/// - Numeric columns are selected via semantic search
+pub fn is_numeric_data_type(data_type: &str) -> bool {
+    let upper = data_type.to_uppercase();
+    // Check for common numeric type patterns across SQL dialects
+    upper.contains("INT") ||       // INTEGER, INT, INT64, BIGINT, SMALLINT, TINYINT
+    upper.contains("FLOAT") ||     // FLOAT, FLOAT64, FLOAT32
+    upper.contains("DOUBLE") ||    // DOUBLE, DOUBLE PRECISION
+    upper.contains("DECIMAL") ||   // DECIMAL
+    upper.contains("NUMERIC") ||   // NUMERIC
+    upper.contains("NUMBER") ||    // NUMBER (Oracle)
+    upper.contains("REAL") ||      // REAL
+    upper == "MONEY" ||            // MONEY (SQL Server)
+    upper == "SMALLMONEY"          // SMALLMONEY (SQL Server)
+}
+
+/// Hybrid column selection: all non-numeric columns + top N numeric columns.
+/// 
+/// This is the shared column selection strategy used by both:
+/// - The `schema_search` tool
+/// - Attached table schema formatting
+/// 
+/// # Arguments
+/// * `columns` - All columns from the table schema
+/// * `semantic_numeric_names` - Optional set of semantically relevant numeric column names
+///   (from vector search). If None, numeric columns are included in order up to the limit.
+/// * `max_numeric_columns` - Maximum number of numeric columns to include
+/// 
+/// # Returns
+/// A tuple of (selected_columns, numeric_count, non_numeric_count) where selected_columns
+/// contains references to the columns that should be included.
+pub fn select_columns_hybrid<'a>(
+    columns: &'a [CachedColumnSchema],
+    semantic_numeric_names: Option<&std::collections::HashSet<String>>,
+    max_numeric_columns: usize,
+) -> (Vec<&'a CachedColumnSchema>, usize, usize) {
+    use std::collections::HashSet;
+    
+    // Separate columns into numeric vs non-numeric
+    let (numeric_cols, non_numeric_cols): (Vec<_>, Vec<_>) = columns
+        .iter()
+        .partition(|c| is_numeric_data_type(&c.data_type));
+    
+    let non_numeric_count = non_numeric_cols.len();
+    let mut selected: Vec<&CachedColumnSchema> = non_numeric_cols;
+    
+    // For numeric columns: use semantic ordering if provided, otherwise use original order
+    let numeric_to_add: Vec<&CachedColumnSchema> = if let Some(semantic_names) = semantic_numeric_names {
+        // First add semantically relevant numeric columns (in order of appearance)
+        let mut ordered: Vec<&CachedColumnSchema> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        
+        // Add semantic matches first
+        for col in &numeric_cols {
+            if semantic_names.contains(&col.name) && !seen.contains(col.name.as_str()) {
+                ordered.push(col);
+                seen.insert(&col.name);
+            }
+        }
+        
+        // Fill remaining slots with other numeric columns
+        for col in &numeric_cols {
+            if !seen.contains(col.name.as_str()) && ordered.len() < max_numeric_columns {
+                ordered.push(col);
+                seen.insert(&col.name);
+            }
+        }
+        
+        ordered.into_iter().take(max_numeric_columns).collect()
+    } else {
+        // No semantic filtering - take first N numeric columns
+        numeric_cols.into_iter().take(max_numeric_columns).collect()
+    };
+    
+    let numeric_count = numeric_to_add.len();
+    selected.extend(numeric_to_add);
+    
+    (selected, numeric_count, non_numeric_count)
+}
 
 /// Input for the schema_search built-in tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +116,7 @@ fn default_max_tables() -> usize {
 }
 
 fn default_max_columns() -> usize {
-    5
+    10
 }
 
 fn default_min_score() -> f32 {
@@ -76,6 +159,20 @@ pub struct ColumnOutput {
     /// Top 3 most common values with percentage (e.g., "THEFT (23.5%)")
     #[serde(default)]
     pub top_values: Vec<String>,
+}
+
+impl ColumnOutput {
+    /// Create a ColumnOutput from a CachedColumnSchema with a given relevance score
+    pub fn from_cached_column_schema(col: &CachedColumnSchema, relevance: f32) -> Self {
+        Self {
+            name: col.name.clone(),
+            data_type: col.data_type.clone(),
+            relevance,
+            description: col.description.clone(),
+            special_attributes: col.special_attributes.clone(),
+            top_values: col.top_values.clone(),
+        }
+    }
 }
 
 /// Output from schema_search
@@ -163,34 +260,117 @@ impl SchemaSearchExecutor {
             table_results.len()
         );
 
-        // For each table, search for relevant columns
+        // For each table, use hybrid column selection:
+        // - Include ALL non-numeric columns (TEXT, DATE, BOOLEAN, etc.)
+        // - Semantic search on numeric columns, limited by max_columns_per_table
         let mut output_tables = Vec::new();
 
         for table in table_results {
-            let (col_tx, col_rx) = oneshot::channel();
+            // 1. Get full table schema with all columns
+            let (schema_tx, schema_rx) = oneshot::channel();
             self.schema_tx
-                .send(SchemaVectorMsg::SearchColumns {
-                    query_embedding: query_embedding.clone(),
-                    table_fq_name: Some(table.table_fq_name.clone()),
-                    limit: input.max_columns_per_table,
-                    respond_to: col_tx,
+                .send(SchemaVectorMsg::GetTableSchema {
+                    table_fq_name: table.table_fq_name.clone(),
+                    respond_to: schema_tx,
                 })
                 .await
-                .map_err(|e| format!("Failed to search columns: {}", e))?;
+                .map_err(|e| format!("Failed to get table schema: {}", e))?;
 
-            let column_results = col_rx.await.unwrap_or_default();
+            let full_schema = schema_rx.await.unwrap_or(None);
 
-            let relevant_columns: Vec<ColumnOutput> = column_results
-                .into_iter()
-                .map(|c| ColumnOutput {
-                    name: c.column_name,
-                    data_type: c.data_type,
-                    relevance: c.relevance_score,
-                    description: c.description,
-                    special_attributes: c.special_attributes,
-                    top_values: c.top_values,
-                })
-                .collect();
+            let relevant_columns = if let Some(schema) = full_schema {
+                // 2. Separate columns into numeric vs non-numeric
+                let (numeric_cols, non_numeric_cols): (Vec<_>, Vec<_>) = schema
+                    .columns
+                    .iter()
+                    .partition(|c| is_numeric_data_type(&c.data_type));
+
+                // 3. Include ALL non-numeric columns with high relevance (1.0)
+                let mut columns: Vec<ColumnOutput> = non_numeric_cols
+                    .into_iter()
+                    .map(|c| ColumnOutput::from_cached_column_schema(c, 1.0))
+                    .collect();
+
+                println!(
+                    "[SchemaSearch] Table '{}': {} non-numeric columns included",
+                    table.table_fq_name,
+                    columns.len()
+                );
+
+                // 4. Semantic search on numeric columns, limited by max_columns_per_table
+                if !numeric_cols.is_empty() {
+                    let (col_tx, col_rx) = oneshot::channel();
+                    self.schema_tx
+                        .send(SchemaVectorMsg::SearchColumns {
+                            query_embedding: query_embedding.clone(),
+                            table_fq_name: Some(table.table_fq_name.clone()),
+                            limit: input.max_columns_per_table,
+                            respond_to: col_tx,
+                        })
+                        .await
+                        .map_err(|e| format!("Failed to search columns: {}", e))?;
+
+                    let column_results = col_rx.await.unwrap_or_default();
+
+                    // Filter to only include numeric columns from the search results
+                    let numeric_col_names: std::collections::HashSet<_> =
+                        numeric_cols.iter().map(|c| c.name.as_str()).collect();
+
+                    let numeric_search_results: Vec<ColumnOutput> = column_results
+                        .into_iter()
+                        .filter(|c| numeric_col_names.contains(c.column_name.as_str()))
+                        .take(input.max_columns_per_table)
+                        .map(|c| ColumnOutput {
+                            name: c.column_name,
+                            data_type: c.data_type,
+                            relevance: c.relevance_score,
+                            description: c.description,
+                            special_attributes: c.special_attributes,
+                            top_values: c.top_values,
+                        })
+                        .collect();
+
+                    println!(
+                        "[SchemaSearch] Table '{}': {} numeric columns selected (of {} total numeric)",
+                        table.table_fq_name,
+                        numeric_search_results.len(),
+                        numeric_cols.len()
+                    );
+
+                    columns.extend(numeric_search_results);
+                }
+
+                columns
+            } else {
+                // Fallback: if we can't get the full schema, use old behavior
+                println!(
+                    "[SchemaSearch] WARNING: Could not get full schema for '{}', using fallback",
+                    table.table_fq_name
+                );
+                let (col_tx, col_rx) = oneshot::channel();
+                self.schema_tx
+                    .send(SchemaVectorMsg::SearchColumns {
+                        query_embedding: query_embedding.clone(),
+                        table_fq_name: Some(table.table_fq_name.clone()),
+                        limit: input.max_columns_per_table,
+                        respond_to: col_tx,
+                    })
+                    .await
+                    .map_err(|e| format!("Failed to search columns: {}", e))?;
+
+                let column_results = col_rx.await.unwrap_or_default();
+                column_results
+                    .into_iter()
+                    .map(|c| ColumnOutput {
+                        name: c.column_name,
+                        data_type: c.data_type,
+                        relevance: c.relevance_score,
+                        description: c.description,
+                        special_attributes: c.special_attributes,
+                        top_values: c.top_values,
+                    })
+                    .collect()
+            };
 
             output_tables.push(TableMatchOutput {
                 table_name: table.table_fq_name.clone(),

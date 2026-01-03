@@ -80,6 +80,11 @@ pub enum SchemaVectorMsg {
     GetStats {
         respond_to: oneshot::Sender<SchemaStoreStats>,
     },
+    /// Get a single table schema by fully-qualified name (includes all columns)
+    GetTableSchema {
+        table_fq_name: String,
+        respond_to: oneshot::Sender<Option<CachedTableSchema>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +246,13 @@ impl SchemaVectorStoreActor {
                             table_count,
                             column_count,
                         });
+                    }
+                    SchemaVectorMsg::GetTableSchema {
+                        table_fq_name,
+                        respond_to,
+                    } => {
+                        let result = get_table_schema_by_name(&tables_table, &table_fq_name).await;
+                        let _ = respond_to.send(result);
                     }
                 }
             });
@@ -953,6 +965,95 @@ async fn get_tables_for_source(table: &Table, source_id: &str) -> Vec<CachedTabl
     }
 
     results
+}
+
+/// Get a single table schema by fully-qualified name
+async fn get_table_schema_by_name(table: &Table, table_fq_name: &str) -> Option<CachedTableSchema> {
+    let query = table
+        .query()
+        .only_if(format!("table_fq_name = '{}'", table_fq_name));
+
+    let mut stream = match query.execute().await {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+
+    // Get the first batch
+    let batch = match stream.next().await {
+        Some(Ok(b)) if b.num_rows() > 0 => b,
+        _ => return None,
+    };
+
+    let fq_names = batch
+        .column_by_name("table_fq_name")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let source_ids = batch
+        .column_by_name("source_id")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let kinds = batch
+        .column_by_name("database_kind")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let dialects = batch
+        .column_by_name("sql_dialect")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let descriptions = batch
+        .column_by_name("description")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let columns_json = batch
+        .column_by_name("columns_json")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let key_cols = batch
+        .column_by_name("key_columns")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let partition_cols = batch
+        .column_by_name("partition_columns")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let cluster_cols = batch
+        .column_by_name("cluster_columns")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let enabled_col = batch
+        .column_by_name("enabled")
+        .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
+
+    // Extract the first row
+    let (fq, src, k, cols) = (fq_names?, source_ids?, kinds?, columns_json?);
+
+    let kind = match k.value(0) {
+        "bigquery" => SupportedDatabaseKind::Bigquery,
+        "postgres" => SupportedDatabaseKind::Postgres,
+        "mysql" => SupportedDatabaseKind::Mysql,
+        "sqlite" => SupportedDatabaseKind::Sqlite,
+        "spanner" => SupportedDatabaseKind::Spanner,
+        _ => return None,
+    };
+
+    let columns: Vec<CachedColumnSchema> =
+        serde_json::from_str(cols.value(0)).unwrap_or_default();
+
+    let sql_dialect = if let Some(d) = dialects {
+        d.value(0).to_string()
+    } else {
+        kind.sql_dialect().to_string()
+    };
+
+    Some(CachedTableSchema {
+        fully_qualified_name: fq.value(0).to_string(),
+        source_id: src.value(0).to_string(),
+        kind,
+        sql_dialect,
+        columns,
+        primary_keys: key_cols
+            .and_then(|c| serde_json::from_str(c.value(0)).ok())
+            .unwrap_or_default(),
+        partition_columns: partition_cols
+            .and_then(|c| serde_json::from_str(c.value(0)).ok())
+            .unwrap_or_default(),
+        cluster_columns: cluster_cols
+            .and_then(|c| serde_json::from_str(c.value(0)).ok())
+            .unwrap_or_default(),
+        description: descriptions.map(|d| d.value(0).to_string()).filter(|s| !s.is_empty()),
+        enabled: enabled_col.map(|c| c.value(0)).unwrap_or(true),
+    })
 }
 
 // ========== Clear Operations ==========

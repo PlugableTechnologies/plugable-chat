@@ -81,7 +81,7 @@ use tools::code_execution::{CodeExecutionExecutor, CodeExecutionInput, CodeExecu
 use tools::tool_search::{
     precompute_tool_search_embeddings, ToolSearchExecutor, ToolSearchInput, ToolSearchOutput,
 };
-use tools::schema_search::SchemaSearchOutput;
+use tools::schema_search::{SchemaSearchOutput, select_columns_hybrid};
 use uuid::Uuid;
 
 // Import all Tauri commands from domain-specific modules (see commands/mod.rs)
@@ -110,33 +110,19 @@ pub fn is_verbose_logging_enabled() -> bool {
 const MAX_TOOL_ITERATIONS: usize = 20;
 const PYTHON_EXECUTION_TOOL_TYPE: &str = "python_execution_20251206";
 
-/// Maximum number of columns to include per attached table in the system prompt.
-/// Helps prevent overwhelming local models with massive column lists.
-const MAX_ATTACHED_TABLE_COLUMNS: usize = 50;
+/// Maximum number of numeric columns to include per attached table in the system prompt.
+/// Non-numeric columns (TEXT, DATE, BOOLEAN, etc.) are always included.
+const MAX_NUMERIC_COLUMNS_PER_TABLE: usize = 10;
 
-/// Check if a column is "essential" and should always be included in schema context.
-/// Essential columns are: primary keys, partition columns, cluster columns, 
-/// and columns with common ID/date/timestamp patterns.
-fn is_essential_column(col_name: &str, table_schema: &settings::CachedTableSchema) -> bool {
-    // Primary keys, partition, cluster columns are always essential
-    if table_schema.primary_keys.contains(&col_name.to_string())
-        || table_schema.partition_columns.contains(&col_name.to_string())
-        || table_schema.cluster_columns.contains(&col_name.to_string())
-    {
-        return true;
-    }
-    // Common patterns for IDs and dates that are often used for filtering/joining
-    let lower = col_name.to_lowercase();
-    lower.ends_with("_id")
-        || lower.ends_with("_date")
-        || lower == "id"
-        || lower.contains("timestamp")
-        || lower.contains("created_at")
-        || lower.contains("updated_at")
-}
+/// Maximum columns to fetch from semantic search when building attached table schemas.
+/// This should be >= MAX_NUMERIC_COLUMNS_PER_TABLE to get enough candidates.
+const SEMANTIC_COLUMN_SEARCH_LIMIT: usize = 30;
 
-/// Build filtered schema_text for an attached table, using semantic column search
-/// and essential column detection to limit context size.
+/// Build filtered schema_text for an attached table using the hybrid column selection strategy:
+/// - ALL non-numeric columns are included (TEXT, DATE, BOOLEAN, etc.)
+/// - Top N numeric columns are selected (via semantic search if available)
+/// 
+/// This is the same strategy used by the schema_search tool, ensuring consistent behavior.
 fn build_filtered_schema_text(
     cached: &settings::CachedTableSchema,
     semantic_column_names: Option<&HashSet<String>>,
@@ -162,45 +148,18 @@ fn build_filtered_schema_text(
         schema_text.push_str(&format!("Key columns: {}\n", key_info.join(" | ")));
     }
     
-    // Collect columns to include: essential + semantically relevant
-    let mut included_columns: Vec<&settings::CachedColumnSchema> = Vec::new();
-    let mut seen_names: HashSet<&str> = HashSet::new();
-    
-    // 1. Always include essential columns first
-    for col in &cached.columns {
-        if is_essential_column(&col.name, cached) && !seen_names.contains(col.name.as_str()) {
-            included_columns.push(col);
-            seen_names.insert(&col.name);
-        }
-    }
-    
-    // 2. Add semantically relevant columns (if provided)
-    if let Some(semantic_names) = semantic_column_names {
-        for col in &cached.columns {
-            if semantic_names.contains(&col.name) && !seen_names.contains(col.name.as_str()) {
-                included_columns.push(col);
-                seen_names.insert(&col.name);
-            }
-        }
-    }
-    
-    // 3. If we still have room and no semantic filtering, add remaining columns
-    if semantic_column_names.is_none() {
-        for col in &cached.columns {
-            if !seen_names.contains(col.name.as_str()) && included_columns.len() < MAX_ATTACHED_TABLE_COLUMNS {
-                included_columns.push(col);
-                seen_names.insert(&col.name);
-            }
-        }
-    }
-    
-    // Cap at maximum
-    let was_truncated = included_columns.len() > MAX_ATTACHED_TABLE_COLUMNS;
-    included_columns.truncate(MAX_ATTACHED_TABLE_COLUMNS);
+    // Use the shared hybrid column selection strategy:
+    // - All non-numeric columns (TEXT, DATE, BOOLEAN, etc.) are included
+    // - Top N numeric columns are selected via semantic search
+    let (selected_columns, numeric_count, non_numeric_count) = select_columns_hybrid(
+        &cached.columns,
+        semantic_column_names,
+        MAX_NUMERIC_COLUMNS_PER_TABLE,
+    );
     
     // Build columns section with enhanced metadata
-    schema_text.push_str("Columns:\n");
-    for col in &included_columns {
+    schema_text.push_str("Columns:\n\n");
+    for col in &selected_columns {
         // Build type with special attributes
         let mut type_parts = vec![col.data_type.clone()];
         for attr in &col.special_attributes {
@@ -213,7 +172,7 @@ fn build_filtered_schema_text(
             }
         }
         
-        schema_text.push_str(&format!("- {} ({})", col.name, type_parts.join(" ")));
+        schema_text.push_str(&format!("{} ({})", col.name, type_parts.join(" ")));
         
         // Add top values inline for enum-like columns (compact format)
         if !col.top_values.is_empty() {
@@ -227,14 +186,26 @@ fn build_filtered_schema_text(
         schema_text.push('\n');
     }
     
-    // Add truncation indicator
-    let omitted = cached.columns.len().saturating_sub(included_columns.len());
-    if omitted > 0 || was_truncated {
+    // Add truncation indicator for numeric columns if applicable
+    let total_numeric = cached.columns.iter()
+        .filter(|c| tools::schema_search::is_numeric_data_type(&c.data_type))
+        .count();
+    let omitted_numeric = total_numeric.saturating_sub(numeric_count);
+    
+    if omitted_numeric > 0 {
         schema_text.push_str(&format!(
-            "... and {} more columns (use schema_search tool for full list)\n",
-            omitted
+            "... and {} more numeric columns (use schema_search tool for full list)\n",
+            omitted_numeric
         ));
     }
+    
+    println!(
+        "[build_filtered_schema_text] Table '{}': {} non-numeric + {} numeric columns (of {} total numeric)",
+        cached.fully_qualified_name,
+        non_numeric_count,
+        numeric_count,
+        total_numeric
+    );
     
     schema_text
 }
@@ -2851,7 +2822,7 @@ async fn chat(
                         if handles.schema_tx.send(SchemaVectorMsg::SearchColumns {
                             query_embedding: embedding.clone(),
                             table_fq_name: Some(cached.fully_qualified_name.clone()),
-                            limit: MAX_ATTACHED_TABLE_COLUMNS,
+                            limit: SEMANTIC_COLUMN_SEARCH_LIMIT,
                             respond_to: col_tx,
                         }).await.is_ok() {
                             match col_rx.await {
@@ -3789,7 +3760,7 @@ async fn get_system_prompt_preview(
                     if handles.schema_tx.send(SchemaVectorMsg::SearchColumns {
                         query_embedding: embedding.clone(),
                         table_fq_name: Some(cached.fully_qualified_name.clone()),
-                        limit: MAX_ATTACHED_TABLE_COLUMNS,
+                        limit: SEMANTIC_COLUMN_SEARCH_LIMIT,
                         respond_to: col_tx,
                     }).await.is_ok() {
                         match col_rx.await {
