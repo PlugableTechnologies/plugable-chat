@@ -5,6 +5,10 @@
 
 use crate::settings::{CachedColumnSchema, CachedTableSchema, SupportedDatabaseKind};
 
+/// Schema version for the embedded demo database.
+/// Bump this when the schema changes to trigger automatic migration.
+pub const DEMO_SCHEMA_VERSION: i32 = 1;
+
 /// Source ID for the embedded demo database
 pub const EMBEDDED_DEMO_SOURCE_ID: &str = "embedded-demo";
 
@@ -19,7 +23,8 @@ pub const CHICAGO_CRIMES_CREATE_TABLE: &str = r#"
 CREATE TABLE IF NOT EXISTS chicago_crimes (
     id INTEGER PRIMARY KEY,
     case_number TEXT,
-    date TEXT,
+    date_of_crime TEXT,
+    time_of_crime TEXT,
     block TEXT,
     iucr TEXT,
     primary_type TEXT,
@@ -35,7 +40,6 @@ CREATE TABLE IF NOT EXISTS chicago_crimes (
     x_coordinate REAL,
     y_coordinate REAL,
     year INTEGER,
-    updated_on TEXT,
     latitude REAL,
     longitude REAL,
     location TEXT,
@@ -59,7 +63,8 @@ CREATE TABLE IF NOT EXISTS chicago_crimes (
 pub const CHICAGO_CRIMES_CSV_HEADERS: &[&str] = &[
     "ID",
     "Case Number",
-    "Date",
+    "Date_of_Crime",
+    "Time_of_Crime",
     "Block",
     "IUCR",
     "Primary Type",
@@ -75,7 +80,6 @@ pub const CHICAGO_CRIMES_CSV_HEADERS: &[&str] = &[
     "X Coordinate",
     "Y Coordinate",
     "Year",
-    "Updated On",
     "Latitude",
     "Longitude",
     "Location",
@@ -133,10 +137,18 @@ pub fn chicago_crimes_columns() -> Vec<CachedColumnSchema> {
             top_values: Vec::new(),
         },
         CachedColumnSchema {
-            name: "date".to_string(),
+            name: "date_of_crime".to_string(),
             data_type: "TEXT".to_string(),
             nullable: true,
-            description: Some("Date and time when the incident occurred".to_string()),
+            description: Some("Date when the incident occurred (YYYY-MM-DD format)".to_string()),
+            special_attributes: Vec::new(),
+            top_values: Vec::new(),
+        },
+        CachedColumnSchema {
+            name: "time_of_crime".to_string(),
+            data_type: "TEXT".to_string(),
+            nullable: true,
+            description: Some("Time when the incident occurred (HH:MM:SS 24-hour format)".to_string()),
             special_attributes: Vec::new(),
             top_values: Vec::new(),
         },
@@ -259,14 +271,6 @@ pub fn chicago_crimes_columns() -> Vec<CachedColumnSchema> {
             description: Some("Year the incident occurred".to_string()),
             special_attributes: Vec::new(),
             top_values: vec!["2025 (100.0%)".to_string()],
-        },
-        CachedColumnSchema {
-            name: "updated_on".to_string(),
-            data_type: "TEXT".to_string(),
-            nullable: true,
-            description: Some("Date and time the record was last updated".to_string()),
-            special_attributes: Vec::new(),
-            top_values: Vec::new(),
         },
         CachedColumnSchema {
             name: "latitude".to_string(),

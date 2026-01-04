@@ -9,7 +9,7 @@
 use crate::actors::database_toolbox_actor::SqlExecutionResult;
 use crate::demo_schema::{
     chicago_crimes_table_schema, CHICAGO_CRIMES_CREATE_TABLE, CHICAGO_CRIMES_TABLE_FQ_NAME,
-    EMBEDDED_DEMO_SOURCE_ID,
+    DEMO_SCHEMA_VERSION, EMBEDDED_DEMO_SOURCE_ID,
 };
 use crate::settings::CachedTableSchema;
 use rusqlite::{params_from_iter, Connection};
@@ -222,6 +222,21 @@ impl EmbeddedSqliteActor {
         let conn = Connection::open(db_path)
             .map_err(|e| format!("Failed to open SQLite database: {}", e))?;
 
+        // Check schema version for migration
+        let current_version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        if current_version != DEMO_SCHEMA_VERSION {
+            println!(
+                "[EmbeddedSqliteActor] Schema version mismatch (found v{}, expected v{}), rebuilding...",
+                current_version, DEMO_SCHEMA_VERSION
+            );
+            // Drop existing table to force rebuild
+            conn.execute("DROP TABLE IF EXISTS chicago_crimes", [])
+                .map_err(|e| format!("Failed to drop old table: {}", e))?;
+        }
+
         // Create the table if it doesn't exist
         conn.execute(CHICAGO_CRIMES_CREATE_TABLE, [])
             .map_err(|e| format!("Failed to create table: {}", e))?;
@@ -243,6 +258,18 @@ impl EmbeddedSqliteActor {
         println!("[EmbeddedSqliteActor] Loading data from CSV...");
         let loaded = Self::load_csv_data(&conn, csv_path)?;
 
+        // Set schema version after successful load
+        conn.execute(
+            &format!("PRAGMA user_version = {}", DEMO_SCHEMA_VERSION),
+            [],
+        )
+        .map_err(|e| format!("Failed to set schema version: {}", e))?;
+
+        println!(
+            "[EmbeddedSqliteActor] Schema version set to v{}",
+            DEMO_SCHEMA_VERSION
+        );
+
         Ok(loaded)
     }
 
@@ -259,10 +286,10 @@ impl EmbeddedSqliteActor {
         // Prepare the INSERT statement
         let insert_sql = r#"
             INSERT INTO chicago_crimes (
-                id, case_number, date, block, iucr, primary_type, description,
-                location_description, arrest, domestic, beat, district, ward,
-                community_area, fbi_code, x_coordinate, y_coordinate, year,
-                updated_on, latitude, longitude, location, day_of_week,
+                id, case_number, date_of_crime, time_of_crime, block, iucr,
+                primary_type, description, location_description, arrest, domestic,
+                beat, district, ward, community_area, fbi_code, x_coordinate,
+                y_coordinate, year, latitude, longitude, location, day_of_week,
                 month_name, hour, is_weekend, season, is_business_hours,
                 community_area_name, hardship_index, crime_category, location_zone,
                 dist_from_center_km, gun_involved, child_involved
@@ -292,77 +319,77 @@ impl EmbeddedSqliteActor {
                         continue;
                     }
 
-                    // Parse each field
+                    // Parse each field - indices match new CSV column order
                     let params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                        // id (INTEGER)
+                        // id (INTEGER) - CSV index 0
                         Box::new(record.get(0).and_then(|s| s.parse::<i64>().ok())),
-                        // case_number (TEXT)
+                        // case_number (TEXT) - CSV index 1
                         Box::new(record.get(1).map(|s| s.to_string())),
-                        // date (TEXT)
+                        // date_of_crime (TEXT, YYYY-MM-DD) - CSV index 2
                         Box::new(record.get(2).map(|s| s.to_string())),
-                        // block (TEXT)
+                        // time_of_crime (TEXT, HH:MM:SS) - CSV index 3
                         Box::new(record.get(3).map(|s| s.to_string())),
-                        // iucr (TEXT)
+                        // block (TEXT) - CSV index 4
                         Box::new(record.get(4).map(|s| s.to_string())),
-                        // primary_type (TEXT)
+                        // iucr (TEXT) - CSV index 5
                         Box::new(record.get(5).map(|s| s.to_string())),
-                        // description (TEXT)
+                        // primary_type (TEXT) - CSV index 6
                         Box::new(record.get(6).map(|s| s.to_string())),
-                        // location_description (TEXT)
+                        // description (TEXT) - CSV index 7
                         Box::new(record.get(7).map(|s| s.to_string())),
-                        // arrest (INTEGER - boolean)
-                        Box::new(Self::parse_bool(record.get(8))),
-                        // domestic (INTEGER - boolean)
+                        // location_description (TEXT) - CSV index 8
+                        Box::new(record.get(8).map(|s| s.to_string())),
+                        // arrest (INTEGER - boolean) - CSV index 9
                         Box::new(Self::parse_bool(record.get(9))),
-                        // beat (INTEGER)
-                        Box::new(record.get(10).and_then(|s| s.parse::<i64>().ok())),
-                        // district (INTEGER)
+                        // domestic (INTEGER - boolean) - CSV index 10
+                        Box::new(Self::parse_bool(record.get(10))),
+                        // beat (INTEGER) - CSV index 11
                         Box::new(record.get(11).and_then(|s| s.parse::<i64>().ok())),
-                        // ward (REAL)
-                        Box::new(record.get(12).and_then(|s| s.parse::<f64>().ok())),
-                        // community_area (REAL)
+                        // district (INTEGER) - CSV index 12
+                        Box::new(record.get(12).and_then(|s| s.parse::<i64>().ok())),
+                        // ward (REAL) - CSV index 13
                         Box::new(record.get(13).and_then(|s| s.parse::<f64>().ok())),
-                        // fbi_code (TEXT)
-                        Box::new(record.get(14).map(|s| s.to_string())),
-                        // x_coordinate (REAL)
-                        Box::new(record.get(15).and_then(|s| s.parse::<f64>().ok())),
-                        // y_coordinate (REAL)
+                        // community_area (REAL) - CSV index 14
+                        Box::new(record.get(14).and_then(|s| s.parse::<f64>().ok())),
+                        // fbi_code (TEXT) - CSV index 15
+                        Box::new(record.get(15).map(|s| s.to_string())),
+                        // x_coordinate (REAL) - CSV index 16
                         Box::new(record.get(16).and_then(|s| s.parse::<f64>().ok())),
-                        // year (INTEGER)
-                        Box::new(record.get(17).and_then(|s| s.parse::<i64>().ok())),
-                        // updated_on (TEXT)
-                        Box::new(record.get(18).map(|s| s.to_string())),
-                        // latitude (REAL)
+                        // y_coordinate (REAL) - CSV index 17
+                        Box::new(record.get(17).and_then(|s| s.parse::<f64>().ok())),
+                        // year (INTEGER) - CSV index 18
+                        Box::new(record.get(18).and_then(|s| s.parse::<i64>().ok())),
+                        // latitude (REAL) - CSV index 19
                         Box::new(record.get(19).and_then(|s| s.parse::<f64>().ok())),
-                        // longitude (REAL)
+                        // longitude (REAL) - CSV index 20
                         Box::new(record.get(20).and_then(|s| s.parse::<f64>().ok())),
-                        // location (TEXT)
+                        // location (TEXT) - CSV index 21
                         Box::new(record.get(21).map(|s| s.to_string())),
-                        // day_of_week (TEXT)
+                        // day_of_week (TEXT) - CSV index 22
                         Box::new(record.get(22).map(|s| s.to_string())),
-                        // month_name (TEXT)
+                        // month_name (TEXT) - CSV index 23
                         Box::new(record.get(23).map(|s| s.to_string())),
-                        // hour (INTEGER)
+                        // hour (INTEGER) - CSV index 24
                         Box::new(record.get(24).and_then(|s| s.parse::<i64>().ok())),
-                        // is_weekend (INTEGER - boolean)
+                        // is_weekend (INTEGER - boolean) - CSV index 25
                         Box::new(Self::parse_bool(record.get(25))),
-                        // season (TEXT)
+                        // season (TEXT) - CSV index 26
                         Box::new(record.get(26).map(|s| s.to_string())),
-                        // is_business_hours (INTEGER - boolean)
+                        // is_business_hours (INTEGER - boolean) - CSV index 27
                         Box::new(Self::parse_bool(record.get(27))),
-                        // community_area_name (TEXT)
+                        // community_area_name (TEXT) - CSV index 28
                         Box::new(record.get(28).map(|s| s.to_string())),
-                        // hardship_index (REAL)
+                        // hardship_index (REAL) - CSV index 29
                         Box::new(record.get(29).and_then(|s| s.parse::<f64>().ok())),
-                        // crime_category (TEXT)
+                        // crime_category (TEXT) - CSV index 30
                         Box::new(record.get(30).map(|s| s.to_string())),
-                        // location_zone (TEXT)
+                        // location_zone (TEXT) - CSV index 31
                         Box::new(record.get(31).map(|s| s.to_string())),
-                        // dist_from_center_km (REAL)
+                        // dist_from_center_km (REAL) - CSV index 32
                         Box::new(record.get(32).and_then(|s| s.parse::<f64>().ok())),
-                        // gun_involved (INTEGER - boolean)
+                        // gun_involved (INTEGER - boolean) - CSV index 33
                         Box::new(Self::parse_bool(record.get(33))),
-                        // child_involved (INTEGER - boolean)
+                        // child_involved (INTEGER - boolean) - CSV index 34
                         Box::new(Self::parse_bool(record.get(34))),
                     ];
 
