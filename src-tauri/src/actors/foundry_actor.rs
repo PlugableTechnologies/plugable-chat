@@ -502,8 +502,12 @@ impl ModelGatewayActor {
                 }
                 Err(e) => {
                     println!(
-                        "FoundryActor: Failed to pre-warm connection (non-fatal): {}",
+                        "FoundryActor: ⚠️ Failed to pre-warm connection (non-fatal): {:?}",
                         e
+                    );
+                    println!(
+                        "FoundryActor: Pre-warm connection error details - url: {}, is_timeout: {}, is_connect: {}",
+                        url, e.is_timeout(), e.is_connect()
                     );
                 }
             }
@@ -577,17 +581,26 @@ impl ModelGatewayActor {
                         );
                     }
                     Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
                         println!(
-                            "FoundryActor: ⚠️ Model pre-warm returned status {}: {}",
-                            resp.status(),
-                            model_name
+                            "FoundryActor: ⚠️ Model pre-warm returned status {} for {}: {}",
+                            status, model_name, body
+                        );
+                        println!(
+                            "FoundryActor: Pre-warm request URL was: {}",
+                            url
                         );
                     }
                     Err(e) => {
                         // This is non-fatal - the model will be loaded on first use
                         println!(
-                            "FoundryActor: ⚠️ Model pre-warm failed (non-fatal): {} - {}",
+                            "FoundryActor: ⚠️ Model pre-warm failed (non-fatal): {} - {:?}",
                             model_name, e
+                        );
+                        println!(
+                            "FoundryActor: Pre-warm error details - kind: {:?}, url: {}, is_timeout: {}, is_connect: {}",
+                            e.status(), url, e.is_timeout(), e.is_connect()
                         );
                     }
                 }
@@ -745,7 +758,8 @@ impl ModelGatewayActor {
                     }));
                 }
                 Ok(Err(e)) => {
-                    println!("FoundryActor ERROR: Failed to load CPU embedding model: {}", e);
+                    println!("FoundryActor ERROR: ❌ Failed to load CPU embedding model: {:?}", e);
+                    println!("FoundryActor: CPU embedding model load error details - check if the model file exists and is accessible");
                     let _ = app_handle_clone.emit("embedding-init-progress", json!({
                         "message": format!("Failed to load CPU embedding model: {}", e),
                         "is_complete": true,
@@ -753,7 +767,8 @@ impl ModelGatewayActor {
                     }));
                 }
                 Err(e) => {
-                    println!("FoundryActor ERROR: CPU embedding model init task panicked: {}", e);
+                    println!("FoundryActor ERROR: ❌ CPU embedding model init task panicked: {:?}", e);
+                    println!("FoundryActor: This may indicate an out-of-memory condition or incompatible hardware");
                     let _ = app_handle_clone.emit("embedding-init-progress", json!({
                         "message": "CPU embedding model initialization task panicked",
                         "is_complete": true,
@@ -816,11 +831,13 @@ impl ModelGatewayActor {
                                 }
                             }
                             Ok(Err(e)) => {
-                                println!("FoundryActor ERROR: {} embedding generation failed: {}", model_type, e);
+                                println!("FoundryActor ERROR: ❌ {} embedding generation failed: {:?}", model_type, e);
+                                println!("FoundryActor: Embedding error details - text_len: {}, model_type: {}", text.len(), model_type);
                                 let _ = respond_to.send(vec![0.0; EMBEDDING_DIM]);
                             }
                             Err(e) => {
-                                println!("FoundryActor ERROR: {} embedding task panicked: {}", model_type, e);
+                                println!("FoundryActor ERROR: ❌ {} embedding task panicked: {:?}", model_type, e);
+                                println!("FoundryActor: This may indicate an out-of-memory condition for {} model", model_type);
                                 let _ = respond_to.send(vec![0.0; EMBEDDING_DIM]);
                             }
                         }
@@ -958,7 +975,8 @@ impl ModelGatewayActor {
 
                             // Restart service
                             if let Err(e) = self.restart_service().await {
-                                println!("FoundryActor: Failed to restart service: {}", e);
+                                println!("FoundryActor: ❌ Failed to restart service: {:?}", e);
+                                println!("FoundryActor: Service restart error details - kind: {:?}", e.kind());
                                 let _ = respond_to.send(format!("Error: Failed to restart local model service. Please ensure Foundry is installed: {}", e));
                                 continue;
                             }
@@ -1421,11 +1439,15 @@ impl ModelGatewayActor {
                                                             let _ = std::io::stdout().flush();
                                                             break 'stream_loop;
                                                         }
-                                                        Err(e) => {
-                                                            println!("[FoundryActor] Stream error: {}", e);
-                                                            let _ = std::io::stdout().flush();
-                                                            break 'stream_loop;
-                                                        }
+                                        Err(e) => {
+                                            println!("[FoundryActor] ❌ Stream error: {:?}", e);
+                                            println!(
+                                                "[FoundryActor] Stream error details - is_timeout: {}, is_connect: {}, is_decode: {}",
+                                                e.is_timeout(), e.is_connect(), e.is_decode()
+                                            );
+                                            let _ = std::io::stdout().flush();
+                                            break 'stream_loop;
+                                        }
                                                     }
                                                 }
                                             }
@@ -1472,10 +1494,17 @@ impl ModelGatewayActor {
                                 }
                                 Err(e) => {
                                     println!(
-                                        "Failed to call Foundry (attempt {}/{}): {}",
+                                        "FoundryActor: ❌ Failed to call Foundry (attempt {}/{}): {:?}",
                                         attempt, MAX_RETRIES, e
                                     );
-                                    last_error = Some(format!("Connection error: {}", e));
+                                    println!(
+                                        "FoundryActor: Request error details - url: {}, is_timeout: {}, is_connect: {}, is_request: {}, is_body: {}",
+                                        current_url, e.is_timeout(), e.is_connect(), e.is_request(), e.is_body()
+                                    );
+                                    if let Some(status) = e.status() {
+                                        println!("FoundryActor: Error had HTTP status: {}", status);
+                                    }
+                                    last_error = Some(format!("Connection error: {:?}", e));
 
                                     if attempt < MAX_RETRIES {
                                         // Restart service on connection errors too
@@ -1626,7 +1655,8 @@ impl ModelGatewayActor {
                             Ok(())
                         }
                         Err(e) => {
-                            println!("FoundryActor: Failed to reload service: {}", e);
+                            println!("FoundryActor: ❌ Failed to reload service: {:?}", e);
+                            println!("FoundryActor: Reload service error details - kind: {:?}", e.kind());
                             Err(format!("Failed to reload service: {}", e))
                         }
                     };
@@ -1679,7 +1709,8 @@ impl ModelGatewayActor {
                                     let _ = respond_to.send(Ok(Some(model_name_clone)));
                                 }
                                 Err(e) => {
-                                    println!("FoundryActor: WARNING - Failed to unload LLM: {}", e);
+                                    println!("FoundryActor: ⚠️ WARNING - Failed to unload LLM: {}", e);
+                                    println!("FoundryActor: LLM unload failed, but continuing - embedding may still work, just slower");
                                     // Return Ok anyway - the embedding may still work, just slower
                                     let _ = respond_to.send(Ok(Some(model_name_clone)));
                                 }
@@ -1940,7 +1971,8 @@ impl ModelGatewayActor {
                     let body_val: Value = match resp.json().await {
                         Ok(v) => v,
                         Err(e) => {
-                            println!("FoundryActor: Failed to parse models response JSON: {}", e);
+                            println!("FoundryActor: ❌ Failed to parse models response JSON: {:?}", e);
+                            println!("FoundryActor: Parse error - is_decode: {}, is_body: {}", e.is_decode(), e.is_body());
                             return Vec::new();
                         }
                     };
@@ -1968,12 +2000,19 @@ impl ModelGatewayActor {
                     println!("FoundryActor: Unexpected models response format");
                     Vec::new()
                 } else {
-                    println!("FoundryActor: REST API error: {}", resp.status());
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    println!("FoundryActor: ❌ REST API error fetching models - HTTP {}: {}", status, body);
+                    println!("FoundryActor: Request URL was: {}", url);
                     Vec::new()
                 }
             }
             Err(e) => {
-                println!("FoundryActor: Failed to call REST API: {}", e);
+                println!("FoundryActor: ❌ Failed to call REST API for models: {:?}", e);
+                println!(
+                    "FoundryActor: Request error details - url: {}, is_timeout: {}, is_connect: {}",
+                    url, e.is_timeout(), e.is_connect()
+                );
                 Vec::new()
             }
         }
@@ -2500,19 +2539,39 @@ impl ModelGatewayActor {
             .get(&catalog_url)
             .send()
             .await
-            .map_err(|e| format!("Failed to fetch catalog: {}", e))?;
+            .map_err(|e| {
+                println!(
+                    "FoundryActor: ❌ Failed to fetch catalog for download: {:?}",
+                    e
+                );
+                println!(
+                    "FoundryActor: Catalog fetch error details - url: {}, is_timeout: {}, is_connect: {}",
+                    catalog_url, e.is_timeout(), e.is_connect()
+                );
+                format!("Failed to fetch catalog: {:?}", e)
+            })?;
 
         if !catalog_response.status().is_success() {
+            let status = catalog_response.status();
+            let body = catalog_response.text().await.unwrap_or_default();
+            println!(
+                "FoundryActor: ❌ Catalog fetch failed - HTTP {}: {}",
+                status, body
+            );
+            println!("FoundryActor: Catalog URL was: {}", catalog_url);
             return Err(format!(
-                "Failed to fetch catalog: HTTP {}",
-                catalog_response.status()
+                "Failed to fetch catalog: HTTP {} - {}",
+                status, body
             ));
         }
 
         let catalog: serde_json::Value = catalog_response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse catalog: {}", e))?;
+            .map_err(|e| {
+                println!("FoundryActor: ❌ Failed to parse catalog JSON: {:?}", e);
+                format!("Failed to parse catalog: {:?}", e)
+            })?;
 
         println!(
             "FoundryActor: Catalog response type: {}",
@@ -2624,7 +2683,17 @@ impl ModelGatewayActor {
             .timeout(Duration::from_secs(3600)) // 1 hour timeout for large models
             .send()
             .await
-            .map_err(|e| format!("Download request failed: {}", e))?;
+            .map_err(|e| {
+                println!(
+                    "FoundryActor: ❌ Download request failed for {}: {:?}",
+                    model_name, e
+                );
+                println!(
+                    "FoundryActor: Download error details - url: {}, is_timeout: {}, is_connect: {}",
+                    url, e.is_timeout(), e.is_connect()
+                );
+                format!("Download request failed: {:?}", e)
+            })?;
 
         println!(
             "FoundryActor: Download response status: {}",
@@ -2808,7 +2877,17 @@ impl ModelGatewayActor {
             .timeout(Duration::from_secs(300)) // 5 minute timeout for loading
             .send()
             .await
-            .map_err(|e| format!("Load request failed: {}", e))?;
+            .map_err(|e| {
+                println!(
+                    "FoundryActor: ❌ Load model request failed for {}: {:?}",
+                    model_name, e
+                );
+                println!(
+                    "FoundryActor: Load error details - url: {}, is_timeout: {}, is_connect: {}",
+                    url, e.is_timeout(), e.is_connect()
+                );
+                format!("Load request failed: {:?}", e)
+            })?;
 
         if response.status().is_success() {
             println!("FoundryActor: Model loaded successfully: {}", model_name);
@@ -2872,20 +2951,27 @@ impl ModelGatewayActor {
                             models
                         }
                         Err(e) => {
-                            println!("FoundryActor: Failed to parse loaded models: {}", e);
+                            println!("FoundryActor: ❌ Failed to parse loaded models JSON: {:?}", e);
                             Vec::new()
                         }
                     }
                 } else {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
                     println!(
-                        "FoundryActor: Get loaded models failed: HTTP {}",
-                        resp.status()
+                        "FoundryActor: ❌ Get loaded models failed - HTTP {}: {}",
+                        status, body
                     );
+                    println!("FoundryActor: Request URL was: {}", url);
                     Vec::new()
                 }
             }
             Err(e) => {
-                println!("FoundryActor: Get loaded models request failed: {}", e);
+                println!("FoundryActor: ❌ Get loaded models request failed: {:?}", e);
+                println!(
+                    "FoundryActor: Request error details - url: {}, is_timeout: {}, is_connect: {}",
+                    url, e.is_timeout(), e.is_connect()
+                );
                 Vec::new()
             }
         }
@@ -2910,20 +2996,27 @@ impl ModelGatewayActor {
                             models
                         }
                         Err(e) => {
-                            println!("FoundryActor: Failed to parse catalog models: {}", e);
+                            println!("FoundryActor: ❌ Failed to parse catalog models JSON: {:?}", e);
                             Vec::new()
                         }
                     }
                 } else {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
                     println!(
-                        "FoundryActor: Get catalog models failed: HTTP {}",
-                        resp.status()
+                        "FoundryActor: ❌ Get catalog models failed - HTTP {}: {}",
+                        status, body
                     );
+                    println!("FoundryActor: Request URL was: {}", url);
                     Vec::new()
                 }
             }
             Err(e) => {
-                println!("FoundryActor: Get catalog models request failed: {}", e);
+                println!("FoundryActor: ❌ Get catalog models request failed: {:?}", e);
+                println!(
+                    "FoundryActor: Request error details - url: {}, is_timeout: {}, is_connect: {}",
+                    url, e.is_timeout(), e.is_connect()
+                );
                 Vec::new()
             }
         }
@@ -2949,7 +3042,17 @@ impl ModelGatewayActor {
             .timeout(Duration::from_secs(60))
             .send()
             .await
-            .map_err(|e| format!("Unload request failed: {}", e))?;
+            .map_err(|e| {
+                println!(
+                    "FoundryActor: ❌ Unload model request failed for {}: {:?}",
+                    model_name, e
+                );
+                println!(
+                    "FoundryActor: Unload error details - url: {}, is_timeout: {}, is_connect: {}",
+                    url, e.is_timeout(), e.is_connect()
+                );
+                format!("Unload request failed: {:?}", e)
+            })?;
 
         if response.status().is_success() {
             println!("FoundryActor: Model unloaded successfully: {}", model_name);
@@ -2957,6 +3060,11 @@ impl ModelGatewayActor {
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
+            println!(
+                "FoundryActor: ❌ Failed to unload model {} - HTTP {}: {}",
+                model_name, status, text
+            );
+            println!("FoundryActor: Unload request URL was: {}", url);
             Err(format!("HTTP {} - {}", status, text))
         }
     }
@@ -2976,16 +3084,31 @@ impl ModelGatewayActor {
             .timeout(Duration::from_secs(10))
             .send()
             .await
-            .map_err(|e| format!("Status request failed: {}", e))?;
+            .map_err(|e| {
+                println!(
+                    "FoundryActor: ❌ Service status request failed: {:?} (url: {}, is_timeout: {}, is_connect: {})",
+                    e, url, e.is_timeout(), e.is_connect()
+                );
+                format!("Status request failed: {:?}", e)
+            })?;
 
         if response.status().is_success() {
             response
                 .json::<FoundryServiceStatus>()
                 .await
-                .map_err(|e| format!("Failed to parse status: {}", e))
+                .map_err(|e| {
+                    println!("FoundryActor: ❌ Failed to parse service status JSON: {:?}", e);
+                    format!("Failed to parse status: {:?}", e)
+                })
         } else {
             let status = response.status();
-            Err(format!("HTTP {}", status))
+            let body = response.text().await.unwrap_or_default();
+            println!(
+                "FoundryActor: ❌ Service status request failed - HTTP {}: {}",
+                status, body
+            );
+            println!("FoundryActor: Status request URL was: {}", url);
+            Err(format!("HTTP {} - {}", status, body))
         }
     }
 
