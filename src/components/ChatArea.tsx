@@ -393,15 +393,11 @@ function formatSqlCellValue(value: string | number | boolean | null): string {
     if (value === null) return '—';
     if (typeof value === 'boolean') return value ? 'true' : 'false';
     if (typeof value === 'number') {
-        // Format large numbers with commas, preserve decimals up to 2 places for currency-like values
-        if (Number.isInteger(value)) {
-            return value.toLocaleString();
+        // For decimals, limit to 2 decimal places for cleaner display
+        if (!Number.isInteger(value)) {
+            return value.toFixed(2).replace(/\.?0+$/, '');
         }
-        // For decimals, show up to 2 places for cleaner display
-        return value.toLocaleString(undefined, { 
-            minimumFractionDigits: 0,
-            maximumFractionDigits: 2 
-        });
+        return String(value);
     }
     return String(value);
 }
