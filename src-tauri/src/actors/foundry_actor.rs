@@ -9,11 +9,18 @@ use crate::settings;
 use serde::Deserialize;
 use crate::settings::ChatFormatName;
 use crate::tool_adapters::parse_combined_tool_name;
-use fastembed::{EmbeddingModel, ExecutionProviderDispatch, InitOptions, TextEmbedding};
-#[cfg(target_os = "macos")]
-use ort::execution_providers::CoreMLExecutionProvider;
-#[cfg(not(target_os = "macos"))]
-use ort::execution_providers::{CUDAExecutionProvider, DirectMLExecutionProvider};
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+
+// =============================================================================
+// GPU EMBEDDING DISABLED - The following ort imports are commented out.
+// To re-enable GPU embeddings, uncomment these imports and the corresponding
+// code in ensure_gpu_embedding_model_loaded(), plus the ort dependencies in Cargo.toml.
+// =============================================================================
+// use fastembed::ExecutionProviderDispatch;
+// #[cfg(target_os = "macos")]
+// use ort::execution_providers::CoreMLExecutionProvider;
+// #[cfg(not(target_os = "macos"))]
+// use ort::execution_providers::{CUDAExecutionProvider, DirectMLExecutionProvider};
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
@@ -691,103 +698,118 @@ impl ModelGatewayActor {
     }
 
     /// Lazily load the GPU embedding model on demand for RAG indexing.
-    /// IMPORTANT: We always load fresh to avoid stale GPU state after LLM operations.
-    /// Caching caused hangs when the cached model's GPU resources were evicted by LLM prewarm.
+    /// 
+    /// NOTE: GPU EMBEDDING DISABLED - This function now always returns an error.
+    /// The callers (rag.rs, database.rs) will fall back to CPU embedding.
+    /// 
+    /// To re-enable GPU embeddings:
+    /// 1. Uncomment the ort dependencies in Cargo.toml
+    /// 2. Uncomment the ort imports at the top of this file
+    /// 3. Restore this function's original implementation (see git history or comments below)
+    #[allow(dead_code)]
     async fn ensure_gpu_embedding_model_loaded(&self) -> Result<Arc<TextEmbedding>, String> {
-        // NOTE: We intentionally do NOT cache the GPU embedding model.
-        // Previously, caching caused hangs because:
-        // 1. GPU model was loaded and cached
-        // 2. LLM prewarm evicted the embedding model's GPU resources  
-        // 3. Calling embed() on the stale cached model hung indefinitely
-        // By always loading fresh, we ensure GPU resources are properly allocated.
-
-        // Need to load the model
-        println!("╔══════════════════════════════════════════════════════════════╗");
-        println!("║  LOADING GPU EMBEDDING MODEL (on-demand for RAG)            ║");
-        println!("╚══════════════════════════════════════════════════════════════╝");
-
-        let start = std::time::Instant::now();
+        // GPU embedding is disabled - always return error to trigger CPU fallback
+        println!("FoundryActor: GPU embedding is disabled, falling back to CPU");
+        Err("GPU embedding is disabled (ONNX dependency removed). Using CPU embedding.".to_string())
         
-        // Emit progress event
-        let _ = self.app_handle.emit("embedding-init-progress", serde_json::json!({
-            "message": "Loading GPU embedding model for RAG indexing...",
-            "is_complete": false
-        }));
-
-        // Build GPU execution providers
-        // Use catch_unwind to handle panics from ORT initialization (e.g., missing DLLs on Windows)
-        // Also suppress the crash dialog since we handle failures gracefully
-        let gpu_result = tokio::task::spawn_blocking(move || {
-            // Suppress crash dialog for ORT initialization - this is optional and we handle failures gracefully
-            let _guard = SuppressCrashDialogGuard::new();
-            
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
-                options.show_download_progress = true;
-                
-                let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
-                
-                // On macOS, use CoreML (Metal GPU acceleration)
-                #[cfg(target_os = "macos")]
-                {
-                    eps.push(CoreMLExecutionProvider::default().into());
-                    println!("FoundryActor: GPU embedding model using CoreML (Metal)");
-                }
-                
-                // On Windows/Linux, try CUDA and DirectML
-                #[cfg(not(target_os = "macos"))]
-                {
-                    // Try CUDA first, then DirectML
-                    eps.push(CUDAExecutionProvider::default().into());
-                    eps.push(DirectMLExecutionProvider::default().into());
-                    println!("FoundryActor: GPU embedding model trying CUDA/DirectML");
-                }
-                
-                if !eps.is_empty() {
-                    options.execution_providers = eps;
-                }
-
-                TextEmbedding::try_new(options)
-            }))
-        })
-        .await
-        .map_err(|e| format!("GPU embedding model init task panicked: {}", e))?;
-
-        // Handle panic from catch_unwind
-        let gpu_result = match gpu_result {
-            Ok(inner_result) => inner_result,
-            Err(panic_payload) => {
-                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Unknown panic".to_string()
-                };
-                return Err(format!("ONNX Runtime panic (missing DLL?): {}", panic_msg));
-            }
-        };
-        
-        let gpu_result = gpu_result
-            .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
-
-        let elapsed = start.elapsed();
-        println!(
-            "FoundryActor: GPU embedding model loaded in {:.2}s",
-            elapsed.as_secs_f64()
-        );
-
-        // NOTE: We intentionally do NOT cache the model to avoid stale GPU state issues.
-        // Each RAG indexing operation gets a fresh model with properly allocated GPU resources.
-        let model = Arc::new(gpu_result);
-
-        // Emit completion
-        let _ = self.app_handle.emit("embedding-init-progress", serde_json::json!({
-            "message": "GPU embedding model loaded",
-            "is_complete": true
-        }));
-
-        Ok(model)
+        // =========================================================================
+        // ORIGINAL GPU EMBEDDING CODE - Uncomment to restore GPU embedding support
+        // =========================================================================
+        // 
+        // // NOTE: We intentionally do NOT cache the GPU embedding model.
+        // // Previously, caching caused hangs because:
+        // // 1. GPU model was loaded and cached
+        // // 2. LLM prewarm evicted the embedding model's GPU resources  
+        // // 3. Calling embed() on the stale cached model hung indefinitely
+        // // By always loading fresh, we ensure GPU resources are properly allocated.
+        //
+        // // Need to load the model
+        // println!("╔══════════════════════════════════════════════════════════════╗");
+        // println!("║  LOADING GPU EMBEDDING MODEL (on-demand for RAG)            ║");
+        // println!("╚══════════════════════════════════════════════════════════════╝");
+        //
+        // let start = std::time::Instant::now();
+        // 
+        // // Emit progress event
+        // let _ = self.app_handle.emit("embedding-init-progress", serde_json::json!({
+        //     "message": "Loading GPU embedding model for RAG indexing...",
+        //     "is_complete": false
+        // }));
+        //
+        // // Build GPU execution providers
+        // // Use catch_unwind to handle panics from ORT initialization (e.g., missing DLLs on Windows)
+        // // Also suppress the crash dialog since we handle failures gracefully
+        // let gpu_result = tokio::task::spawn_blocking(move || {
+        //     // Suppress crash dialog for ORT initialization - this is optional and we handle failures gracefully
+        //     let _guard = SuppressCrashDialogGuard::new();
+        //     
+        //     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        //         let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
+        //         options.show_download_progress = true;
+        //         
+        //         let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
+        //         
+        //         // On macOS, use CoreML (Metal GPU acceleration)
+        //         #[cfg(target_os = "macos")]
+        //         {
+        //             eps.push(CoreMLExecutionProvider::default().into());
+        //             println!("FoundryActor: GPU embedding model using CoreML (Metal)");
+        //         }
+        //         
+        //         // On Windows/Linux, try CUDA and DirectML
+        //         #[cfg(not(target_os = "macos"))]
+        //         {
+        //             // Try CUDA first, then DirectML
+        //             eps.push(CUDAExecutionProvider::default().into());
+        //             eps.push(DirectMLExecutionProvider::default().into());
+        //             println!("FoundryActor: GPU embedding model trying CUDA/DirectML");
+        //         }
+        //         
+        //         if !eps.is_empty() {
+        //             options.execution_providers = eps;
+        //         }
+        //
+        //         TextEmbedding::try_new(options)
+        //     }))
+        // })
+        // .await
+        // .map_err(|e| format!("GPU embedding model init task panicked: {}", e))?;
+        //
+        // // Handle panic from catch_unwind
+        // let gpu_result = match gpu_result {
+        //     Ok(inner_result) => inner_result,
+        //     Err(panic_payload) => {
+        //         let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+        //             s.to_string()
+        //         } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+        //             s.clone()
+        //         } else {
+        //             "Unknown panic".to_string()
+        //         };
+        //         return Err(format!("ONNX Runtime panic (missing DLL?): {}", panic_msg));
+        //     }
+        // };
+        // 
+        // let gpu_result = gpu_result
+        //     .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
+        //
+        // let elapsed = start.elapsed();
+        // println!(
+        //     "FoundryActor: GPU embedding model loaded in {:.2}s",
+        //     elapsed.as_secs_f64()
+        // );
+        //
+        // // NOTE: We intentionally do NOT cache the model to avoid stale GPU state issues.
+        // // Each RAG indexing operation gets a fresh model with properly allocated GPU resources.
+        // let model = Arc::new(gpu_result);
+        //
+        // // Emit completion
+        // let _ = self.app_handle.emit("embedding-init-progress", serde_json::json!({
+        //     "message": "GPU embedding model loaded",
+        //     "is_complete": true
+        // }));
+        //
+        // Ok(model)
     }
 
     pub async fn run(mut self) {
@@ -1045,6 +1067,26 @@ impl ModelGatewayActor {
                     model_id,
                     respond_to,
                 } => {
+                    // Unload the previous model first to free VRAM before loading the new one.
+                    // Without this, Foundry may try to load the new model while the old one is
+                    // still in memory, causing VRAM pressure on systems with limited GPU memory.
+                    let old_model_id = self.model_id.clone();
+                    if let (Some(old_model), Some(port)) = (&old_model_id, self.port) {
+                        if old_model != &model_id {
+                            println!(
+                                "FoundryActor: Unloading previous model '{}' before switching to '{}'",
+                                old_model, model_id
+                            );
+                            if let Err(e) = self.unload_model_impl(&self.http_client, port, old_model).await {
+                                // Log but don't fail - the new model load may still succeed via Foundry's eviction
+                                println!(
+                                    "FoundryActor: ⚠️ Failed to unload previous model (non-fatal): {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    
                     self.model_id = Some(model_id.clone());
                     self.emit_model_selected(&model_id);
                     

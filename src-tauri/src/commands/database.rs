@@ -9,7 +9,6 @@
 use crate::actors::database_toolbox_actor::DatabaseToolboxMsg;
 use crate::actors::schema_vector_actor::SchemaVectorMsg;
 use crate::app_state::{ActorHandles, EmbeddingModelState, SettingsState};
-use crate::protocol::FoundryMsg;
 use crate::settings::{
     CachedTableSchema, DatabaseSourceConfig, DatabaseToolboxConfig, SupportedDatabaseKind,
 };
@@ -18,6 +17,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::oneshot;
+
+// NOTE: GPU EMBEDDING DISABLED - FoundryMsg import removed as GetGpuEmbeddingModel,
+// UnloadCurrentLlm, and RewarmCurrentModel are no longer used in this file.
+// To re-enable, add: use crate::protocol::FoundryMsg;
 
 /// Status of a table in the schema cache
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -67,8 +70,9 @@ pub struct SchemaRefreshSummary {
 
 /// Refresh database schemas for a given configuration
 ///
-/// NOTE: Tries to use GPU embedding model for bulk caching, but falls back to CPU
-/// if GPU is busy with LLM operations (prevents memory contention).
+/// NOTE: GPU EMBEDDING DISABLED - Always uses CPU embedding model.
+/// This simplifies the code and avoids GPU memory contention issues.
+/// To re-enable GPU embedding, see the commented code in foundry_actor.rs.
 pub async fn refresh_database_schemas_for_config(
     app_handle: &AppHandle,
     handles: &State<'_, ActorHandles>,
@@ -83,7 +87,7 @@ pub async fn refresh_database_schemas_for_config(
         .collect();
 
     println!(
-        "[SchemaRefresh] Config has {} total sources, {} enabled",
+        "[SchemaRefresh] Config has {} total sources, {} enabled (CPU embedding)",
         toolbox_config.sources.len(),
         sources.len()
     );
@@ -108,114 +112,12 @@ pub async fn refresh_database_schemas_for_config(
         });
     }
 
-    // Try to get GPU embedding model, but fall back to CPU if GPU is busy
-    // This prevents GPU memory contention with LLM prewarm/chat operations
-    // When using GPU, we explicitly unload the LLM first to free GPU/Metal memory
-    let (embedding_model, using_gpu) = match handles.gpu_guard.mutex.try_lock() {
-        Ok(_guard) => {
-            // GPU is available - first unload the LLM to free GPU memory
-            drop(_guard);
-            
-            // Unload LLM to free GPU/Metal memory before loading embedding model
-            // This prevents Metal context contention between the two model frameworks
-            let (unload_tx, unload_rx) = oneshot::channel();
-            handles
-                .foundry_tx
-                .send(FoundryMsg::UnloadCurrentLlm {
-                    respond_to: unload_tx,
-                })
-                .await
-                .map_err(|e| format!("Failed to request LLM unload: {}", e))?;
-            
-            // Wait for unload to complete (best-effort, don't fail on error)
-            match unload_rx.await {
-                Ok(Ok(Some(model_name))) => {
-                    println!("[SchemaRefresh] LLM '{}' unloaded, GPU memory freed for embedding", model_name);
-                }
-                Ok(Ok(None)) => {
-                    println!("[SchemaRefresh] No LLM was loaded, proceeding with GPU embedding");
-                }
-                Ok(Err(e)) => {
-                    println!("[SchemaRefresh] WARNING: Failed to unload LLM: {}. Continuing anyway.", e);
-                }
-                Err(_) => {
-                    println!("[SchemaRefresh] WARNING: LLM unload channel closed. Continuing anyway.");
-                }
-            }
-            
-            // Now request the GPU embedding model
-            let (model_tx, model_rx) = oneshot::channel();
-            handles
-                .foundry_tx
-                .send(FoundryMsg::GetGpuEmbeddingModel {
-                    respond_to: model_tx,
-                })
-                .await
-                .map_err(|e| format!("Failed to request GPU embedding model: {}", e))?;
-
-            match model_rx.await {
-                Ok(Ok(model)) => (model, true),
-                Ok(Err(gpu_error)) => {
-                    // GPU embedding failed - fall back to CPU with warning
-                    println!("[SchemaRefresh] WARNING: GPU embedding failed: {}. Falling back to CPU.", gpu_error);
-                    
-                    let _ = app_handle.emit(
-                        "schema-refresh-progress",
-                        SchemaRefreshProgress {
-                            message: format!("GPU embedding unavailable, using CPU ({})", gpu_error),
-                            source_name: "".to_string(),
-                            current_table: None,
-                            tables_done: 0,
-                            tables_total: 0,
-                            is_complete: false,
-                            error: None,
-                        },
-                    );
-                    
-                    let model_guard = embedding_state.cpu_model.read().await;
-                    let model = model_guard
-                        .clone()
-                        .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
-                    drop(model_guard);
-                    
-                    (model, false)
-                }
-                Err(_) => {
-                    return Err("Foundry actor died while getting GPU embedding model".to_string());
-                }
-            }
-        }
-        Err(_) => {
-            // GPU is busy - check what operation is running and fall back to CPU
-            let current_op = handles.gpu_guard.current_operation.read().await;
-            let op_desc = current_op.clone().unwrap_or_else(|| "unknown operation".to_string());
-            drop(current_op);
-            
-            println!("[SchemaRefresh] GPU busy with '{}', falling back to CPU embeddings", op_desc);
-            
-            let _ = app_handle.emit(
-                "schema-refresh-progress",
-                SchemaRefreshProgress {
-                    message: format!("GPU busy ({}), using CPU for embeddings", op_desc),
-                    source_name: "".to_string(),
-                    current_table: None,
-                    tables_done: 0,
-                    tables_total: 0,
-                    is_complete: false,
-                    error: None,
-                },
-            );
-            
-            // Use CPU embedding model instead
-            let model_guard = embedding_state.cpu_model.read().await;
-            let model = model_guard
-                .clone()
-                .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
-            drop(model_guard);
-            
-            (model, false)
-        }
-    };
+    // Always use CPU embedding model (GPU embedding is disabled)
+    let model_guard = embedding_state.cpu_model.read().await;
+    let embedding_model = model_guard
+        .clone()
+        .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
+    drop(model_guard);
 
     ensure_toolbox_running(&handles.database_toolbox_tx, toolbox_config).await?;
 
@@ -251,19 +153,7 @@ pub async fn refresh_database_schemas_for_config(
         },
     );
 
-    // Only re-warm LLM if we used GPU embeddings (which may have evicted the LLM)
-    if using_gpu {
-        println!("[SchemaRefresh] Caching complete (GPU), triggering LLM re-warm");
-        let (rewarm_tx, _) = oneshot::channel();
-        let _ = handles
-            .foundry_tx
-            .send(FoundryMsg::RewarmCurrentModel {
-                respond_to: rewarm_tx,
-            })
-            .await;
-    } else {
-        println!("[SchemaRefresh] Caching complete (CPU), no re-warm needed");
-    }
+    println!("[SchemaRefresh] Caching complete (CPU)");
 
     Ok(SchemaRefreshSummary {
         sources: refreshed_sources,

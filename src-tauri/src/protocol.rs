@@ -984,6 +984,10 @@ pub enum FoundryMsg {
     /// Get GPU embedding model for RAG indexing (lazy-loaded on demand).
     /// This loads the model if not already loaded, avoiding startup overhead
     /// and GPU memory contention with the LLM until actually needed.
+    /// 
+    /// NOTE: GPU EMBEDDING DISABLED - This message handler now always returns an error.
+    /// Callers should use CPU embedding instead. To re-enable GPU embedding, see
+    /// the commented code in foundry_actor.rs and Cargo.toml.
     GetGpuEmbeddingModel {
         respond_to: oneshot::Sender<Result<Arc<TextEmbedding>, String>>,
     },

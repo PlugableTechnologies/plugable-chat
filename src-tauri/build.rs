@@ -43,13 +43,19 @@ fn main() {
     // These files are created when extracting a zip on Windows that was created on macOS.
     clean_apple_double_files(manifest_path.join("capabilities").as_path());
 
-    // Link clang runtime on macOS for ONNX Runtime CoreML support
-    #[cfg(target_os = "macos")]
-    link_macos_clang_runtime();
+    // ==========================================================================
+    // GPU EMBEDDING DISABLED - The following ONNX-related build steps are
+    // commented out. To re-enable, uncomment these and the corresponding
+    // dependency blocks in Cargo.toml.
+    // ==========================================================================
+    
+    // // Link clang runtime on macOS for ONNX Runtime CoreML support
+    // #[cfg(target_os = "macos")]
+    // link_macos_clang_runtime();
 
-    // Copy ONNX Runtime DLLs to binaries directory on Windows for bundling
-    #[cfg(target_os = "windows")]
-    copy_onnx_runtime_dlls(manifest_path);
+    // // Copy ONNX Runtime DLLs to binaries directory on Windows for bundling
+    // #[cfg(target_os = "windows")]
+    // copy_onnx_runtime_dlls(manifest_path);
 
     tauri_build::build()
 }
@@ -291,7 +297,11 @@ fn set_git_version_info(project_root: &Path) -> u32 {
 ///
 /// This function dynamically finds the correct clang version directory to work
 /// across different Xcode versions (clang/16, clang/17, clang/18, etc.).
+/// 
+/// NOTE: GPU EMBEDDING DISABLED - This function is currently unused. To re-enable,
+/// uncomment the call site in main() and the ort dependencies in Cargo.toml.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn link_macos_clang_runtime() {
     // Find the Xcode Developer directory using xcode-select
     let developer_output = Command::new("xcode-select").args(["-p"]).output();
@@ -385,7 +395,11 @@ fn link_macos_clang_runtime() {
 /// 4. Pre-installed: %LOCALAPPDATA%\Programs\onnxruntime\ (from requirements script)
 /// 5. ort-sys 2.0 global cache: %LOCALAPPDATA%\ort\
 /// 6. Legacy: target/*/build/ort-sys-*/out/
+///
+/// NOTE: GPU EMBEDDING DISABLED - This function is currently unused. To re-enable,
+/// uncomment the call site in main() and the ort dependencies in Cargo.toml.
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 fn copy_onnx_runtime_dlls(manifest_path: &Path) {
     let binaries_dir = manifest_path.join("binaries");
     
@@ -498,7 +512,9 @@ fn copy_onnx_runtime_dlls(manifest_path: &Path) {
 }
 
 /// Recursively search for a directory containing ONNX Runtime DLLs
+/// NOTE: GPU EMBEDDING DISABLED - This function is currently unused.
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 fn find_onnx_dlls_recursive(dir: &Path) -> Option<std::path::PathBuf> {
     if !dir.exists() {
         return None;
@@ -527,7 +543,9 @@ fn find_onnx_dlls_recursive(dir: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// Copy all DLL files from source directory to destination
+/// NOTE: GPU EMBEDDING DISABLED - This function is currently unused.
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 fn copy_dlls_from_dir(src_dir: &Path, dest_dir: &Path) -> bool {
     if !src_dir.exists() {
         return false;

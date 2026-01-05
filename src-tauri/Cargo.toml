@@ -101,18 +101,27 @@ version = "2"
 [dev-dependencies]
 tempfile = "3"
 
-# Pin ort-sys to match ort version (required for compatibility)
-ort-sys = "=2.0.0-rc.9"
+# =============================================================================
+# GPU EMBEDDING DISABLED - To re-enable, uncomment the ort/ort-sys blocks below
+# and revert the corresponding changes in:
+#   - build.rs (link_macos_clang_runtime, copy_onnx_runtime_dlls)
+#   - src/actors/foundry_actor.rs (ensure_gpu_embedding_model_loaded)
+#   - src/commands/rag.rs (GPU embedding path)
+#   - src/commands/database.rs (GPU embedding path)
+# =============================================================================
 
-# ONNX Runtime with platform-specific GPU support:
-# - Windows: CUDA + TensorRT (NVIDIA GPUs)
-# - macOS: CoreML only (Apple Silicon/Intel GPUs)
-# - Linux: CUDA + TensorRT (NVIDIA GPUs)
-[target.'cfg(target_os = "windows")'.dependencies]
-ort = { version = "=2.0.0-rc.9", features = ["cuda", "tensorrt"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "=2.0.0-rc.9", features = ["coreml"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-ort = { version = "=2.0.0-rc.9", features = ["cuda", "tensorrt"] }
+# # Pin ort-sys to match ort version (required for compatibility)
+# ort-sys = "=2.0.0-rc.9"
+#
+# # ONNX Runtime with platform-specific GPU support:
+# # - Windows: CUDA + TensorRT (NVIDIA GPUs)
+# # - macOS: CoreML only (Apple Silicon/Intel GPUs)
+# # - Linux: CUDA + TensorRT (NVIDIA GPUs)
+# [target.'cfg(target_os = "windows")'.dependencies]
+# ort = { version = "=2.0.0-rc.9", features = ["cuda", "tensorrt"] }
+#
+# [target.'cfg(target_os = "macos")'.dependencies]
+# ort = { version = "=2.0.0-rc.9", features = ["coreml"] }
+#
+# [target.'cfg(target_os = "linux")'.dependencies]
+# ort = { version = "=2.0.0-rc.9", features = ["cuda", "tensorrt"] }

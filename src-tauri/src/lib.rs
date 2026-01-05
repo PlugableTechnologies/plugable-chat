@@ -4113,11 +4113,12 @@ pub fn run() {
                 gpu_guard,
             });
 
-            // Initialize shared embedding model state (dual models for GPU/CPU)
-            // - GPU model: For background RAG indexing (can evict LLM)
-            // - CPU model: For search during chat (avoids LLM eviction)
+            // Initialize shared embedding model state
+            // NOTE: GPU EMBEDDING DISABLED - Only CPU model is used.
+            // The gpu_model field is kept for API compatibility but will always be None.
+            // To re-enable GPU embedding, see foundry_actor.rs and Cargo.toml.
             let embedding_model_state = EmbeddingModelState {
-                gpu_model: Arc::new(RwLock::new(None)),
+                gpu_model: Arc::new(RwLock::new(None)), // DISABLED - always None
                 cpu_model: Arc::new(RwLock::new(None)),
             };
             let gpu_embedding_model_arc = embedding_model_state.gpu_model.clone();
@@ -4274,7 +4275,9 @@ pub fn run() {
                 actor.run().await;
             });
 
-            // Spawn Foundry Actor (manages dual embedding model initialization: GPU + CPU)
+            // Spawn Foundry Actor (manages embedding model initialization)
+            // NOTE: GPU EMBEDDING DISABLED - Only CPU embedding is active.
+            // The GPU model Arc is still passed for API compatibility but won't be populated.
             let foundry_app_handle = app_handle.clone();
             let gpu_embedding_model_arc_for_foundry = gpu_embedding_model_arc.clone();
             let cpu_embedding_model_arc_for_foundry = cpu_embedding_model_arc.clone();
