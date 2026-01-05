@@ -3343,8 +3343,6 @@ export function SettingsModal() {
     const [databasesSaving, setDatabasesSaving] = useState(false);
     const databasesSaveHandlerRef = useRef<(() => Promise<void>) | null>(null);
 
-    const { settings } = useSettingsStore();
-
     const handleRegisterSystemSave = useCallback((handler: () => Promise<void>) => {
         systemSaveHandlerRef.current = handler;
     }, []);
