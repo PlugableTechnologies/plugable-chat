@@ -5,8 +5,12 @@
 //! 2. Writes a crash log to ~/.plugable-chat/crash.log
 //! 3. Shows a native dialog with error details and "Try Again" button
 //! 4. Can restart the application on user request
+//!
+//! For expected panics (e.g., ORT initialization failures), use
+//! `suppress_crash_dialog()` to prevent the dialog from showing.
 
 use std::backtrace::Backtrace;
+use std::cell::Cell;
 use std::fs;
 use std::io::Write;
 use std::panic::PanicHookInfo;
@@ -17,6 +21,46 @@ use crate::paths;
 
 const APP_NAME: &str = "plugable-chat";
 
+// Thread-local flag to suppress the crash dialog for expected panics
+// (e.g., ORT initialization failures that we handle gracefully)
+thread_local! {
+    static SUPPRESS_CRASH_DIALOG: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Suppress the crash dialog for the current thread.
+/// Use this before code that might panic in expected ways (e.g., optional features).
+/// The dialog will still not show for panics inside `catch_unwind`.
+pub fn suppress_crash_dialog() {
+    SUPPRESS_CRASH_DIALOG.with(|flag| flag.set(true));
+}
+
+/// Re-enable the crash dialog for the current thread.
+pub fn enable_crash_dialog() {
+    SUPPRESS_CRASH_DIALOG.with(|flag| flag.set(false));
+}
+
+/// Check if the crash dialog is suppressed for the current thread.
+fn is_crash_dialog_suppressed() -> bool {
+    SUPPRESS_CRASH_DIALOG.with(|flag| flag.get())
+}
+
+/// RAII guard to suppress crash dialogs in a scope.
+/// The dialog is automatically re-enabled when the guard is dropped.
+pub struct SuppressCrashDialogGuard;
+
+impl SuppressCrashDialogGuard {
+    pub fn new() -> Self {
+        suppress_crash_dialog();
+        SuppressCrashDialogGuard
+    }
+}
+
+impl Drop for SuppressCrashDialogGuard {
+    fn drop(&mut self) {
+        enable_crash_dialog();
+    }
+}
+
 /// Install the global crash handler.
 /// Must be called at the very start of main().
 pub fn install_crash_handler() {
@@ -26,17 +70,22 @@ pub fn install_crash_handler() {
         // Format the crash details
         let crash_details = format_crash_details(panic_info);
 
-        // Write to crash log
+        // Write to crash log (always do this)
         let log_path = write_crash_log(&crash_details);
 
         // Log to stderr as well (for console/debugging)
         eprintln!("{}", crash_details);
 
-        // Show native dialog and handle user response
-        let should_restart = show_crash_dialog(&crash_details, log_path.as_ref());
+        // Only show the dialog if not suppressed
+        // (suppressed for expected panics like ORT initialization failures)
+        if !is_crash_dialog_suppressed() {
+            let should_restart = show_crash_dialog(&crash_details, log_path.as_ref());
 
-        if should_restart {
-            restart_application();
+            if should_restart {
+                restart_application();
+            }
+        } else {
+            eprintln!("[CrashHandler] Crash dialog suppressed (expected panic in optional feature)");
         }
 
         // Call the default handler (prints backtrace if RUST_BACKTRACE is set)

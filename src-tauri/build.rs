@@ -382,8 +382,9 @@ fn link_macos_clang_runtime() {
 /// 1. Already in binaries/ directory (from previous build)
 /// 2. ORT_DYLIB_PATH environment variable (ort 2.0 runtime path)
 /// 3. ORT_LIB_LOCATION environment variable (legacy/manual override)
-/// 4. ort-sys 2.0 global cache: %LOCALAPPDATA%\ort\
-/// 5. Legacy: target/*/build/ort-sys-*/out/
+/// 4. Pre-installed: %LOCALAPPDATA%\Programs\onnxruntime\ (from requirements script)
+/// 5. ort-sys 2.0 global cache: %LOCALAPPDATA%\ort\
+/// 6. Legacy: target/*/build/ort-sys-*/out/
 #[cfg(target_os = "windows")]
 fn copy_onnx_runtime_dlls(manifest_path: &Path) {
     let binaries_dir = manifest_path.join("binaries");
@@ -423,13 +424,30 @@ fn copy_onnx_runtime_dlls(manifest_path: &Path) {
         }
     }
     
-    // 3. Check ort-sys 2.0 global cache: %LOCALAPPDATA%\ort\
+    // 3. Check pre-installed location: %LOCALAPPDATA%\Programs\onnxruntime\
+    // This is where windows-requirements.ps1 installs ONNX Runtime
+    if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+        let programs_dir = Path::new(&local_app_data)
+            .join("Programs")
+            .join("onnxruntime");
+        if programs_dir.exists() {
+            if copy_dlls_from_dir(&programs_dir, &binaries_dir) {
+                println!(
+                    "cargo:warning=Copied ONNX Runtime DLLs from Programs: {:?}",
+                    programs_dir
+                );
+                return;
+            }
+        }
+    }
+    
+    // 5. Check ort-sys 2.0 global cache: %LOCALAPPDATA%\ort\
     if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
         let ort_cache_dir = Path::new(&local_app_data).join("ort");
         if let Some(dll_dir) = find_onnx_dlls_recursive(&ort_cache_dir) {
             if copy_dlls_from_dir(&dll_dir, &binaries_dir) {
                 println!(
-                    "cargo:warning=Copied ONNX Runtime DLLs from global cache: {:?}",
+                    "cargo:warning=Copied ONNX Runtime DLLs from ort cache: {:?}",
                     dll_dir
                 );
                 return;
@@ -437,7 +455,7 @@ fn copy_onnx_runtime_dlls(manifest_path: &Path) {
         }
     }
     
-    // 4. Legacy: Search in the target build directory for ort-sys output
+    // 6. Legacy: Search in the target build directory for ort-sys output
     let target_dir = manifest_path.join("target");
     let profiles = ["release", "debug"];
     

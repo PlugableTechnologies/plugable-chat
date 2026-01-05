@@ -492,6 +492,100 @@ function Install-McpToolbox {
     }
 }
 
+# Download ONNX Runtime DLLs for embedding/search features
+# This is required because ort-sys downloads during cargo build, but our build.rs
+# runs before ort-sys, causing a timing issue. Pre-downloading ensures the DLLs are available.
+function Install-OnnxRuntime {
+    $displayName = "ONNX Runtime"
+    $onnxDir = "$env:LOCALAPPDATA\Programs\onnxruntime"
+    $onnxDll = "$onnxDir\onnxruntime.dll"
+    # Version should match what ort-sys 2.0.0-rc.9 expects (ONNX Runtime 1.19.x)
+    $onnxVersion = "1.19.2"
+    $downloadUrl = "https://github.com/microsoft/onnxruntime/releases/download/v$onnxVersion/onnxruntime-win-x64-$onnxVersion.zip"
+    
+    Write-Host "Checking $displayName... " -NoNewline
+    
+    # Check if already installed
+    if (Test-Path $onnxDll) {
+        Write-Host "already installed" -ForegroundColor Green
+        return $true
+    }
+    
+    Write-Host "downloading v$onnxVersion..." -ForegroundColor Yellow
+    
+    try {
+        # Create directory
+        if (-not (Test-Path $onnxDir)) {
+            New-Item -ItemType Directory -Path $onnxDir -Force | Out-Null
+        }
+        
+        # Download and extract
+        $tempZip = "$env:TEMP\onnxruntime-$onnxVersion.zip"
+        $tempExtract = "$env:TEMP\onnxruntime-extract"
+        
+        Write-Host "  -> Downloading from GitHub..." -ForegroundColor Gray
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempZip -UseBasicParsing
+        
+        if (Test-Path $tempZip) {
+            Write-Host "  -> Extracting..." -ForegroundColor Gray
+            
+            # Clean up any previous extraction
+            if (Test-Path $tempExtract) {
+                Remove-Item $tempExtract -Recurse -Force
+            }
+            
+            Expand-Archive -Path $tempZip -DestinationPath $tempExtract -Force
+            
+            # Find the lib directory (inside onnxruntime-win-x64-<version>/lib/)
+            $extractedDir = Get-ChildItem -Path $tempExtract -Directory | Select-Object -First 1
+            $libDir = Join-Path $extractedDir.FullName "lib"
+            
+            if (Test-Path $libDir) {
+                # Copy DLLs to our install location
+                Copy-Item "$libDir\*.dll" -Destination $onnxDir -Force
+                Write-Host "  -> Installed to $onnxDir" -ForegroundColor Green
+                
+                # Also copy to src-tauri/binaries if we're in the project
+                $binariesDir = Join-Path $projectRoot "src-tauri\binaries"
+                if (Test-Path (Split-Path $binariesDir)) {
+                    if (-not (Test-Path $binariesDir)) {
+                        New-Item -ItemType Directory -Path $binariesDir -Force | Out-Null
+                    }
+                    Copy-Item "$libDir\*.dll" -Destination $binariesDir -Force
+                    Write-Host "  -> Also copied to src-tauri/binaries/ for bundling" -ForegroundColor Green
+                }
+                
+                # Set ORT_DYLIB_PATH for the current session and permanently
+                $onnxDllPath = "$onnxDir\onnxruntime.dll"
+                [Environment]::SetEnvironmentVariable("ORT_DYLIB_PATH", $onnxDllPath, "User")
+                $env:ORT_DYLIB_PATH = $onnxDllPath
+                Write-Host "  -> Set ORT_DYLIB_PATH environment variable" -ForegroundColor Green
+                
+                $script:InstalledAnything = $true
+            }
+            else {
+                Write-Host "  -> Could not find lib directory in extracted archive" -ForegroundColor Red
+                return $false
+            }
+            
+            # Cleanup
+            Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+            
+            return $true
+        }
+        else {
+            Write-Host "  -> Download failed" -ForegroundColor Red
+            return $false
+        }
+    }
+    catch {
+        Write-Host "  -> Download failed: $_" -ForegroundColor Red
+        Write-Host "  -> (Embedding/search features may not work)" -ForegroundColor Yellow
+        return $false
+    }
+}
+
 # Install the wasm32-wasip1 target for WASM sandboxing
 # Note: wasm32-wasi was renamed to wasm32-wasip1 in Rust 1.78+
 function Install-WasmTarget {
@@ -686,6 +780,9 @@ function Install-Requirements {
     
     # MCP Database Toolbox - For database demo and MCP database integrations (downloaded from Google Storage)
     Install-McpToolbox  # Optional, don't fail if this doesn't work
+    
+    # ONNX Runtime - Required for embedding/search features
+    Install-OnnxRuntime  # Optional, but needed for semantic search
     
     Write-Host ""
     

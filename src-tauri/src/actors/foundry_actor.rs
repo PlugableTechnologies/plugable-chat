@@ -1,3 +1,4 @@
+use crate::crash_handler::SuppressCrashDialogGuard;
 use crate::is_verbose_logging_enabled;
 use crate::protocol::{
     CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus, ModelFamily,
@@ -715,7 +716,11 @@ impl ModelGatewayActor {
 
         // Build GPU execution providers
         // Use catch_unwind to handle panics from ORT initialization (e.g., missing DLLs on Windows)
+        // Also suppress the crash dialog since we handle failures gracefully
         let gpu_result = tokio::task::spawn_blocking(move || {
+            // Suppress crash dialog for ORT initialization - this is optional and we handle failures gracefully
+            let _guard = SuppressCrashDialogGuard::new();
+            
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
                 options.show_download_progress = true;
@@ -831,7 +836,11 @@ impl ModelGatewayActor {
 
             // Initialize CPU model (no GPU execution providers - pure CPU)
             // Use catch_unwind to handle panics from ORT initialization (e.g., missing DLLs on Windows)
+            // Also suppress the crash dialog since this is an optional feature
             let cpu_result = tokio::task::spawn_blocking(move || {
+                // Suppress crash dialog for ORT initialization - this is optional and we handle failures gracefully
+                let _guard = SuppressCrashDialogGuard::new();
+                
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
                     options.show_download_progress = true;
