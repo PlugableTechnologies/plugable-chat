@@ -9,8 +9,8 @@
 use crate::actors::mcp_host_actor::McpTool;
 use crate::protocol::McpHostMsg;
 use crate::settings::{
-    CachedColumnSchema, CachedTableSchema, DatabaseSourceConfig, DatabaseToolboxConfig,
-    McpServerConfig, SupportedDatabaseKind,
+    is_embedded_demo_source, regenerate_demo_source_args, CachedColumnSchema, CachedTableSchema,
+    DatabaseSourceConfig, DatabaseToolboxConfig, McpServerConfig, SupportedDatabaseKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -297,13 +297,27 @@ impl DatabaseToolboxActor {
             }
         }
 
+        // For the embedded demo source, always regenerate the tools.yaml path at connection time.
+        // This ensures the path is valid even if settings were saved on a different machine or
+        // the working directory has changed (common on macOS app bundles).
+        let args = if is_embedded_demo_source(&source.id) {
+            regenerate_demo_source_args().unwrap_or_else(|| {
+                println!(
+                    "[DatabaseToolboxActor] Warning: Could not regenerate demo-tools.yaml, using stored args"
+                );
+                source.args.clone()
+            })
+        } else {
+            source.args.clone()
+        };
+
         McpServerConfig {
             id: source.id.clone(),
             name: source.name.clone(),
             enabled: source.enabled,
             transport: source.transport.clone(),
             command: source.command.clone(),
-            args: source.args.clone(),
+            args,
             env,
             auto_approve_tools: true, // Always true for database sources
             defer_tools: source.defer_tools,

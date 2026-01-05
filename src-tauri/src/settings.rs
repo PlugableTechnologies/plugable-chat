@@ -1138,6 +1138,19 @@ pub fn is_embedded_demo_source(source_id: &str) -> bool {
     source_id == EMBEDDED_DEMO_SOURCE_ID
 }
 
+/// Regenerate the args for the embedded demo database source with a fresh tools.yaml path.
+/// This should be called before starting the demo database to ensure the path is valid.
+/// Returns None if the demo.db cannot be found (not bundled/available).
+pub fn regenerate_demo_source_args() -> Option<Vec<String>> {
+    let tools_file_path = ensure_demo_tools_yaml()?;
+    let path_str = normalize_path_for_yaml(&tools_file_path);
+    Some(vec![
+        "--tools-file".to_string(),
+        path_str,
+        "--stdio".to_string(),
+    ])
+}
+
 /// Ensure the default MCP test server and demo database exist in settings (for migration)
 pub fn ensure_default_servers(settings: &mut AppSettings) {
     // Check if mcp-test-server already exists
@@ -1160,17 +1173,19 @@ pub fn ensure_default_servers(settings: &mut AppSettings) {
 
     match demo_source_idx {
         Some(idx) => {
-            // Update existing demo source with correct MCP toolbox args if missing
+            // ALWAYS regenerate the demo source args to ensure the tools.yaml path is valid
+            // This handles cases where the app was moved, or the cache was cleared, or
+            // the working directory changed (common on macOS bundles).
             let source = &mut settings.database_toolbox.sources[idx];
-            let default_source = default_demo_database_source();
             
-            // Check if args need updating (migration from old config without MCP args)
-            let needs_args_update = source.args.is_empty() 
-                || !source.args.iter().any(|a| a.contains("--tools-file"));
-            
-            if needs_args_update {
-                println!("Updating embedded demo database source with MCP toolbox args");
-                source.args = default_source.args;
+            if let Some(fresh_args) = regenerate_demo_source_args() {
+                if source.args != fresh_args {
+                    println!("[DemoDatabase] Regenerating demo-tools.yaml path for embedded demo source");
+                    source.args = fresh_args;
+                }
+            } else {
+                // demo.db not found - leave args as-is but warn
+                println!("[DemoDatabase] Warning: Could not regenerate demo-tools.yaml (demo.db not found)");
             }
             
             // Auto-detect toolbox binary if not set or if set to an invalid path
