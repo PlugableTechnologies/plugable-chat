@@ -12,15 +12,21 @@
 
 /**
  * Strip OpenAI special tokens that may leak through from models
- * These include: <|start|>, <|end|>, <|im_start|>, <|im_end|>, <|endoftext|>, etc.
+ * These include: <|start|>, <|im_start|>, <|im_end|>, <|endoftext|>, etc.
  * Also handles role markers like <|start|>assistant, <|im_start|>user, etc.
- * Note: <|call|> and <|return|> are harmony tokens but NOT stripped here - they're 
- * processed by parseChannelFormat.
+ * 
+ * IMPORTANT: DO NOT strip harmony tokens here - they're needed by parseChannelFormat:
+ * - <|channel|> - channel type marker
+ * - <|message|> - content delimiter  
+ * - <|end|> - channel terminator (needed to find content boundaries!)
+ * - <|call|> - tool call terminator
+ * - <|constrain|> - format constraint
  */
 function stripOpenAITokens(content: string): string {
     return content
-        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text|return)\|>(?:assistant|user|system|tool)?/gi, '')
-        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text|return)\|>/gi, '')
+        // Strip chat template tokens (but NOT <|end|> which harmony format needs)
+        .replace(/<\|(?:start|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>(?:assistant|user|system|tool)?/gi, '')
+        .replace(/<\|(?:start|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>/gi, '')
         // Clean up any leftover newlines at the start from removed tokens
         .replace(/^\s*\n+/, '');
 }

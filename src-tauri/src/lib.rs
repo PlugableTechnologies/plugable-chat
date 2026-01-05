@@ -1406,7 +1406,8 @@ pub(crate) async fn run_agentic_loop(
 
                             // Check for early stop if we see a potential closing character.
                             // This prevents models from hallucinating results or extra text after tool calls.
-                            if assistant_response.len() > 20 && (token.contains('>') || token.contains('`') || token.contains('}') || token.contains(']')) {
+                            // Note: '|' is for harmony format <|call|> tokens
+                            if assistant_response.len() > 20 && (token.contains('>') || token.contains('`') || token.contains('}') || token.contains(']') || token.contains('|')) {
                                 let action = detect_agentic_action(
                                     &assistant_response,
                                     model_family,
@@ -1425,6 +1426,7 @@ pub(crate) async fn run_agentic_loop(
                                         || trimmed.ends_with("</function_call>")
                                         || trimmed.ends_with("</function>")
                                         || trimmed.ends_with("[/TOOL_CALLS]")
+                                        || trimmed.ends_with("<|call|>")  // Harmony format (gpt-oss)
                                     {
                                         should_stop = true;
                                     } else if python_tool_mode && trimmed.ends_with("```") {

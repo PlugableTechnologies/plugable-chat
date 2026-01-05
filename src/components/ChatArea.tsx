@@ -1122,14 +1122,25 @@ const createChatPreviewFromMessage = (message: string) => {
 };
 
 // Strip OpenAI special tokens that may leak through
+// NOTE: Do NOT strip <|end|> here - harmony format uses it as a channel terminator
+// and the response-parser needs it to properly extract channel boundaries.
+// Leftover <|end|> tokens after parsing are stripped by stripHarmonyTokens below.
 const stripOpenAITokens = (content: string): string => {
-    // Remove common OpenAI special tokens
-    // Patterns: <|start|>, <|end|>, <|im_start|>, <|im_end|>, <|endoftext|>
+    // Remove common OpenAI special tokens (but NOT <|end|> which harmony format needs)
+    // Patterns: <|start|>, <|im_start|>, <|im_end|>, <|endoftext|>
     // Also handles role markers like <|start|>assistant, <|im_start|>user, etc.
     return content
-        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>(?:assistant|user|system)?/gi, '')
-        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>/gi, '')
+        .replace(/<\|(?:start|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>(?:assistant|user|system)?/gi, '')
+        .replace(/<\|(?:start|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>/gi, '')
         // Clean up any leftover newlines at the start from removed tokens
+        .replace(/^\n+/, '');
+};
+
+// Strip harmony-specific tokens after parsing (for clean rendering)
+const stripHarmonyTokens = (content: string): string => {
+    return content
+        .replace(/<\|channel\|>\w+(?:\s+to=\S+)?(?:\s+<\|constrain\|>\w+)?<\|message\|>/gi, '')
+        .replace(/<\|(?:end|call|return)\|>/gi, '')
         .replace(/^\n+/, '');
 };
 
@@ -1371,8 +1382,9 @@ const wrapUndelimitedLatex = (content: string): string => {
 
 // Helper to wrap raw \boxed{} in math delimiters to ensure they render
 const preprocessLaTeX = (content: string) => {
-    // First strip OpenAI tokens
+    // First strip OpenAI tokens, then any leftover harmony tokens
     let processed = stripOpenAITokens(content);
+    processed = stripHarmonyTokens(processed);
 
     // Then convert LaTeX delimiters
     processed = convertLatexDelimiters(processed);
