@@ -20,13 +20,13 @@ pub struct SqlSelectInput {
     /// Optional query parameters (for parameterized queries)
     #[serde(default)]
     pub parameters: Vec<Value>,
-    /// Maximum number of rows to return (default: 100)
+    /// Maximum number of rows to return (default: 25)
     #[serde(default = "default_max_rows")]
     pub max_rows: usize,
 }
 
 fn default_max_rows() -> usize {
-    100
+    25
 }
 
 /// Output from sql_select
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(input.source_id, Some("bq-prod".to_string()));
         assert_eq!(input.sql, "SELECT * FROM orders");
         assert!(input.parameters.is_empty());
-        assert_eq!(input.max_rows, 100);
+        assert_eq!(input.max_rows, 25);
     }
 
     #[test]
