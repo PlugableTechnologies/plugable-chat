@@ -377,6 +377,12 @@ fn link_macos_clang_runtime() {
 /// to be bundled with the application for it to run on target machines.
 /// This function finds the downloaded DLLs and copies them to src-tauri/binaries/
 /// where Tauri's bundle configuration will pick them up.
+///
+/// Search order:
+/// 1. ORT_DYLIB_PATH environment variable (ort 2.0 runtime path)
+/// 2. ORT_LIB_LOCATION environment variable (legacy/manual override)
+/// 3. ort-sys 2.0 global cache: %LOCALAPPDATA%\ort\
+/// 4. Legacy: target/*/build/ort-sys-*/out/
 #[cfg(target_os = "windows")]
 fn copy_onnx_runtime_dlls(manifest_path: &Path) {
     let binaries_dir = manifest_path.join("binaries");
@@ -389,15 +395,41 @@ fn copy_onnx_runtime_dlls(manifest_path: &Path) {
         }
     }
     
-    // Look for ONNX Runtime DLLs in common locations
-    // 1. Check if ort-sys provides the path via environment variable
+    // 1. Check ORT_DYLIB_PATH (ort 2.0 uses this at runtime)
+    if let Ok(ort_dylib_path) = env::var("ORT_DYLIB_PATH") {
+        let dylib_path = Path::new(&ort_dylib_path);
+        // ORT_DYLIB_PATH points to the DLL file itself, get the parent directory
+        if let Some(dll_dir) = dylib_path.parent() {
+            if copy_dlls_from_dir(dll_dir, &binaries_dir) {
+                println!("cargo:warning=Copied ONNX Runtime DLLs from ORT_DYLIB_PATH");
+                return;
+            }
+        }
+    }
+    
+    // 2. Check ORT_LIB_LOCATION (legacy/manual override)
     if let Ok(ort_lib_dir) = env::var("ORT_LIB_LOCATION") {
         if copy_dlls_from_dir(Path::new(&ort_lib_dir), &binaries_dir) {
+            println!("cargo:warning=Copied ONNX Runtime DLLs from ORT_LIB_LOCATION");
             return;
         }
     }
     
-    // 2. Search in the target build directory for ort-sys output
+    // 3. Check ort-sys 2.0 global cache: %LOCALAPPDATA%\ort\
+    if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+        let ort_cache_dir = Path::new(&local_app_data).join("ort");
+        if let Some(dll_dir) = find_onnx_dlls_recursive(&ort_cache_dir) {
+            if copy_dlls_from_dir(&dll_dir, &binaries_dir) {
+                println!(
+                    "cargo:warning=Copied ONNX Runtime DLLs from global cache: {:?}",
+                    dll_dir
+                );
+                return;
+            }
+        }
+    }
+    
+    // 4. Legacy: Search in the target build directory for ort-sys output
     let target_dir = manifest_path.join("target");
     let profiles = ["release", "debug"];
     
@@ -420,8 +452,8 @@ fn copy_onnx_runtime_dlls(manifest_path: &Path) {
                     if let Some(dll_dir) = find_onnx_dlls_recursive(&out_dir) {
                         if copy_dlls_from_dir(&dll_dir, &binaries_dir) {
                             println!(
-                                "cargo:warning=Copied ONNX Runtime DLLs from {:?} to {:?}",
-                                dll_dir, binaries_dir
+                                "cargo:warning=Copied ONNX Runtime DLLs from target build: {:?}",
+                                dll_dir
                             );
                             return;
                         }
@@ -431,9 +463,12 @@ fn copy_onnx_runtime_dlls(manifest_path: &Path) {
         }
     }
     
-    println!("cargo:warning=Could not find ONNX Runtime DLLs to bundle");
-    println!("cargo:warning=The application may fail to start on Windows without onnxruntime.dll");
-    println!("cargo:warning=You may need to install ONNX Runtime separately or set ORT_LIB_LOCATION");
+    // If we get here on a fresh build, ort-sys may not have downloaded yet.
+    // The DLLs will be available after ort-sys runs its build.rs.
+    // This is not necessarily an error - ort dynamically loads at runtime.
+    println!("cargo:warning=ONNX Runtime DLLs not found for bundling.");
+    println!("cargo:warning=If this is a fresh build, they may be downloaded when ort-sys builds.");
+    println!("cargo:warning=For production bundles, set ORT_DYLIB_PATH or ORT_LIB_LOCATION.");
 }
 
 /// Recursively search for a directory containing ONNX Runtime DLLs
