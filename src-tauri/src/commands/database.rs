@@ -153,12 +153,37 @@ pub async fn refresh_database_schemas_for_config(
                 .await
                 .map_err(|e| format!("Failed to request GPU embedding model: {}", e))?;
 
-            let model = model_rx
-                .await
-                .map_err(|_| "Foundry actor died while getting GPU embedding model")?
-                .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
-            
-            (model, true)
+            match model_rx.await {
+                Ok(Ok(model)) => (model, true),
+                Ok(Err(gpu_error)) => {
+                    // GPU embedding failed - fall back to CPU with warning
+                    println!("[SchemaRefresh] WARNING: GPU embedding failed: {}. Falling back to CPU.", gpu_error);
+                    
+                    let _ = app_handle.emit(
+                        "schema-refresh-progress",
+                        SchemaRefreshProgress {
+                            message: format!("GPU embedding unavailable, using CPU ({})", gpu_error),
+                            source_name: "".to_string(),
+                            current_table: None,
+                            tables_done: 0,
+                            tables_total: 0,
+                            is_complete: false,
+                            error: None,
+                        },
+                    );
+                    
+                    let model_guard = embedding_state.cpu_model.read().await;
+                    let model = model_guard
+                        .clone()
+                        .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
+                    drop(model_guard);
+                    
+                    (model, false)
+                }
+                Err(_) => {
+                    return Err("Foundry actor died while getting GPU embedding model".to_string());
+                }
+            }
         }
         Err(_) => {
             // GPU is busy - check what operation is running and fall back to CPU

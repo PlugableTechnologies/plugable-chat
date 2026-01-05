@@ -80,12 +80,24 @@ pub async fn process_rag_documents(
                 .await
                 .map_err(|e| format!("Failed to request GPU embedding model: {}", e))?;
 
-            let model = model_rx
-                .await
-                .map_err(|_| "Foundry actor died while getting GPU embedding model")?
-                .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
-            
-            (model, true)
+            match model_rx.await {
+                Ok(Ok(model)) => (model, true),
+                Ok(Err(gpu_error)) => {
+                    // GPU embedding failed - fall back to CPU with warning
+                    println!("[RAG] WARNING: GPU embedding failed: {}. Falling back to CPU.", gpu_error);
+                    
+                    let model_guard = embedding_state.cpu_model.read().await;
+                    let model = model_guard
+                        .clone()
+                        .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
+                    drop(model_guard);
+                    
+                    (model, false)
+                }
+                Err(_) => {
+                    return Err("Foundry actor died while getting GPU embedding model".to_string());
+                }
+            }
         }
         Err(_) => {
             // GPU is busy - fall back to CPU
