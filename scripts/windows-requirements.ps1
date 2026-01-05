@@ -385,24 +385,59 @@ function Install-McpToolbox {
     
     Write-Host "Checking $displayName... " -NoNewline
     
-    # Check if already installed and in PATH
-    if (Test-CommandExists "toolbox") {
-        Write-Host "already installed" -ForegroundColor Green
-        return $true
-    }
-    
-    # Check if installed in our directory
-    if (Test-Path $toolboxExe) {
-        Write-Host "already downloaded" -ForegroundColor Green
-        # Add to PATH for current session
-        if ($env:Path -notlike "*$toolboxDir*") {
-            $env:Path = "$toolboxDir;$env:Path"
+    # Helper to verify if the binary is valid and working
+    $verifyExe = {
+        param($path)
+        if (-not (Test-Path $path)) { return $false }
+        $size = (Get-Item $path).Length
+        # If the file is too small (e.g. < 1MB), it's likely a 404 HTML page or corrupted
+        if ($size -lt 1MB) { return $false }
+        
+        try {
+            # Try to run it. If it's corrupted or wrong arch, this will fail.
+            # Using 2>&1 to capture errors as data
+            $null = & $path --version 2>&1
+            return $LASTEXITCODE -eq 0
+        } catch {
+            return $false
         }
-        return $true
+    }
+
+    # Check if already installed locally and if it actually works
+    if (Test-Path $toolboxExe) {
+        if (&$verifyExe $toolboxExe) {
+            Write-Host "already installed and verified" -ForegroundColor Green
+            # Add to PATH for current session
+            if ($env:Path -notlike "*$toolboxDir*") {
+                $env:Path = "$toolboxDir;$env:Path"
+            }
+            return $true
+        } else {
+            Write-Host "found but broken, removing..." -ForegroundColor Yellow
+            Remove-Item $toolboxExe -Force -ErrorAction SilentlyContinue
+        }
     }
     
+    # Check if in PATH elsewhere and working
+    if (Test-CommandExists "toolbox") {
+        try {
+            # Need to capture output to avoid printing it here
+            $null = toolbox --version 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "already installed (in PATH)" -ForegroundColor Green
+                return $true
+            }
+        } catch {}
+        Write-Host "found in PATH but broken, installing local version..." -ForegroundColor Yellow
+    }
+
     Write-Host "downloading..." -ForegroundColor Yellow
     
+    # Detect if we are on ARM (Google only provides amd64, but Windows ARM can emulate it)
+    if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+        Write-Host "  (Note: Running on ARM64, using amd64 version via emulation)" -ForegroundColor Gray
+    }
+
     try {
         # Create directory
         if (-not (Test-Path $toolboxDir)) {
@@ -411,26 +446,39 @@ function Install-McpToolbox {
         
         # Download the binary
         Write-Host "  -> Downloading from Google Storage..." -ForegroundColor Gray
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $toolboxExe -UseBasicParsing
+        # Use a temporary file first to avoid corrupted state if download is interrupted
+        $tempExe = "$toolboxExe.tmp"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempExe -UseBasicParsing
         
-        if (Test-Path $toolboxExe) {
-            Write-Host "  -> Downloaded successfully" -ForegroundColor Green
-            
-            # Add to user PATH permanently
-            $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-            if ($userPath -notlike "*$toolboxDir*") {
-                [Environment]::SetEnvironmentVariable("Path", "$toolboxDir;$userPath", "User")
-                Write-Host "  -> Added to user PATH" -ForegroundColor Green
+        if (Test-Path $tempExe) {
+            # Verify the downloaded file before moving it
+            if (&$verifyExe $tempExe) {
+                if (Test-Path $toolboxExe) { Remove-Item $toolboxExe -Force }
+                Move-Item $tempExe $toolboxExe
+                
+                Write-Host "  -> Downloaded and verified successfully" -ForegroundColor Green
+                
+                # Add to user PATH permanently
+                $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+                if ($userPath -notlike "*$toolboxDir*") {
+                    [Environment]::SetEnvironmentVariable("Path", "$toolboxDir;$userPath", "User")
+                    Write-Host "  -> Added to user PATH" -ForegroundColor Green
+                }
+                
+                # Add to current session
+                if ($env:Path -notlike "*$toolboxDir*") {
+                    $env:Path = "$toolboxDir;$env:Path"
+                }
+                
+                $script:InstalledToolbox = $true
+                $script:InstalledAnything = $true
+                return $true
             }
-            
-            # Add to current session
-            if ($env:Path -notlike "*$toolboxDir*") {
-                $env:Path = "$toolboxDir;$env:Path"
+            else {
+                Remove-Item $tempExe -Force -ErrorAction SilentlyContinue
+                Write-Host "  -> Downloaded file is invalid (likely corrupted or wrong architecture)" -ForegroundColor Red
+                return $false
             }
-            
-            $script:InstalledToolbox = $true
-            $script:InstalledAnything = $true
-            return $true
         }
         else {
             Write-Host "  -> Download failed" -ForegroundColor Red
@@ -563,8 +611,20 @@ function Test-AllCommands {
     
     Write-Host "  toolbox: " -NoNewline
     if (Test-CommandExists "toolbox") {
-        $version = toolbox --version 2>&1
-        Write-Host "$version" -ForegroundColor Green
+        try {
+            # Use 2>&1 and check exit code to prevent red error text from command failures
+            $versionOutput = toolbox --version 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "$versionOutput" -ForegroundColor Green
+            } else {
+                Write-Host "failed to run (code $LASTEXITCODE)" -ForegroundColor Red
+                if ($versionOutput) { 
+                    Write-Host "    $versionOutput" -ForegroundColor Gray 
+                }
+            }
+        } catch {
+            Write-Host "error: $_" -ForegroundColor Red
+        }
     }
     else {
         Write-Host "not found (optional - for database demo)" -ForegroundColor Yellow
