@@ -8,7 +8,9 @@
     "dev": "vite",
     "build": "npm run generate-icons && tsc && vite build",
     "preview": "npm run generate-icons && vite preview",
-    "tauri": "tauri"
+    "tauri": "node scripts/tauri-offline.mjs",
+    "tauri:dev": "node scripts/tauri-offline.mjs dev",
+    "tauri:build": "node scripts/tauri-offline.mjs build"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

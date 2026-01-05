@@ -754,6 +754,11 @@ function Install-Requirements {
         }
     }
     
+    # Disable rustup auto-self-update (reduces network calls, enables air-gapped builds)
+    if (Test-CommandExists "rustup") {
+        rustup set auto-self-update disable 2>$null
+    }
+    
     # Install wasm32-wasi target for WASM sandboxing (optional but recommended)
     Install-WasmTarget
     

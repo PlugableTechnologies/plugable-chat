@@ -386,6 +386,11 @@ install_requirements() {
         all_succeeded=false
     fi
     
+    # Disable rustup auto-self-update (reduces network calls, enables air-gapped builds)
+    if command_exists rustup; then
+        rustup set auto-self-update disable 2>/dev/null || true
+    fi
+    
     # Step 5b: wasm32-wasip1 target - Required for WASM sandboxing of Python code execution
     # This is optional but recommended for enhanced security
     install_wasm_target  # Don't fail if this doesn't work
