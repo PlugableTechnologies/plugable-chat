@@ -19,7 +19,6 @@ dist-ssr
 target
 src-tauri/target
 src-tauri/wasm/
-.cargo
 
 # Workspace members don't have their own Cargo.lock (root Cargo.lock is the source of truth)
 src-tauri/Cargo.lock

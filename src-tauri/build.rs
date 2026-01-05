@@ -43,6 +43,10 @@ fn main() {
     // These files are created when extracting a zip on Windows that was created on macOS.
     clean_apple_double_files(manifest_path.join("capabilities").as_path());
 
+    // Link clang runtime on macOS for ONNX Runtime CoreML support
+    #[cfg(target_os = "macos")]
+    link_macos_clang_runtime();
+
     tauri_build::build()
 }
 
@@ -272,4 +276,93 @@ fn set_git_version_info(project_root: &Path) -> u32 {
     println!("cargo:rustc-env=PLUGABLE_CHAT_GIT_HASH={}", git_hash);
 
     commit_count
+}
+
+/// Link the clang runtime library on macOS for ONNX Runtime CoreML support.
+///
+/// The pre-built ONNX Runtime binaries with CoreML use `@available()` checks which
+/// require the `___isPlatformVersionAtLeast` symbol from Apple's clang runtime.
+/// Rust's default linker invocation doesn't include this library, so we need to
+/// explicitly add it.
+///
+/// This function dynamically finds the correct clang version directory to work
+/// across different Xcode versions (clang/16, clang/17, clang/18, etc.).
+#[cfg(target_os = "macos")]
+fn link_macos_clang_runtime() {
+    // Find the Xcode Developer directory using xcode-select
+    let developer_output = Command::new("xcode-select").args(["-p"]).output();
+
+    let toolchain_base = match developer_output {
+        Ok(output) if output.status.success() => {
+            // xcode-select -p gives us: /Applications/Xcode.app/Contents/Developer
+            let developer_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Path::new(&developer_path)
+                .join("Toolchains")
+                .join("XcodeDefault.xctoolchain")
+                .join("usr")
+                .join("lib")
+                .join("clang")
+        }
+        _ => {
+            println!("cargo:warning=xcode-select not available, cannot find clang runtime");
+            return;
+        }
+    };
+
+    // Find the clang version directory (e.g., clang/17, clang/18)
+    let clang_version_dir = match fs::read_dir(&toolchain_base) {
+        Ok(entries) => {
+            let mut versions: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    // Parse version number (could be "17", "17.0.0", etc.)
+                    name.split('.').next()?.parse::<u32>().ok().map(|v| (v, e.path()))
+                })
+                .collect();
+
+            // Sort by version number descending, use the latest
+            versions.sort_by(|a, b| b.0.cmp(&a.0));
+            versions.into_iter().next().map(|(_, path)| path)
+        }
+        Err(e) => {
+            println!(
+                "cargo:warning=Could not read clang directory {:?}: {}",
+                toolchain_base, e
+            );
+            return;
+        }
+    };
+
+    let clang_dir = match clang_version_dir {
+        Some(dir) => dir,
+        None => {
+            println!(
+                "cargo:warning=No clang version directory found in {:?}",
+                toolchain_base
+            );
+            return;
+        }
+    };
+
+    // Build the path to the darwin lib directory
+    let darwin_lib_dir = clang_dir.join("lib").join("darwin");
+    let clang_rt_lib = darwin_lib_dir.join("libclang_rt.osx.a");
+
+    if !clang_rt_lib.exists() {
+        println!(
+            "cargo:warning=clang runtime library not found at {:?}",
+            clang_rt_lib
+        );
+        return;
+    }
+
+    // Emit linker directives
+    println!("cargo:rustc-link-search=native={}", darwin_lib_dir.display());
+    println!("cargo:rustc-link-lib=static=clang_rt.osx");
+    println!(
+        "cargo:warning=Linked clang runtime from {:?}",
+        darwin_lib_dir
+    );
 }

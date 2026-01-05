@@ -1,0 +1,25 @@
+[alias]
+# Runs the dev MCP test server with full sweep and prompt printing.
+mcp-test = [
+  "run",
+  "--manifest-path",
+  "mcp-test-server/Cargo.toml",
+  "--",
+  "--run-all-on-start",
+  "true",
+  "--print-prompt",
+  "true",
+  "--open-ui",
+  "true",
+  "--serve-ui",
+  "true",
+]
+
+
+
+
+
+
+
+
+
