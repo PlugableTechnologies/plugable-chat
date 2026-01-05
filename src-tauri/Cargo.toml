@@ -23,6 +23,9 @@ futures = "0.3"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = "0.4"
 
+# Native dialogs for crash reporting (works without Tauri runtime)
+rfd = "0.15"
+
 # LanceDB & Arrow Stack
 lancedb = { version = "0.23", default-features = false }
 arrow = "56" 
