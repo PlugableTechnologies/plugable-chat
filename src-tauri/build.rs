@@ -379,10 +379,11 @@ fn link_macos_clang_runtime() {
 /// where Tauri's bundle configuration will pick them up.
 ///
 /// Search order:
-/// 1. ORT_DYLIB_PATH environment variable (ort 2.0 runtime path)
-/// 2. ORT_LIB_LOCATION environment variable (legacy/manual override)
-/// 3. ort-sys 2.0 global cache: %LOCALAPPDATA%\ort\
-/// 4. Legacy: target/*/build/ort-sys-*/out/
+/// 1. Already in binaries/ directory (from previous build)
+/// 2. ORT_DYLIB_PATH environment variable (ort 2.0 runtime path)
+/// 3. ORT_LIB_LOCATION environment variable (legacy/manual override)
+/// 4. ort-sys 2.0 global cache: %LOCALAPPDATA%\ort\
+/// 5. Legacy: target/*/build/ort-sys-*/out/
 #[cfg(target_os = "windows")]
 fn copy_onnx_runtime_dlls(manifest_path: &Path) {
     let binaries_dir = manifest_path.join("binaries");
@@ -393,6 +394,13 @@ fn copy_onnx_runtime_dlls(manifest_path: &Path) {
             println!("cargo:warning=Failed to create binaries directory: {}", e);
             return;
         }
+    }
+    
+    // 0. Check if DLLs are already in binaries/ (from previous build)
+    let existing_dll = binaries_dir.join("onnxruntime.dll");
+    if existing_dll.exists() {
+        println!("cargo:warning=ONNX Runtime DLLs already present in binaries/");
+        return;
     }
     
     // 1. Check ORT_DYLIB_PATH (ort 2.0 uses this at runtime)
@@ -465,10 +473,10 @@ fn copy_onnx_runtime_dlls(manifest_path: &Path) {
     
     // If we get here on a fresh build, ort-sys may not have downloaded yet.
     // The DLLs will be available after ort-sys runs its build.rs.
-    // This is not necessarily an error - ort dynamically loads at runtime.
+    // This is expected on first build - the runtime will find them via ORT_DYLIB_PATH.
     println!("cargo:warning=ONNX Runtime DLLs not found for bundling.");
-    println!("cargo:warning=If this is a fresh build, they may be downloaded when ort-sys builds.");
-    println!("cargo:warning=For production bundles, set ORT_DYLIB_PATH or ORT_LIB_LOCATION.");
+    println!("cargo:warning=After first successful build, run 'cargo build' again to bundle DLLs.");
+    println!("cargo:warning=Or set ORT_DYLIB_PATH to the onnxruntime.dll location.");
 }
 
 /// Recursively search for a directory containing ONNX Runtime DLLs
