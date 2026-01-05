@@ -379,8 +379,6 @@ fn link_macos_clang_runtime() {
 /// where Tauri's bundle configuration will pick them up.
 #[cfg(target_os = "windows")]
 fn copy_onnx_runtime_dlls(manifest_path: &Path) {
-    use std::ffi::OsStr;
-    
     let binaries_dir = manifest_path.join("binaries");
     
     // Create binaries directory if it doesn't exist
