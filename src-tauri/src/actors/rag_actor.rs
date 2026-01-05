@@ -39,8 +39,7 @@ const RAG_FILE_CACHE_TABLE: &str = "rag_file_cache";
 /// LRU cache capacity for embeddings (~150MB for 384-dim vectors at 10k entries)
 const EMBEDDING_LRU_CAPACITY: usize = 10_000;
 
-/// Central cache directory name under ~/.plugable-chat/
-const CENTRAL_RAG_CACHE_DIR: &str = "rag-cache";
+// Note: Central cache directory is now managed by crate::paths::get_central_rag_cache_dir()
 
 // ============================================================================
 // DOCUMENT ELEMENT TYPES (for hierarchical parsing)
@@ -494,59 +493,30 @@ impl RagRetrievalActor {
     // DATABASE INITIALIZATION & SIDE CAR MANAGEMENT
     // ========================================================================
 
-    const SIDECAR_CACHE_DIR: &'static str = ".plugable-rag-cache";
-
-    /// Helper to derive the sidecar cache path from a document path
+    /// Helper to derive the sidecar cache path from a document path.
+    /// Uses the centralized paths module for consistent cross-platform behavior.
     fn get_cache_dir_for_file(&self, file_path: &Path) -> PathBuf {
-        // For a file like /Volumes/USB/docs/report.pdf
-        // Returns /Volumes/USB/docs/.plugable-rag-cache/
-        file_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(Self::SIDECAR_CACHE_DIR)
+        crate::paths::get_rag_sidecar_cache_dir(file_path)
     }
 
-    /// On-demand connection creation for a specific path
+    /// On-demand connection creation for a specific path.
+    /// Uses the centralized paths module for fallback handling.
     async fn ensure_connection_for_path(
         &mut self,
         file_path: &Path,
     ) -> Result<&mut DirectoryConnection, String> {
-        let cache_dir = self.get_cache_dir_for_file(file_path);
+        // Use centralized fallback chain from paths module
+        let writable = crate::paths::ensure_rag_cache_dir(file_path).await;
+        let cache_dir = writable.path.clone();
 
         if !self.connections.contains_key(&cache_dir) {
-            println!("RagActor: Initializing sidecar cache at {:?}", cache_dir);
-
-            // Try to create .plugable-rag-cache directory
-            let is_readonly = if let Err(e) = tokio::fs::create_dir_all(&cache_dir).await {
-                println!(
-                    "RagActor WARNING: Could not create sidecar directory {:?}. Falling back to central cache: {}",
-                    cache_dir, e
-                );
-                true
-            } else {
-                false
-            };
-
-            let db_path_str = if is_readonly {
-                // Fallback to central cache instead of volatile memory
-                let central_cache = dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".plugable-chat")
-                    .join(CENTRAL_RAG_CACHE_DIR)
-                    .join(Self::hash_path(&cache_dir)); // Hash to avoid collisions
-
-                if let Err(e) = std::fs::create_dir_all(&central_cache) {
-                    // If even central cache fails, then use memory as last resort
-                    println!("RagActor WARNING: Central cache also failed: {}. Using memory://", e);
-                    "memory://".to_string()
-                } else {
-                    println!("RagActor: Using central cache at {:?}", central_cache);
-                    central_cache.to_string_lossy().to_string()
+            if writable.is_fallback {
+                if let Some(reason) = &writable.fallback_reason {
+                    println!("RagActor: {}", reason);
                 }
-            } else {
-                cache_dir.to_string_lossy().to_string()
-            };
+            }
 
+            let db_path_str = cache_dir.to_string_lossy().to_string();
             let db = connect(&db_path_str)
                 .execute()
                 .await
@@ -2483,7 +2453,9 @@ impl RagRetrievalActor {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Hash a directory path to create a unique, safe directory name for central cache
+    /// Hash a directory path to create a unique, safe directory name for central cache.
+    /// Note: This is now primarily used by tests; production code uses crate::paths::hash_path.
+    #[cfg(test)]
     fn hash_path(path: &Path) -> String {
         let mut hasher = Sha256::new();
         hasher.update(path.to_string_lossy().as_bytes());
@@ -2787,11 +2759,7 @@ mod tests {
         assert_eq!(hash.len(), 16); // First 16 chars of SHA256
 
         // Verify central cache path would be created
-        let central_path = dirs::home_dir()
-            .unwrap()
-            .join(".plugable-chat")
-            .join(CENTRAL_RAG_CACHE_DIR)
-            .join(&hash);
+        let central_path = crate::paths::get_central_rag_cache_dir().join(&hash);
 
         // Central cache should be writable (unless home is also readonly, which is unlikely)
         let central_create = std::fs::create_dir_all(&central_path);

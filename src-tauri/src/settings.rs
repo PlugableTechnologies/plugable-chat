@@ -1167,15 +1167,26 @@ pub fn ensure_default_servers(settings: &mut AppSettings) {
     }
 }
 
-/// Get the path to the config file
-fn get_config_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".plugable-chat").join("config.json")
+/// Get the path to the config file.
+///
+/// Uses platform-standard config directories:
+/// - macOS: `~/Library/Application Support/plugable-chat/config.json`
+/// - Windows: `%APPDATA%\plugable-chat\config.json`
+pub fn get_settings_path() -> PathBuf {
+    crate::paths::get_config_dir().join("config.json")
+}
+
+/// Get the path to the application data directory (for LanceDB, caches, etc.)
+///
+/// Deprecated: Use `crate::paths::get_data_dir()` directly for new code.
+/// This is kept for backward compatibility.
+pub fn get_app_data_dir() -> PathBuf {
+    crate::paths::get_data_dir()
 }
 
 /// Load settings from the config file
 pub async fn load_settings() -> AppSettings {
-    let config_path = get_config_path();
+    let config_path = get_settings_path();
 
     let (mut settings, raw_json) = match fs::read_to_string(&config_path).await {
         Ok(contents) => {
@@ -1243,7 +1254,7 @@ pub async fn load_settings() -> AppSettings {
 
 /// Save settings to the config file
 pub async fn save_settings(settings: &AppSettings) -> Result<(), String> {
-    let config_path = get_config_path();
+    let config_path = get_settings_path();
 
     // Ensure the directory exists
     if let Some(parent) = config_path.parent() {
@@ -1342,9 +1353,9 @@ mod tests {
     #[tokio::test]
     async fn test_load_settings_migration() {
         // Create a temporary config file with legacy flags
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let config_dir = home.join(".plugable-chat");
-        let config_path = config_dir.join("config.json");
+        // Use the actual config path from the paths module
+        let config_path = get_settings_path();
+        let config_dir = config_path.parent().unwrap().to_path_buf();
         
         // Backup existing config if it exists
         let backup_path = config_dir.join("config.json.bak");

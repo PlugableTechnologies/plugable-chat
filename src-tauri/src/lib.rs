@@ -16,6 +16,7 @@ pub mod cli;
 pub mod demo_schema;
 pub mod mid_turn_state;
 pub mod model_profiles;
+pub mod paths;
 pub mod protocol;
 pub mod python_helpers;
 pub mod repetition_detector;
@@ -4070,15 +4071,15 @@ pub fn run() {
             app.manage(tool_registry_state);
 
             // Initialize settings state (load from config file)
-            let mut settings =
+            let mut app_settings =
                 tauri::async_runtime::block_on(async { settings::load_settings().await });
-            let launch_overrides = apply_cli_overrides(&cli_args_for_setup, &mut settings);
+            let launch_overrides = apply_cli_overrides(&cli_args_for_setup, &mut app_settings);
             println!(
                 "Settings loaded: {} MCP servers configured",
-                settings.mcp_servers.len()
+                app_settings.mcp_servers.len()
             );
             // Create SettingsStateMachine (Tier 1 of the three-tier hierarchy)
-            let settings_sm = SettingsStateMachine::from_settings(&settings, &launch_filter);
+            let settings_sm = SettingsStateMachine::from_settings(&app_settings, &launch_filter);
             println!(
                 "[SettingsStateMachine] Initialized with mode: {} (capabilities: {:?})",
                 settings_sm.operational_mode().name(),
@@ -4086,7 +4087,7 @@ pub fn run() {
             );
             
             let settings_state = SettingsState {
-                settings: Arc::new(RwLock::new(settings)),
+                settings: Arc::new(RwLock::new(app_settings)),
             };
             app.manage(settings_state);
             
@@ -4194,9 +4195,20 @@ pub fn run() {
             let app_handle = app.handle();
             // Spawn Vector Actor
             tauri::async_runtime::spawn(async move {
-                // Ensure data directory exists
-                let _ = tokio::fs::create_dir_all("./data").await;
-                let actor = ChatVectorStoreActor::new(vector_rx, "./data/lancedb").await;
+                // Get writable data directory with fallback chain
+                let writable = paths::ensure_writable_dir(
+                    paths::get_data_dir().join("lancedb"),
+                    "chat-vectors",
+                )
+                .await;
+
+                if writable.is_fallback {
+                    if let Some(reason) = &writable.fallback_reason {
+                        println!("[VectorActor] {}", reason);
+                    }
+                }
+
+                let actor = ChatVectorStoreActor::new(vector_rx, &writable.path.to_string_lossy()).await;
                 actor.run().await;
             });
 
@@ -4263,8 +4275,20 @@ pub fn run() {
 
             // Spawn Schema Vector Store Actor
             tauri::async_runtime::spawn(async move {
-                let _ = tokio::fs::create_dir_all("./data").await;
-                let actor = SchemaVectorStoreActor::new(schema_rx, "./data/lancedb").await;
+                // Get writable data directory with fallback chain
+                let writable = paths::ensure_writable_dir(
+                    paths::get_data_dir().join("lancedb"),
+                    "schema-vectors",
+                )
+                .await;
+
+                if writable.is_fallback {
+                    if let Some(reason) = &writable.fallback_reason {
+                        println!("[SchemaVectorActor] {}", reason);
+                    }
+                }
+
+                let actor = SchemaVectorStoreActor::new(schema_rx, &writable.path.to_string_lossy()).await;
                 actor.run().await;
             });
 
