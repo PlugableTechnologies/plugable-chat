@@ -1,20 +1,20 @@
-import { 
-    useChatStore, 
-    ToolCallRecord, 
-    CodeExecutionRecord, 
-    RagChunk, 
+import {
+    useChatStore,
+    ToolCallRecord,
+    CodeExecutionRecord,
+    RagChunk,
     type Message,
     type AttachedTool
 } from '../store/chat-store';
 import { useSettingsStore } from '../store/settings-store';
 import { StatusBar, StreamingWarningBar } from './StatusBar';
-import { 
-    Search, 
-    Database, 
-    Wrench, 
-    Check, 
-    X, 
-    Loader2, 
+import {
+    Search,
+    Database,
+    Wrench,
+    Check,
+    X,
+    Loader2,
     AlertCircle,
     Layout,
     ChevronRight
@@ -41,7 +41,7 @@ const formatTime = (seconds: number) => {
 // Thinking indicator component with elapsed time
 const ThinkingIndicator = ({ startTime }: { startTime: number }) => {
     const [elapsed, setElapsed] = useState(0);
-    
+
     useEffect(() => {
         const interval = setInterval(() => {
             setElapsed(Math.floor((Date.now() - startTime) / 1000));
@@ -66,7 +66,7 @@ const ThinkingIndicator = ({ startTime }: { startTime: number }) => {
 // Searching indicator component for RAG retrieval
 const SearchingIndicator = ({ startTime, stage }: { startTime: number, stage: 'indexing' | 'searching' }) => {
     const [elapsed, setElapsed] = useState(0);
-    
+
     useEffect(() => {
         const interval = setInterval(() => {
             setElapsed(Math.floor((Date.now() - startTime) / 1000));
@@ -95,7 +95,7 @@ const SearchingIndicator = ({ startTime, stage }: { startTime: number, stage: 'i
 const ToolExecutionIndicator = ({ server, tool }: { server: string; tool: string }) => {
     const [elapsed, setElapsed] = useState(0);
     const startTime = useRef(Date.now());
-    
+
     useEffect(() => {
         const interval = setInterval(() => {
             setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
@@ -138,14 +138,14 @@ function parseToolCallJson(jsonContent: string): ParsedToolCallInfo | null {
     }
     try {
         const parsed = JSON.parse(jsonContent.trim());
-        
+
         // Extract tool name - could be "name" or "tool_name" (GPT-OSS legacy)
         const fullName = parsed.name || parsed.tool_name || 'unknown';
-        
+
         // Check if the name contains server prefix (server___tool format)
         let server = 'unknown';
         let tool = fullName;
-        
+
         if (fullName.includes('___')) {
             const parts = fullName.split('___');
             server = parts[0];
@@ -153,10 +153,10 @@ function parseToolCallJson(jsonContent: string): ParsedToolCallInfo | null {
         } else if (parsed.server) {
             server = parsed.server;
         }
-        
+
         // Extract arguments - could be "arguments", "parameters" (Llama), or "tool_args" (GPT-OSS)
         const args = parsed.arguments || parsed.parameters || parsed.tool_args || {};
-        
+
         return {
             server,
             tool,
@@ -173,7 +173,7 @@ function parseToolCallJson(jsonContent: string): ParsedToolCallInfo | null {
 const ToolProcessingBlock = ({ content, startTime }: { content: string; startTime: number }) => {
     const [elapsed, setElapsed] = useState(0);
     const [showRaw, setShowRaw] = useState(false);
-    
+
     useEffect(() => {
         const interval = setInterval(() => {
             setElapsed(Math.floor((Date.now() - startTime) / 1000));
@@ -285,11 +285,11 @@ const ToolProcessingBlock = ({ content, startTime }: { content: string; startTim
 };
 
 // Tool approval dialog component
-const ToolApprovalDialog = ({ 
-    calls, 
-    onApprove, 
-    onReject 
-}: { 
+const ToolApprovalDialog = ({
+    calls,
+    onApprove,
+    onReject
+}: {
     calls: { server: string; tool: string; arguments: Record<string, unknown> }[];
     onApprove: () => void;
     onReject: () => void;
@@ -420,12 +420,12 @@ function isNumericColumn(rows: (string | number | boolean | null)[][], colIndex:
 // Note: SQL executed details are shown in the tool call accordion, not duplicated here
 const SqlResultTable = ({ sqlResult }: { sqlResult: SqlResult }) => {
     const { columns, rows, row_count } = sqlResult;
-    
+
     // Pre-compute which columns are numeric for alignment
     const numericColumns = useMemo(() => {
         return columns.map((_, idx) => isNumericColumn(rows, idx));
     }, [columns, rows]);
-    
+
     return (
         <div className="sql-result-table mt-2">
             {/* Data table */}
@@ -434,11 +434,10 @@ const SqlResultTable = ({ sqlResult }: { sqlResult: SqlResult }) => {
                     <thead>
                         <tr className="bg-gray-50 border-b border-gray-200">
                             {columns.map((col, idx) => (
-                                <th 
-                                    key={idx} 
-                                    className={`px-3 py-2 font-semibold text-gray-700 ${
-                                        numericColumns[idx] ? 'text-right' : 'text-left'
-                                    }`}
+                                <th
+                                    key={idx}
+                                    className={`px-3 py-2 font-semibold text-gray-700 ${numericColumns[idx] ? 'text-right' : 'text-left'
+                                        }`}
                                 >
                                     {col}
                                 </th>
@@ -447,18 +446,16 @@ const SqlResultTable = ({ sqlResult }: { sqlResult: SqlResult }) => {
                     </thead>
                     <tbody>
                         {rows.map((row, rowIdx) => (
-                            <tr 
-                                key={rowIdx} 
-                                className={`border-b border-gray-100 ${
-                                    rowIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'
-                                } hover:bg-blue-50/50 transition-colors`}
+                            <tr
+                                key={rowIdx}
+                                className={`border-b border-gray-100 ${rowIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'
+                                    } hover:bg-blue-50/50 transition-colors`}
                             >
                                 {row.map((cell, cellIdx) => (
-                                    <td 
-                                        key={cellIdx} 
-                                        className={`px-3 py-2 ${
-                                            numericColumns[cellIdx] ? 'text-right font-mono' : 'text-left'
-                                        } ${cell === null ? 'text-gray-400 italic' : 'text-gray-800'}`}
+                                    <td
+                                        key={cellIdx}
+                                        className={`px-3 py-2 ${numericColumns[cellIdx] ? 'text-right font-mono' : 'text-left'
+                                            } ${cell === null ? 'text-gray-400 italic' : 'text-gray-800'}`}
                                     >
                                         {formatSqlCellValue(cell)}
                                     </td>
@@ -468,7 +465,7 @@ const SqlResultTable = ({ sqlResult }: { sqlResult: SqlResult }) => {
                     </tbody>
                 </table>
             </div>
-            
+
             {/* Footer with row count */}
             <div className="mt-1 text-xs text-gray-500">
                 {row_count === 1 ? '1 row' : `${row_count.toLocaleString()} rows`} returned
@@ -583,11 +580,10 @@ const InlineToolCallResult = ({ call }: { call: ToolCallRecord }) => {
                         <summary className={`text-xs cursor-pointer hover:text-gray-700 ${call.isError ? 'text-red-500' : 'text-gray-500'}`}>
                             {call.isError ? 'Error' : 'Response'}
                         </summary>
-                        <pre className={`mt-1 text-xs p-2 rounded overflow-x-auto whitespace-pre-wrap ${
-                            call.isError ? 'bg-red-50 text-red-700' : 'bg-gray-50 text-gray-700'
-                        }`}>
+                        <pre className={`mt-1 text-xs p-2 rounded overflow-x-auto whitespace-pre-wrap ${call.isError ? 'bg-red-50 text-red-700' : 'bg-gray-50 text-gray-700'
+                            }`}>
                             {showResult
-                                ? (resultText 
+                                ? (resultText
                                     ? (resultText.length > 2000 ? resultText.slice(0, 2000) + '\n... (truncated)' : resultText)
                                     : 'Loading response...')
                                 : 'Expand to view response'}
@@ -602,10 +598,10 @@ const InlineToolCallResult = ({ call }: { call: ToolCallRecord }) => {
 // Collapsible RAG Context Block - shows document chunks used as context
 const RagContextBlock = ({ chunks }: { chunks: RagChunk[] }) => {
     if (!chunks || chunks.length === 0) return null;
-    
+
     // Get unique source files
     const uniqueFiles = [...new Set(chunks.map(c => c.source_file))];
-    
+
     return (
         <details className="my-4 group/rag border border-emerald-200 rounded-xl overflow-hidden bg-emerald-50/50">
             <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-emerald-100/50 transition-colors select-none">
@@ -643,10 +639,10 @@ const RagContextBlock = ({ chunks }: { chunks: RagChunk[] }) => {
 // Collapsible Code Execution Block - shows Python code execution
 const CodeExecutionBlock = ({ executions }: { executions: CodeExecutionRecord[] }) => {
     if (!executions || executions.length === 0) return null;
-    
+
     const errorCount = executions.filter(e => !e.success).length;
     const successCount = executions.length - errorCount;
-    
+
     return (
         <details className="my-4 group/code border border-blue-200 rounded-xl overflow-hidden bg-blue-50/50">
             <summary className="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-blue-100/50 transition-colors select-none">
@@ -738,25 +734,25 @@ const CodeExecutionBlock = ({ executions }: { executions: CodeExecutionRecord[] 
 
 // RAG File Pills Component - shows indexed files above input with remove buttons
 // Supports both always-on/locked and removable pills
-const RagFilePills = ({ 
-    files, 
+const RagFilePills = ({
+    files,
     alwaysOnPaths = [],
     onRemove,
     isIndexing
-}: { 
-    files: string[], 
+}: {
+    files: string[],
     alwaysOnPaths?: string[],
     onRemove: (file: string) => void,
     isIndexing: boolean
 }) => {
     if (files.length === 0 && alwaysOnPaths.length === 0 && !isIndexing) return null;
-    
+
     // Truncate filename to first 15 chars
     const truncateFilename = (filename: string) => {
         if (filename.length <= 15) return filename;
         return filename.slice(0, 12) + '...';
     };
-    
+
     return (
         <div className="rag-file-pill-bar flex flex-wrap gap-2 px-2 py-2 max-w-[900px] mx-auto">
             {isIndexing && (
@@ -767,7 +763,7 @@ const RagFilePills = ({
             )}
             {/* Always-on RAG paths - locked appearance, no remove button */}
             {alwaysOnPaths.map((path) => (
-                <div 
+                <div
                     key={`always-on-${path}`}
                     className="rag-file-pill-locked inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-full text-xs font-medium"
                     title={`${path} (always-on)`}
@@ -778,7 +774,7 @@ const RagFilePills = ({
             ))}
             {/* Removable files */}
             {files.map((file) => (
-                <div 
+                <div
                     key={file}
                     className="rag-file-pill inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-medium group"
                     title={file}
@@ -799,27 +795,27 @@ const RagFilePills = ({
 };
 
 // Database Table Pills Component (supports both always-on/locked and removable pills)
-const AttachedTablePills = ({ 
-    tables, 
+const AttachedTablePills = ({
+    tables,
     alwaysOnTables = [],
-    onRemove 
-}: { 
-    tables: any[], 
+    onRemove
+}: {
+    tables: any[],
     alwaysOnTables?: any[],
-    onRemove: (fqName: string) => void 
+    onRemove: (fqName: string) => void
 }) => {
     if (tables.length === 0 && alwaysOnTables.length === 0) return null;
-    
+
     const truncateName = (name: string) => {
         if (name.length <= 20) return name;
         return name.slice(0, 17) + '...';
     };
-    
+
     return (
         <div className="db-table-pill-bar flex flex-wrap gap-2 px-2 py-2 max-w-[900px] mx-auto">
             {/* Always-on tables - locked appearance, no remove button */}
             {alwaysOnTables.map((table) => (
-                <div 
+                <div
                     key={`always-on-${table.tableFqName}`}
                     className="db-table-pill-locked inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 rounded-full text-xs font-medium"
                     title={`${table.tableFqName} (always-on)`}
@@ -830,7 +826,7 @@ const AttachedTablePills = ({
             ))}
             {/* Removable tables */}
             {tables.map((table) => (
-                <div 
+                <div
                     key={table.tableFqName}
                     className="db-table-pill inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 text-amber-800 rounded-full text-xs font-medium group"
                     title={`${table.tableFqName} (${table.sourceName})`}
@@ -851,22 +847,22 @@ const AttachedTablePills = ({
 };
 
 // Attached Tool Pills Component (supports both always-on/locked and removable pills)
-const AttachedToolPills = ({ 
-    tools, 
+const AttachedToolPills = ({
+    tools,
     alwaysOnTools = [],
-    onRemove 
-}: { 
-    tools: any[], 
+    onRemove
+}: {
+    tools: any[],
     alwaysOnTools?: any[],
-    onRemove: (key: string) => void 
+    onRemove: (key: string) => void
 }) => {
     if (tools.length === 0 && alwaysOnTools.length === 0) return null;
-    
+
     return (
         <div className="tool-pill-bar flex flex-wrap gap-2 px-2 py-2 max-w-[900px] mx-auto">
             {/* Always-on tools - locked appearance, no remove button */}
             {alwaysOnTools.map((tool) => (
-                <div 
+                <div
                     key={`always-on-${tool.key}`}
                     className="tool-pill-locked inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-50 border border-purple-200 text-purple-700 rounded-full text-xs font-medium"
                     title={`${tool.name} on ${tool.server} (always-on)`}
@@ -877,7 +873,7 @@ const AttachedToolPills = ({
             ))}
             {/* Removable tools */}
             {tools.map((tool) => (
-                <div 
+                <div
                     key={tool.key}
                     className="tool-pill inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-100 text-purple-800 rounded-full text-xs font-medium group"
                     title={`${tool.name} on ${tool.server}`}
@@ -898,19 +894,19 @@ const AttachedToolPills = ({
 };
 
 // Attachment Menu Component
-const AttachmentMenu = ({ 
-    isOpen, 
-    onClose, 
-    onSelectFiles, 
+const AttachmentMenu = ({
+    isOpen,
+    onClose,
+    onSelectFiles,
     onSelectFolder,
     onSelectDatabase,
     onSelectTool,
     filesDisabled,
     dbDisabled
-}: { 
-    isOpen: boolean, 
-    onClose: () => void, 
-    onSelectFiles: () => void, 
+}: {
+    isOpen: boolean,
+    onClose: () => void,
+    onSelectFiles: () => void,
     onSelectFolder: () => void,
     onSelectDatabase: () => void,
     onSelectTool: () => void,
@@ -918,7 +914,7 @@ const AttachmentMenu = ({
     dbDisabled: boolean
 }) => {
     const menuRef = useRef<HTMLDivElement>(null);
-    
+
     useEffect(() => {
         const handleClickOutside = (e: MouseEvent) => {
             if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
@@ -930,20 +926,19 @@ const AttachmentMenu = ({
         }
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, [isOpen, onClose]);
-    
+
     if (!isOpen) return null;
-    
+
     return (
-        <div 
+        <div
             ref={menuRef}
             className="absolute bottom-full left-0 mb-2 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[180px] z-50"
         >
             <button
                 onClick={() => { onSelectFiles(); onClose(); }}
                 disabled={filesDisabled}
-                className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${
-                    filesDisabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 hover:bg-gray-100'
-                }`}
+                className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${filesDisabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 hover:bg-gray-100'
+                    }`}
             >
                 <span>📄</span>
                 <span>Attach Files</span>
@@ -951,9 +946,8 @@ const AttachmentMenu = ({
             <button
                 onClick={() => { onSelectFolder(); onClose(); }}
                 disabled={filesDisabled}
-                className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${
-                    filesDisabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 hover:bg-gray-100'
-                }`}
+                className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${filesDisabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 hover:bg-gray-100'
+                    }`}
             >
                 <span>📁</span>
                 <span>Attach Folder</span>
@@ -962,9 +956,8 @@ const AttachmentMenu = ({
             <button
                 onClick={() => { onSelectDatabase(); onClose(); }}
                 disabled={dbDisabled}
-                className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${
-                    dbDisabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 hover:bg-gray-100'
-                }`}
+                className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${dbDisabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 hover:bg-gray-100'
+                    }`}
             >
                 <span>🗄️</span>
                 <span>Attach Database</span>
@@ -1022,7 +1015,7 @@ const InputBar = ({
     const isMultiline = input.includes('\n') || (textareaRef.current && textareaRef.current.scrollHeight > 44);
     const hasAttachments = attachedCount > 0;
     const isDisabled = disabled || isLoading;
-    
+
     return (
         <div className={`chat-input-shell w-full flex justify-center ${className}`}>
             <div className={`chat-input-surface flex items-center gap-3 w-full max-w-[900px] bg-[#f5f5f5] border border-transparent px-4 py-2.5 shadow-[0px_2px_8px_rgba(15,23,42,0.08)] focus-within:border-gray-300 transition-all ${isMultiline ? 'rounded-2xl' : 'rounded-full'}`}>
@@ -1030,11 +1023,10 @@ const InputBar = ({
                     <button
                         type="button"
                         onClick={() => setMenuOpen(!menuOpen)}
-                        className={`chat-attach-button flex h-9 w-9 items-center justify-center rounded-full text-xl shadow-sm transition shrink-0 relative ${
-                            hasAttachments 
-                                ? 'bg-blue-500 text-white hover:bg-blue-600' 
+                        className={`chat-attach-button flex h-9 w-9 items-center justify-center rounded-full text-xl shadow-sm transition shrink-0 relative ${hasAttachments
+                                ? 'bg-blue-500 text-white hover:bg-blue-600'
                                 : 'bg-white text-gray-600 hover:bg-gray-100'
-                        }`}
+                            }`}
                         aria-label="Attach files"
                     >
                         +
@@ -1184,20 +1176,20 @@ const convertLatexDelimiters = (content: string): string => {
     if (looksLikeJson) {
         return content;
     }
-    
+
     let result = content;
-    
+
     // Convert \[...\] to $$...$$ (display math)
     // Use a non-greedy match to handle multiple blocks
     result = result.replace(/\\\[([\s\S]*?)\\\]/g, (_match, inner) => {
         return `$$${inner}$$`;
     });
-    
+
     // Convert \(...\) to $...$ (inline math)
     result = result.replace(/\\\(([\s\S]*?)\\\)/g, (_match, inner) => {
         return `$${inner}$`;
     });
-    
+
     // Handle bare brackets [ ... ] that contain LaTeX (has backslash commands)
     // Be careful not to match markdown links or array-like content
     // Only match if the content has LaTeX patterns like \frac, \text, \times, etc.
@@ -1231,7 +1223,7 @@ const convertLatexDelimiters = (content: string): string => {
             bracketIdx = closeIdx + 1;
         }
     }
-    
+
     // Handle bare parentheses ( ... ) that contain LaTeX
     // Be more conservative here since parentheses are common
     // FIXED: Use simple iteration instead of backtracking regex
@@ -1249,7 +1241,7 @@ const convertLatexDelimiters = (content: string): string => {
         // Exclude things that look like file paths or are too long
         const looksLikePath = /^\/[a-zA-Z]/.test(inner.trim());
         const isTooLong = inner.length > 500;
-        
+
         if ((hasLatexCommand || hasMathNotation || hasScientificNotation) && !looksLikePath && !isTooLong) {
             const replacement = `$${inner.trim()}$`;
             result = result.substring(0, parenIdx) + replacement + result.substring(closeIdx + 1);
@@ -1258,11 +1250,11 @@ const convertLatexDelimiters = (content: string): string => {
             parenIdx = closeIdx + 1;
         }
     }
-    
+
     // NEW: Wrap undelimited LaTeX expressions in inline math delimiters
     // This catches cases where LaTeX commands appear in plain text without any delimiters
     result = wrapUndelimitedLatex(result);
-    
+
     return result;
 };
 
@@ -1273,60 +1265,60 @@ const wrapUndelimitedLatex = (content: string): string => {
     if (!content.includes('\\')) {
         return content;
     }
-    
+
     // Early exit: skip if content looks like JSON/code (prevents backtracking)
     const looksLikeJson = /^\s*[\[{]/.test(content) && /"[^"]*"\s*:/.test(content);
     if (looksLikeJson) {
         return content;
     }
-    
+
     // Track positions that are already in math mode or code
     const mathRanges: [number, number][] = [];
     const codeRanges: [number, number][] = [];
-    
+
     // Find existing math delimiters ($$...$$ and $...$)
     let match;
     const displayMathRegex = /\$\$[\s\S]*?\$\$/g;
     while ((match = displayMathRegex.exec(content)) !== null) {
         mathRanges.push([match.index, match.index + match[0].length]);
     }
-    
+
     const inlineMathRegex = /\$(?!\$)[^\$\n]+\$(?!\$)/g;
     while ((match = inlineMathRegex.exec(content)) !== null) {
         mathRanges.push([match.index, match.index + match[0].length]);
     }
-    
+
     // Find code blocks and inline code
     const codeBlockRegex = /```[\s\S]*?```/g;
     while ((match = codeBlockRegex.exec(content)) !== null) {
         codeRanges.push([match.index, match.index + match[0].length]);
     }
-    
+
     const inlineCodeRegex = /`[^`\n]+`/g;
     while ((match = inlineCodeRegex.exec(content)) !== null) {
         codeRanges.push([match.index, match.index + match[0].length]);
     }
-    
+
     // Check if a position is inside math or code
     const isProtected = (pos: number): boolean => {
         return mathRanges.some(([start, end]) => pos >= start && pos < end) ||
-               codeRanges.some(([start, end]) => pos >= start && pos < end);
+            codeRanges.some(([start, end]) => pos >= start && pos < end);
     };
-    
+
     // Find and wrap undelimited LaTeX expressions
     // Pattern matches: LaTeX command followed by more math content
     // e.g., \frac{4}{3} \pi r^3 or V = \frac{a}{b}
     const latexExpressionRegex = /(?:^|[^\\$])((\\(?:frac|sqrt|sum|prod|int|lim)\s*\{[^}]*\}\s*(?:\{[^}]*\})?|\\(?:text|textbf|textit|mathrm|mathbf)\s*\{[^}]*\})(?:\s*[+\-*/=^_]?\s*(?:\\[a-zA-Z]+(?:\s*\{[^}]*\})*|[a-zA-Z0-9.]+|\{[^}]*\}|[+\-*/=^_]))*)/g;
-    
+
     const replacements: { start: number; end: number; text: string }[] = [];
-    
+
     while ((match = latexExpressionRegex.exec(content)) !== null) {
         const fullMatch = match[1];
         const startPos = match.index + match[0].indexOf(fullMatch);
-        
+
         // Skip if this position is already in math or code
         if (isProtected(startPos)) continue;
-        
+
         // Only wrap if it contains actual LaTeX commands
         if (LATEX_COMMAND_PATTERN.test(fullMatch)) {
             replacements.push({
@@ -1335,27 +1327,27 @@ const wrapUndelimitedLatex = (content: string): string => {
                 text: `$${fullMatch.trim()}$`
             });
         }
-        
+
         // Reset the regex lastIndex to avoid infinite loops
         LATEX_COMMAND_PATTERN.lastIndex = 0;
     }
-    
+
     // Also catch simpler patterns: standalone LaTeX commands with arguments
     // e.g., \times 10^{27} or \approx 1.41
     const simpleLatexRegex = /(?:^|[\s(=])((\\(?:times|approx|equiv|leq|geq|neq|pm|mp|cdot|div|infty|pi|alpha|beta|gamma|delta|theta|lambda|mu|sigma|omega|phi|psi|partial|nabla|sum|prod|int)\b)(?:\s*[0-9.]+)?(?:\s*\\times\s*[0-9.]+)?(?:\s*\^[\s{]*[-0-9]+\}?)?(?:\s*\\text\{[^}]*\})?)/g;
-    
+
     while ((match = simpleLatexRegex.exec(content)) !== null) {
         const fullMatch = match[1];
         const startPos = match.index + match[0].indexOf(fullMatch);
-        
+
         if (isProtected(startPos)) continue;
-        
+
         // Check it's not already inside our planned replacements
-        const overlaps = replacements.some(r => 
+        const overlaps = replacements.some(r =>
             (startPos >= r.start && startPos < r.end) ||
             (startPos + fullMatch.length > r.start && startPos + fullMatch.length <= r.end)
         );
-        
+
         if (!overlaps) {
             replacements.push({
                 start: startPos,
@@ -1364,16 +1356,16 @@ const wrapUndelimitedLatex = (content: string): string => {
             });
         }
     }
-    
+
     // Sort replacements by position (descending) to apply from end to start
     replacements.sort((a, b) => b.start - a.start);
-    
+
     // Apply replacements
     let result = content;
     for (const { start, end, text } of replacements) {
         result = result.slice(0, start) + text + result.slice(end);
     }
-    
+
     return result;
 };
 
@@ -1381,10 +1373,10 @@ const wrapUndelimitedLatex = (content: string): string => {
 const preprocessLaTeX = (content: string) => {
     // First strip OpenAI tokens
     let processed = stripOpenAITokens(content);
-    
+
     // Then convert LaTeX delimiters
     processed = convertLatexDelimiters(processed);
-    
+
     // Now handle \boxed{} and other special cases
     let result = '';
     let i = 0;
@@ -1482,15 +1474,15 @@ const preprocessLaTeX = (content: string) => {
             if (braceCount === 0) {
                 // Found complete block - extract the inner content
                 const innerContent = processed.substring(i + 7, ptr - 1);
-                
+
                 // Check if content contains LaTeX commands like \text{}, \mathbf{}, etc.
                 const hasLatexCommands = /\\[a-zA-Z]+\{/.test(innerContent);
-                
+
                 // Check if content looks like plain prose text (has spaces, no math operators, no LaTeX commands)
-                const looksLikePlainText = !hasLatexCommands && 
-                    innerContent.includes(' ') && 
+                const looksLikePlainText = !hasLatexCommands &&
+                    innerContent.includes(' ') &&
                     !/[+\-*/=^_{}\\]/.test(innerContent);
-                
+
                 if (looksLikePlainText) {
                     // For plain text content (no LaTeX commands), use HTML box
                     result += '<div style="border: 2px solid #2e2e2e; padding: 0.5em 0.75em; border-radius: 6px; margin: 0.5em 0; display: inline-block; max-width: 100%; word-wrap: break-word;">' + innerContent + '</div>';
@@ -1560,10 +1552,10 @@ const AssistantMessage = memo(function AssistantMessage({
         ? toolCallPartIndices.length > 0
             ? toolCallPartIndices[toolCallPartIndices.length - 1]
             : lastThinkIndex !== -1
-            ? lastThinkIndex
-            : parsedParts.length > 0
-            ? 0
-            : -1
+                ? lastThinkIndex
+                : parsedParts.length > 0
+                    ? 0
+                    : -1
         : -1;
     const latestCodeExecutionStdout = useMemo(
         () =>
@@ -1593,11 +1585,11 @@ const AssistantMessage = memo(function AssistantMessage({
                 // Only show successful tool results as fallback answers
                 // Errors stay in the tool accordion for the model to retry
                 // Exclude sql_select - SQL results are already rendered as a table in renderedParts
-                .find((call) => 
-                    call.tool !== 'python_execution' && 
-                    call.tool !== 'sql_select' && 
-                    !call.isError && 
-                    call.result && 
+                .find((call) =>
+                    call.tool !== 'python_execution' &&
+                    call.tool !== 'sql_select' &&
+                    !call.isError &&
+                    call.result &&
                     call.result.trim().length > 0
                 )
                 ?.result.trim(),
@@ -1830,7 +1822,7 @@ export function ChatArea() {
         attachedPaths, ragIndexedFiles, isIndexingRag,
         addAttachment, searchRagContext, clearRagContext, removeRagFile,
         // Attachment state
-        attachedDatabaseTables, attachedTools, 
+        attachedDatabaseTables, attachedTools,
         removeAttachedTable, removeAttachedTool,
         clearAttachedTables, clearAttachedTools,
         // Always-on state (synced from settings)
@@ -1840,9 +1832,9 @@ export function ChatArea() {
         // Streaming state
         streamingChatId
     } = useChatStore();
-    
+
     const { settings, openSettings, setActiveTab } = useSettingsStore();
-    
+
     // Check if streaming is active in a different chat (input should be blocked)
     const isStreamingInOtherChat = streamingChatId !== null && streamingChatId !== currentChatId;
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1886,9 +1878,9 @@ export function ChatArea() {
     useEffect(() => {
         const lastMessage = chatMessages[chatMessages.length - 1];
         const isThinkingOnly = lastMessage?.role === 'assistant' &&
-                               hasOnlyThinkContent(lastMessage.content) &&
-                               assistantStreamingActive;
-        
+            hasOnlyThinkContent(lastMessage.content) &&
+            assistantStreamingActive;
+
         if (isThinkingOnly && !thinkingStartTime) {
             setThinkingStartTime(Date.now());
         } else if (!assistantStreamingActive || (lastMessage?.role === 'assistant' && !hasOnlyThinkContent(lastMessage.content))) {
@@ -1900,9 +1892,9 @@ export function ChatArea() {
     useEffect(() => {
         const lastMessage = chatMessages[chatMessages.length - 1];
         const isToolProcessingOnly = lastMessage?.role === 'assistant' &&
-                                      hasOnlyToolCallContent(lastMessage.content) &&
-                                      assistantStreamingActive;
-        
+            hasOnlyToolCallContent(lastMessage.content) &&
+            assistantStreamingActive;
+
         if (isToolProcessingOnly && !toolProcessingStartTime) {
             setToolProcessingStartTime(Date.now());
         } else if (!assistantStreamingActive || (lastMessage?.role === 'assistant' && !hasOnlyToolCallContent(lastMessage.content))) {
@@ -2058,10 +2050,10 @@ export function ChatArea() {
         if (textareaRef.current) textareaRef.current.style.height = 'auto';
         setAssistantStreamingActive(true);
         storeState.setLastStreamActivityTs(Date.now());
-        
+
         // Track which chat we're streaming to (for cross-chat switching)
         storeState.setStreamingChatId(chatId);
-        
+
         // Show streaming status in status bar
         storeState.setOperationStatus({
             type: 'streaming',
@@ -2082,19 +2074,19 @@ export function ChatArea() {
             // Check if we have RAG context to search (files are indexed immediately on attach)
             let messageToSend = text;
             const hasRagContext = storeState.ragIndexedFiles.length > 0;
-            
+
             if (hasRagContext) {
                 console.log('[ChatArea] Searching RAG context with', storeState.ragIndexedFiles.length, 'indexed files');
-                
+
                 // Show RAG indicator
                 setIsRagProcessing(true);
                 setRagStartTime(Date.now());
                 setRagStage('searching');
-                
+
                 const allChunks = await searchRagContext(trimmedText, 10);
                 // Entirely ignore rag results with a relevance score below 30%
                 const relevantChunks = allChunks.filter(chunk => chunk.score >= 0.3);
-                
+
                 if (relevantChunks.length > 0) {
                     // Store chunks on the assistant message for display
                     useChatStore.setState((state) => {
@@ -2105,18 +2097,18 @@ export function ChatArea() {
                         }
                         return { chatMessages: newMessages };
                     });
-                    
+
                     // Build context string for the model
-                    const contextParts = relevantChunks.map((chunk, idx) => 
+                    const contextParts = relevantChunks.map((chunk, idx) =>
                         `[${idx + 1}] From "${chunk.source_file}" (relevance: ${(chunk.score * 100).toFixed(1)}%):\n${chunk.content}`
                     );
                     const contextString = contextParts.join('\n\n');
-                    
+
                     // Prepend context to the message
                     messageToSend = `Context from attached documents:\n\n${contextString}\n\n---\n\nUser question: ${text}`;
                     console.log('[ChatArea] Added', relevantChunks.length, 'chunks as context');
                 }
-                
+
                 // Hide RAG indicator
                 setIsRagProcessing(false);
                 setRagStartTime(null);
@@ -2125,7 +2117,7 @@ export function ChatArea() {
             // Fetch the exact system prompt that will be sent for this turn
             let systemPromptPreview: string | null = null;
             try {
-                systemPromptPreview = await invoke<string>('get_system_prompt_preview', { 
+                systemPromptPreview = await invoke<string>('get_system_prompt_preview', {
                     userPrompt: messageToSend,
                     attachedFiles: storeState.ragIndexedFiles,
                     attachedTables: storeState.attachedDatabaseTables.map(t => ({
@@ -2215,15 +2207,15 @@ export function ChatArea() {
     };
 
     return (
-    <div id="chat-area" className="chat-area h-full w-full flex flex-col text-gray-800 font-sans relative overflow-hidden">
-        {/* Status Bar for model operations */}
-        <StatusBar />
-        
-        {/* Warning when streaming in another chat */}
-        <StreamingWarningBar />
-        
-        {/* Scrollable Messages Area - takes all remaining space */}
-        <div ref={scrollContainerRef} onScroll={handleScroll} className="chat-scroll-region flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-4 sm:px-6 pt-6 pb-6">
+        <div id="chat-area" className="chat-area h-full w-full flex flex-col text-gray-800 font-sans relative overflow-hidden">
+            {/* Status Bar for model operations */}
+            <StatusBar />
+
+            {/* Warning when streaming in another chat */}
+            <StreamingWarningBar />
+
+            {/* Scrollable Messages Area - takes all remaining space */}
+            <div ref={scrollContainerRef} onScroll={handleScroll} className="chat-scroll-region flex-1 min-h-0 w-full overflow-y-auto flex flex-col px-4 sm:px-6 pt-6 pb-6">
                 {chatMessages.length === 0 ? (
                     <div className="chat-empty-state flex-1 flex flex-col items-center justify-center px-6">
                         <div className="chat-empty-copy mb-8 text-center">
@@ -2297,9 +2289,9 @@ export function ChatArea() {
             {toolExecution.currentTool && (
                 <div className="flex-shrink-0 px-4 sm:px-6">
                     <div className="max-w-[900px] mx-auto">
-                        <ToolExecutionIndicator 
-                            server={toolExecution.currentTool.server} 
-                            tool={toolExecution.currentTool.tool} 
+                        <ToolExecutionIndicator
+                            server={toolExecution.currentTool.server}
+                            tool={toolExecution.currentTool.tool}
                         />
                     </div>
                 </div>
@@ -2324,27 +2316,27 @@ export function ChatArea() {
                 onClose={() => setDbModalOpen(false)}
                 chatPrompt={chatInputValue}
             />
-            <ToolAttachmentModal 
-                isOpen={toolModalOpen} 
-                onClose={() => setToolModalOpen(false)} 
+            <ToolAttachmentModal
+                isOpen={toolModalOpen}
+                onClose={() => setToolModalOpen(false)}
             />
 
             {/* Fixed Input Area at Bottom */}
             <div className="chat-input-section flex-shrink-0 mt-1 pb-4">
                 {/* Attachment Pills */}
                 <div className="chat-input-pill-row px-2 sm:px-6">
-                    <RagFilePills 
-                        files={ragIndexedFiles} 
+                    <RagFilePills
+                        files={ragIndexedFiles}
                         alwaysOnPaths={alwaysOnRagPaths}
                         onRemove={removeRagFile}
                         isIndexing={isIndexingRag}
                     />
-                    <AttachedTablePills 
+                    <AttachedTablePills
                         tables={attachedDatabaseTables}
                         alwaysOnTables={alwaysOnTables}
                         onRemove={removeAttachedTable}
                     />
-                    <AttachedToolPills 
+                    <AttachedToolPills
                         tools={attachedTools}
                         alwaysOnTools={alwaysOnTools}
                         onRemove={removeAttachedTool}
@@ -2378,12 +2370,12 @@ export function ChatArea() {
 
 // ========== Attachment Modals ==========
 
-const DatabaseAttachmentModal = ({ 
-    isOpen, 
-    onClose, 
-    chatPrompt = "" 
-}: { 
-    isOpen: boolean; 
+const DatabaseAttachmentModal = ({
+    isOpen,
+    onClose,
+    chatPrompt = ""
+}: {
+    isOpen: boolean;
     onClose: () => void;
     chatPrompt?: string;
 }) => {
@@ -2395,16 +2387,16 @@ const DatabaseAttachmentModal = ({
     // Fetch tables when modal opens, ordered by relevance to chat prompt (if any)
     useEffect(() => {
         if (!isOpen) return;
-        
+
         const fetchTables = async () => {
             setLoading(true);
             setError(null);
             try {
                 // If there's a chat prompt, use semantic search to order by relevance
                 // Otherwise, get all tables (backend returns all when query is empty)
-                const searchResults = await invoke<any[]>('search_database_tables', { 
-                    query: chatPrompt.trim(), 
-                    limit: 50 
+                const searchResults = await invoke<any[]>('search_database_tables', {
+                    query: chatPrompt.trim(),
+                    limit: 50
                 });
                 setResults(searchResults);
             } catch (err: any) {
@@ -2413,15 +2405,15 @@ const DatabaseAttachmentModal = ({
                 setLoading(false);
             }
         };
-        
+
         fetchTables();
     }, [isOpen, chatPrompt]);
 
     if (!isOpen) return null;
 
-    const isAttached = (fqName: string) => 
+    const isAttached = (fqName: string) =>
         attachedDatabaseTables.some(t => t.tableFqName === fqName);
-    
+
     const hasPrompt = chatPrompt.trim().length > 0;
 
     return (
@@ -2471,9 +2463,9 @@ const DatabaseAttachmentModal = ({
                                 const nameParts = table.table_fq_name.split('.');
                                 const tableName = nameParts.pop() || table.table_fq_name;
                                 const pathParts = nameParts; // remaining parts (project, dataset, etc.)
-                                
+
                                 return (
-                                    <div 
+                                    <div
                                         key={table.table_fq_name}
                                         onClick={() => {
                                             if (attached) {
@@ -2487,24 +2479,22 @@ const DatabaseAttachmentModal = ({
                                                 });
                                             }
                                         }}
-                                        className={`group cursor-pointer p-4 rounded-xl border transition-all flex items-start gap-4 ${
-                                            attached 
-                                                ? 'bg-amber-50 border-amber-200 ring-1 ring-amber-200' 
+                                        className={`group cursor-pointer p-4 rounded-xl border transition-all flex items-start gap-4 ${attached
+                                                ? 'bg-amber-50 border-amber-200 ring-1 ring-amber-200'
                                                 : 'bg-white border-gray-100 hover:border-amber-200 hover:bg-gray-50'
-                                        }`}
+                                            }`}
                                     >
-                                        <div className={`mt-0.5 w-5 h-5 rounded border flex-shrink-0 flex items-center justify-center transition-colors ${
-                                            attached 
-                                                ? 'bg-amber-500 border-amber-500 text-white' 
+                                        <div className={`mt-0.5 w-5 h-5 rounded border flex-shrink-0 flex items-center justify-center transition-colors ${attached
+                                                ? 'bg-amber-500 border-amber-500 text-white'
                                                 : 'bg-white border-gray-300 group-hover:border-amber-400'
-                                        }`}>
+                                            }`}>
                                             {attached && <Check size={14} />}
                                         </div>
                                         <div className="flex-1 min-w-0">
                                             {/* Path breadcrumb (project / dataset) */}
                                             {pathParts.length > 0 && (
                                                 <div className="flex flex-wrap items-center gap-1 mb-1.5 text-xs text-gray-500">
-                                                    {pathParts.map((part, idx) => (
+                                                    {pathParts.map((part: string, idx: number) => (
                                                         <span key={idx} className="flex items-center gap-1">
                                                             <span className="break-all">{part}</span>
                                                             {idx < pathParts.length - 1 && (
@@ -2562,11 +2552,11 @@ const DatabaseAttachmentModal = ({
     );
 };
 
-const ToolAttachmentModal = ({ 
-    isOpen, 
-    onClose 
-}: { 
-    isOpen: boolean; 
+const ToolAttachmentModal = ({
+    isOpen,
+    onClose
+}: {
+    isOpen: boolean;
     onClose: () => void;
 }) => {
     const { attachedTools, addAttachedTool, removeAttachedTool } = useChatStore();
@@ -2609,8 +2599,8 @@ const ToolAttachmentModal = ({
         }
     });
 
-    const filteredTools = availableTools.filter(t => 
-        t.name.toLowerCase().includes(query.toLowerCase()) || 
+    const filteredTools = availableTools.filter(t =>
+        t.name.toLowerCase().includes(query.toLowerCase()) ||
         t.server.toLowerCase().includes(query.toLowerCase())
     );
 
@@ -2651,7 +2641,7 @@ const ToolAttachmentModal = ({
                             filteredTools.map((tool) => {
                                 const attached = isAttached(tool.key);
                                 return (
-                                    <div 
+                                    <div
                                         key={tool.key}
                                         onClick={() => {
                                             if (attached) {
@@ -2660,17 +2650,15 @@ const ToolAttachmentModal = ({
                                                 addAttachedTool(tool);
                                             }
                                         }}
-                                        className={`group cursor-pointer p-4 rounded-xl border transition-all flex items-start gap-4 ${
-                                            attached 
-                                                ? 'bg-purple-50 border-purple-200 ring-1 ring-purple-200' 
+                                        className={`group cursor-pointer p-4 rounded-xl border transition-all flex items-start gap-4 ${attached
+                                                ? 'bg-purple-50 border-purple-200 ring-1 ring-purple-200'
                                                 : 'bg-white border-gray-100 hover:border-purple-200 hover:bg-gray-50'
-                                        }`}
+                                            }`}
                                     >
-                                        <div className={`mt-0.5 w-5 h-5 rounded border flex items-center justify-center transition-colors ${
-                                            attached 
-                                                ? 'bg-purple-500 border-purple-500 text-white' 
+                                        <div className={`mt-0.5 w-5 h-5 rounded border flex items-center justify-center transition-colors ${attached
+                                                ? 'bg-purple-500 border-purple-500 text-white'
                                                 : 'bg-white border-gray-300 group-hover:border-purple-400'
-                                        }`}>
+                                            }`}>
                                             {attached && <Check size={14} />}
                                         </div>
                                         <div className="flex-1 min-w-0">
@@ -2678,11 +2666,10 @@ const ToolAttachmentModal = ({
                                                 <span className="font-medium text-gray-900 truncate">
                                                     {tool.name}
                                                 </span>
-                                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                                                    tool.isBuiltin 
-                                                        ? 'bg-blue-100 text-blue-600' 
+                                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${tool.isBuiltin
+                                                        ? 'bg-blue-100 text-blue-600'
                                                         : 'bg-gray-100 text-gray-500'
-                                                }`}>
+                                                    }`}>
                                                     {tool.server}
                                                 </span>
                                             </div>
