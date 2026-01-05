@@ -3440,9 +3440,6 @@ export function SettingsModal() {
                             ? databasesSaving
                             : false;
 
-    const alwaysOn = settings?.always_on_builtin_tools || [];
-    const showDatabasesTab = alwaysOn.includes('schema_search') || alwaysOn.includes('sql_select') || settings?.database_toolbox?.enabled;
-
     return (
         <div id="settings-modal" className="settings-modal fixed inset-0 z-50 flex items-center justify-center">
             {/* Backdrop */}
@@ -3498,18 +3495,16 @@ export function SettingsModal() {
                         <Cpu size={16} />
                         Models
                     </button>
-                    {showDatabasesTab && (
-                        <button
-                            onClick={() => setActiveTab('databases')}
-                            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'databases'
-                                ? 'border-blue-500 text-blue-600'
-                                : 'border-transparent text-gray-500 hover:text-gray-700'
-                                }`}
-                        >
-                            <Server size={16} />
-                            Databases
-                        </button>
-                    )}
+                    <button
+                        onClick={() => setActiveTab('databases')}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'databases'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <Server size={16} />
+                        Databases
+                    </button>
                     <button
                         onClick={() => setActiveTab('builtins')}
                         className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'builtins'
