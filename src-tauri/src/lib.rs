@@ -90,6 +90,57 @@ use uuid::Uuid;
 // This keeps lib.rs lean while making commands available for the invoke_handler
 use commands::*;
 
+/// Fix the PATH environment variable for macOS GUI applications.
+///
+/// macOS GUI applications (launched from Finder, Spotlight, or Dock) don't inherit
+/// the user's shell PATH from dotfiles (.zshrc, .bashrc, etc.). This causes issues
+/// when trying to find executables like `foundry` that are installed via Homebrew
+/// or other package managers.
+///
+/// This function spawns the user's default shell in login mode to source their
+/// dotfiles, then extracts and applies the resulting PATH to the current process.
+#[cfg(target_os = "macos")]
+fn fix_macos_path_env() -> Result<(), String> {
+    use std::process::Command;
+    
+    // Get the user's default shell from the SHELL environment variable
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    
+    // Run the shell in login mode (-l) to source dotfiles, then echo PATH
+    // We use -i for interactive mode which sources .zshrc/.bashrc
+    // The printf ensures we get just the PATH without a trailing newline
+    let output = Command::new(&shell)
+        .args(["-l", "-i", "-c", "printf '%s' \"$PATH\""])
+        .output()
+        .map_err(|e| format!("Failed to spawn shell '{}': {}", shell, e))?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Shell exited with error: {}", stderr));
+    }
+    
+    let new_path = String::from_utf8_lossy(&output.stdout).to_string();
+    
+    if new_path.is_empty() {
+        return Err("Shell returned empty PATH".to_string());
+    }
+    
+    // Get the current PATH to compare
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    
+    // Only update if the new PATH is different and longer (more entries)
+    if new_path != current_path && new_path.len() > current_path.len() {
+        println!("[Launch] Fixing macOS PATH for GUI application");
+        println!("[Launch] Old PATH entries: {}", current_path.matches(':').count() + 1);
+        println!("[Launch] New PATH entries: {}", new_path.matches(':').count() + 1);
+        std::env::set_var("PATH", &new_path);
+    } else {
+        println!("[Launch] PATH already contains shell entries, no fix needed");
+    }
+    
+    Ok(())
+}
+
 /// Global toggle for verbose logging, enabled when LOG_VERBOSE (or PLUGABLE_LOG_VERBOSE)
 /// is set to a truthy value such as 1/true/yes/on/debug.
 pub fn is_verbose_logging_enabled() -> bool {
@@ -3979,6 +4030,16 @@ async fn get_system_prompt_preview(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Fix PATH for macOS GUI applications (required for finding 'foundry' CLI in production builds).
+    // macOS GUI apps don't inherit shell PATH from dotfiles (.zshrc, .bashrc, etc.).
+    // This spawns the user's login shell to extract the correct PATH and sets it.
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(e) = fix_macos_path_env() {
+            eprintln!("[Launch] Warning: Failed to fix PATH environment: {}", e);
+        }
+    }
+
     let cli_args = CliArgs::try_parse().unwrap_or_else(|e| {
         println!("[Launch] CLI parse warning: {}", e);
         // Fall back to defaults (no overrides) if parsing fails

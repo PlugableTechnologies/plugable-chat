@@ -30,6 +30,79 @@ const EMBEDDING_DIM: usize = 768;
 /// This matches the phi-4-mini-instruct model that is auto-downloaded on first launch.
 const DEFAULT_FALLBACK_MODEL: &str = "phi-4-mini-instruct";
 
+/// Find the foundry CLI executable, checking PATH first then common installation locations.
+/// This provides a fallback for production builds where PATH may not include the foundry binary.
+fn find_foundry_binary() -> String {
+    // First try PATH using which/where (will work after fix_macos_path_env() on macOS, or natively on Windows)
+    #[cfg(windows)]
+    let which_result = std::process::Command::new("where.exe")
+        .arg("foundry")
+        .output();
+
+    #[cfg(not(windows))]
+    let which_result = std::process::Command::new("which")
+        .arg("foundry")
+        .output();
+
+    if let Ok(output) = which_result {
+        if output.status.success() {
+            if let Some(path) = String::from_utf8_lossy(&output.stdout).lines().next() {
+                let path = path.trim();
+                if !path.is_empty() && std::path::Path::new(path).exists() {
+                    return path.to_string();
+                }
+            }
+        }
+    }
+
+    // Fallback to common installation locations
+    let common_paths: &[&str] = &[
+        #[cfg(target_os = "macos")]
+        "/opt/homebrew/bin/foundry",
+        #[cfg(target_os = "macos")]
+        "/usr/local/bin/foundry",
+        #[cfg(target_os = "windows")]
+        "C:\\Program Files\\Microsoft\\Foundry\\foundry.exe",
+        #[cfg(target_os = "windows")]
+        "C:\\Program Files (x86)\\Microsoft\\Foundry\\foundry.exe",
+        #[cfg(target_os = "linux")]
+        "/usr/local/bin/foundry",
+        #[cfg(target_os = "linux")]
+        "/usr/bin/foundry",
+    ];
+
+    for path in common_paths {
+        if std::path::Path::new(path).exists() {
+            println!("FoundryActor: Found foundry at fallback location: {}", path);
+            return path.to_string();
+        }
+    }
+
+    // Also check home directory for user-local installations (common for installers)
+    if let Some(home) = dirs::home_dir() {
+        let home_paths: &[std::path::PathBuf] = &[
+            #[cfg(target_os = "macos")]
+            home.join(".foundry").join("bin").join("foundry"),
+            #[cfg(target_os = "windows")]
+            home.join("AppData").join("Local").join("Microsoft").join("Foundry").join("foundry.exe"),
+            #[cfg(target_os = "linux")]
+            home.join(".foundry").join("bin").join("foundry"),
+        ];
+
+        for path in home_paths {
+            if path.exists() {
+                let path_str = path.to_string_lossy().to_string();
+                println!("FoundryActor: Found foundry in home directory: {}", path_str);
+                return path_str;
+            }
+        }
+    }
+
+    // Last resort: return "foundry" and hope it's in PATH
+    println!("FoundryActor: foundry not found in common locations, trying PATH directly");
+    "foundry".to_string()
+}
+
 /// Accumulator for OpenAI-style streaming tool calls.
 ///
 /// In the OpenAI streaming format, tool calls arrive incrementally:
@@ -641,37 +714,57 @@ impl ModelGatewayActor {
         }));
 
         // Build GPU execution providers
+        // Use catch_unwind to handle panics from ORT initialization (e.g., missing DLLs on Windows)
         let gpu_result = tokio::task::spawn_blocking(move || {
-            let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
-            options.show_download_progress = true;
-            
-            let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
-            
-            // On macOS, use CoreML (Metal GPU acceleration)
-            #[cfg(target_os = "macos")]
-            {
-                eps.push(CoreMLExecutionProvider::default().into());
-                println!("FoundryActor: GPU embedding model using CoreML (Metal)");
-            }
-            
-            // On Windows/Linux, try CUDA and DirectML
-            #[cfg(not(target_os = "macos"))]
-            {
-                // Try CUDA first, then DirectML
-                eps.push(CUDAExecutionProvider::default().into());
-                eps.push(DirectMLExecutionProvider::default().into());
-                println!("FoundryActor: GPU embedding model trying CUDA/DirectML");
-            }
-            
-            if !eps.is_empty() {
-                options.execution_providers = eps;
-            }
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
+                options.show_download_progress = true;
+                
+                let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
+                
+                // On macOS, use CoreML (Metal GPU acceleration)
+                #[cfg(target_os = "macos")]
+                {
+                    eps.push(CoreMLExecutionProvider::default().into());
+                    println!("FoundryActor: GPU embedding model using CoreML (Metal)");
+                }
+                
+                // On Windows/Linux, try CUDA and DirectML
+                #[cfg(not(target_os = "macos"))]
+                {
+                    // Try CUDA first, then DirectML
+                    eps.push(CUDAExecutionProvider::default().into());
+                    eps.push(DirectMLExecutionProvider::default().into());
+                    println!("FoundryActor: GPU embedding model trying CUDA/DirectML");
+                }
+                
+                if !eps.is_empty() {
+                    options.execution_providers = eps;
+                }
 
-            TextEmbedding::try_new(options)
+                TextEmbedding::try_new(options)
+            }))
         })
         .await
-        .map_err(|e| format!("GPU embedding model init task panicked: {}", e))?
-        .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
+        .map_err(|e| format!("GPU embedding model init task panicked: {}", e))?;
+
+        // Handle panic from catch_unwind
+        let gpu_result = match gpu_result {
+            Ok(inner_result) => inner_result,
+            Err(panic_payload) => {
+                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                return Err(format!("ONNX Runtime panic (missing DLL?): {}", panic_msg));
+            }
+        };
+        
+        let gpu_result = gpu_result
+            .map_err(|e| format!("Failed to load GPU embedding model: {}", e))?;
 
         let elapsed = start.elapsed();
         println!(
@@ -737,18 +830,22 @@ impl ModelGatewayActor {
             }));
 
             // Initialize CPU model (no GPU execution providers - pure CPU)
+            // Use catch_unwind to handle panics from ORT initialization (e.g., missing DLLs on Windows)
             let cpu_result = tokio::task::spawn_blocking(move || {
-                let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
-                options.show_download_progress = true;
-                // Don't set any execution providers - defaults to CPU
-                println!("FoundryActor: CPU model - using CPU only (no GPU EPs configured)");
-                TextEmbedding::try_new(options)
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
+                    options.show_download_progress = true;
+                    // Don't set any execution providers - defaults to CPU
+                    println!("FoundryActor: CPU model - using CPU only (no GPU EPs configured)");
+                    TextEmbedding::try_new(options)
+                }))
             })
             .await;
 
             // Store CPU model result
+            // Handle triple-nested Result from: spawn_blocking -> catch_unwind -> try_new
             match cpu_result {
-                Ok(Ok(model)) => {
+                Ok(Ok(Ok(model))) => {
                     println!("FoundryActor: CPU embedding model loaded successfully");
                     let mut guard = shared_cpu_model.write().await;
                     *guard = Some(Arc::new(model));
@@ -757,7 +854,7 @@ impl ModelGatewayActor {
                         "is_complete": true
                     }));
                 }
-                Ok(Err(e)) => {
+                Ok(Ok(Err(e))) => {
                     println!("FoundryActor ERROR: ❌ Failed to load CPU embedding model: {:?}", e);
                     println!("FoundryActor: CPU embedding model load error details - check if the model file exists and is accessible");
                     let _ = app_handle_clone.emit("embedding-init-progress", json!({
@@ -766,11 +863,29 @@ impl ModelGatewayActor {
                         "error": true
                     }));
                 }
+                Ok(Err(panic_payload)) => {
+                    // ORT initialization panic - likely missing onnxruntime.dll on Windows
+                    let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Unknown panic".to_string()
+                    };
+                    println!("FoundryActor ERROR: ❌ ONNX Runtime initialization panicked: {}", panic_msg);
+                    println!("FoundryActor: This usually means onnxruntime.dll is missing on Windows.");
+                    println!("FoundryActor: Embedding/search features will be unavailable.");
+                    let _ = app_handle_clone.emit("embedding-init-progress", json!({
+                        "message": format!("ONNX Runtime unavailable: {}. Embedding features disabled.", panic_msg),
+                        "is_complete": true,
+                        "error": true
+                    }));
+                }
                 Err(e) => {
-                    println!("FoundryActor ERROR: ❌ CPU embedding model init task panicked: {:?}", e);
+                    println!("FoundryActor ERROR: ❌ CPU embedding model init task failed: {:?}", e);
                     println!("FoundryActor: This may indicate an out-of-memory condition or incompatible hardware");
                     let _ = app_handle_clone.emit("embedding-init-progress", json!({
-                        "message": "CPU embedding model initialization task panicked",
+                        "message": "CPU embedding model initialization task failed",
                         "is_complete": true,
                         "error": true
                     }));
@@ -2205,7 +2320,8 @@ impl ModelGatewayActor {
         println!("FoundryActor: Checking/Starting Foundry service...");
         // Try to start service via CLI: `foundry service start`
         // We use a timeout to prevent hanging indefinitely
-        let child = Command::new("foundry").args(&["service", "start"]).output();
+        let foundry_bin = find_foundry_binary();
+        let child = Command::new(&foundry_bin).args(&["service", "start"]).output();
 
         let output = match timeout(Duration::from_secs(10), child).await {
             Ok(res) => res?,
@@ -2233,8 +2349,9 @@ impl ModelGatewayActor {
         timeout_secs: u64,
         op_desc: &str,
     ) -> std::io::Result<std::process::Output> {
-        println!("FoundryActor: Running `foundry {}` ...", args.join(" "));
-        let child = Command::new("foundry").args(args).output();
+        let foundry_bin = find_foundry_binary();
+        println!("FoundryActor: Running `{} {}` ...", foundry_bin, args.join(" "));
+        let child = Command::new(&foundry_bin).args(args).output();
         match timeout(Duration::from_secs(timeout_secs), child).await {
             Ok(Ok(output)) => Ok(output),
             Ok(Err(e)) => {
@@ -2432,9 +2549,10 @@ impl ModelGatewayActor {
     /// Valid EPs: CPUExecutionProvider, WebGpuExecutionProvider, NvTensorRTRTXExecutionProvider, OpenVINOExecutionProvider, CUDAExecutionProvider
     /// ```
     async fn detect_port_and_eps(&self) -> ServiceStatus {
-        println!("FoundryActor: Detecting port and EPs via 'foundry service status'...");
+        let foundry_bin = find_foundry_binary();
+        println!("FoundryActor: Detecting port and EPs via '{} service status'...", foundry_bin);
 
-        let child = Command::new("foundry")
+        let child = Command::new(&foundry_bin)
             .args(&["service", "status"])
             .output();
 
@@ -3115,16 +3233,17 @@ impl ModelGatewayActor {
     /// Remove a model from the disk cache using CLI
     /// foundry cache remove --yes <model>
     async fn remove_cached_model_impl(&self, model_name: &str) -> Result<(), String> {
+        let foundry_bin = find_foundry_binary();
         println!(
-            "FoundryActor: Removing model from cache via CLI: {}",
-            model_name
+            "FoundryActor: Removing model from cache via CLI: {} (using {})",
+            model_name, foundry_bin
         );
 
-        let output = Command::new("foundry")
+        let output = Command::new(&foundry_bin)
             .args(["cache", "remove", "--yes", model_name])
             .output()
             .await
-            .map_err(|e| format!("Failed to run foundry cache remove: {}", e))?;
+            .map_err(|e| format!("Failed to run {} cache remove: {}", foundry_bin, e))?;
 
         if output.status.success() {
             println!("FoundryActor: Model removed from cache: {}", model_name);

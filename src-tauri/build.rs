@@ -47,6 +47,10 @@ fn main() {
     #[cfg(target_os = "macos")]
     link_macos_clang_runtime();
 
+    // Copy ONNX Runtime DLLs to binaries directory on Windows for bundling
+    #[cfg(target_os = "windows")]
+    copy_onnx_runtime_dlls(manifest_path);
+
     tauri_build::build()
 }
 
@@ -365,4 +369,132 @@ fn link_macos_clang_runtime() {
         "cargo:warning=Linked clang runtime from {:?}",
         darwin_lib_dir
     );
+}
+
+/// Copy ONNX Runtime DLLs to the binaries directory on Windows.
+///
+/// The ort-sys crate downloads ONNX Runtime binaries during build, but they need
+/// to be bundled with the application for it to run on target machines.
+/// This function finds the downloaded DLLs and copies them to src-tauri/binaries/
+/// where Tauri's bundle configuration will pick them up.
+#[cfg(target_os = "windows")]
+fn copy_onnx_runtime_dlls(manifest_path: &Path) {
+    use std::ffi::OsStr;
+    
+    let binaries_dir = manifest_path.join("binaries");
+    
+    // Create binaries directory if it doesn't exist
+    if !binaries_dir.exists() {
+        if let Err(e) = fs::create_dir_all(&binaries_dir) {
+            println!("cargo:warning=Failed to create binaries directory: {}", e);
+            return;
+        }
+    }
+    
+    // Look for ONNX Runtime DLLs in common locations
+    // 1. Check if ort-sys provides the path via environment variable
+    if let Ok(ort_lib_dir) = env::var("ORT_LIB_LOCATION") {
+        if copy_dlls_from_dir(Path::new(&ort_lib_dir), &binaries_dir) {
+            return;
+        }
+    }
+    
+    // 2. Search in the target build directory for ort-sys output
+    let target_dir = manifest_path.join("target");
+    let profiles = ["release", "debug"];
+    
+    for profile in &profiles {
+        let build_dir = target_dir.join(profile).join("build");
+        if !build_dir.exists() {
+            continue;
+        }
+        
+        // Look for ort-sys-* directories
+        if let Ok(entries) = fs::read_dir(&build_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let dir_name = entry.file_name();
+                let dir_name_str = dir_name.to_string_lossy();
+                
+                if dir_name_str.starts_with("ort-sys-") {
+                    let out_dir = entry.path().join("out");
+                    
+                    // Search recursively for DLLs
+                    if let Some(dll_dir) = find_onnx_dlls_recursive(&out_dir) {
+                        if copy_dlls_from_dir(&dll_dir, &binaries_dir) {
+                            println!(
+                                "cargo:warning=Copied ONNX Runtime DLLs from {:?} to {:?}",
+                                dll_dir, binaries_dir
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("cargo:warning=Could not find ONNX Runtime DLLs to bundle");
+    println!("cargo:warning=The application may fail to start on Windows without onnxruntime.dll");
+    println!("cargo:warning=You may need to install ONNX Runtime separately or set ORT_LIB_LOCATION");
+}
+
+/// Recursively search for a directory containing ONNX Runtime DLLs
+#[cfg(target_os = "windows")]
+fn find_onnx_dlls_recursive(dir: &Path) -> Option<std::path::PathBuf> {
+    if !dir.exists() {
+        return None;
+    }
+    
+    // Check if this directory contains onnxruntime*.dll
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            
+            if file_name_str.starts_with("onnxruntime") && file_name_str.ends_with(".dll") {
+                return Some(dir.to_path_buf());
+            }
+            
+            // Recurse into subdirectories
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                if let Some(found) = find_onnx_dlls_recursive(&entry.path()) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    
+    None
+}
+
+/// Copy all DLL files from source directory to destination
+#[cfg(target_os = "windows")]
+fn copy_dlls_from_dir(src_dir: &Path, dest_dir: &Path) -> bool {
+    if !src_dir.exists() {
+        return false;
+    }
+    
+    let mut copied_any = false;
+    
+    if let Ok(entries) = fs::read_dir(src_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().map(|e| e == "dll").unwrap_or(false) {
+                let file_name = entry.file_name();
+                let dest_path = dest_dir.join(&file_name);
+                
+                if let Err(e) = fs::copy(&path, &dest_path) {
+                    println!(
+                        "cargo:warning=Failed to copy {:?} to {:?}: {}",
+                        path, dest_path, e
+                    );
+                } else {
+                    println!("cargo:warning=Copied {:?} to binaries/", file_name);
+                    copied_any = true;
+                }
+            }
+        }
+    }
+    
+    copied_any
 }
