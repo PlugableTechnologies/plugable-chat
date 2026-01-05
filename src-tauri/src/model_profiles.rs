@@ -58,6 +58,11 @@ impl ModelProfile {
         tools: &[ToolSchema],
         options: &PromptOptions,
     ) -> ModelInput {
+        // Check tool format first - Harmony format has its own prompt builder
+        if self.tool_call_format == ToolFormat::Harmony {
+            return self.build_prompt_harmony(history, tools, options);
+        }
+
         match self.model_family {
             ModelFamily::GptOss => self.build_prompt_openai_style(history, tools, options),
             ModelFamily::Phi => self.build_prompt_phi(history, tools, options),
@@ -77,6 +82,10 @@ impl ModelProfile {
             ToolFormat::Hermes => parse_hermes_tool_calls(output),
             ToolFormat::Granite => parse_granite_tool_calls(output),
             ToolFormat::Gemini => parse_gemini_tool_calls(output),
+            ToolFormat::Harmony => {
+                // gpt-oss harmony format: <|channel|>commentary to=tool_name...<|message|>args<|call|>
+                crate::tool_adapters::parse_harmony_tool_calls(output)
+            }
             ToolFormat::TextBased => {
                 // Try Hermes-style first, then fall back to generic JSON detection
                 let calls = parse_hermes_tool_calls(output);
@@ -209,6 +218,112 @@ print(f"Mean: {statistics.mean(data):.1f}, Sum: {math.fsum(data)}")
 Use `tool_search` to discover MCP tools, which then become available as async Python functions in python_execution.
 
 "#.to_string()
+    }
+
+    // ========== Harmony Format Prompt Building (gpt-oss models) ==========
+
+    /// Build prompt for gpt-oss models using native harmony format.
+    ///
+    /// IMPORTANT: gpt-oss models use native harmony tool calling - we do NOT
+    /// include explicit tool calling format instructions in the system prompt.
+    fn build_prompt_harmony(
+        &self,
+        history: &[ChatMessage],
+        tools: &[ToolSchema],
+        options: &PromptOptions,
+    ) -> ModelInput {
+        let mut messages = Vec::new();
+
+        // Build system prompt - NO explicit tool format instructions
+        let system_content = if options.tools_available && !tools.is_empty() {
+            self.build_tool_system_prompt_harmony(tools, options)
+        } else {
+            "You are a helpful assistant.".to_string()
+        };
+
+        messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: system_content,
+            system_prompt: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        // Add history (skip existing system messages)
+        for msg in history {
+            if msg.role != "system" {
+                messages.push(msg.clone());
+            }
+        }
+
+        // gpt-oss uses native tool calling via harmony format
+        // Provide tool schemas in OpenAI format for the API
+        let openai_tools = if options.tools_available && !tools.is_empty() {
+            Some(
+                tools
+                    .iter()
+                    .map(|t| self.tool_schema_to_openai(t))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        ModelInput {
+            messages,
+            tools: openai_tools,
+            extra_params: json!({}),
+        }
+    }
+
+    /// Build system prompt for harmony format models (gpt-oss).
+    ///
+    /// IMPORTANT: Do NOT include explicit tool calling format instructions.
+    /// gpt-oss models use native harmony format for tool calls - providing
+    /// conflicting instructions (like <tool_call> tags) will confuse the model.
+    fn build_tool_system_prompt_harmony(
+        &self,
+        tools: &[ToolSchema],
+        options: &PromptOptions,
+    ) -> String {
+        if options.code_mode_enabled {
+            return Self::python_only_tool_prompt(tools);
+        }
+
+        let mut prompt = String::from(
+            "You are a helpful assistant with tool-calling capabilities.\n\n",
+        );
+
+        // Add reasoning style instruction
+        match options.reasoning_style {
+            ReasoningStyle::EncourageCot => {
+                prompt.push_str("Think step by step before using tools or providing answers.\n\n");
+            }
+            ReasoningStyle::SuppressCot => {
+                prompt.push_str("Provide concise, direct responses.\n\n");
+            }
+            ReasoningStyle::Default => {}
+        }
+
+        // Factual grounding - critical for data queries
+        prompt.push_str("## Factual Grounding\n\n");
+        prompt.push_str("**CRITICAL**: Never make up, infer, or guess data values. ");
+        prompt.push_str("All factual information (numbers, dates, totals, sales figures, etc.) ");
+        prompt.push_str("MUST come from executing tools like `sql_select` or `schema_search`. ");
+        prompt.push_str("If you need data, you MUST call the appropriate tool first. ");
+        prompt.push_str("Do NOT display SQL code or tool code to the user - only show the actual results from tool execution.\n\n");
+
+        // List available tools WITHOUT format instructions
+        // The model will use its native harmony format
+        prompt.push_str("## Available Tools\n\n");
+        for tool in tools.iter().filter(|t| !t.defer_loading) {
+            self.append_tool_description(&mut prompt, tool);
+        }
+
+        // DO NOT add any "Tool Calling Format" section
+        // gpt-oss uses native harmony format
+
+        prompt
     }
 
     // ========== Phi-Style Prompt Building ==========
@@ -582,10 +697,19 @@ Use `tool_search` to discover MCP tools, which then become available as async Py
 // Static registry of all known model profiles
 lazy_static::lazy_static! {
     static ref PROFILES: Vec<ModelProfile> = vec![
-        // OpenAI-style models (Qwen, GPT-OSS, LLaMA-Instruct)
+        // gpt-oss models (gpt-oss-20b, gpt-oss-120b) - use native harmony format
+        // Must be listed BEFORE openai_style to take precedence
+        ModelProfile::new(
+            "gpt_oss_harmony",
+            r"gpt-oss",
+            ModelFamily::GptOss,
+            ToolFormat::Harmony,
+        ),
+        // OpenAI-style models (Qwen, LLaMA-Instruct, Mistral) - use Hermes format
+        // Note: gpt-oss removed - now uses harmony format above
         ModelProfile::new(
             "openai_style",
-            r"qwen|gpt-oss|llama.*instruct|mistral.*instruct",
+            r"qwen|llama.*instruct|mistral.*instruct",
             ModelFamily::GptOss,
             ToolFormat::Hermes,
         ),
@@ -666,6 +790,69 @@ mod tests {
         // Test fallback
         let profile = resolve_profile("unknown-model");
         assert_eq!(profile.id, "default");
+    }
+
+    #[test]
+    fn test_gpt_oss_uses_harmony_profile() {
+        // gpt-oss models should match the harmony profile, NOT openai_style
+        let profile = resolve_profile("gpt-oss-20b");
+        assert_eq!(profile.id, "gpt_oss_harmony");
+        assert_eq!(profile.tool_call_format, ToolFormat::Harmony);
+
+        let profile = resolve_profile("gpt-oss-120b");
+        assert_eq!(profile.id, "gpt_oss_harmony");
+        assert_eq!(profile.tool_call_format, ToolFormat::Harmony);
+    }
+
+    #[test]
+    fn test_harmony_system_prompt_no_format_instructions() {
+        let profile = resolve_profile("gpt-oss-20b");
+        assert_eq!(profile.tool_call_format, ToolFormat::Harmony);
+
+        let mut sql_select = ToolSchema::new("sql_select");
+        sql_select.description = Some("Execute SQL queries".to_string());
+
+        let tools = vec![sql_select];
+        let options = PromptOptions {
+            tools_available: true,
+            code_mode_enabled: false,
+            reasoning_style: ReasoningStyle::Default,
+        };
+
+        let input = profile.build_prompt(&[], &tools, &options);
+        let system_content = &input.messages[0].content;
+
+        // Should NOT contain explicit format instructions that would conflict with native harmony
+        assert!(
+            !system_content.contains("<tool_call>"),
+            "Harmony system prompt should NOT contain <tool_call> format instructions"
+        );
+        assert!(
+            !system_content.contains("[TOOL_CALLS]"),
+            "Harmony system prompt should NOT contain [TOOL_CALLS] format instructions"
+        );
+        assert!(
+            !system_content.contains("<function_call>"),
+            "Harmony system prompt should NOT contain <function_call> format instructions"
+        );
+        assert!(
+            !system_content.contains("Tool Calling Format"),
+            "Harmony system prompt should NOT contain Tool Calling Format section"
+        );
+
+        // Should contain tool descriptions
+        assert!(
+            system_content.contains("sql_select"),
+            "System prompt should list available tools"
+        );
+        assert!(
+            system_content.contains("Available Tools"),
+            "System prompt should have Available Tools section"
+        );
+        assert!(
+            system_content.contains("Factual Grounding"),
+            "System prompt should have Factual Grounding section"
+        );
     }
 
     #[test]

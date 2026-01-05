@@ -14,11 +14,13 @@
  * Strip OpenAI special tokens that may leak through from models
  * These include: <|start|>, <|end|>, <|im_start|>, <|im_end|>, <|endoftext|>, etc.
  * Also handles role markers like <|start|>assistant, <|im_start|>user, etc.
+ * Note: <|call|> and <|return|> are harmony tokens but NOT stripped here - they're 
+ * processed by parseChannelFormat.
  */
 function stripOpenAITokens(content: string): string {
     return content
-        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>(?:assistant|user|system)?/gi, '')
-        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text)\|>/gi, '')
+        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text|return)\|>(?:assistant|user|system|tool)?/gi, '')
+        .replace(/<\|(?:start|end|im_start|im_end|endoftext|eot_id|begin_of_text|end_of_text|return)\|>/gi, '')
         // Clean up any leftover newlines at the start from removed tokens
         .replace(/^\s*\n+/, '');
 }
@@ -52,19 +54,26 @@ export function detectResponseFormat(content: string): ModelFamily {
 }
 
 /**
- * Parse gpt-oss channel format:
- * <|channel|>analysis<|message|>thinking content<|end|><|channel|>final<|message|>response content
+ * Parse gpt-oss channel format (harmony format):
+ * - <|channel|>analysis<|message|>thinking content<|end|> -> think
+ * - <|channel|>commentary to=TOOL <|constrain|>json<|message|>{args}<|call|> -> tool_call
+ * - <|channel|>final<|message|>response content<|end|> -> text
  * 
  * Also handles streaming partial states:
  * - <|channel|>analysis<|message|>partial... (no <|end|> yet)
  * - <|channel|>final<|message|>partial... (streaming final response)
+ * - <|channel|>commentary to=... (streaming tool call)
  */
 function parseChannelFormat(content: string): MessagePart[] {
     const parts: MessagePart[] = [];
     
-    // Regex to match complete channel blocks: <|channel|>TYPE<|message|>CONTENT<|end|>
-    // and incomplete ones (streaming): <|channel|>TYPE<|message|>CONTENT (no end tag)
-    const channelPattern = /<\|channel\|>(\w+)<\|message\|>([\s\S]*?)(?:<\|end\|>|(?=<\|channel\|>)|$)/g;
+    // Updated regex to capture:
+    // 1. Channel type (analysis, commentary, final)
+    // 2. Optional to= attribute (for commentary tool calls)
+    // 3. Optional <|constrain|> section
+    // 4. Message content (between <|message|> and terminator)
+    // Terminators: <|call|>, <|end|>, next channel, or end of string
+    const channelPattern = /<\|channel\|>(\w+)(?:\s+to=(\S+))?(?:\s+<\|constrain\|>\w+)?<\|message\|>([\s\S]*?)(?:<\|call\|>|<\|end\|>|(?=<\|channel\|>)|$)/g;
     
     let match;
     let lastIndex = 0;
@@ -79,22 +88,50 @@ function parseChannelFormat(content: string): MessagePart[] {
         }
         
         const channelType = match[1].toLowerCase();
-        const channelContent = match[2];
+        const toolName = match[2];  // May be undefined if not present
+        const channelContent = match[3];
         
         if (channelType === 'analysis') {
-            // Analysis channel = thinking content
+            // Analysis channel = thinking/reasoning content
             if (channelContent.trim()) {
-                parts.push({ type: 'think', content: channelContent });
+                parts.push({ type: 'think', content: channelContent.trim() });
+            }
+        } else if (channelType === 'commentary') {
+            if (toolName) {
+                // Commentary with to= attribute = tool call
+                // Arguments are JSON directly, not wrapped in {"name": ..., "arguments": ...}
+                const trimmedContent = channelContent.trim();
+                if (trimmedContent) {
+                    try {
+                        const args = JSON.parse(trimmedContent);
+                        const toolCallJson = JSON.stringify({
+                            name: toolName,
+                            arguments: args
+                        });
+                        parts.push({ type: 'tool_call', content: toolCallJson });
+                    } catch {
+                        // If JSON parse fails, still emit as tool_call with raw content
+                        parts.push({ type: 'tool_call', content: JSON.stringify({
+                            name: toolName,
+                            arguments: { _raw: trimmedContent }
+                        })});
+                    }
+                }
+            } else {
+                // Commentary without to= = preamble/explanation text
+                if (channelContent.trim()) {
+                    parts.push({ type: 'text', content: channelContent.trim() });
+                }
             }
         } else if (channelType === 'final') {
-            // Final channel = visible response
+            // Final channel = user-facing response
             if (channelContent.trim()) {
-                parts.push({ type: 'text', content: channelContent });
+                parts.push({ type: 'text', content: channelContent.trim() });
             }
         } else {
             // Unknown channel type - treat as text
             if (channelContent.trim()) {
-                parts.push({ type: 'text', content: channelContent });
+                parts.push({ type: 'text', content: channelContent.trim() });
             }
         }
         

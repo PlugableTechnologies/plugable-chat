@@ -675,6 +675,9 @@ pub enum ToolFormat {
     Granite,
     /// No native tool calling support - use text-based fallback
     TextBased,
+    /// OpenAI Harmony format for gpt-oss models
+    /// Uses <|channel|>commentary to=tool_name<|message|>args<|call|> format
+    Harmony,
 }
 
 /// Reasoning/thinking output format

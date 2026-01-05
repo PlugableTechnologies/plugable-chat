@@ -144,25 +144,76 @@ function Download-And-Install-Autologon {
     $zipPath = Join-Path $KioskDir "Autologon.zip"
     $autologonDir = Join-Path $KioskDir "Autologon"
     $autologonExe = Join-Path $autologonDir "Autologon.exe"
+    $autologonExe64 = Join-Path $autologonDir "Autologon64.exe"
 
     if (Test-Path $autologonExe) {
         Write-Host "Autologon already present: $autologonExe"
         return $autologonExe
     }
 
-    Write-Host "Downloading Sysinternals Autologon..."
-    $url = "https://download.sysinternals.com/files/Autologon.zip"
-    Invoke-WebRequest -Uri $url -OutFile $zipPath
-
     if (-not (Test-Path $autologonDir)) {
         New-Item -Path $autologonDir -ItemType Directory | Out-Null
     }
 
-    Write-Host "Extracting Autologon..."
-    Expand-Archive -Path $zipPath -DestinationPath $autologonDir -Force
+    # Try multiple download methods - Sysinternals CDN can be flaky
+    $downloadSuccess = $false
 
+    # Method 1: Try the ZIP download from download.sysinternals.com
+    Write-Host "Downloading Sysinternals Autologon (method 1: ZIP)..."
+    $zipUrl = "https://download.sysinternals.com/files/Autologon.zip"
+    try {
+        # Use TLS 1.2 for compatibility
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+        
+        if (Test-Path $zipPath) {
+            Write-Host "Extracting Autologon..."
+            Expand-Archive -Path $zipPath -DestinationPath $autologonDir -Force
+            $downloadSuccess = $true
+        }
+    }
+    catch {
+        Write-Host "ZIP download failed: $($_.Exception.Message)"
+    }
+
+    # Method 2: Try direct EXE download from live.sysinternals.com
+    if (-not $downloadSuccess -or -not (Test-Path $autologonExe)) {
+        Write-Host "Trying alternate download (method 2: live.sysinternals.com)..."
+        try {
+            $liveUrl = "https://live.sysinternals.com/Autologon.exe"
+            Invoke-WebRequest -Uri $liveUrl -OutFile $autologonExe -UseBasicParsing -ErrorAction Stop
+            $downloadSuccess = Test-Path $autologonExe
+            
+            # Also try 64-bit version
+            if ($downloadSuccess) {
+                $liveUrl64 = "https://live.sysinternals.com/Autologon64.exe"
+                Invoke-WebRequest -Uri $liveUrl64 -OutFile $autologonExe64 -UseBasicParsing -ErrorAction SilentlyContinue
+            }
+        }
+        catch {
+            Write-Host "Live download failed: $($_.Exception.Message)"
+        }
+    }
+
+    # Method 3: If all else fails, give manual instructions
     if (-not (Test-Path $autologonExe)) {
-        throw "Autologon.exe not found after extraction."
+        Write-Host ""
+        Write-Host "========================================" -ForegroundColor Yellow
+        Write-Host "MANUAL DOWNLOAD REQUIRED" -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor Yellow
+        Write-Host "Automatic download failed. Please manually download Autologon:"
+        Write-Host ""
+        Write-Host "1. Open a browser and go to:"
+        Write-Host "   https://learn.microsoft.com/en-us/sysinternals/downloads/autologon"
+        Write-Host ""
+        Write-Host "2. Click 'Download Autologon' link"
+        Write-Host ""
+        Write-Host "3. Extract Autologon.exe to:"
+        Write-Host "   $autologonDir"
+        Write-Host ""
+        Write-Host "4. Re-run this script"
+        Write-Host "========================================" -ForegroundColor Yellow
+        throw "Autologon.exe not found. Please download manually (see instructions above)."
     }
 
     return $autologonExe

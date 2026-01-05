@@ -56,6 +56,10 @@ pub fn format_tools_for_model(
             // Granite uses a similar format to OpenAI but may need schema adjustments
             json!(tools)
         }
+        ToolFormat::Harmony => {
+            // Harmony (gpt-oss) uses OpenAI-compatible tool definitions
+            json!(tools)
+        }
         ToolFormat::TextBased => {
             // No native tool calling - return empty array
             // Text-based tools are handled via system prompt
@@ -112,6 +116,11 @@ pub fn parse_tool_calls_for_model_profile(
             } else {
                 Vec::new()
             }
+        }
+        ToolFormat::Harmony => {
+            // gpt-oss harmony format - always try to parse
+            // Harmony uses native format so we don't check enabled formats
+            parse_harmony_tool_calls(response)
         }
         ToolFormat::Granite | ToolFormat::TextBased => {
             if formats.is_enabled(ToolCallFormatName::Mistral)
@@ -279,6 +288,63 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
         if let Some(call) = extract_tool_call_by_regex(content) {
             calls.push(call);
         }
+    }
+
+    calls
+}
+
+/// Parse harmony-format tool calls from gpt-oss models.
+///
+/// Harmony format uses special tokens for structured output:
+/// - `<|channel|>commentary to={tool_name} <|constrain|>json<|message|>{args}<|call|>`
+///
+/// The tool name is in the channel header (after `to=`), not inside the JSON.
+/// The JSON content after `<|message|>` is the arguments directly (not wrapped).
+pub fn parse_harmony_tool_calls(content: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+
+    // Match: <|channel|>commentary to=TOOL_NAME ... <|message|>ARGS<|call|> or <|end|>
+    // The tool name can include server___tool format
+    // Note: The pipe character | in tokens like <|channel|> must be escaped as \|
+    // Note: Rust regex doesn't support look-ahead, so we match up to terminators explicitly
+    let pattern = r"(?s)<\|channel\|>commentary\s+to=(\S+)(?:\s+<\|constrain\|>\w+)?<\|message\|>(.*?)(?:<\|call\|>|<\|end\|>|<\|channel\|>|$)";
+    let re = Regex::new(pattern);
+
+    if let Ok(re) = re {
+        for cap in re.captures_iter(content) {
+            let tool_name = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+            let args_str = cap.get(2).map(|m| m.as_str().trim()).unwrap_or("{}");
+
+            if tool_name.is_empty() {
+                continue;
+            }
+
+            // Parse arguments JSON directly (not wrapped in {"name": ..., "arguments": ...})
+            let fixed_json = fix_llm_json(args_str);
+            let arguments = parse_flexible_json(&fixed_json)
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+
+            let (server, tool) = parse_combined_tool_name(tool_name);
+
+            let raw = cap
+                .get(0)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
+
+            calls.push(ParsedToolCall {
+                server,
+                tool,
+                arguments,
+                raw,
+                id: None,
+            });
+        }
+    }
+
+    // Fallback: if no harmony tool calls found, try Hermes parsing
+    // (in case model outputs mixed format)
+    if calls.is_empty() {
+        return parse_hermes_tool_calls(content);
     }
 
     calls
@@ -1060,6 +1126,24 @@ pub fn format_tool_result(
                 )
             } else {
                 format!("<function_response>\n{}\n</function_response>{}", result, guidance)
+            }
+        }
+        ToolFormat::Harmony => {
+            // Harmony format uses <|start|>tool to={tool_name}<|message|>{result}<|end|>
+            if is_error {
+                format!(
+                    "<|start|>tool to={}<|message|>{{\"error\": \"{}\"}}<|end|>{}",
+                    call.tool,
+                    result.replace('"', "\\\""),
+                    guidance
+                )
+            } else {
+                format!(
+                    "<|start|>tool to={}<|message|>{}<|end|>{}",
+                    call.tool,
+                    result,
+                    guidance
+                )
             }
         }
         ToolFormat::TextBased => {
@@ -2519,5 +2603,129 @@ sql_select("SELECT SUM(total_sale) FROM table WHERE year = 2025", ["bq-123"])
         let calls = parse_hermes_tool_calls(content);
         assert_eq!(calls.len(), 1, "Should parse with Python None");
         assert!(calls[0].arguments.get("value").map(|v| v.is_null()).unwrap_or(false));
+    }
+
+    // ============ Harmony Format Tests ============
+
+    #[test]
+    fn test_parse_harmony_tool_call_basic() {
+        let content = r#"<|channel|>commentary to=sql_select <|constrain|>json<|message|>{"sql":"SELECT * FROM users"}<|call|>"#;
+        let calls = parse_harmony_tool_calls(content);
+        assert_eq!(calls.len(), 1, "Should parse basic harmony tool call");
+        assert_eq!(calls[0].server, "unknown");
+        assert_eq!(calls[0].tool, "sql_select");
+        assert_eq!(calls[0].arguments["sql"], "SELECT * FROM users");
+    }
+
+    #[test]
+    fn test_parse_harmony_tool_call_with_server_prefix() {
+        let content = r#"<|channel|>commentary to=builtin___python_execution <|constrain|>json<|message|>{"code":"print('hello')"}<|call|>"#;
+        let calls = parse_harmony_tool_calls(content);
+        assert_eq!(calls.len(), 1, "Should parse harmony tool call with server prefix");
+        assert_eq!(calls[0].server, "builtin");
+        assert_eq!(calls[0].tool, "python_execution");
+        assert_eq!(calls[0].arguments["code"], "print('hello')");
+    }
+
+    #[test]
+    fn test_parse_harmony_with_end_instead_of_call() {
+        // Some outputs may use <|end|> instead of <|call|>
+        let content = r#"<|channel|>commentary to=sql_select <|constrain|>json<|message|>{"sql":"SELECT 1"}<|end|>"#;
+        let calls = parse_harmony_tool_calls(content);
+        assert_eq!(calls.len(), 1, "Should parse harmony with <|end|> terminator");
+        assert_eq!(calls[0].tool, "sql_select");
+    }
+
+    #[test]
+    fn test_parse_harmony_multiple_channels() {
+        // Full harmony response with analysis, commentary, and final channels
+        let content = r#"<|channel|>analysis<|message|>Let me search for pickpocket crimes...<|end|><|channel|>commentary to=sql_select <|constrain|>json<|message|>{"sql":"SELECT COUNT(*)"}<|call|><|channel|>final<|message|>Here are the results...<|end|>"#;
+        let calls = parse_harmony_tool_calls(content);
+        assert_eq!(calls.len(), 1, "Should only parse commentary with to= as tool call");
+        assert_eq!(calls[0].tool, "sql_select");
+    }
+
+    #[test]
+    fn test_parse_harmony_complex_sql() {
+        // Real-world example from the screenshot
+        let content = r#"<|channel|>commentary to=sql_select <|constrain|>json<|message|>{"sql":"SELECT COUNT(*) AS total_pickpockets FROM main.chicago_crimes WHERE description LIKE '%PICKPOCKET%'"}<|call|>"#;
+        let calls = parse_harmony_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "sql_select");
+        assert!(calls[0].arguments["sql"].as_str().unwrap().contains("PICKPOCKET"));
+    }
+
+    #[test]
+    fn test_parse_harmony_no_constrain() {
+        // Handle case where <|constrain|> is missing
+        let content = r#"<|channel|>commentary to=tool_search<|message|>{"query":"weather tools"}<|call|>"#;
+        let calls = parse_harmony_tool_calls(content);
+        assert_eq!(calls.len(), 1, "Should parse without <|constrain|> token");
+        assert_eq!(calls[0].tool, "tool_search");
+    }
+
+    #[test]
+    fn test_parse_harmony_streaming_incomplete() {
+        // Streaming case where tool call is not yet terminated
+        let content = r#"<|channel|>commentary to=sql_select <|constrain|>json<|message|>{"sql":"SELECT"#;
+        let calls = parse_harmony_tool_calls(content);
+        // Should still try to parse, even if JSON is incomplete
+        // Falls back to hermes parsing which may not find anything
+        // This is expected - incomplete JSON won't parse
+        assert!(calls.is_empty() || calls.len() == 1);
+    }
+
+    #[test]
+    fn test_parse_harmony_multiple_tool_calls() {
+        // Multiple tool calls in sequence
+        let content = r#"<|channel|>commentary to=schema_search <|constrain|>json<|message|>{"query":"users"}<|call|><|channel|>commentary to=sql_select <|constrain|>json<|message|>{"sql":"SELECT * FROM users"}<|call|>"#;
+        let calls = parse_harmony_tool_calls(content);
+        assert_eq!(calls.len(), 2, "Should parse multiple harmony tool calls");
+        assert_eq!(calls[0].tool, "schema_search");
+        assert_eq!(calls[1].tool, "sql_select");
+    }
+
+    #[test]
+    fn test_format_harmony_tool_result_success() {
+        let call = ParsedToolCall {
+            server: "builtin".to_string(),
+            tool: "sql_select".to_string(),
+            arguments: json!({"sql": "SELECT 1"}),
+            raw: "".to_string(),
+            id: None,
+        };
+        let result = format_tool_result(
+            &call,
+            r#"{"rows": [[1]], "columns": ["?column?"]}"#,
+            false,
+            ToolFormat::Harmony,
+            None,
+            None,
+        );
+        assert!(result.contains("<|start|>tool to=sql_select"), "Should use harmony format");
+        assert!(result.contains("<|message|>"), "Should contain message token");
+        assert!(result.contains("<|end|>"), "Should contain end token");
+        assert!(result.contains("rows"), "Should contain result data");
+    }
+
+    #[test]
+    fn test_format_harmony_tool_result_error() {
+        let call = ParsedToolCall {
+            server: "builtin".to_string(),
+            tool: "sql_select".to_string(),
+            arguments: json!({"sql": "SELECT * FROM nonexistent"}),
+            raw: "".to_string(),
+            id: None,
+        };
+        let result = format_tool_result(
+            &call,
+            "Table not found: nonexistent",
+            true,
+            ToolFormat::Harmony,
+            None,
+            None,
+        );
+        assert!(result.contains("<|start|>tool to=sql_select"), "Should use harmony format");
+        assert!(result.contains("error"), "Should contain error field");
     }
 }
