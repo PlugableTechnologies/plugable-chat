@@ -32,7 +32,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "binaries/*": "./"
+      "binaries/*": "./",
+      "../test-data/*": "test-data/"
     }
   }
 }

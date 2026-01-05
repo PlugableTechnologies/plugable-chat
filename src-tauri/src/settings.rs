@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tokio::fs;
 
 use crate::agentic_state::RelevancyThresholds;
+use crate::paths;
 
 // ============ Tool Calling Formats ============
 
@@ -927,7 +928,15 @@ pub fn find_test_data_dir() -> Option<std::path::PathBuf> {
             if dev_path.exists() {
                 return dev_path.canonicalize().ok();
             }
-            // Check exe_dir/test-data (for bundled apps)
+            // Check macOS bundle Resources folder: Contents/MacOS/../Resources/test-data
+            #[cfg(target_os = "macos")]
+            {
+                let resources_path = exe_dir.join("../Resources/test-data");
+                if resources_path.exists() {
+                    return resources_path.canonicalize().ok().or(Some(resources_path));
+                }
+            }
+            // Check exe_dir/test-data (for bundled apps on Windows/Linux)
             let bundled_path = exe_dir.join("test-data");
             if bundled_path.exists() {
                 return bundled_path.canonicalize().ok().or(Some(bundled_path));
@@ -1024,11 +1033,28 @@ fn normalize_path_for_yaml(path: &std::path::Path) -> String {
     path_str.replace('\\', "/")
 }
 
-/// Ensure the demo-tools.yaml file exists with correct absolute paths
+/// Ensure the demo-tools.yaml file exists with correct absolute paths.
+/// 
+/// The YAML is written to a writable cache directory because the bundled
+/// test-data Resources folder is read-only on macOS. The YAML points to
+/// the bundled demo.db in the read-only Resources folder.
 pub fn ensure_demo_tools_yaml() -> Option<std::path::PathBuf> {
     let test_data_dir = find_test_data_dir()?;
-    let tools_yaml_path = test_data_dir.join("demo-tools.yaml");
     let demo_db_path = test_data_dir.join("demo.db");
+    
+    // Verify demo.db exists
+    if !demo_db_path.exists() {
+        eprintln!("[DemoDatabase] demo.db not found at {:?}", demo_db_path);
+        return None;
+    }
+    
+    // Write to a writable cache directory (since Resources may be read-only on macOS)
+    let cache_dir = paths::get_cache_dir().join("demo-toolbox");
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        eprintln!("[DemoDatabase] Failed to create cache dir {:?}: {}", cache_dir, e);
+        return None;
+    }
+    let tools_yaml_path = cache_dir.join("demo-tools.yaml");
     
     // Generate the tools.yaml content with absolute path to demo.db
     // Tool name 'sqlite-sql' matches what DatabaseToolboxActor expects
@@ -1064,7 +1090,7 @@ tools:
         return None;
     }
     
-    println!("[DemoDatabase] Generated demo-tools.yaml at {:?}", tools_yaml_path);
+    println!("[DemoDatabase] Generated demo-tools.yaml at {:?} (pointing to {:?})", tools_yaml_path, demo_db_path);
     Some(tools_yaml_path)
 }
 

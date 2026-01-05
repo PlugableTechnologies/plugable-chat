@@ -148,7 +148,15 @@ impl EmbeddedSqliteActor {
                 if dev_path.exists() {
                     return Some(dev_path.canonicalize().ok()?);
                 }
-                // Check exe_dir/test-data (for bundled apps)
+                // Check macOS bundle Resources folder: Contents/MacOS/../Resources/test-data
+                #[cfg(target_os = "macos")]
+                {
+                    let resources_path = exe_dir.join("../Resources/test-data");
+                    if resources_path.exists() {
+                        return resources_path.canonicalize().ok().or(Some(resources_path));
+                    }
+                }
+                // Check exe_dir/test-data (for bundled apps on Windows/Linux)
                 let bundled_path = exe_dir.join("test-data");
                 if bundled_path.exists() {
                     return Some(bundled_path);
