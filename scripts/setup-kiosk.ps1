@@ -334,17 +334,45 @@ function Optional-Harden-For-KioskUser {
     # We'll set them in HKLM\Software\Microsoft\Windows NT\CurrentVersion\ProfileList based on SID.
     # If the user has never logged in, HKCU hive does not exist yet; we use HKU by loading the user's NTUSER.DAT.
 
-    $sid = (Get-LocalUser -Name $UserName).SID.Value
-    $profilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid").ProfileImagePath
+    # Get user object with error handling
+    $localUser = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue
+    if (-not $localUser) {
+        Write-Host "User '$UserName' not found. Skipping per-user hardening." -ForegroundColor Yellow
+        return
+    }
+
+    $sid = $localUser.SID.Value
+    if (-not $sid) {
+        Write-Host "Could not retrieve SID for '$UserName'. Skipping per-user hardening." -ForegroundColor Yellow
+        return
+    }
+
+    # Check if profile exists in registry
+    $profileRegPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+    $profileReg = Get-ItemProperty -Path $profileRegPath -ErrorAction SilentlyContinue
+    if (-not $profileReg -or -not $profileReg.ProfileImagePath) {
+        Write-Host "User profile not created yet (user must log in once). Skipping per-user hardening." -ForegroundColor Yellow
+        Write-Host "After first login as '$UserName', re-run this script with -Harden to apply hardening." -ForegroundColor Yellow
+        return
+    }
+
+    $profilePath = $profileReg.ProfileImagePath
     $ntUserDat = Join-Path $profilePath "NTUSER.DAT"
 
     if (-not (Test-Path $ntUserDat)) {
-        Write-Host "User profile not created yet (no NTUSER.DAT). The user must log in once for per-user hardening to apply."
+        Write-Host "User profile not created yet (no NTUSER.DAT). The user must log in once for per-user hardening to apply." -ForegroundColor Yellow
         return
     }
 
     $hiveName = "KIOSK_$UserName"
-    reg.exe load "HKU\$hiveName" "$ntUserDat" | Out-Null
+    
+    # Try to load the hive
+    $loadResult = reg.exe load "HKU\$hiveName" "$ntUserDat" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Could not load user registry hive (may be in use or locked): $loadResult" -ForegroundColor Yellow
+        Write-Host "Skipping per-user hardening. You can apply it later by re-running with -Harden." -ForegroundColor Yellow
+        return
+    }
 
     try {
         # Disable Task Manager
@@ -365,7 +393,7 @@ function Optional-Harden-For-KioskUser {
         Write-Host "Per-user hardening registry settings applied."
     }
     finally {
-        reg.exe unload "HKU\$hiveName" | Out-Null
+        reg.exe unload "HKU\$hiveName" 2>&1 | Out-Null
     }
 }
 
