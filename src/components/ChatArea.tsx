@@ -4,10 +4,11 @@ import {
     CodeExecutionRecord,
     RagChunk,
     type Message,
-    type AttachedTool
+    type AttachedTool,
+    getModelStateMessage
 } from '../store/chat-store';
 import { useSettingsStore } from '../store/settings-store';
-import { StatusBar, StreamingWarningBar } from './StatusBar';
+import { StatusBar, StreamingWarningBar, ModelStateBar } from './StatusBar';
 import {
     Search,
     Database,
@@ -1842,13 +1843,18 @@ export function ChatArea() {
         // Tool execution state
         pendingToolApproval, toolExecution, approveCurrentToolCall, rejectCurrentToolCall,
         // Streaming state
-        streamingChatId
+        streamingChatId,
+        // Model state machine (deterministic sync with backend)
+        modelState, isModelReady
     } = useChatStore();
 
     const { settings, openSettings, setActiveTab } = useSettingsStore();
 
     // Check if streaming is active in a different chat (input should be blocked)
     const isStreamingInOtherChat = streamingChatId !== null && streamingChatId !== currentChatId;
+    
+    // Model state blocking: block prompts when model is not ready (loading, switching, etc.)
+    const isModelBlocking = !isModelReady;
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const [thinkingStartTime, setThinkingStartTime] = useState<number | null>(null);
@@ -2223,6 +2229,9 @@ export function ChatArea() {
             {/* Status Bar for model operations */}
             <StatusBar />
 
+            {/* Model state bar for blocking states (loading, switching, etc.) */}
+            <ModelStateBar />
+
             {/* Warning when streaming in another chat */}
             <StreamingWarningBar />
 
@@ -2232,7 +2241,9 @@ export function ChatArea() {
                     <div className="chat-empty-state flex-1 flex flex-col items-center justify-center px-6">
                         <div className="chat-empty-copy mb-8 text-center">
                             <h1 className="chat-empty-title text-2xl font-bold text-gray-900">
-                                {isConnecting ? "Wait, Loading Local Models ..." : "How can I help you today?"}
+                                {isConnecting ? "Wait, Loading Local Models ..." : 
+                                 isModelBlocking ? getModelStateMessage(modelState) :
+                                 "How can I help you today?"}
                             </h1>
                         </div>
                     </div>
@@ -2372,7 +2383,7 @@ export function ChatArea() {
                         onClearAttachments={handleClearAttachments}
                         filesDisabled={filesDisabled}
                         dbDisabled={dbDisabled}
-                        disabled={isStreamingInOtherChat}
+                        disabled={isStreamingInOtherChat || isModelBlocking}
                     />
                 </div>
             </div>

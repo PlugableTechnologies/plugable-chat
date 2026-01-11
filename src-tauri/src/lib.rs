@@ -4381,6 +4381,8 @@ pub fn run() {
             get_catalog_models,
             unload_model,
             get_foundry_service_status,
+            get_current_model,
+            get_model_state,
             remove_cached_model,
             cancel_generation,
             get_turn_status,

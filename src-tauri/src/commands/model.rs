@@ -4,7 +4,7 @@
 //! through the Foundry Local service.
 
 use crate::app_state::{ActorHandles, SettingsState};
-use crate::protocol::{CachedModel, CatalogModel, FoundryMsg, FoundryServiceStatus, ModelInfo};
+use crate::protocol::{CachedModel, CatalogModel, FoundryMsg, FoundryServiceStatus, ModelInfo, ModelState};
 use crate::settings;
 use tauri::State;
 use tokio::sync::oneshot;
@@ -227,6 +227,18 @@ pub async fn get_current_model(handles: State<'_, ActorHandles>) -> Result<Optio
     handles
         .foundry_tx
         .send(FoundryMsg::GetCurrentModel { respond_to: tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rx.await.map_err(|_| "Foundry actor died".to_string())?)
+}
+
+/// Get the current model state machine state
+#[tauri::command]
+pub async fn get_model_state(handles: State<'_, ActorHandles>) -> Result<ModelState, String> {
+    let (tx, rx) = oneshot::channel();
+    handles
+        .foundry_tx
+        .send(FoundryMsg::GetModelState { respond_to: tx })
         .await
         .map_err(|e| e.to_string())?;
     Ok(rx.await.map_err(|_| "Foundry actor died".to_string())?)

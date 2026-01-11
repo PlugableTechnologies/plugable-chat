@@ -58,6 +58,135 @@ export interface ModelInfo {
     supports_reasoning_effort: boolean;
 }
 
+// ============ Model State Machine Types ============
+// These mirror the backend ModelState enum for deterministic synchronization
+
+export type ModelStateType =
+    | 'initializing'
+    | 'ready'
+    | 'switching_model'
+    | 'unloading_model'
+    | 'loading_model'
+    | 'error'
+    | 'service_unavailable'
+    | 'service_restarting'
+    | 'reconnecting';
+
+/**
+ * Model state data from the backend state machine.
+ * The backend is the single source of truth - frontend subscribes to state changes.
+ */
+export interface ModelStateData {
+    state: ModelStateType;
+    /** Current or target model ID (depending on state) */
+    modelId?: string;
+    /** Target model for switch operations */
+    targetModel?: string;
+    /** Previous model before switch/error */
+    previousModel?: string;
+    /** Error message when in error state */
+    errorMessage?: string;
+    /** Timestamp of the state change (ms since epoch) */
+    timestamp?: number;
+}
+
+/**
+ * Parse the backend ModelState enum into a flat ModelStateData object
+ */
+function parseModelStateEvent(payload: any): ModelStateData {
+    if (!payload || !payload.state) {
+        return { state: 'initializing' };
+    }
+
+    const stateObj = payload.state;
+    const timestamp = payload.timestamp;
+
+    // Handle tagged enum format from Rust: { state: "ready", model_id: "..." }
+    if (typeof stateObj === 'object' && stateObj.state) {
+        const stateName = stateObj.state as string;
+        switch (stateName) {
+            case 'initializing':
+                return { state: 'initializing', timestamp };
+            case 'ready':
+                return { state: 'ready', modelId: stateObj.model_id, timestamp };
+            case 'switching_model':
+                return {
+                    state: 'switching_model',
+                    previousModel: stateObj.from,
+                    targetModel: stateObj.to,
+                    timestamp
+                };
+            case 'unloading_model':
+                return {
+                    state: 'unloading_model',
+                    modelId: stateObj.model_id,
+                    targetModel: stateObj.next_model,
+                    timestamp
+                };
+            case 'loading_model':
+                return { state: 'loading_model', modelId: stateObj.model_id, timestamp };
+            case 'error':
+                return {
+                    state: 'error',
+                    errorMessage: stateObj.message,
+                    previousModel: stateObj.last_model,
+                    timestamp
+                };
+            case 'service_unavailable':
+                return { state: 'service_unavailable', errorMessage: stateObj.message, timestamp };
+            case 'service_restarting':
+                return { state: 'service_restarting', timestamp };
+            case 'reconnecting':
+                return { state: 'reconnecting', timestamp };
+            default:
+                console.warn('[ChatStore] Unknown model state:', stateName);
+                return { state: 'initializing', timestamp };
+        }
+    }
+
+    // Fallback: assume it's a simple string state name
+    if (typeof stateObj === 'string') {
+        return { state: stateObj as ModelStateType, timestamp };
+    }
+
+    return { state: 'initializing', timestamp };
+}
+
+/**
+ * Check if prompts should be blocked based on the current model state
+ */
+export function isModelStateBlocking(modelState: ModelStateData): boolean {
+    return modelState.state !== 'ready';
+}
+
+/**
+ * Get a user-friendly message for the current model state
+ */
+export function getModelStateMessage(modelState: ModelStateData): string {
+    switch (modelState.state) {
+        case 'initializing':
+            return 'Initializing...';
+        case 'ready':
+            return modelState.modelId ? `Ready: ${modelState.modelId}` : 'Ready';
+        case 'switching_model':
+            return `Switching to ${modelState.targetModel || 'new model'}...`;
+        case 'unloading_model':
+            return `Unloading ${modelState.modelId || 'model'} from VRAM...`;
+        case 'loading_model':
+            return `Loading ${modelState.modelId || 'model'} into VRAM...`;
+        case 'error':
+            return modelState.errorMessage || 'Model error';
+        case 'service_unavailable':
+            return modelState.errorMessage || 'Foundry service unavailable';
+        case 'service_restarting':
+            return 'Restarting Foundry service...';
+        case 'reconnecting':
+            return 'Reconnecting to Foundry...';
+        default:
+            return 'Unknown state';
+    }
+}
+
 export interface ChatSummary {
     id: string;
     title: string;
@@ -227,6 +356,11 @@ interface ChatState {
     modelStuckWarning: string | null;
     setModelStuck: (message: string | null) => void;
 
+    // Model state machine (deterministic sync with backend)
+    modelState: ModelStateData;
+    isModelReady: boolean; // Derived: true when modelState.state === 'ready'
+    fetchModelState: () => Promise<void>;
+
     // Per-chat streaming tracking (streaming continues to original chat on switch)
     streamingChatId: string | null;
     streamingMessages: Message[]; // Messages for the streaming chat (if different from current)
@@ -370,6 +504,7 @@ let unlistenModelFallback: (() => void) | undefined;
 let unlistenEmbeddingInit: (() => void) | undefined;
 let unlistenChatStreamStatus: (() => void) | undefined;
 let unlistenAvailableModelsChanged: (() => void) | undefined;
+let unlistenModelStateChanged: (() => void) | undefined;
 let isSettingUp = false; // Guard against async race conditions
 let listenerGeneration = 0; // Generation counter to invalidate stale setup calls
 let hasInitializedRagContext = false; // Only clear RAG context once on true app startup
@@ -443,8 +578,11 @@ async function initializeModelsOnStartup(
         const state = get();
         const cachedModels = state.cachedModels;
         
-        // Sync current model with backend if possible
+        // Sync current model and model state with backend
         try {
+            // Fetch the model state machine state first
+            await get().fetchModelState();
+            
             const currentBackendModel = await invoke<ModelInfo | null>('get_current_model');
             if (currentBackendModel) {
                 console.log('[ChatStore] Synced current model from backend:', currentBackendModel.id);
@@ -677,6 +815,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     modelStuckWarning: null,
     setModelStuck: (message) => set({ modelStuckWarning: message, statusBarDismissed: false }),
+
+    // Model state machine (deterministic sync with backend)
+    modelState: { state: 'initializing' } as ModelStateData,
+    isModelReady: false,
+    fetchModelState: async () => {
+        try {
+            const state = await invoke<any>('get_model_state');
+            const parsed = parseModelStateEvent({ state, timestamp: Date.now() });
+            set({
+                modelState: parsed,
+                isModelReady: parsed.state === 'ready',
+            });
+            console.log('[ChatStore] Fetched model state:', parsed);
+        } catch (e: any) {
+            console.error('[ChatStore] Failed to fetch model state:', e);
+            // Don't update state on error - keep existing
+        }
+    },
 
     // Per-chat streaming tracking
     streamingChatId: null,
@@ -1611,6 +1767,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 set({ currentModel: event.payload });
             });
 
+            // Model state machine changes - deterministic sync with backend
+            const modelStateChangedListener = await listen<any>('model-state-changed', (event) => {
+                const parsed = parseModelStateEvent(event.payload);
+                console.log(`[ChatStore] Model state changed: ${parsed.state}`, parsed);
+                set({
+                    modelState: parsed,
+                    isModelReady: parsed.state === 'ready',
+                });
+                
+                // Also update currentModel if transitioning to ready state
+                if (parsed.state === 'ready' && parsed.modelId) {
+                    set({ currentModel: parsed.modelId });
+                }
+            });
+
             // Available models changed - update dropdown after download/removal
             const availableModelsChangedListener = await listen<string[]>('available-models-changed', (event) => {
                 const models = event.payload;
@@ -2075,6 +2246,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 embeddingInitListener();
                 chatStreamStatusListener();
                 availableModelsChangedListener();
+                modelStateChangedListener();
                 isSettingUp = false;
                 return;
             }
@@ -2084,6 +2256,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             unlistenFinished = finishedListener;
             unlistenChatStreamStatus = chatStreamStatusListener;
             unlistenModelSelected = modelSelectedListener;
+            unlistenModelStateChanged = modelStateChangedListener;
             unlistenToolBlocked = toolBlockedListener;
             unlistenToolCallsPending = toolCallsPendingListener;
             unlistenToolExecuting = toolExecutingListener;
@@ -2133,6 +2306,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (unlistenModelSelected) {
             unlistenModelSelected();
             unlistenModelSelected = undefined;
+        }
+        if (unlistenModelStateChanged) {
+            unlistenModelStateChanged();
+            unlistenModelStateChanged = undefined;
         }
         if (unlistenToolBlocked) {
             unlistenToolBlocked();

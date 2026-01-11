@@ -2,7 +2,7 @@ use crate::crash_handler::SuppressCrashDialogGuard;
 use crate::is_verbose_logging_enabled;
 use crate::protocol::{
     CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus, ModelFamily,
-    ModelInfo, OpenAITool, ParsedToolCall, ReasoningFormat, ToolFormat,
+    ModelInfo, ModelState, OpenAITool, ParsedToolCall, ReasoningFormat, ToolFormat,
 };
 use crate::app_state::{GpuResourceGuard, LoggingPersistence, SettingsState};
 use crate::settings;
@@ -484,6 +484,8 @@ pub struct ModelGatewayActor {
     foundry_msg_rx: mpsc::Receiver<FoundryMsg>,
     port: Option<u16>,
     model_id: Option<String>,
+    /// Current state machine state for model management
+    model_state: ModelState,
     available_models: Vec<String>,
     model_info: Vec<ModelInfo>,
     app_handle: AppHandle,
@@ -524,6 +526,7 @@ impl ModelGatewayActor {
             foundry_msg_rx,
             port: None,
             model_id: None,
+            model_state: ModelState::Initializing,
             available_models: Vec::new(),
             model_info: Vec::new(),
             app_handle,
@@ -697,6 +700,68 @@ impl ModelGatewayActor {
         }
     }
 
+    // ============ Model State Machine Methods ============
+
+    /// Transition to a new model state and emit event to frontend
+    fn transition_model_state(&mut self, new_state: ModelState) {
+        use std::io::Write;
+        let old_state = std::mem::replace(&mut self.model_state, new_state.clone());
+        
+        println!(
+            "[ModelStateMachine] Transition: {:?} -> {:?}",
+            old_state, new_state
+        );
+        let _ = std::io::stdout().flush();
+        
+        self.emit_model_state_changed();
+    }
+
+    /// Emit the current model state to the frontend
+    fn emit_model_state_changed(&self) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        
+        let event_payload = serde_json::json!({
+            "state": &self.model_state,
+            "timestamp": timestamp
+        });
+        
+        if let Err(e) = self.app_handle.emit("model-state-changed", event_payload) {
+            eprintln!("[ModelStateMachine] Failed to emit state change: {:?}", e);
+        }
+    }
+
+    /// Transition to Ready state with the given model
+    fn transition_to_ready(&mut self, model_id: String) {
+        // Also update the legacy model_id field for compatibility
+        self.model_id = Some(model_id.clone());
+        self.transition_model_state(ModelState::Ready { model_id });
+    }
+
+    /// Transition to Error state
+    fn transition_to_error(&mut self, message: String, last_model: Option<String>) {
+        self.transition_model_state(ModelState::Error { message, last_model });
+    }
+
+    /// Transition to ServiceUnavailable state
+    fn transition_to_service_unavailable(&mut self, message: String) {
+        self.transition_model_state(ModelState::ServiceUnavailable { message });
+    }
+
+    /// Transition to ServiceRestarting state
+    fn transition_to_service_restarting(&mut self) {
+        self.transition_model_state(ModelState::ServiceRestarting);
+    }
+
+    /// Transition to Reconnecting state
+    fn transition_to_reconnecting(&mut self) {
+        self.transition_model_state(ModelState::Reconnecting);
+    }
+
     /// Lazily load the GPU embedding model on demand for RAG indexing.
     /// 
     /// NOTE: GPU EMBEDDING DISABLED - This function now always returns an error.
@@ -814,6 +879,9 @@ impl ModelGatewayActor {
 
     pub async fn run(mut self) {
         println!("Initializing Foundry Local Manager via CLI...");
+        
+        // Emit initial Initializing state
+        self.emit_model_state_changed();
 
         // Try to start the service or ensure it's running
         if let Err(e) = self.ensure_service_running().await {
@@ -821,12 +889,19 @@ impl ModelGatewayActor {
                 "Warning: Failed to ensure Foundry service is running: {}",
                 e
             );
+            self.transition_to_service_unavailable(format!("Failed to start service: {}", e));
         }
 
         // Try to get the port and EPs with retries
         // Foundry may take time to start up, so we retry with exponential backoff
-        self.update_connection_info_with_retry(5, Duration::from_secs(2))
+        // 8 retries × 1.5x backoff (2s initial, 10s max) = ~45 seconds max wait
+        let connected = self.update_connection_info_with_retry(8, Duration::from_secs(2))
             .await;
+        
+        // If connection failed and we're still in Initializing, transition to ServiceUnavailable
+        if !connected && matches!(self.model_state, ModelState::Initializing) {
+            self.transition_to_service_unavailable("Could not connect to Foundry service".to_string());
+        }
 
         // Pre-warm the HTTP connection pool so first chat request doesn't pay connection cost
         self.prewarm_http_connection().await;
@@ -1067,27 +1142,56 @@ impl ModelGatewayActor {
                     model_id,
                     respond_to,
                 } => {
+                    // Get the current model before switching
+                    let old_model_id = self.model_id.clone();
+                    
+                    // Skip if already on this model
+                    if old_model_id.as_ref() == Some(&model_id) {
+                        println!("FoundryActor: Model '{}' already selected, skipping switch", model_id);
+                        let _ = respond_to.send(true);
+                        continue;
+                    }
+                    
+                    // Transition to SwitchingModel state
+                    self.transition_model_state(ModelState::SwitchingModel {
+                        from: old_model_id.clone(),
+                        to: model_id.clone(),
+                    });
+                    
                     // Unload the previous model first to free VRAM before loading the new one.
                     // Without this, Foundry may try to load the new model while the old one is
                     // still in memory, causing VRAM pressure on systems with limited GPU memory.
-                    let old_model_id = self.model_id.clone();
                     if let (Some(old_model), Some(port)) = (&old_model_id, self.port) {
-                        if old_model != &model_id {
+                        // Transition to UnloadingModel state
+                        self.transition_model_state(ModelState::UnloadingModel {
+                            model_id: old_model.clone(),
+                            next_model: model_id.clone(),
+                        });
+                        
+                        println!(
+                            "FoundryActor: Unloading previous model '{}' before switching to '{}'",
+                            old_model, model_id
+                        );
+                        
+                        if let Err(e) = self.unload_model_impl(&self.http_client, port, old_model).await {
+                            // Log but don't fail - the new model load may still succeed via Foundry's eviction
                             println!(
-                                "FoundryActor: Unloading previous model '{}' before switching to '{}'",
-                                old_model, model_id
+                                "FoundryActor: ⚠️ Failed to unload previous model (non-fatal): {}",
+                                e
                             );
-                            if let Err(e) = self.unload_model_impl(&self.http_client, port, old_model).await {
-                                // Log but don't fail - the new model load may still succeed via Foundry's eviction
-                                println!(
-                                    "FoundryActor: ⚠️ Failed to unload previous model (non-fatal): {}",
-                                    e
-                                );
-                            }
                         }
                     }
                     
+                    // Transition to LoadingModel state
+                    self.transition_model_state(ModelState::LoadingModel {
+                        model_id: model_id.clone(),
+                    });
+                    
+                    // Update model_id and transition to Ready
                     self.model_id = Some(model_id.clone());
+                    self.transition_to_ready(model_id.clone());
+                    
+                    // Also emit the legacy event for backward compatibility
                     self.emit_model_selected(&model_id);
                     
                     // Pre-warm the model in the background to reduce time-to-first-token
@@ -1130,6 +1234,9 @@ impl ModelGatewayActor {
                     // Check if we need to restart/reconnect
                     if self.port.is_none() || self.available_models.is_empty() {
                         println!("FoundryActor: No models found or port missing. Attempting to restart service...");
+                        
+                        // Transition to Reconnecting state to block prompts during reconnection
+                        self.transition_to_reconnecting();
 
                         // First try to just reconnect (maybe service started in meantime)
                         if !self
@@ -1756,35 +1863,61 @@ impl ModelGatewayActor {
                     model_name,
                     respond_to,
                 } => {
-                    // Acquire GPU mutex for model loading
-                    let _gpu_lock = self.gpu_guard.mutex.lock().await;
-                    *self.gpu_guard.current_operation.write().await = Some(format!("Loading model: {}", model_name));
+                    // Transition to LoadingModel state BEFORE acquiring lock
+                    self.transition_model_state(ModelState::LoadingModel {
+                        model_id: model_name.clone(),
+                    });
                     
-                    let _ = self.app_handle.emit("gpu-status", json!({
-                        "operation": "load_model",
-                        "model": &model_name,
-                        "status": "started"
-                    }));
+                    // Perform the actual model load with GPU lock
+                    let load_result = {
+                        // Acquire GPU mutex for model loading
+                        let _gpu_lock = self.gpu_guard.mutex.lock().await;
+                        *self.gpu_guard.current_operation.write().await = Some(format!("Loading model: {}", model_name));
+                        
+                        let _ = self.app_handle.emit("gpu-status", json!({
+                            "operation": "load_model",
+                            "model": &model_name,
+                            "status": "started"
+                        }));
+                        
+                        println!("FoundryActor: Loading model into VRAM: {}", model_name);
+                        let result = if let Some(port) = self.port {
+                            self.load_model_impl(&self.http_client, port, &model_name).await
+                        } else {
+                            Err("Foundry service not available".to_string())
+                        };
+                        
+                        *self.gpu_guard.current_operation.write().await = None;
+                        let _ = self.app_handle.emit("gpu-status", json!({
+                            "operation": "load_model",
+                            "model": &model_name,
+                            "status": "completed"
+                        }));
+                        
+                        result
+                        // _gpu_lock released here
+                    };
                     
-                    println!("FoundryActor: Loading model into VRAM: {}", model_name);
-                    if let Some(port) = self.port {
-                        let result = self.load_model_impl(&self.http_client, port, &model_name).await;
-                        // Update model_id when load succeeds
-                        if result.is_ok() {
+                    // Now update state after lock is released
+                    match &load_result {
+                        Ok(()) => {
                             self.model_id = Some(model_name.clone());
+                            self.transition_to_ready(model_name.clone());
+                            self.emit_model_selected(&model_name);
                             println!("FoundryActor: Updated selected model to: {}", model_name);
                         }
-                        let _ = respond_to.send(result);
-                    } else {
-                        let _ = respond_to.send(Err("Foundry service not available".to_string()));
+                        Err(e) => {
+                            if e.contains("service not available") {
+                                self.transition_to_service_unavailable(e.clone());
+                            } else {
+                                self.transition_to_error(
+                                    e.clone(),
+                                    self.model_id.clone(),
+                                );
+                            }
+                        }
                     }
-                    
-                    *self.gpu_guard.current_operation.write().await = None;
-                    let _ = self.app_handle.emit("gpu-status", json!({
-                        "operation": "load_model",
-                        "model": &model_name,
-                        "status": "completed"
-                    }));
+                    let _ = respond_to.send(load_result);
                 }
                 FoundryMsg::GetLoadedModels { respond_to } => {
                     println!("FoundryActor: Getting loaded models");
@@ -1807,22 +1940,51 @@ impl ModelGatewayActor {
                     );
                     let _ = respond_to.send(current);
                 }
+                FoundryMsg::GetModelState { respond_to } => {
+                    // Return the current model state machine state
+                    let _ = respond_to.send(self.model_state.clone());
+                }
                 FoundryMsg::Reload { respond_to } => {
                     println!("FoundryActor: Reloading foundry service...");
+                    
+                    // Transition to ServiceRestarting state
+                    self.transition_to_service_restarting();
 
                     // Restart the service
                     let result = match self.restart_service().await {
                         Ok(()) => {
                             // Re-detect port, endpoints, and available models after restart
-                            self.update_connection_info().await;
-
-                            println!("FoundryActor: Service reloaded successfully. Port: {:?}, Models: {}", 
-                                self.port, self.available_models.len());
-                            Ok(())
+                            if self.update_connection_info().await {
+                                println!("FoundryActor: Service reloaded successfully. Port: {:?}, Models: {}", 
+                                    self.port, self.available_models.len());
+                                
+                                // Transition to Ready with current model if we have one
+                                if let Some(ref model_id) = self.model_id {
+                                    self.transition_to_ready(model_id.clone());
+                                } else if !self.available_models.is_empty() {
+                                    // Select first available model if none selected
+                                    let first_model = self.available_models[0].clone();
+                                    self.model_id = Some(first_model.clone());
+                                    self.transition_to_ready(first_model);
+                                } else {
+                                    // Service is up but no models available
+                                    self.transition_to_error(
+                                        "No models available after restart".to_string(),
+                                        None,
+                                    );
+                                }
+                                Ok(())
+                            } else {
+                                self.transition_to_service_unavailable(
+                                    "Could not reconnect after restart".to_string()
+                                );
+                                Err("Failed to reconnect after restart".to_string())
+                            }
                         }
                         Err(e) => {
                             println!("FoundryActor: ❌ Failed to reload service: {:?}", e);
                             println!("FoundryActor: Reload service error details - kind: {:?}", e.kind());
+                            self.transition_to_service_unavailable(format!("Restart failed: {}", e));
                             Err(format!("Failed to reload service: {}", e))
                         }
                     };
@@ -2094,24 +2256,34 @@ impl ModelGatewayActor {
                 let selected = if let Some(model) = persisted_available {
                     println!("[FoundryActor] ✅ SELECTED: {} (from settings)", model);
                     let _ = std::io::stdout().flush();
-                    model
+                    Some(model)
                 } else if let Some(model) = fallback_model {
                     println!("[FoundryActor] ✅ SELECTED: {} (fallback - settings model not available)", model);
                     let _ = std::io::stdout().flush();
-                    model
+                    Some(model)
                 } else {
                     // No phi-4-mini available - this is a problem, but don't pick random model
                     println!("[FoundryActor] ❌ Neither settings model nor phi-4-mini-instruct available!");
                     println!("[FoundryActor] Available models: {:?}", self.available_models);
                     let _ = std::io::stdout().flush();
-                    return true; // Don't select anything - let user choose
+                    None
                 };
                 
                 println!("[FoundryActor] =================================================\n");
                 let _ = std::io::stdout().flush();
                 
-                self.model_id = Some(selected.clone());
-                self.emit_model_selected(&selected);
+                if let Some(model) = selected {
+                    self.model_id = Some(model.clone());
+                    self.transition_to_ready(model.clone());
+                    self.emit_model_selected(&model);
+                } else {
+                    // No model available - transition to error state
+                    self.transition_to_error(
+                        "No compatible model available. Please download phi-4-mini-instruct.".to_string(),
+                        None,
+                    );
+                    return true; // Service is up, but no model selected
+                }
             }
 
             println!(

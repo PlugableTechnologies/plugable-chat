@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
-import { useChatStore, OperationStatus } from '../store/chat-store';
+import { useChatStore, OperationStatus, ModelStateData, getModelStateMessage, isModelStateBlocking } from '../store/chat-store';
 
 // Format elapsed time helper
 const formatElapsedTime = (seconds: number): string => {
@@ -103,6 +103,52 @@ const getOperationIcon = (status: OperationStatus) => {
             return '❌';
         default:
             return '⏳';
+    }
+};
+
+// Get model state colors and icon
+const getModelStateColors = (modelState: ModelStateData) => {
+    switch (modelState.state) {
+        case 'ready':
+            return {
+                bg: 'bg-green-50',
+                border: 'border-green-200',
+                text: 'text-green-800',
+                icon: '✅',
+            };
+        case 'switching_model':
+        case 'unloading_model':
+        case 'loading_model':
+            return {
+                bg: 'bg-amber-50',
+                border: 'border-amber-200',
+                text: 'text-amber-800',
+                icon: '⚡',
+            };
+        case 'service_restarting':
+        case 'reconnecting':
+            return {
+                bg: 'bg-orange-50',
+                border: 'border-orange-200',
+                text: 'text-orange-800',
+                icon: '🔄',
+            };
+        case 'service_unavailable':
+        case 'error':
+            return {
+                bg: 'bg-red-50',
+                border: 'border-red-200',
+                text: 'text-red-800',
+                icon: '❌',
+            };
+        case 'initializing':
+        default:
+            return {
+                bg: 'bg-gray-50',
+                border: 'border-gray-200',
+                text: 'text-gray-700',
+                icon: '⏳',
+            };
     }
 };
 
@@ -299,6 +345,71 @@ export function StreamingWarningBar() {
             >
                 <X size={16} />
             </button>
+        </div>
+    );
+}
+
+// Status bar showing model state machine status (blocking states only)
+export function ModelStateBar() {
+    const { modelState } = useChatStore();
+    const [elapsed, setElapsed] = useState(0);
+    
+    // Track elapsed time since state change
+    useEffect(() => {
+        if (!modelState.timestamp || modelState.state === 'ready') {
+            setElapsed(0);
+            return;
+        }
+        
+        const updateElapsed = () => {
+            setElapsed(Math.floor((Date.now() - (modelState.timestamp || Date.now())) / 1000));
+        };
+        
+        updateElapsed();
+        const interval = setInterval(updateElapsed, 1000);
+        return () => clearInterval(interval);
+    }, [modelState]);
+    
+    // Only show for blocking states (not ready)
+    if (!isModelStateBlocking(modelState)) {
+        return null;
+    }
+    
+    const colors = getModelStateColors(modelState);
+    const message = getModelStateMessage(modelState);
+    
+    return (
+        <div className={`model-state-bar flex items-center justify-between px-4 py-2 ${colors.bg} border-b ${colors.border}`}>
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+                {/* Icon with animation for transitional states */}
+                <div className="flex items-center flex-shrink-0">
+                    <span className="text-lg mr-1">{colors.icon}</span>
+                    {modelState.state !== 'error' && modelState.state !== 'service_unavailable' && (
+                        <div className="flex gap-0.5">
+                            <div className={`w-1 h-1 ${colors.text} bg-current rounded-full animate-pulse`} />
+                            <div className={`w-1 h-1 ${colors.text} bg-current rounded-full animate-pulse`} style={{ animationDelay: '200ms' }} />
+                            <div className={`w-1 h-1 ${colors.text} bg-current rounded-full animate-pulse`} style={{ animationDelay: '400ms' }} />
+                        </div>
+                    )}
+                </div>
+                
+                {/* Status message */}
+                <span className={`text-sm font-medium ${colors.text} truncate`}>
+                    {message}
+                </span>
+                
+                {/* Elapsed time for transitional states */}
+                {elapsed > 0 && modelState.state !== 'error' && modelState.state !== 'service_unavailable' && (
+                    <div className={`flex-shrink-0 text-xs ${colors.text} opacity-75 font-mono`}>
+                        {formatElapsedTime(elapsed)}
+                    </div>
+                )}
+                
+                {/* Blocked indicator */}
+                <span className={`flex-shrink-0 text-xs ${colors.text} opacity-60`}>
+                    (prompts blocked)
+                </span>
+            </div>
         </div>
     );
 }

@@ -1045,6 +1045,10 @@ pub enum FoundryMsg {
     GetCurrentModel {
         respond_to: oneshot::Sender<Option<ModelInfo>>,
     },
+    /// Get the current model state machine state
+    GetModelState {
+        respond_to: oneshot::Sender<ModelState>,
+    },
     /// Reload the foundry service
     Reload {
         respond_to: oneshot::Sender<Result<(), String>>,
@@ -1122,6 +1126,95 @@ pub struct FoundryServiceStatus {
     pub model_dir_path: String,
     #[serde(default)]
     pub is_auto_registration_resolved: bool,
+}
+
+// ============ Model State Machine ============
+
+/// Model state machine states for deterministic frontend/backend synchronization.
+/// The backend is the single source of truth; frontend subscribes to state change events.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ModelState {
+    /// App is starting up, model state not yet determined
+    Initializing,
+    /// Model is ready and loaded in VRAM, prompts allowed
+    Ready {
+        model_id: String,
+    },
+    /// User initiated a model switch, determining if unload is needed
+    SwitchingModel {
+        from: Option<String>,
+        to: String,
+    },
+    /// Previous model is being unloaded from VRAM
+    UnloadingModel {
+        model_id: String,
+        next_model: String,
+    },
+    /// New model is being loaded into VRAM
+    LoadingModel {
+        model_id: String,
+    },
+    /// Model load failed, may have fallback
+    Error {
+        message: String,
+        last_model: Option<String>,
+    },
+    /// Foundry service is not available
+    ServiceUnavailable {
+        message: String,
+    },
+    /// Foundry service is restarting
+    ServiceRestarting,
+    /// Attempting to reconnect to Foundry service
+    Reconnecting,
+}
+
+impl ModelState {
+    /// Returns the current model ID if in a ready or transitional state that has one
+    pub fn current_model_id(&self) -> Option<&str> {
+        match self {
+            ModelState::Ready { model_id } => Some(model_id),
+            ModelState::SwitchingModel { from, .. } => from.as_deref(),
+            ModelState::UnloadingModel { model_id, .. } => Some(model_id),
+            ModelState::LoadingModel { model_id } => Some(model_id),
+            ModelState::Error { last_model, .. } => last_model.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Returns true if prompts should be blocked in this state
+    pub fn blocks_prompts(&self) -> bool {
+        !matches!(self, ModelState::Ready { .. })
+    }
+
+    /// Returns a user-friendly status message for this state
+    pub fn status_message(&self) -> String {
+        match self {
+            ModelState::Initializing => "Initializing...".to_string(),
+            ModelState::Ready { model_id } => format!("Ready: {}", model_id),
+            ModelState::SwitchingModel { to, .. } => format!("Switching to {}...", to),
+            ModelState::UnloadingModel { model_id, .. } => format!("Unloading {} from VRAM...", model_id),
+            ModelState::LoadingModel { model_id } => format!("Loading {} into VRAM...", model_id),
+            ModelState::Error { message, .. } => format!("Error: {}", message),
+            ModelState::ServiceUnavailable { message } => format!("Service unavailable: {}", message),
+            ModelState::ServiceRestarting => "Restarting Foundry service...".to_string(),
+            ModelState::Reconnecting => "Reconnecting to Foundry...".to_string(),
+        }
+    }
+}
+
+impl Default for ModelState {
+    fn default() -> Self {
+        ModelState::Initializing
+    }
+}
+
+/// Event payload for model state changes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelStateChangedEvent {
+    pub state: ModelState,
+    pub timestamp: u64,
 }
 
 /// Event payload for model download progress
