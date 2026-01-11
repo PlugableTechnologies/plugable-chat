@@ -1793,6 +1793,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         ? models[0]
                         : state.currentModel
                 }));
+                // Also refresh cachedModels for the main dropdown and modelInfo for capabilities
+                get().fetchCachedModels();
+                get().fetchModelInfo();
             });
             
             // Tool blocked by state machine - show error in status bar
