@@ -8,8 +8,8 @@
  * This allows `npx tauri dev` to use our offline-aware wrapper.
  */
 
-import { existsSync, unlinkSync, symlinkSync, writeFileSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { existsSync, unlinkSync, symlinkSync, writeFileSync, mkdirSync, statSync } from 'fs';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,81 +21,113 @@ const binDir = join(projectRoot, 'node_modules', '.bin');
 const tauriPath = join(binDir, 'tauri');
 const tauriCmdPath = join(binDir, 'tauri.cmd');
 const tauriPs1Path = join(binDir, 'tauri.ps1');
-const targetScript = join(projectRoot, 'scripts', 'tauri-offline.mjs');
-const relativeTarget = '../../scripts/tauri-offline.mjs';
+
+// Use absolute path for Windows, relative for Unix
+const targetScriptAbsolute = resolve(projectRoot, 'scripts', 'tauri-offline.mjs');
+const relativeTargetUnix = '../../scripts/tauri-offline.mjs';
+
+console.log(`[postinstall] Platform: ${process.platform}`);
+console.log(`[postinstall] Project root: ${projectRoot}`);
+console.log(`[postinstall] Target script: ${targetScriptAbsolute}`);
+
+// Verify target script exists
+if (!existsSync(targetScriptAbsolute)) {
+  console.error(`[postinstall] ERROR: Target script not found: ${targetScriptAbsolute}`);
+  console.error('[postinstall] You can still use: npm run tauri dev');
+  process.exit(0); // Don't fail the install
+}
 
 // Ensure .bin directory exists
 if (!existsSync(binDir)) {
+  console.log(`[postinstall] Creating bin directory: ${binDir}`);
   mkdirSync(binDir, { recursive: true });
 }
 
-// Clean up existing files
-for (const p of [tauriPath, tauriCmdPath, tauriPs1Path]) {
+// Helper to safely remove a file
+function safeUnlink(filePath) {
   try {
-    unlinkSync(p);
-  } catch {
-    // File doesn't exist, that's fine
+    if (existsSync(filePath)) {
+      const stat = statSync(filePath);
+      if (stat.isSymbolicLink() || stat.isFile()) {
+        unlinkSync(filePath);
+        console.log(`[postinstall] Removed existing: ${filePath}`);
+      }
+    }
+  } catch (err) {
+    console.log(`[postinstall] Could not remove ${filePath}: ${err.message}`);
   }
 }
+
+// Clean up existing files
+safeUnlink(tauriPath);
+safeUnlink(tauriCmdPath);
+safeUnlink(tauriPs1Path);
 
 if (isWindows) {
   // On Windows, create .cmd and .ps1 wrappers instead of symlinks
   // This avoids the need for admin privileges or Developer Mode
+  // Use absolute path to avoid issues with backslash/forward slash mixing
+  
+  // Escape backslashes for the cmd file
+  const escapedPath = targetScriptAbsolute.replace(/\\/g, '\\\\');
+  // Use forward slashes for PowerShell (works on Windows)
+  const forwardSlashPath = targetScriptAbsolute.replace(/\\/g, '/');
   
   const cmdContent = `@ECHO off\r
-GOTO start\r
-:find_dp0\r
-SET dp0=%~dp0\r
-EXIT /b\r
-:start\r
-SETLOCAL\r
-CALL :find_dp0\r
-\r
-IF EXIST "%dp0%\\node.exe" (\r
-  SET "_prog=%dp0%\\node.exe"\r
-) ELSE (\r
-  SET "_prog=node"\r
-  SET PATHEXT=%PATHEXT:;.JS;=;%\r
-)\r
-\r
-endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\${relativeTarget}" %*\r
+node "${escapedPath}" %*\r
 `;
 
   const ps1Content = `#!/usr/bin/env pwsh
-$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent
-
-$exe=""
-if ($PSVersionTable.PSVersion -lt "6.0" -or $IsWindows) {
-  $exe=".exe"
-}
-$ret=0
-if (Test-Path "$basedir/node$exe") {
-  # Use local node if available
-  & "$basedir/node$exe"  "$basedir/${relativeTarget}" $args
-  $ret=$LASTEXITCODE
-} else {
-  # Use node from PATH
-  & "node$exe"  "$basedir/${relativeTarget}" $args
-  $ret=$LASTEXITCODE
-}
-exit $ret
+& node "${forwardSlashPath}" $args
+exit $LASTEXITCODE
 `;
 
+  // Also create a shell script for Git Bash/MSYS2 users on Windows
+  const shContent = `#!/bin/sh
+node "${forwardSlashPath}" "$@"
+`;
+
+  let success = true;
+  
   try {
     writeFileSync(tauriCmdPath, cmdContent);
-    writeFileSync(tauriPs1Path, ps1Content);
-    console.log('Created tauri CLI wrappers for Windows (.cmd and .ps1)');
+    console.log(`[postinstall] Created: ${tauriCmdPath}`);
   } catch (err) {
-    console.warn(`Warning: Could not create tauri CLI wrappers: ${err.message}`);
-    console.warn('You can still use: npm run tauri dev');
+    console.error(`[postinstall] Failed to create ${tauriCmdPath}: ${err.message}`);
+    success = false;
+  }
+  
+  try {
+    writeFileSync(tauriPs1Path, ps1Content);
+    console.log(`[postinstall] Created: ${tauriPs1Path}`);
+  } catch (err) {
+    console.error(`[postinstall] Failed to create ${tauriPs1Path}: ${err.message}`);
+    success = false;
+  }
+  
+  try {
+    writeFileSync(tauriPath, shContent);
+    console.log(`[postinstall] Created: ${tauriPath}`);
+  } catch (err) {
+    console.error(`[postinstall] Failed to create ${tauriPath}: ${err.message}`);
+    // This one is optional for Git Bash users
+  }
+  
+  if (success) {
+    console.log('[postinstall] Tauri CLI wrappers created successfully');
+  } else {
+    console.warn('[postinstall] Some wrappers could not be created. Use: npm run tauri dev');
   }
 } else {
   // On Unix, use symlink
   try {
-    symlinkSync(relativeTarget, tauriPath);
-    console.log('Created tauri CLI symlink');
+    symlinkSync(relativeTargetUnix, tauriPath);
+    console.log(`[postinstall] Created symlink: ${tauriPath} -> ${relativeTargetUnix}`);
   } catch (err) {
-    console.warn(`Warning: Could not create tauri CLI symlink: ${err.message}`);
-    console.warn('You can still use: npm run tauri dev');
+    console.warn(`[postinstall] Could not create symlink: ${err.message}`);
+    console.warn('[postinstall] You can still use: npm run tauri dev');
   }
 }
+
+console.log('[postinstall] Done');
+
