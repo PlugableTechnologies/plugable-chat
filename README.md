@@ -46,19 +46,21 @@ npx tauri dev
 
 ### Windows
 
-Double-click `requirements.bat` or run in PowerShell:
+Double-click `requirements.bat` or run in Command Prompt/PowerShell:
 
 ```powershell
-.\requirements.ps1
+.\requirements.bat
 ```
 
 This script will:
-- Install Node.js, Rust, Git, Visual Studio Build Tools, and Protocol Buffers via winget
+- Validate prerequisites (Windows version, disk space, network connectivity)
+- Install Visual Studio Build Tools with C++ workload, Microsoft Foundry Local, Node.js, Rust, Git, and Protocol Buffers via winget
+- Verify each installation and provide clear error messages if something fails
 - Initialize the Rust toolchain
 - Run `npm install` automatically
 - Tell you exactly what to do next
 
-> **Note:** After installing Visual Studio Build Tools, you must open Visual Studio Installer and add the "Desktop development with C++" workload.
+> **Tip:** Run `requirements.bat --check` to diagnose issues without installing anything.
 
 Once complete, start the app:
 
@@ -182,6 +184,93 @@ This runs automatically during builds, so you only need to run it manually if yo
 ---
 
 ## Troubleshooting
+
+### Diagnostic Mode
+
+Before troubleshooting manually, run the diagnostic check to identify issues:
+
+```powershell
+# Windows
+.\requirements.bat --check
+
+# macOS/Linux
+./requirements.sh --check
+```
+
+This reports system info, installed components, and network connectivity without making changes.
+
+### Windows Installation Issues
+
+#### ERR_WINGET_MISSING - winget not found
+
+**Symptoms:** Script exits immediately with "winget is required but not installed"
+
+**Solution:**
+1. Open Microsoft Store
+2. Search for "App Installer"
+3. Install or update "App Installer" by Microsoft Corporation
+4. Close and reopen your terminal
+5. Re-run `requirements.bat`
+
+#### ERR_WINGET_TIMEOUT - Installation hangs at "Checking Node.js LTS..."
+
+**Symptoms:** Script appears frozen during package checks or initialization
+
+**Solutions:**
+1. **Check for UAC dialogs** - Look behind the terminal window or in your taskbar for a "User Account Control" prompt
+2. **Install Foundry Local first** - Some users report this prevents hanging:
+   ```powershell
+   winget install Microsoft.FoundryLocal
+   ```
+3. **Reset winget sources** (run PowerShell as Administrator):
+   ```powershell
+   winget source reset --force
+   ```
+4. Restart your computer and try again
+
+#### ERR_CPP_WORKLOAD_MISSING - "link.exe not found" during build
+
+**Symptoms:** Rust compilation fails with linker errors
+
+**Solution:**
+1. Open "Visual Studio Installer" from the Start Menu
+2. Click "Modify" next to "Build Tools 2022"
+3. Check the box for "Desktop development with C++"
+4. Ensure "MSVC v143 - VS 2022 C++ x64/x86 build tools" is selected
+5. Click "Modify" and wait for installation
+6. Open a new terminal and re-run the build
+
+#### ERR_VS_INSTALLER_RUNNING - Visual Studio Installer conflict
+
+**Symptoms:** Script fails because Visual Studio Installer is already running
+
+**Solution:**
+1. Close all Visual Studio Installer windows
+2. Check the system tray for any VS Installer processes
+3. Wait for any pending updates to complete
+4. Re-run `requirements.bat`
+
+#### PowerShell execution policy errors
+
+**Symptoms:** "running scripts is disabled on this system"
+
+**Solution:** Always use `requirements.bat` (not the `.ps1` file directly). The batch wrapper handles execution policy automatically. If issues persist:
+
+```powershell
+# Run in PowerShell as Administrator
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+#### wasm32-wasip1 target installation fails
+
+**Symptoms:** Warning about "rust-std-wasm32-wasi" not available
+
+**Impact:** WASM sandboxing disabled, but the app still works (Python sandbox uses RustPython directly)
+
+**Solution:** This is usually a temporary network issue. You can manually install later:
+```powershell
+rustup target add wasm32-wasip1
+```
 
 ### Git Pull Shows Conflicts in `src-tauri/Cargo.toml`
 

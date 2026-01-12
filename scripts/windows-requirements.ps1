@@ -7,6 +7,12 @@
     This script uses winget to check for and install required dependencies
     in an idempotent manner. It will skip already-installed packages.
 
+.PARAMETER Check
+    Run diagnostic checks only without installing anything.
+
+.PARAMETER Diagnose
+    Alias for -Check. Run diagnostic checks only.
+
 .NOTES
     DO NOT RUN THIS SCRIPT DIRECTLY!
     
@@ -18,6 +24,11 @@
     
     The .bat wrapper ensures proper execution policy and permissions.
 #>
+
+param(
+    [switch]$Check,
+    [switch]$Diagnose
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -56,6 +67,422 @@ $script:InstalledBuildTools = $false
 $script:InstalledToolbox = $false
 $script:InstalledAnything = $false
 
+# =============================================================================
+# ERROR HANDLING AND USER GUIDANCE
+# =============================================================================
+
+# Display a blocking error with clear remediation steps and exit
+function Show-BlockingError {
+    param(
+        [string]$ErrorCode,
+        [string]$Title,
+        [string]$Description,
+        [string[]]$Steps,
+        [string]$HelpUrl = ""
+    )
+    
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host "  INSTALLATION CANNOT CONTINUE         " -ForegroundColor Red
+    Write-Host "  Error Code: $ErrorCode               " -ForegroundColor Red
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "$Title" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host $Description -ForegroundColor White
+    Write-Host ""
+    Write-Host "To fix this issue:" -ForegroundColor Cyan
+    $stepNum = 1
+    foreach ($step in $Steps) {
+        Write-Host "  $stepNum. $step" -ForegroundColor White
+        $stepNum++
+    }
+    if ($HelpUrl) {
+        Write-Host ""
+        Write-Host "For more information: $HelpUrl" -ForegroundColor Gray
+    }
+    Write-Host ""
+    Write-Host "After completing these steps, re-run: .\requirements.bat" -ForegroundColor Green
+    Write-Host ""
+    exit 1
+}
+
+# =============================================================================
+# PREREQUISITE VALIDATION
+# =============================================================================
+
+# Comprehensive prerequisite checks before any installations
+function Test-Prerequisites {
+    Write-Host ""
+    Write-Host "Running prerequisite checks..." -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Check 1: Windows version (require Windows 10 1809+ or Windows 11)
+    Write-Host "  Checking Windows version... " -NoNewline
+    $osVersion = [System.Environment]::OSVersion.Version
+    if ($osVersion.Major -lt 10 -or ($osVersion.Major -eq 10 -and $osVersion.Build -lt 17763)) {
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_WINDOWS_VERSION" `
+            -Title "Windows version too old" `
+            -Description "Plugable Chat requires Windows 10 version 1809 (build 17763) or later. Current build: $($osVersion.Build)" `
+            -Steps @(
+                "Update Windows to version 1809 or later via Settings > Windows Update",
+                "Restart your computer after updating"
+            )
+    }
+    Write-Host "OK (Build $($osVersion.Build))" -ForegroundColor Green
+    
+    # Check 2: winget availability
+    Write-Host "  Checking winget availability... " -NoNewline
+    if (-not (Test-Winget)) {
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_WINGET_MISSING" `
+            -Title "Windows Package Manager (winget) not found" `
+            -Description "winget is required but not installed on this system." `
+            -Steps @(
+                "Open Microsoft Store",
+                "Search for 'App Installer'",
+                "Install or update 'App Installer' by Microsoft Corporation",
+                "Close and reopen your terminal",
+                "Re-run this script"
+            ) `
+            -HelpUrl "https://aka.ms/getwinget"
+    }
+    Write-Host "OK" -ForegroundColor Green
+    
+    # Check 3: Disk space (require at least 10GB free on system drive)
+    Write-Host "  Checking disk space... " -NoNewline
+    try {
+        $systemDriveLetter = $env:SystemDrive[0]
+        $drive = Get-PSDrive -Name $systemDriveLetter -ErrorAction Stop
+        $freeSpaceGB = [math]::Round($drive.Free / 1GB, 1)
+        if ($drive.Free -lt 10GB) {
+            Write-Host "FAILED" -ForegroundColor Red
+            Show-BlockingError -ErrorCode "ERR_DISK_SPACE" `
+                -Title "Insufficient disk space" `
+                -Description "Only $freeSpaceGB GB free on $env:SystemDrive. At least 10 GB required for Visual Studio Build Tools, Rust, and other dependencies." `
+                -Steps @(
+                    "Free up disk space using Windows Disk Cleanup",
+                    "Or run: cleanmgr /d $systemDriveLetter",
+                    "Consider moving large files to another drive"
+                )
+        }
+        Write-Host "OK ($freeSpaceGB GB free)" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "SKIPPED (could not check)" -ForegroundColor Yellow
+    }
+    
+    # Check 4: Network connectivity
+    Write-Host "  Checking network connectivity... " -NoNewline
+    $testUrls = @(
+        @{ Url = "https://github.com"; Name = "GitHub" },
+        @{ Url = "https://aka.ms"; Name = "Microsoft" }
+    )
+    $networkOk = $false
+    $testedUrls = @()
+    foreach ($test in $testUrls) {
+        try {
+            $response = Invoke-WebRequest -Uri $test.Url -UseBasicParsing -TimeoutSec 10 -Method Head -ErrorAction Stop
+            if ($response.StatusCode -eq 200) { 
+                $networkOk = $true
+                break 
+            }
+        }
+        catch {
+            $testedUrls += $test.Name
+        }
+    }
+    if (-not $networkOk) {
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_NETWORK" `
+            -Title "No internet connection" `
+            -Description "Cannot reach GitHub or Microsoft servers. Tested: $($testedUrls -join ', ')" `
+            -Steps @(
+                "Check your internet connection",
+                "If behind a corporate proxy, configure system proxy settings",
+                "If on a corporate network, contact IT for firewall exceptions to github.com and aka.ms",
+                "Try disabling VPN temporarily"
+            )
+    }
+    Write-Host "OK" -ForegroundColor Green
+    
+    # Check 5: Visual Studio Installer not running (would conflict)
+    Write-Host "  Checking for conflicting processes... " -NoNewline
+    $vsInstallerRunning = Get-Process -Name "vs_installer", "vs_installershell" -ErrorAction SilentlyContinue
+    if ($vsInstallerRunning) {
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_VS_INSTALLER_RUNNING" `
+            -Title "Visual Studio Installer is running" `
+            -Description "Close Visual Studio Installer before continuing. It may be performing updates in the background." `
+            -Steps @(
+                "Close all Visual Studio Installer windows",
+                "Check the system tray for Visual Studio Installer",
+                "Wait for any pending updates to complete",
+                "Re-run this script"
+            )
+    }
+    Write-Host "OK" -ForegroundColor Green
+    
+    # Check 6: Not running as SYSTEM or with broken user profile
+    Write-Host "  Checking user environment... " -NoNewline
+    if ([string]::IsNullOrEmpty($env:USERPROFILE) -or -not (Test-Path $env:USERPROFILE)) {
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_USER_PROFILE" `
+            -Title "User profile not accessible" `
+            -Description "Cannot access user profile directory. This may happen when running as SYSTEM or with a corrupted profile." `
+            -Steps @(
+                "Run this script as a regular user, not as SYSTEM",
+                "Ensure your user profile exists at $env:USERPROFILE",
+                "Try logging out and back in"
+            )
+    }
+    Write-Host "OK" -ForegroundColor Green
+    
+    Write-Host ""
+    Write-Host "  All prerequisite checks passed!" -ForegroundColor Green
+    Write-Host ""
+}
+
+# =============================================================================
+# DIAGNOSTIC MODE
+# =============================================================================
+
+function Show-DiagnosticReport {
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  Plugable Chat - Diagnostic Report    " -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    # System info
+    Write-Host "System Information:" -ForegroundColor White
+    Write-Host "  Windows:      $([System.Environment]::OSVersion.VersionString)" -ForegroundColor Gray
+    Write-Host "  Build:        $([System.Environment]::OSVersion.Version.Build)" -ForegroundColor Gray
+    Write-Host "  Architecture: $env:PROCESSOR_ARCHITECTURE" -ForegroundColor Gray
+    Write-Host "  User Profile: $env:USERPROFILE" -ForegroundColor Gray
+    Write-Host ""
+    
+    # Disk space
+    Write-Host "Disk Space:" -ForegroundColor White
+    try {
+        $systemDriveLetter = $env:SystemDrive[0]
+        $drive = Get-PSDrive -Name $systemDriveLetter -ErrorAction Stop
+        $freeSpaceGB = [math]::Round($drive.Free / 1GB, 1)
+        $usedSpaceGB = [math]::Round($drive.Used / 1GB, 1)
+        Write-Host "  $env:SystemDrive Free: $freeSpaceGB GB" -ForegroundColor Gray
+    }
+    catch {
+        Write-Host "  Could not check disk space" -ForegroundColor Yellow
+    }
+    Write-Host ""
+    
+    # Component status
+    Write-Host "Component Status:" -ForegroundColor White
+    
+    # winget
+    Write-Host "  winget:       " -NoNewline
+    if (Test-Winget) {
+        try {
+            $wingetVersion = (winget --version 2>&1) -replace 'v', ''
+            Write-Host "$wingetVersion" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "installed (version unknown)" -ForegroundColor Green
+        }
+    }
+    else {
+        Write-Host "NOT INSTALLED" -ForegroundColor Red
+    }
+    
+    # Node.js
+    Write-Host "  node:         " -NoNewline
+    if (Test-CommandExists "node") {
+        $version = node --version 2>&1
+        Write-Host "$version" -ForegroundColor Green
+    }
+    else {
+        Write-Host "not found" -ForegroundColor Red
+    }
+    
+    # npm
+    Write-Host "  npm:          " -NoNewline
+    if (Test-CommandExists "npm") {
+        $version = npm --version 2>&1
+        Write-Host "$version" -ForegroundColor Green
+    }
+    else {
+        Write-Host "not found" -ForegroundColor Red
+    }
+    
+    # Rust
+    Write-Host "  rustc:        " -NoNewline
+    if (Test-CommandExists "rustc") {
+        $version = (rustc --version 2>&1) -split " " | Select-Object -Index 1
+        Write-Host "$version" -ForegroundColor Green
+    }
+    else {
+        Write-Host "not found" -ForegroundColor Red
+    }
+    
+    # Cargo
+    Write-Host "  cargo:        " -NoNewline
+    if (Test-CommandExists "cargo") {
+        $version = (cargo --version 2>&1) -split " " | Select-Object -Index 1
+        Write-Host "$version" -ForegroundColor Green
+    }
+    else {
+        Write-Host "not found" -ForegroundColor Red
+    }
+    
+    # rustup
+    Write-Host "  rustup:       " -NoNewline
+    if (Test-CommandExists "rustup") {
+        $previousErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $versionOutput = rustup --version 2>$null
+            $version = ($versionOutput -split ' ')[1]
+            Write-Host "$version" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "installed" -ForegroundColor Green
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorPreference
+        }
+    }
+    else {
+        Write-Host "not found" -ForegroundColor Red
+    }
+    
+    # Git
+    Write-Host "  git:          " -NoNewline
+    if (Test-CommandExists "git") {
+        $version = (git --version 2>&1) -replace "git version ", ""
+        Write-Host "$version" -ForegroundColor Green
+    }
+    else {
+        Write-Host "not found" -ForegroundColor Red
+    }
+    
+    # protoc
+    Write-Host "  protoc:       " -NoNewline
+    if (Test-CommandExists "protoc") {
+        $version = (protoc --version 2>&1) -split " " | Select-Object -Last 1
+        Write-Host "$version" -ForegroundColor Green
+    }
+    else {
+        Write-Host "not found" -ForegroundColor Red
+    }
+    
+    # Foundry Local
+    Write-Host "  foundry:      " -NoNewline
+    if (Test-CommandExists "foundry") {
+        Write-Host "installed" -ForegroundColor Green
+    }
+    else {
+        # Check known paths
+        $foundryPaths = @(
+            "$env:LOCALAPPDATA\Programs\Microsoft\FoundryLocal\foundry.exe",
+            "$env:ProgramFiles\Microsoft\FoundryLocal\foundry.exe"
+        )
+        $found = $false
+        foreach ($p in $foundryPaths) {
+            if (Test-Path $p) {
+                Write-Host "installed (not in PATH)" -ForegroundColor Yellow
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) {
+            Write-Host "not found" -ForegroundColor Red
+        }
+    }
+    
+    # toolbox
+    Write-Host "  toolbox:      " -NoNewline
+    if (Test-CommandExists "toolbox") {
+        try {
+            $null = toolbox --version 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "installed" -ForegroundColor Green
+            }
+            else {
+                Write-Host "installed but not working" -ForegroundColor Yellow
+            }
+        }
+        catch {
+            Write-Host "installed but not working" -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "not found (optional)" -ForegroundColor Gray
+    }
+    
+    Write-Host ""
+    
+    # Visual Studio Build Tools
+    Write-Host "Build Tools:" -ForegroundColor White
+    $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vsWhere) {
+        $installPath = & $vsWhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+        if ($installPath) {
+            Write-Host "  VS Build Tools: installed with C++ workload" -ForegroundColor Green
+            Write-Host "    Path: $installPath" -ForegroundColor Gray
+            
+            # Check for link.exe
+            $msvcDir = Join-Path $installPath "VC\Tools\MSVC"
+            if (Test-Path $msvcDir) {
+                $linkExe = Get-ChildItem -Path $msvcDir -Recurse -Filter "link.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($linkExe) {
+                    Write-Host "    link.exe: found" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "    link.exe: NOT FOUND" -ForegroundColor Red
+                }
+            }
+        }
+        else {
+            $anyInstall = & $vsWhere -products * -property installationPath 2>$null | Select-Object -First 1
+            if ($anyInstall) {
+                Write-Host "  VS Build Tools: installed but C++ workload MISSING" -ForegroundColor Yellow
+            }
+            else {
+                Write-Host "  VS Build Tools: not installed" -ForegroundColor Red
+            }
+        }
+    }
+    else {
+        Write-Host "  VS Build Tools: not installed (vswhere not found)" -ForegroundColor Red
+    }
+    Write-Host ""
+    
+    # Network connectivity
+    Write-Host "Network Connectivity:" -ForegroundColor White
+    $endpoints = @(
+        @{ Url = "https://github.com"; Name = "GitHub" },
+        @{ Url = "https://aka.ms"; Name = "Microsoft (aka.ms)" },
+        @{ Url = "https://storage.googleapis.com"; Name = "Google Storage" }
+    )
+    foreach ($endpoint in $endpoints) {
+        Write-Host "  $($endpoint.Name): " -NoNewline
+        try {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $response = Invoke-WebRequest -Uri $endpoint.Url -UseBasicParsing -TimeoutSec 10 -Method Head -ErrorAction Stop
+            $sw.Stop()
+            Write-Host "OK ($($sw.ElapsedMilliseconds)ms)" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "FAILED" -ForegroundColor Red
+        }
+    }
+    Write-Host ""
+    
+    Write-Host "To install missing components, run: .\requirements.bat" -ForegroundColor Cyan
+    Write-Host ""
+}
+
 # Check if winget is available
 function Test-Winget {
     try {
@@ -70,31 +497,84 @@ function Test-Winget {
 # Initialize winget on first run (updates sources, accepts agreements)
 # This prevents hangs during the first package check on fresh systems
 function Initialize-Winget {
-    Write-Host "Initializing winget package sources..." -ForegroundColor Gray
-    Write-Host "  (This may take a moment on first run)" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Initializing Windows Package Manager..." -ForegroundColor Cyan
+    Write-Host "  (This may take 1-2 minutes on first run)" -ForegroundColor Gray
+    Write-Host ""
     
-    # Accept source agreements and update sources in the background
-    # Using 'winget source update' to ensure the package database is ready
-    try {
-        $job = Start-Job -ScriptBlock {
-            # Force winget to initialize by listing sources
-            winget source update --accept-source-agreements 2>&1 | Out-Null
+    # Step 1: Force winget to accept agreements and update sources (blocking with spinner)
+    $spinChars = @('|', '/', '-', '\')
+    $spinIdx = 0
+    $startTime = Get-Date
+    $timeout = 180  # 3 minutes max
+    
+    $job = Start-Job -ScriptBlock {
+        # Multiple attempts to initialize winget
+        winget source update --accept-source-agreements 2>&1 | Out-Null
+        # Trigger package database initialization with a simple list
+        winget list --count 1 --accept-source-agreements 2>&1 | Out-Null
+    }
+    
+    while ($job.State -eq 'Running') {
+        $elapsed = ((Get-Date) - $startTime).TotalSeconds
+        if ($elapsed -gt $timeout) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            Show-BlockingError -ErrorCode "ERR_WINGET_TIMEOUT" `
+                -Title "winget initialization timed out" `
+                -Description "Windows Package Manager took too long to initialize (>3 minutes). This usually indicates a network or configuration issue." `
+                -Steps @(
+                    "Check your internet connection",
+                    "Open Microsoft Store and check for 'App Installer' updates",
+                    "Try running in PowerShell (admin): winget source reset --force",
+                    "Restart your computer and try again"
+                )
         }
         
-        # Wait up to 60 seconds for initialization
-        $completed = Wait-Job -Job $job -Timeout 60
-        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        Write-Host "`r  Initializing... $($spinChars[$spinIdx % 4]) ($([int]$elapsed)s)  " -NoNewline
+        $spinIdx++
+        Start-Sleep -Milliseconds 250
+    }
+    
+    Write-Host "`r  Initialization complete                 " -ForegroundColor Green
+    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    
+    # Step 2: Verify winget actually works now by running a simple command
+    Write-Host "  Verifying winget functionality... " -NoNewline
+    try {
+        $testJob = Start-Job -ScriptBlock {
+            winget list --id Microsoft.WindowsTerminal --accept-source-agreements 2>&1
+        }
+        $testCompleted = Wait-Job -Job $testJob -Timeout 30
         
-        if ($completed) {
-            Write-Host "  Package sources ready" -ForegroundColor Green
+        if ($testCompleted) {
+            $testResult = Receive-Job -Job $testJob
+            Remove-Job -Job $testJob -Force -ErrorAction SilentlyContinue
+            
+            # Check for known error patterns
+            $resultText = $testResult -join "`n"
+            if ($resultText -match "error|failed|0x" -and $resultText -notmatch "No installed package") {
+                throw "winget returned an error"
+            }
+            Write-Host "OK" -ForegroundColor Green
         }
         else {
-            Write-Host "  Source update timed out (continuing anyway)" -ForegroundColor Yellow
+            Stop-Job -Job $testJob -ErrorAction SilentlyContinue
+            Remove-Job -Job $testJob -Force -ErrorAction SilentlyContinue
+            throw "verification timed out"
         }
     }
     catch {
-        Write-Host "  Could not update sources: $_" -ForegroundColor Yellow
-        Write-Host "  (Continuing with installation)" -ForegroundColor Gray
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_WINGET_BROKEN" `
+            -Title "winget is not working correctly" `
+            -Description "Windows Package Manager initialization completed but commands are failing. Error: $_" `
+            -Steps @(
+                "Open Microsoft Store and update 'App Installer'",
+                "Run in PowerShell (as Administrator): winget source reset --force",
+                "If that fails, try: Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe",
+                "Restart your computer"
+            )
     }
     
     Write-Host ""
@@ -444,19 +924,17 @@ function Install-McpToolbox {
             New-Item -ItemType Directory -Path $toolboxDir -Force | Out-Null
         }
         
-        # Download the binary
-        Write-Host "  -> Downloading from Google Storage..." -ForegroundColor Gray
-        # Use a temporary file first to avoid corrupted state if download is interrupted
+        # Download with retry logic
         $tempExe = "$toolboxExe.tmp"
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempExe -UseBasicParsing
+        $downloaded = Invoke-DownloadWithRetry -Url $downloadUrl -OutFile $tempExe -DisplayName $displayName -MaxRetries 3 -TimeoutSec 120
         
-        if (Test-Path $tempExe) {
+        if ($downloaded -and (Test-Path $tempExe)) {
             # Verify the downloaded file before moving it
             if (&$verifyExe $tempExe) {
                 if (Test-Path $toolboxExe) { Remove-Item $toolboxExe -Force }
                 Move-Item $tempExe $toolboxExe
                 
-                Write-Host "  -> Downloaded and verified successfully" -ForegroundColor Green
+                Write-Host "  -> Verified and installed successfully" -ForegroundColor Green
                 
                 # Add to user PATH permanently
                 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -477,11 +955,12 @@ function Install-McpToolbox {
             else {
                 Remove-Item $tempExe -Force -ErrorAction SilentlyContinue
                 Write-Host "  -> Downloaded file is invalid (likely corrupted or wrong architecture)" -ForegroundColor Red
+                Write-Host "  -> (Optional: needed for database demo/integrations)" -ForegroundColor Yellow
                 return $false
             }
         }
         else {
-            Write-Host "  -> Download failed" -ForegroundColor Red
+            Write-Host "  -> (Optional: needed for database demo/integrations)" -ForegroundColor Yellow
             return $false
         }
     }
@@ -523,10 +1002,10 @@ function Install-OnnxRuntime {
         $tempZip = "$env:TEMP\onnxruntime-$onnxVersion.zip"
         $tempExtract = "$env:TEMP\onnxruntime-extract"
         
-        Write-Host "  -> Downloading from GitHub..." -ForegroundColor Gray
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempZip -UseBasicParsing
+        # Download with retry logic
+        $downloaded = Invoke-DownloadWithRetry -Url $downloadUrl -OutFile $tempZip -DisplayName $displayName -MaxRetries 3 -TimeoutSec 180
         
-        if (Test-Path $tempZip) {
+        if ($downloaded -and (Test-Path $tempZip)) {
             Write-Host "  -> Extracting..." -ForegroundColor Gray
             
             # Clean up any previous extraction
@@ -620,6 +1099,235 @@ function Install-WasmTarget {
         Write-Host "  -> Installation failed: $_" -ForegroundColor Red
         Write-Host "  -> (WASM sandboxing will be disabled, but Python sandboxing still works)" -ForegroundColor Gray
     }
+}
+
+# =============================================================================
+# POST-INSTALLATION VERIFICATION FUNCTIONS
+# =============================================================================
+
+# Verify Build Tools installation with double-checks
+function Verify-BuildToolsInstallation {
+    Write-Host "  Verifying Build Tools installation... " -NoNewline
+    
+    # Double-check 1: vswhere can find the installation
+    $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vsWhere)) {
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_BUILD_TOOLS_INCOMPLETE" `
+            -Title "Visual Studio Installer not found" `
+            -Description "Build Tools installation did not complete correctly. The Visual Studio Installer component is missing." `
+            -Steps @(
+                "Open 'Add or remove programs' in Windows Settings",
+                "Search for 'Visual Studio' and uninstall any partial installations",
+                "Restart your computer",
+                "Re-run this script"
+            )
+    }
+    
+    # Double-check 2: C++ workload is installed (link.exe should be available)
+    $vcToolsPath = & $vsWhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+    if (-not $vcToolsPath) {
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_CPP_WORKLOAD_MISSING" `
+            -Title "C++ Build Tools not installed" `
+            -Description "Visual Studio Build Tools is installed but the C++ workload is missing. This is required to compile Rust native dependencies." `
+            -Steps @(
+                "Open 'Visual Studio Installer' from the Start Menu",
+                "Click 'Modify' next to 'Build Tools 2022'",
+                "Check the box for 'Desktop development with C++'",
+                "Click 'Modify' and wait for installation to complete",
+                "Re-run this script"
+            )
+    }
+    
+    # Double-check 3: link.exe is actually findable
+    $msvcDir = Join-Path $vcToolsPath "VC\Tools\MSVC"
+    if (Test-Path $msvcDir) {
+        $linkExe = Get-ChildItem -Path $msvcDir -Recurse -Filter "link.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $linkExe) {
+            Write-Host "WARNING" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "    NOTE: link.exe not found in expected location." -ForegroundColor Yellow
+            Write-Host "    If you see linker errors during build, manually add the C++ workload:" -ForegroundColor Yellow
+            Write-Host "      1. Open 'Visual Studio Installer'" -ForegroundColor Gray
+            Write-Host "      2. Click 'Modify' next to 'Build Tools 2022'" -ForegroundColor Gray
+            Write-Host "      3. Ensure 'MSVC v143 - VS 2022 C++ x64/x86 build tools' is checked" -ForegroundColor Gray
+            Write-Host ""
+            return
+        }
+    }
+    
+    Write-Host "OK" -ForegroundColor Green
+}
+
+# Verify Rust installation with double-checks
+function Verify-RustInstallation {
+    Write-Host "  Verifying Rust installation... " -NoNewline
+    
+    # Refresh PATH first
+    Update-PathFromRegistry
+    Probe-KnownPaths
+    
+    # Double-check 1: rustup is in PATH
+    if (-not (Test-CommandExists "rustup")) {
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_RUSTUP_PATH" `
+            -Title "Rust installed but not in PATH" `
+            -Description "rustup was installed but is not accessible in this terminal session. This usually requires a terminal restart." `
+            -Steps @(
+                "Close this terminal completely",
+                "Open a NEW terminal window (PowerShell or Command Prompt)",
+                "Re-run: .\requirements.bat"
+            )
+    }
+    
+    # Double-check 2: stable toolchain is default
+    $previousErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $defaultToolchain = rustup show active-toolchain 2>&1
+        if ($defaultToolchain -notmatch "stable") {
+            Write-Host "setting default... " -NoNewline -ForegroundColor Yellow
+            rustup default stable 2>&1 | Out-Null
+        }
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorPreference
+    }
+    
+    # Double-check 3: rustc and cargo work
+    try {
+        $null = rustc --version 2>&1
+        $null = cargo --version 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Command failed"
+        }
+    }
+    catch {
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_RUST_BROKEN" `
+            -Title "Rust toolchain is broken" `
+            -Description "rustup is installed but rustc/cargo are not working correctly." `
+            -Steps @(
+                "Run: rustup self uninstall",
+                "Delete folder: $env:USERPROFILE\.cargo",
+                "Delete folder: $env:USERPROFILE\.rustup",
+                "Re-run this script to reinstall Rust"
+            )
+    }
+    
+    Write-Host "OK" -ForegroundColor Green
+}
+
+# Verify Foundry Local installation
+function Verify-FoundryLocalInstallation {
+    Write-Host "  Verifying Foundry Local installation... " -NoNewline
+    
+    # Refresh PATH
+    Update-PathFromRegistry
+    Probe-KnownPaths
+    
+    if (Test-CommandExists "foundry") {
+        Write-Host "OK" -ForegroundColor Green
+        return
+    }
+    
+    # Check if it's installed but not in PATH
+    $foundryPaths = @(
+        "$env:LOCALAPPDATA\Programs\Microsoft\FoundryLocal\foundry.exe",
+        "$env:ProgramFiles\Microsoft\FoundryLocal\foundry.exe",
+        "$env:LOCALAPPDATA\Microsoft\FoundryLocal\foundry.exe"
+    )
+    $foundryFound = $false
+    foreach ($p in $foundryPaths) {
+        if (Test-Path $p) { 
+            $foundryFound = $true
+            break 
+        }
+    }
+    
+    if ($foundryFound) {
+        Write-Host "OK (requires terminal restart for PATH)" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "FAILED" -ForegroundColor Red
+        Show-BlockingError -ErrorCode "ERR_FOUNDRY_MISSING" `
+            -Title "Microsoft Foundry Local installation failed" `
+            -Description "Foundry Local is required for running local AI models. The installation via winget may have failed." `
+            -Steps @(
+                "Try installing manually: winget install Microsoft.FoundryLocal",
+                "Or open Microsoft Store and search for 'Foundry Local'",
+                "Install 'Microsoft Foundry Local' by Microsoft Corporation",
+                "Re-run this script after installation"
+            ) `
+            -HelpUrl "https://github.com/microsoft/Foundry-Local"
+    }
+}
+
+# =============================================================================
+# DOWNLOAD RESILIENCE
+# =============================================================================
+
+# Download a file with retry logic and manual fallback instructions
+function Invoke-DownloadWithRetry {
+    param(
+        [string]$Url,
+        [string]$OutFile,
+        [string]$DisplayName,
+        [int]$MaxRetries = 3,
+        [int]$TimeoutSec = 120
+    )
+    
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        Write-Host "  -> Attempt $attempt of $MaxRetries..." -ForegroundColor Gray
+        
+        try {
+            # Disable progress bar for faster downloads
+            $ProgressPreference = 'SilentlyContinue'
+            
+            # Remove existing temp file if present
+            if (Test-Path $OutFile) {
+                Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+            }
+            
+            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSec
+            
+            if (Test-Path $OutFile) {
+                $size = (Get-Item $OutFile).Length
+                if ($size -gt 100KB) {  # Sanity check - not an error page
+                    $sizeMB = [math]::Round($size / 1MB, 1)
+                    Write-Host "  -> Downloaded successfully ($sizeMB MB)" -ForegroundColor Green
+                    return $true
+                }
+                else {
+                    Write-Host "  -> Downloaded file too small (likely error page)" -ForegroundColor Yellow
+                    Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        catch {
+            Write-Host "  -> Failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        
+        if ($attempt -lt $MaxRetries) {
+            $waitSec = $attempt * 5
+            Write-Host "  -> Retrying in $waitSec seconds..." -ForegroundColor Gray
+            Start-Sleep -Seconds $waitSec
+        }
+    }
+    
+    # All retries failed - provide manual instructions
+    Write-Host ""
+    Write-Host "  ========================================" -ForegroundColor Yellow
+    Write-Host "  Automatic download of $DisplayName failed." -ForegroundColor Yellow
+    Write-Host "  To install manually:" -ForegroundColor White
+    Write-Host "    1. Download from: $Url" -ForegroundColor Gray
+    Write-Host "    2. Save to: $OutFile" -ForegroundColor Gray
+    Write-Host "    3. Re-run this script" -ForegroundColor Gray
+    Write-Host "  ========================================" -ForegroundColor Yellow
+    Write-Host ""
+    
+    return $false
 }
 
 # Verify that critical commands are available
@@ -729,54 +1437,87 @@ function Test-AllCommands {
 
 # Main installation logic
 function Install-Requirements {
-    # Verify winget is available
-    if (-not (Test-Winget)) {
-        Write-Host "ERROR: winget is not available on this system." -ForegroundColor Red
-        Write-Host "Please install the App Installer from the Microsoft Store or update Windows." -ForegroundColor Yellow
-        Write-Host "https://apps.microsoft.com/store/detail/app-installer/9NBLGGH4NNS1" -ForegroundColor Cyan
-        exit 1
-    }
+    # ==========================================================================
+    # PHASE 1: PREREQUISITE VALIDATION (blocking failures)
+    # ==========================================================================
     
-    # Initialize winget sources first (prevents hangs on fresh systems)
+    # Run comprehensive prerequisite checks
+    Test-Prerequisites
+    
+    # Initialize winget sources (with spinner and timeout)
     Initialize-Winget
     
-    Write-Host "Using winget to install dependencies..." -ForegroundColor White
+    # ==========================================================================
+    # PHASE 2: CORE DEPENDENCIES (with UAC warning)
+    # ==========================================================================
+    
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Yellow
+    Write-Host "  IMPORTANT: User Action May Be Needed " -ForegroundColor Yellow
+    Write-Host "========================================" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Some installations require administrator approval." -ForegroundColor White
+    Write-Host "If you see a 'User Account Control' dialog, click 'Yes'." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  >>> The dialog may appear BEHIND this window! <<<" -ForegroundColor Cyan
+    Write-Host "  >>> Check your taskbar if installation seems stuck. <<<" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Press Enter to continue..." -ForegroundColor Gray
+    Read-Host
+    
+    Write-Host ""
+    Write-Host "Installing dependencies..." -ForegroundColor White
     Write-Host ""
     
     $allSucceeded = $true
     
-    # Visual Studio Build Tools - Required for compiling native Rust dependencies on Windows
-    # MUST be installed BEFORE Rust to avoid "installing msvc toolchain without its prerequisites" warning
+    # 1. Visual Studio Build Tools - MUST be installed FIRST
+    # Required for compiling native Rust dependencies on Windows
     # This includes the MSVC compiler and Windows SDK
-    # We use a custom install to include the C++ workload automatically
     if (-not (Install-BuildToolsWithCpp)) {
         $allSucceeded = $false
     }
+    else {
+        # Verify the installation immediately
+        Verify-BuildToolsInstallation
+    }
     
-    # Node.js LTS - Required for frontend build (React/Vite)
+    # 2. Microsoft Foundry Local - Install early to prevent hangs later
+    # Users report that having Foundry Local installed prevents hanging issues
+    if (-not (Install-WingetPackage -PackageId "Microsoft.FoundryLocal" -DisplayName "Microsoft Foundry Local")) {
+        $allSucceeded = $false
+    }
+    else {
+        Verify-FoundryLocalInstallation
+    }
+    
+    # 3. Node.js LTS - Required for frontend build (React/Vite)
     if (-not (Install-WingetPackage -PackageId "OpenJS.NodeJS.LTS" -DisplayName "Node.js LTS" -TrackVariable "Node")) {
         $allSucceeded = $false
     }
     
-    # Rust - Required for Tauri backend (installed after Build Tools to avoid MSVC warning)
+    # 4. Rust - Required for Tauri backend (installed after Build Tools to avoid MSVC warning)
     if (-not (Install-WingetPackage -PackageId "Rustlang.Rustup" -DisplayName "Rust (rustup)" -TrackVariable "Rust")) {
         $allSucceeded = $false
     }
-
-    # Microsoft Foundry Local - Local model runtime
-    if (-not (Install-WingetPackage -PackageId "Microsoft.FoundryLocal" -DisplayName "Microsoft Foundry Local")) {
-        $allSucceeded = $false
-    }
     
-    # Git - For version control (optional but recommended)
+    # 5. Git - For version control (optional but recommended)
     if (-not (Install-WingetPackage -PackageId "Git.Git" -DisplayName "Git" -TrackVariable "Git")) {
         $allSucceeded = $false
     }
     
-    # Protocol Buffers (protoc) - Required for compiling lance-embedding and other protobuf-dependent crates
+    # 6. Protocol Buffers (protoc) - Required for compiling lance-embedding and other protobuf-dependent crates
     if (-not (Install-WingetPackage -PackageId "Google.Protobuf" -DisplayName "Protocol Buffers (protoc)" -TrackVariable "Protoc")) {
         $allSucceeded = $false
     }
+    
+    # ==========================================================================
+    # PHASE 3: OPTIONAL COMPONENTS (non-blocking)
+    # ==========================================================================
+    
+    Write-Host ""
+    Write-Host "Installing optional components..." -ForegroundColor White
+    Write-Host ""
     
     # MCP Database Toolbox - For database demo and MCP database integrations (downloaded from Google Storage)
     Install-McpToolbox  # Optional, don't fail if this doesn't work
@@ -849,6 +1590,9 @@ function Install-Requirements {
             Write-Host "  Running 'rustup default stable'..." -ForegroundColor Gray
             rustup default stable
         }
+        
+        # Verify Rust installation
+        Verify-RustInstallation
     }
     
     # Disable rustup auto-self-update (reduces network calls, enables air-gapped builds)
@@ -970,6 +1714,16 @@ function Install-Requirements {
             Write-Host ""
         }
     }
+}
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
+
+# Handle diagnostic mode (--check or --diagnose flags)
+if ($Check -or $Diagnose) {
+    Show-DiagnosticReport
+    exit 0
 }
 
 # Run the installation

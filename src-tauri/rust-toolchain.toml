@@ -1,5 +1,5 @@
 [toolchain]
 channel = "stable"
-targets = ["wasm32-wasi"]
-
-
+# Note: wasm32-wasip1 target is installed on-demand by build.rs when needed.
+# Removing it from here prevents network-dependent failures during rustup installation.
+# The Python sandbox still works without WASM (uses RustPython directly).
