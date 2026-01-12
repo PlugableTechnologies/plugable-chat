@@ -5,6 +5,7 @@
 //! - Service status parsing structures
 //! - Helper types for model management
 
+use crate::process_utils::HideConsoleWindow;
 use serde::Deserialize;
 
 /// Default fallback model to use when no model is specified or when errors occur.
@@ -18,11 +19,13 @@ pub fn find_foundry_binary() -> String {
     #[cfg(windows)]
     let which_result = std::process::Command::new("where.exe")
         .arg("foundry")
+        .hide_console_window()
         .output();
 
     #[cfg(not(windows))]
     let which_result = std::process::Command::new("which")
         .arg("foundry")
+        .hide_console_window()
         .output();
 
     if let Ok(output) = which_result {

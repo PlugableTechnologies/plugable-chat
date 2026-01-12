@@ -8,6 +8,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
+use crate::process_utils::HideConsoleWindow;
 use crate::protocol::McpHostMsg;
 use crate::settings::{McpServerConfig, Transport};
 
@@ -361,6 +362,9 @@ impl McpToolRouterActor {
 
         // Kill process on drop to avoid zombies
         cmd.kill_on_drop(true);
+
+        // Hide console window on Windows to avoid distracting popups
+        cmd.hide_console_window();
 
         let mut child = cmd
             .spawn()
@@ -874,6 +878,9 @@ impl McpToolRouterActor {
 
         // Kill process on drop
         cmd.kill_on_drop(true);
+
+        // Hide console window on Windows to avoid distracting popups
+        cmd.hide_console_window();
 
         let mut child = cmd
             .spawn()

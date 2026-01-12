@@ -21,6 +21,7 @@ pub mod message_builders;
 pub mod mid_turn_state;
 pub mod model_profiles;
 pub mod paths;
+pub mod process_utils;
 pub mod protocol;
 pub mod python_helpers;
 pub mod repetition_detector;

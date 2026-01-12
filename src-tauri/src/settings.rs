@@ -5,6 +5,7 @@ use tokio::fs;
 
 use crate::agentic_state::RelevancyThresholds;
 use crate::paths;
+use crate::process_utils::HideConsoleWindow;
 
 // ============ Tool Calling Formats ============
 
@@ -954,11 +955,13 @@ pub fn find_toolbox_binary() -> Option<String> {
     #[cfg(windows)]
     let which_result = std::process::Command::new("where.exe")
         .arg("toolbox")
+        .hide_console_window()
         .output();
     
     #[cfg(not(windows))]
     let which_result = std::process::Command::new("which")
         .arg("toolbox")
+        .hide_console_window()
         .output();
     
     if let Ok(output) = which_result {

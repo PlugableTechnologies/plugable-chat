@@ -10,6 +10,7 @@
 use crate::actors::startup_actor::StartupMsg;
 use crate::crash_handler::SuppressCrashDialogGuard;
 use crate::is_verbose_logging_enabled;
+use crate::process_utils::HideConsoleWindow;
 use crate::protocol::{
     CachedModel, CatalogModel, FoundryMsg, FoundryServiceStatus, ModelFamily,
     ModelInfo, ModelState, ReasoningFormat, ResourceStatus, ToolFormat,
@@ -2148,7 +2149,9 @@ impl ModelGatewayActor {
         // Try to start service via CLI: `foundry service start`
         // We use a timeout to prevent hanging indefinitely
         let foundry_bin = find_foundry_binary();
-        let child = Command::new(&foundry_bin).args(&["service", "start"]).output();
+        let mut cmd = Command::new(&foundry_bin);
+        cmd.args(&["service", "start"]).hide_console_window();
+        let child = cmd.output();
 
         let output = match timeout(Duration::from_secs(10), child).await {
             Ok(res) => res?,
@@ -2178,7 +2181,9 @@ impl ModelGatewayActor {
     ) -> std::io::Result<std::process::Output> {
         let foundry_bin = find_foundry_binary();
         println!("FoundryActor: Running `{} {}` ...", foundry_bin, args.join(" "));
-        let child = Command::new(&foundry_bin).args(args).output();
+        let mut cmd = Command::new(&foundry_bin);
+        cmd.args(args).hide_console_window();
+        let child = cmd.output();
         match timeout(Duration::from_secs(timeout_secs), child).await {
             Ok(Ok(output)) => Ok(output),
             Ok(Err(e)) => {
@@ -2379,9 +2384,9 @@ impl ModelGatewayActor {
         let foundry_bin = find_foundry_binary();
         println!("FoundryActor: Detecting port and EPs via '{} service status'...", foundry_bin);
 
-        let child = Command::new(&foundry_bin)
-            .args(&["service", "status"])
-            .output();
+        let mut cmd = Command::new(&foundry_bin);
+        cmd.args(&["service", "status"]).hide_console_window();
+        let child = cmd.output();
 
         match timeout(Duration::from_secs(5), child).await {
             Ok(Ok(output)) => {
@@ -3009,8 +3014,10 @@ impl ModelGatewayActor {
             model_name, foundry_bin
         );
 
-        let output = Command::new(&foundry_bin)
-            .args(["cache", "remove", "--yes", model_name])
+        let mut cmd = Command::new(&foundry_bin);
+        cmd.args(["cache", "remove", "--yes", model_name])
+            .hide_console_window();
+        let output = cmd
             .output()
             .await
             .map_err(|e| format!("Failed to run {} cache remove: {}", foundry_bin, e))?;
