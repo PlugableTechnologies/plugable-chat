@@ -12,7 +12,7 @@ use crate::protocol::{
     ChatMessage, ModelFamily, ModelInput, OpenAITool, ParsedToolCall, PromptOptions,
     ReasoningStyle, ToolFormat, ToolSchema,
 };
-use crate::tool_adapters::{
+use crate::tool_parsing::{
     parse_gemini_tool_calls, parse_granite_tool_calls, parse_hermes_tool_calls,
 };
 use regex::Regex;
@@ -84,7 +84,7 @@ impl ModelProfile {
             ToolFormat::Gemini => parse_gemini_tool_calls(output),
             ToolFormat::Harmony => {
                 // gpt-oss harmony format: <|channel|>commentary to=tool_name...<|message|>args<|call|>
-                crate::tool_adapters::parse_harmony_tool_calls(output)
+                crate::tool_parsing::parse_harmony_tool_calls(output)
             }
             ToolFormat::TextBased => {
                 // Try Hermes-style first, then fall back to generic JSON detection

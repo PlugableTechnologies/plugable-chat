@@ -1,14 +1,22 @@
+//! Model Gateway Actor for Foundry Local integration.
+//!
+//! This module contains the main `ModelGatewayActor` which handles:
+//! - Managing the Foundry Local service lifecycle
+//! - Model loading, unloading, and pre-warming
+//! - Chat completion streaming with cancellation support
+//! - Embedding model management (CPU and GPU)
+//! - Model state machine transitions
+
+use crate::actors::startup_actor::StartupMsg;
 use crate::crash_handler::SuppressCrashDialogGuard;
 use crate::is_verbose_logging_enabled;
 use crate::protocol::{
-    CachedModel, CatalogModel, ChatMessage, FoundryMsg, FoundryServiceStatus, ModelFamily,
-    ModelInfo, ModelState, OpenAITool, ParsedToolCall, ReasoningFormat, ToolFormat,
+    CachedModel, CatalogModel, FoundryMsg, FoundryServiceStatus, ModelFamily,
+    ModelInfo, ModelState, ReasoningFormat, ResourceStatus, ToolFormat,
 };
 use crate::app_state::{GpuResourceGuard, LoggingPersistence, SettingsState};
 use crate::settings;
-use serde::Deserialize;
 use crate::settings::ChatFormatName;
-use crate::tool_adapters::parse_combined_tool_name;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
 // =============================================================================
@@ -23,7 +31,6 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 // use ort::execution_providers::{CUDAExecutionProvider, DirectMLExecutionProvider};
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -31,454 +38,21 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{sleep, timeout};
 
+// Import from sibling modules in the foundry package
+use super::request_builder::build_foundry_chat_request_body;
+use super::service_manager::{
+    find_foundry_binary, parse_foundry_service_status_output, 
+    FoundryModel, FoundryModelsResponse, ServiceStatus, DEFAULT_FALLBACK_MODEL,
+};
+use super::stream_handler::{extract_text_from_stream_chunk, StreamingToolCalls};
+
 /// Target embedding dimension (must match LanceDB schema)
 const EMBEDDING_DIM: usize = 768;
 
-/// Default fallback model to use when no model is specified or when errors occur.
-/// This matches the phi-4-mini-instruct model that is auto-downloaded on first launch.
-const DEFAULT_FALLBACK_MODEL: &str = "phi-4-mini-instruct";
-
-/// Find the foundry CLI executable, checking PATH first then common installation locations.
-/// This provides a fallback for production builds where PATH may not include the foundry binary.
-fn find_foundry_binary() -> String {
-    // First try PATH using which/where (will work after fix_macos_path_env() on macOS, or natively on Windows)
-    #[cfg(windows)]
-    let which_result = std::process::Command::new("where.exe")
-        .arg("foundry")
-        .output();
-
-    #[cfg(not(windows))]
-    let which_result = std::process::Command::new("which")
-        .arg("foundry")
-        .output();
-
-    if let Ok(output) = which_result {
-        if output.status.success() {
-            if let Some(path) = String::from_utf8_lossy(&output.stdout).lines().next() {
-                let path = path.trim();
-                if !path.is_empty() && std::path::Path::new(path).exists() {
-                    return path.to_string();
-                }
-            }
-        }
-    }
-
-    // Fallback to common installation locations
-    let common_paths: &[&str] = &[
-        #[cfg(target_os = "macos")]
-        "/opt/homebrew/bin/foundry",
-        #[cfg(target_os = "macos")]
-        "/usr/local/bin/foundry",
-        #[cfg(target_os = "windows")]
-        "C:\\Program Files\\Microsoft\\Foundry\\foundry.exe",
-        #[cfg(target_os = "windows")]
-        "C:\\Program Files (x86)\\Microsoft\\Foundry\\foundry.exe",
-        #[cfg(target_os = "linux")]
-        "/usr/local/bin/foundry",
-        #[cfg(target_os = "linux")]
-        "/usr/bin/foundry",
-    ];
-
-    for path in common_paths {
-        if std::path::Path::new(path).exists() {
-            println!("FoundryActor: Found foundry at fallback location: {}", path);
-            return path.to_string();
-        }
-    }
-
-    // Also check home directory for user-local installations (common for installers)
-    if let Some(home) = dirs::home_dir() {
-        let home_paths: &[std::path::PathBuf] = &[
-            #[cfg(target_os = "macos")]
-            home.join(".foundry").join("bin").join("foundry"),
-            #[cfg(target_os = "windows")]
-            home.join("AppData").join("Local").join("Microsoft").join("Foundry").join("foundry.exe"),
-            #[cfg(target_os = "linux")]
-            home.join(".foundry").join("bin").join("foundry"),
-        ];
-
-        for path in home_paths {
-            if path.exists() {
-                let path_str = path.to_string_lossy().to_string();
-                println!("FoundryActor: Found foundry in home directory: {}", path_str);
-                return path_str;
-            }
-        }
-    }
-
-    // Last resort: return "foundry" and hope it's in PATH
-    println!("FoundryActor: foundry not found in common locations, trying PATH directly");
-    "foundry".to_string()
-}
-
-/// Accumulator for OpenAI-style streaming tool calls.
-///
-/// In the OpenAI streaming format, tool calls arrive incrementally:
-/// - First chunk contains `id`, `type`, and `function.name`
-/// - Subsequent chunks contain `function.arguments` fragments
-/// - Multiple tool calls are indexed by their `index` field
-#[derive(Default)]
-struct StreamingToolCalls {
-    /// Map of index -> (id, name, accumulated_arguments)
-    calls: HashMap<usize, (String, String, String)>,
-}
-
-impl StreamingToolCalls {
-    /// Process a delta.tool_calls array from a streaming chunk
-    fn process_delta(&mut self, tool_calls: &[Value]) {
-        for tc in tool_calls {
-            let index = tc["index"].as_u64().unwrap_or(0) as usize;
-            let entry = self
-                .calls
-                .entry(index)
-                .or_insert_with(|| (String::new(), String::new(), String::new()));
-
-            // First chunk has id/name
-            if let Some(id) = tc["id"].as_str() {
-                entry.0 = id.to_string();
-            }
-            if let Some(name) = tc["function"]["name"].as_str() {
-                entry.1 = name.to_string();
-            }
-            // Accumulate arguments (streamed incrementally)
-            if let Some(args) = tc["function"]["arguments"].as_str() {
-                entry.2.push_str(args);
-            }
-        }
-    }
-
-    /// Check if any tool calls have been accumulated
-    fn is_empty(&self) -> bool {
-        self.calls.is_empty()
-    }
-
-    /// Convert accumulated tool calls to ParsedToolCall format
-    fn into_parsed_calls(self) -> Vec<ParsedToolCall> {
-        let mut result = Vec::new();
-
-        // Sort by index to maintain order
-        let mut indexed: Vec<_> = self.calls.into_iter().collect();
-        indexed.sort_by_key(|(idx, _)| *idx);
-
-        for (_index, (tool_call_id, name, arguments_str)) in indexed {
-            // Skip entries without a name (incomplete)
-            if name.is_empty() {
-                continue;
-            }
-
-            // Parse the accumulated arguments JSON
-            let arguments = if arguments_str.is_empty() {
-                Value::Object(serde_json::Map::new())
-            } else {
-                serde_json::from_str(&arguments_str).unwrap_or_else(|e| {
-                    println!(
-                        "[StreamingToolCalls] Failed to parse arguments for {}: {}",
-                        name, e
-                    );
-                    println!("[StreamingToolCalls] Raw arguments: {}", arguments_str);
-                    Value::Object(serde_json::Map::new())
-                })
-            };
-
-            // Parse the tool name (may be "server___tool" format)
-            let (server, tool) = parse_combined_tool_name(&name);
-
-            // Build raw representation for display
-            let raw = format!(
-                "<tool_call>{{\"name\": \"{}\", \"arguments\": {}}}</tool_call>",
-                name,
-                serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
-            );
-
-            // Include the native tool call ID if present
-            let id = if tool_call_id.is_empty() {
-                None
-            } else {
-                Some(tool_call_id)
-            };
-
-            result.push(ParsedToolCall {
-                server,
-                tool,
-                arguments,
-                raw,
-                id,
-            });
-        }
-
-        result
-    }
-}
-
-/// Build a chat request body with model-family-specific parameters
-fn build_chat_request_body(
-    model: &str,
-    family: ModelFamily,
-    messages: &[ChatMessage],
-    tools: &Option<Vec<OpenAITool>>,
-    use_native_tools: bool,
-    supports_reasoning: bool,
-    supports_reasoning_effort: bool,
-    reasoning_effort: &str,
-    use_responses_api: bool,
-) -> Value {
-    let mut body = if use_responses_api {
-        json!({
-            "model": model,
-            "input": map_messages_to_responses_input(messages),
-            "stream": true,
-        })
-    } else {
-        json!({
-            "model": model,
-            "messages": messages,
-            "stream": true,
-        })
-    };
-
-    // Note: EP (execution provider) parameter is not passed to completions
-    // as it didn't work reliably. Foundry will auto-select the best EP.
-
-    // Add model-family-specific parameters
-    match family {
-        ModelFamily::GptOss => {
-            // GPT-OSS models: standard OpenAI-compatible parameters
-            body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
-                json!(16384);
-            body["temperature"] = json!(0.7);
-
-            if use_native_tools {
-                if let Some(tool_list) = tools {
-                    body["tools"] = json!(tool_list);
-                }
-            }
-        }
-        ModelFamily::Phi => {
-            // Phi models: may support reasoning_effort
-            if supports_reasoning && supports_reasoning_effort {
-                println!(
-                    "[FoundryActor] Phi model with reasoning, using effort: {}",
-                    reasoning_effort
-                );
-                body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
-                    json!(8192);
-                body["reasoning_effort"] = json!(reasoning_effort);
-                // Note: Reasoning models typically don't use tools in the same request
-            } else {
-                body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
-                    json!(16384);
-                if use_native_tools {
-                    if let Some(tool_list) = tools {
-                        body["tools"] = json!(tool_list);
-                    }
-                }
-            }
-        }
-        ModelFamily::Gemma => {
-            // Gemma models: support temperature and top_k
-            body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
-                json!(8192);
-            body["temperature"] = json!(0.7);
-            // Gemma supports top_k which is useful for controlling randomness
-            body["top_k"] = json!(40);
-
-            if use_native_tools {
-                // Gemma may use a different tool format, but Foundry handles this
-                if let Some(tool_list) = tools {
-                    body["tools"] = json!(tool_list);
-                }
-            }
-        }
-        ModelFamily::Granite => {
-            // IBM Granite models: support repetition_penalty
-            body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
-                json!(8192);
-            body["temperature"] = json!(0.7);
-            // Granite models benefit from repetition penalty
-            body["repetition_penalty"] = json!(1.05);
-
-            if supports_reasoning {
-                // Granite reasoning models use <|thinking|> tags internally
-                println!("[FoundryActor] Granite model with reasoning support");
-            }
-
-            if use_native_tools {
-                if let Some(tool_list) = tools {
-                    body["tools"] = json!(tool_list);
-                }
-            }
-        }
-        ModelFamily::Generic => {
-            // Generic/unknown models: use safe defaults
-            if supports_reasoning && supports_reasoning_effort {
-                body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
-                    json!(8192);
-                body["reasoning_effort"] = json!(reasoning_effort);
-            } else {
-                body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
-                    json!(16384);
-                if use_native_tools {
-                    if let Some(tool_list) = tools {
-                        body["tools"] = json!(tool_list);
-                    }
-                }
-            }
-        }
-    }
-
-    body
-}
-
-/// Convert OpenAI chat messages into Responses API input blocks (text-only)
-fn map_messages_to_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
-    messages
-        .iter()
-        .map(|msg| {
-            json!({
-                "role": msg.role,
-                "content": [
-                    {
-                        "type": "text",
-                        "text": msg.content
-                    }
-                ]
-            })
-        })
-        .collect()
-}
-
-/// Extract streamed text from either Chat Completions or Responses API payloads.
-fn extract_stream_text(json: &Value, use_responses_api: bool) -> Option<String> {
-    // Chat Completions delta string form
-    if let Some(content) = json
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("delta"))
-        .and_then(|d| d.get("content"))
-    {
-        if let Some(text) = content.as_str() {
-            if !text.is_empty() {
-                return Some(text.to_string());
-            }
-        } else if let Some(parts) = content.as_array() {
-            let mut buf = String::new();
-            for part in parts {
-                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                    buf.push_str(text);
-                } else if let Some(text) = part.as_str() {
-                    buf.push_str(text);
-                }
-            }
-            if !buf.is_empty() {
-                return Some(buf);
-            }
-        }
-    }
-
-    if use_responses_api {
-        // Responses API event shapes (best-effort)
-        let candidates = [
-            json.get("output_text_delta")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            json.pointer("/delta/output_text")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            json.pointer("/response/output_text")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        ];
-
-        for cand in candidates {
-            if let Some(text) = cand {
-                if !text.is_empty() {
-                    return Some(text);
-                }
-            }
-        }
-
-        if let Some(delta_obj) = json.get("delta") {
-            if let Some(text) = delta_obj
-                .get("output_text_delta")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                return Some(text.to_string());
-            }
-
-            if let Some(output_arr) = delta_obj.get("output").and_then(|v| v.as_array()) {
-                let mut buf = String::new();
-                for entry in output_arr {
-                    if let Some(content_arr) = entry.get("content").and_then(|c| c.as_array()) {
-                        for part in content_arr {
-                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                buf.push_str(text);
-                            }
-                        }
-                    }
-                }
-                if !buf.is_empty() {
-                    return Some(buf);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn map_messages_to_responses_input_wraps_text() {
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: "hi there".to_string(),
-            system_prompt: None,
-            tool_calls: None,
-            tool_call_id: None,
-        }];
-        let input = map_messages_to_responses_input(&messages);
-        assert_eq!(input.len(), 1);
-        assert_eq!(input[0]["role"], "user");
-        assert_eq!(input[0]["content"][0]["text"], "hi there");
-    }
-
-    #[test]
-    fn extract_stream_text_handles_chat_delta_string() {
-        let payload = json!({"choices":[{"delta":{"content":"hello"}}]});
-        let extracted = extract_stream_text(&payload, false);
-        assert_eq!(extracted.as_deref(), Some("hello"));
-    }
-
-    #[test]
-    fn extract_stream_text_handles_responses_delta() {
-        let payload = json!({"type":"response.output_text.delta","output_text_delta":"hello-resp"});
-        let extracted = extract_stream_text(&payload, true);
-        assert_eq!(extracted.as_deref(), Some("hello-resp"));
-    }
-}
-
-/// Result of parsing `foundry service status` output
-struct ServiceStatus {
-    port: Option<u16>,
-    registered_eps: Vec<String>,
-    valid_eps: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FoundryModel {
-    id: String,
-    #[serde(default)]
-    tags: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FoundryModelsResponse {
-    data: Vec<FoundryModel>,
-}
+// StreamingToolCalls, build_foundry_chat_request_body, convert_chat_messages_to_foundry_format,
+// extract_text_from_stream_chunk, find_foundry_binary, ServiceStatus, FoundryModel, FoundryModelsResponse,
+// and DEFAULT_FALLBACK_MODEL are now imported from sibling modules.
+// See: super::stream_handler, super::request_builder, super::service_manager
 
 pub struct ModelGatewayActor {
     foundry_msg_rx: mpsc::Receiver<FoundryMsg>,
@@ -503,6 +77,8 @@ pub struct ModelGatewayActor {
     http_client: reqwest::Client,
     /// GPU resource guard for serializing GPU operations (prevents memory contention)
     gpu_guard: Arc<GpuResourceGuard>,
+    /// Channel to report status to the startup coordinator
+    startup_tx: Option<mpsc::Sender<StartupMsg>>,
 }
 
 impl ModelGatewayActor {
@@ -513,6 +89,7 @@ impl ModelGatewayActor {
         shared_cpu_embedding_model: Arc<RwLock<Option<Arc<TextEmbedding>>>>,
         logging_persistence: Arc<LoggingPersistence>,
         gpu_guard: Arc<GpuResourceGuard>,
+        startup_tx: Option<mpsc::Sender<StartupMsg>>,
     ) -> Self {
         // Create HTTP client with connection pooling optimized for local service
         let http_client = reqwest::Client::builder()
@@ -537,6 +114,7 @@ impl ModelGatewayActor {
             logging_persistence,
             http_client,
             gpu_guard,
+            startup_tx,
         }
     }
 
@@ -732,6 +310,32 @@ impl ModelGatewayActor {
         
         if let Err(e) = self.app_handle.emit("model-state-changed", event_payload) {
             eprintln!("[ModelStateMachine] Failed to emit state change: {:?}", e);
+        }
+        
+        // Also report to startup coordinator
+        self.report_to_startup_coordinator();
+    }
+
+    /// Report current status to the startup coordinator
+    fn report_to_startup_coordinator(&self) {
+        if let Some(tx) = &self.startup_tx {
+            let foundry_status = if self.port.is_some() {
+                ResourceStatus::Ready
+            } else {
+                ResourceStatus::Initializing
+            };
+
+            let msg = StartupMsg::ReportFoundryStatus {
+                status: foundry_status,
+                model_state: Some(self.model_state.clone()),
+                available_models: Some(self.available_models.clone()),
+                model_info: Some(self.model_info.clone()),
+                current_model: self.model_id.clone(),
+            };
+
+            if let Err(e) = tx.try_send(msg) {
+                eprintln!("[FoundryActor] Failed to report to startup coordinator: {:?}", e);
+            }
         }
     }
 
@@ -1515,7 +1119,7 @@ impl ModelGatewayActor {
 
                             // Rebuild body in case anything changed after restart
                             let body_build_start = std::time::Instant::now();
-                            let current_body = build_chat_request_body(
+                            let current_body = build_foundry_chat_request_body(
                                 &model,
                                 model_family,
                                 &messages,
@@ -1673,7 +1277,7 @@ impl ModelGatewayActor {
                                                                         }
                                                                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                                                                         if let Some(content) =
-                                                                            extract_stream_text(&json, use_responses_api)
+                                                                            extract_text_from_stream_chunk(&json, use_responses_api)
                                                                         {
                                                                             if !content.is_empty() {
                                                                                 token_count += 1;
@@ -1699,7 +1303,7 @@ impl ModelGatewayActor {
 
                                                                             // Accumulate native OpenAI tool calls (delta.tool_calls)
                                                                             if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
-                                                                                streaming_tool_calls.process_delta(tool_calls);
+                                                                                streaming_tool_calls.process_streaming_tool_call_delta(tool_calls);
                                                                             }
                                                                         }
                                                                     }
@@ -2782,8 +2386,7 @@ impl ModelGatewayActor {
         match timeout(Duration::from_secs(5), child).await {
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let status = self.parse_service_status(&stdout);
-                status
+                parse_foundry_service_status_output(&stdout)
             }
             Ok(Err(e)) => {
                 println!("Failed to run foundry status: {}", e);
@@ -2801,62 +2404,6 @@ impl ModelGatewayActor {
                     valid_eps: Vec::new(),
                 }
             }
-        }
-    }
-
-    /// Parse the output of `foundry service status`
-    fn parse_service_status(&self, output: &str) -> ServiceStatus {
-        let mut port = None;
-        let mut registered_eps = Vec::new();
-        let mut valid_eps = Vec::new();
-
-        for line in output.lines() {
-            // Parse port from URL: "http://127.0.0.1:54657" or "https://127.0.0.1:54657"
-            if let Some(start_idx) = line.find("http://127.0.0.1:") {
-                let rest = &line[start_idx + "http://127.0.0.1:".len()..];
-                let port_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if let Ok(p) = port_str.parse::<u16>() {
-                    port = Some(p);
-                    println!("FoundryActor: Detected port {}", p);
-                }
-            } else if let Some(start_idx) = line.find("https://127.0.0.1:") {
-                let rest = &line[start_idx + "https://127.0.0.1:".len()..];
-                let port_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if let Ok(p) = port_str.parse::<u16>() {
-                    port = Some(p);
-                    println!("FoundryActor: Detected port {} (https)", p);
-                }
-            }
-
-            // Parse registered EPs: "registered the following EPs: EP1, EP2."
-            if let Some(start_idx) = line.find("registered the following EPs:") {
-                let rest = &line[start_idx + "registered the following EPs:".len()..];
-                // Remove trailing period and parse comma-separated list
-                let eps_str = rest.trim().trim_end_matches('.');
-                registered_eps = eps_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                println!("FoundryActor: Registered EPs: {:?}", registered_eps);
-            }
-
-            // Parse valid EPs: "Valid EPs: EP1, EP2, EP3"
-            if let Some(start_idx) = line.find("Valid EPs:") {
-                let rest = &line[start_idx + "Valid EPs:".len()..];
-                valid_eps = rest
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                println!("FoundryActor: Valid EPs: {:?}", valid_eps);
-            }
-        }
-
-        ServiceStatus {
-            port,
-            registered_eps,
-            valid_eps,
         }
     }
 

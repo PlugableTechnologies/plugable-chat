@@ -3,7 +3,7 @@ import { useEffect, useRef } from "react";
 import type { ReasoningEffort } from "./store/chat-store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
-import { SettingsModal } from "./components/Settings";
+import { SettingsModal } from "./components/settings";
 import { useChatStore } from "./store/chat-store";
 import { useSettingsStore } from "./store/settings-store";
 import { AlertTriangle, X } from "lucide-react";
@@ -64,7 +64,7 @@ function ErrorBanner() {
 
 
 function App() {
-  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, fetchCachedModels, startSystemChat, chatMessages, hasFetchedCachedModels, loadModel, operationStatus } = useChatStore();
+  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, fetchCachedModels, startSystemChat, chatMessages, hasFetchedCachedModels, loadModel, operationStatus, startupState, handshakeComplete } = useChatStore();
   const effortOptions: ReasoningEffort[] = ['low', 'medium', 'high'];
   const hasShownHelpChat = useRef(false);
   console.log("App component rendering...");
@@ -437,10 +437,10 @@ function App() {
           <div className="flex-1" />
           <div className="app-model-controls flex items-center gap-2 text-sm text-gray-500">
             <span className="app-model-label">Model:</span>
-            {isConnecting ? (
+            {(isConnecting || !handshakeComplete || startupState === 'initializing' || startupState === 'connecting_to_foundry') ? (
               <span className="app-model-status text-gray-500 flex items-center gap-1.5">
                 <span className="inline-block w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></span>
-                Connecting...
+                {startupState === 'connecting_to_foundry' ? 'Connecting to Foundry...' : 'Starting...'}
               </span>
             ) : currentModel === 'Unavailable' ? (
               <button onClick={retryConnection} className="app-model-unavailable text-red-600 hover:text-red-800 underline underline-offset-2 transition-colors" title="Click to retry connection">

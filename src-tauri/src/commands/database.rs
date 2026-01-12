@@ -68,6 +68,132 @@ pub struct SchemaRefreshSummary {
     pub errors: Vec<String>,
 }
 
+/// A conflict between table names across sources
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TableNameConflict {
+    /// The table name that conflicts (base name, not fully-qualified)
+    pub table_name: String,
+    /// Sources that have tables with this name
+    pub conflicting_sources: Vec<TableConflictSource>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TableConflictSource {
+    pub source_id: String,
+    pub source_name: String,
+    pub fully_qualified_name: String,
+}
+
+/// Check for table name conflicts across enabled sources.
+/// Returns a list of conflicts where multiple sources have tables with the same base name.
+#[tauri::command]
+pub async fn check_table_name_conflicts(
+    handles: State<'_, ActorHandles>,
+    settings_state: State<'_, SettingsState>,
+) -> Result<Vec<TableNameConflict>, String> {
+    let settings = settings_state.settings.read().await;
+    
+    // Get enabled source IDs and names
+    let enabled_sources: Vec<(String, String)> = settings
+        .database_toolbox
+        .sources
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|s| (s.id.clone(), s.name.clone()))
+        .collect();
+    
+    drop(settings); // Release lock early
+    
+    if enabled_sources.len() < 2 {
+        // No conflicts possible with 0 or 1 source
+        return Ok(vec![]);
+    }
+    
+    // Collect tables for each source
+    let mut source_tables: HashMap<String, Vec<(String, String)>> = HashMap::new(); // source_id -> [(base_name, fq_name)]
+    
+    for (source_id, _source_name) in &enabled_sources {
+        let (tx, rx) = oneshot::channel();
+        if handles
+            .schema_tx
+            .send(SchemaVectorMsg::GetTablesForSource {
+                source_id: source_id.to_string(),
+                respond_to: tx,
+            })
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        
+        if let Ok(tables) = rx.await {
+            let table_pairs: Vec<(String, String)> = tables
+                .iter()
+                .filter(|t| t.enabled)
+                .map(|t| {
+                    // Extract base name (last part of fully-qualified name)
+                    let base_name = t.fully_qualified_name
+                        .split('.')
+                        .last()
+                        .unwrap_or(&t.fully_qualified_name)
+                        .to_lowercase();
+                    (base_name, t.fully_qualified_name.clone())
+                })
+                .collect();
+            source_tables.insert(source_id.to_string(), table_pairs);
+        }
+    }
+    
+    // Find conflicts: same base name in multiple sources
+    let mut base_name_to_sources: HashMap<String, Vec<TableConflictSource>> = HashMap::new();
+    
+    for (source_id, source_name) in &enabled_sources {
+        if let Some(tables) = source_tables.get(source_id.as_str()) {
+            for (base_name, fq_name) in tables {
+                base_name_to_sources
+                    .entry(base_name.clone())
+                    .or_default()
+                    .push(TableConflictSource {
+                        source_id: source_id.to_string(),
+                        source_name: source_name.to_string(),
+                        fully_qualified_name: fq_name.clone(),
+                    });
+            }
+        }
+    }
+    
+    // Filter to only conflicts (2+ sources with same base name)
+    let conflicts: Vec<TableNameConflict> = base_name_to_sources
+        .into_iter()
+        .filter(|(_, sources)| sources.len() > 1)
+        .map(|(table_name, conflicting_sources)| TableNameConflict {
+            table_name,
+            conflicting_sources,
+        })
+        .collect();
+    
+    if !conflicts.is_empty() {
+        println!(
+            "[TableConflictCheck] Found {} table name conflict(s) across enabled sources",
+            conflicts.len()
+        );
+        for conflict in &conflicts {
+            let sources_str: Vec<String> = conflict
+                .conflicting_sources
+                .iter()
+                .map(|s| format!("{} ({})", s.fully_qualified_name, s.source_name))
+                .collect();
+            println!(
+                "[TableConflictCheck]   '{}' exists in: {}",
+                conflict.table_name,
+                sources_str.join(", ")
+            );
+        }
+    }
+    
+    Ok(conflicts)
+}
+
 /// Refresh database schemas for a given configuration
 ///
 /// NOTE: GPU EMBEDDING DISABLED - Always uses CPU embedding model.

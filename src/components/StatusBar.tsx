@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
-import { useChatStore, OperationStatus, ModelStateData, getModelStateMessage, isModelStateBlocking } from '../store/chat-store';
+import { useChatStore, OperationStatus, ModelStateData, getModelStateMessage, isModelStateBlocking, StartupStateType } from '../store/chat-store';
 
 // Format elapsed time helper
 const formatElapsedTime = (seconds: number): string => {
@@ -349,9 +349,130 @@ export function StreamingWarningBar() {
     );
 }
 
+// Get startup state message
+const getStartupStateMessage = (state: StartupStateType): string => {
+    switch (state) {
+        case 'initializing':
+            return 'Starting up...';
+        case 'connecting_to_foundry':
+            return 'Connecting to Foundry...';
+        case 'awaiting_frontend':
+            return 'Synchronizing...';
+        case 'ready':
+            return 'Ready';
+        case 'failed':
+            return 'Startup failed';
+        default:
+            return 'Unknown state';
+    }
+};
+
+// Get startup state colors
+const getStartupStateColors = (state: StartupStateType) => {
+    switch (state) {
+        case 'ready':
+            return {
+                bg: 'bg-green-50',
+                border: 'border-green-200',
+                text: 'text-green-800',
+                icon: '✅'
+            };
+        case 'failed':
+            return {
+                bg: 'bg-red-50',
+                border: 'border-red-300',
+                text: 'text-red-800',
+                icon: '❌'
+            };
+        default:
+            return {
+                bg: 'bg-blue-50',
+                border: 'border-blue-200',
+                text: 'text-blue-800',
+                icon: '🔄'
+            };
+    }
+};
+
+// Status bar showing startup state (only during initialization)
+export function StartupStateBar() {
+    const { startupState, subsystemStatus, handshakeComplete } = useChatStore();
+    const [elapsed, setElapsed] = useState(0);
+    const [startTime] = useState(Date.now());
+    
+    // Track elapsed time since startup began
+    useEffect(() => {
+        if (startupState === 'ready') {
+            setElapsed(0);
+            return;
+        }
+        
+        const updateElapsed = () => {
+            setElapsed(Math.floor((Date.now() - startTime) / 1000));
+        };
+        
+        updateElapsed();
+        const interval = setInterval(updateElapsed, 1000);
+        return () => clearInterval(interval);
+    }, [startupState, startTime]);
+    
+    // Only show during non-ready states (before handshake complete or if failed)
+    if (startupState === 'ready' && handshakeComplete) {
+        return null;
+    }
+    
+    const colors = getStartupStateColors(startupState);
+    const message = getStartupStateMessage(startupState);
+    
+    // Count ready subsystems
+    const subsystems = subsystemStatus ? [
+        { name: 'Foundry', status: subsystemStatus.foundry_service?.status },
+        { name: 'Model', status: subsystemStatus.model?.status },
+        { name: 'Embeddings', status: subsystemStatus.cpu_embedding?.status },
+    ] : [];
+    const readyCount = subsystems.filter(s => s.status === 'ready').length;
+    
+    return (
+        <div className={`startup-state-bar flex items-center justify-between px-4 py-2 ${colors.bg} border-b ${colors.border}`}>
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+                {/* Icon with animation */}
+                <div className="flex items-center flex-shrink-0">
+                    <span className="text-lg mr-1">{colors.icon}</span>
+                    {startupState !== 'ready' && startupState !== 'failed' && (
+                        <div className="flex gap-0.5">
+                            <div className={`w-1 h-1 ${colors.text} bg-current rounded-full animate-pulse`} />
+                            <div className={`w-1 h-1 ${colors.text} bg-current rounded-full animate-pulse`} style={{ animationDelay: '200ms' }} />
+                            <div className={`w-1 h-1 ${colors.text} bg-current rounded-full animate-pulse`} style={{ animationDelay: '400ms' }} />
+                        </div>
+                    )}
+                </div>
+                
+                {/* Status message */}
+                <span className={`text-sm font-medium ${colors.text} truncate`}>
+                    {message}
+                </span>
+                
+                {/* Subsystem progress */}
+                {subsystems.length > 0 && (
+                    <span className={`text-xs ${colors.text} opacity-75`}>
+                        ({readyCount}/{subsystems.length} subsystems)
+                    </span>
+                )}
+                
+                {/* Elapsed time */}
+                {elapsed > 0 && startupState !== 'ready' && startupState !== 'failed' && (
+                    <div className={`flex-shrink-0 text-xs ${colors.text} opacity-75 font-mono`}>
+                        {formatElapsedTime(elapsed)}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
 // Status bar showing model state machine status (blocking states only)
 export function ModelStateBar() {
-    const { modelState } = useChatStore();
+    const { modelState, startupState, handshakeComplete } = useChatStore();
     const [elapsed, setElapsed] = useState(0);
     
     // Track elapsed time since state change
@@ -369,6 +490,11 @@ export function ModelStateBar() {
         const interval = setInterval(updateElapsed, 1000);
         return () => clearInterval(interval);
     }, [modelState]);
+    
+    // Don't show if startup state bar is showing (avoid double bars)
+    if (startupState !== 'ready' || !handshakeComplete) {
+        return null;
+    }
     
     // Only show for blocking states (not ready)
     if (!isModelStateBlocking(modelState)) {

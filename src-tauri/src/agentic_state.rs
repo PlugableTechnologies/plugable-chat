@@ -385,6 +385,16 @@ pub enum AgenticState {
         /// Tool schemas available for calling
         available_for_call: Vec<ToolSchema>,
     },
+    
+    /// After SQL query failed - allows retry with error context
+    SqlErrorRecovery {
+        /// The SQL query that failed
+        failed_sql: String,
+        /// The error message
+        error_message: String,
+        /// The source_id that was used
+        source_id: String,
+    },
 }
 
 impl AgenticState {
@@ -402,6 +412,7 @@ impl AgenticState {
             AgenticState::SqlResultCommentary { .. } => "SQL Result Commentary",
             AgenticState::CodeExecutionHandoff { .. } => "Code Execution Handoff",
             AgenticState::ToolsDiscovered { .. } => "Tools Discovered",
+            AgenticState::SqlErrorRecovery { .. } => "SQL Error Recovery",
         }
     }
 
@@ -506,6 +517,14 @@ impl AgenticState {
                 caps.insert(Capability::McpTools);
                 caps
             }
+            
+            // SQL error recovery allows retry with sql_select
+            AgenticState::SqlErrorRecovery { .. } => {
+                let mut caps = HashSet::new();
+                caps.insert(Capability::SqlQuery);
+                caps.insert(Capability::SchemaSearch);
+                caps
+            }
         }
     }
 }
@@ -532,6 +551,16 @@ pub enum StateEvent {
     SqlExecuted {
         results: SqlResults,
         row_count: usize,
+    },
+    
+    /// SQL query failed with error - allows retry
+    SqlFailed {
+        /// The SQL that was executed
+        sql: String,
+        /// The error message
+        error: String,
+        /// The source_id that was used
+        source_id: String,
     },
     
     /// Python code executed

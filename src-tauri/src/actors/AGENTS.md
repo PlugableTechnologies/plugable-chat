@@ -6,8 +6,8 @@ Each model has a `ModelProfile` that defines:
 - **`ToolFormat`**: How the model outputs tool calls (`OpenAI`, `Hermes`, `Granite`, `Gemini`, `TextBased`).
 - **`ReasoningFormat`**: `None`, `ThinkTags`, `ThinkingTags`, `ChannelBased`.
 
-## Execution Parameters (`foundry_actor.rs`)
-Sets model-family-specific parameters:
+## Execution Parameters (`foundry/request_builder.rs`)
+`build_foundry_chat_request_body()` sets model-family-specific parameters:
 - **GptOss**: `max_tokens=16384`, `temperature=0.7`, native tools.
 - **Phi**: Supports `reasoning_effort` when reasoning model.
 - **Gemma**: `top_k=40`.

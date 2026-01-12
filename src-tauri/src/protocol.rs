@@ -1232,6 +1232,168 @@ pub struct ModelLoadCompleteEvent {
     pub error: Option<String>,
 }
 
+// ============ Application Startup State Machine ============
+
+/// Application startup state machine for coordinating frontend/backend initialization.
+/// The backend is the single source of truth; frontend initiates handshake when ready.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StartupState {
+    /// Initial state, actors spawning
+    Initializing,
+    /// Foundry service detection in progress
+    ConnectingToFoundry,
+    /// Backend ready, waiting for frontend to signal ready
+    AwaitingFrontend,
+    /// Frontend connected, app fully operational
+    Ready,
+    /// Startup failed unrecoverably
+    Failed { message: String },
+}
+
+impl Default for StartupState {
+    fn default() -> Self {
+        StartupState::Initializing
+    }
+}
+
+impl StartupState {
+    /// Returns true if the app is ready for user interaction
+    pub fn is_ready(&self) -> bool {
+        matches!(self, StartupState::Ready)
+    }
+
+    /// Returns a user-friendly status message for this state
+    pub fn status_message(&self) -> String {
+        match self {
+            StartupState::Initializing => "Starting up...".to_string(),
+            StartupState::ConnectingToFoundry => "Connecting to Foundry...".to_string(),
+            StartupState::AwaitingFrontend => "Waiting for UI...".to_string(),
+            StartupState::Ready => "Ready".to_string(),
+            StartupState::Failed { message } => format!("Startup failed: {}", message),
+        }
+    }
+}
+
+/// Status of an individual subsystem/resource during startup
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ResourceStatus {
+    /// Not yet started
+    #[default]
+    Pending,
+    /// Currently initializing
+    Initializing,
+    /// Successfully initialized and ready
+    Ready,
+    /// Initialization failed
+    Failed { message: String },
+    /// Optional feature not configured/available
+    Unavailable,
+}
+
+impl ResourceStatus {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, ResourceStatus::Ready)
+    }
+
+    pub fn is_failed(&self) -> bool {
+        matches!(self, ResourceStatus::Failed { .. })
+    }
+
+    pub fn is_blocking(&self) -> bool {
+        matches!(self, ResourceStatus::Pending | ResourceStatus::Initializing)
+    }
+}
+
+/// Status of all subsystems during startup
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SubsystemStatus {
+    /// Foundry Local service connection status
+    pub foundry_service: ResourceStatus,
+    /// LLM model loading status
+    pub model: ResourceStatus,
+    /// CPU embedding model status
+    pub cpu_embedding: ResourceStatus,
+    /// MCP server connections status
+    pub mcp_servers: ResourceStatus,
+    /// Settings loading status
+    pub settings: ResourceStatus,
+}
+
+impl SubsystemStatus {
+    /// Returns true if all required subsystems are ready
+    pub fn is_core_ready(&self) -> bool {
+        self.foundry_service.is_ready() && self.settings.is_ready()
+    }
+
+    /// Returns true if the model is ready for chat
+    pub fn is_chat_ready(&self) -> bool {
+        self.is_core_ready() && self.model.is_ready()
+    }
+
+    /// Returns true if embeddings are available for RAG/search
+    pub fn is_embedding_ready(&self) -> bool {
+        self.cpu_embedding.is_ready()
+    }
+}
+
+/// Complete snapshot of application state for frontend handshake
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartupSnapshot {
+    /// Overall startup state
+    pub startup_state: StartupState,
+    /// Individual subsystem statuses
+    pub subsystem_status: SubsystemStatus,
+    /// Current model state machine state
+    pub model_state: ModelState,
+    /// Available model IDs
+    pub available_models: Vec<String>,
+    /// Cached model info with capabilities
+    pub model_info: Vec<ModelInfo>,
+    /// Currently selected model (if any)
+    pub current_model: Option<String>,
+    /// Timestamp of snapshot creation
+    pub timestamp: u64,
+}
+
+impl StartupSnapshot {
+    /// Create a snapshot with current timestamp
+    pub fn new(
+        startup_state: StartupState,
+        subsystem_status: SubsystemStatus,
+        model_state: ModelState,
+        available_models: Vec<String>,
+        model_info: Vec<ModelInfo>,
+        current_model: Option<String>,
+    ) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        Self {
+            startup_state,
+            subsystem_status,
+            model_state,
+            available_models,
+            model_info,
+            current_model,
+            timestamp,
+        }
+    }
+}
+
+/// Event payload for startup progress updates
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartupProgressEvent {
+    pub startup_state: StartupState,
+    pub subsystem_status: SubsystemStatus,
+    pub message: String,
+    pub timestamp: u64,
+}
+
 pub enum McpMsg {
     ExecuteTool {
         tool_name: String,

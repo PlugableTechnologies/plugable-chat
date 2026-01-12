@@ -85,6 +85,13 @@ pub enum SchemaVectorMsg {
         table_fq_name: String,
         respond_to: oneshot::Sender<Option<CachedTableSchema>>,
     },
+    /// Look up source_id for a table name (supports partial matching for unqualified names)
+    /// Returns (source_id, fully_qualified_name) if found uniquely
+    LookupTableSource {
+        table_name: String,
+        enabled_sources: Vec<String>,
+        respond_to: oneshot::Sender<Result<(String, String), String>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +259,14 @@ impl SchemaVectorStoreActor {
                         respond_to,
                     } => {
                         let result = get_table_schema_by_name(&tables_table, &table_fq_name).await;
+                        let _ = respond_to.send(result);
+                    }
+                    SchemaVectorMsg::LookupTableSource {
+                        table_name,
+                        enabled_sources,
+                        respond_to,
+                    } => {
+                        let result = lookup_table_source(&tables_table, &table_name, &enabled_sources).await;
                         let _ = respond_to.send(result);
                     }
                 }
@@ -1054,6 +1069,110 @@ async fn get_table_schema_by_name(table: &Table, table_fq_name: &str) -> Option<
         description: descriptions.map(|d| d.value(0).to_string()).filter(|s| !s.is_empty()),
         enabled: enabled_col.map(|c| c.value(0)).unwrap_or(true),
     })
+}
+
+/// Look up source_id for a table name, supporting partial matching.
+/// For example, "chicago_crimes" can match "main.chicago_crimes" in SQLite.
+/// Returns (source_id, fully_qualified_name) if found uniquely among enabled sources.
+async fn lookup_table_source(
+    table: &Table,
+    table_name: &str,
+    enabled_sources: &[String],
+) -> Result<(String, String), String> {
+    if enabled_sources.is_empty() {
+        return Err("No database sources are enabled".to_string());
+    }
+
+    // Build a filter for enabled sources
+    let source_filter = enabled_sources
+        .iter()
+        .map(|s| format!("source_id = '{}'", s.replace("'", "''")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let query = table.query().only_if(format!("({})", source_filter));
+
+    let mut stream = match query.execute().await {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Failed to query tables: {}", e)),
+    };
+
+    // Collect all tables from enabled sources
+    let mut matches: Vec<(String, String)> = Vec::new(); // (source_id, fq_name)
+    let table_name_lower = table_name.to_lowercase();
+
+    while let Some(batch_result) = stream.next().await {
+        let batch = match batch_result {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        let fq_names = batch
+            .column_by_name("table_fq_name")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let source_ids = batch
+            .column_by_name("source_id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let enabled_col = batch
+            .column_by_name("enabled")
+            .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
+
+        if let (Some(fq), Some(src)) = (fq_names, source_ids) {
+            for i in 0..batch.num_rows() {
+                // Skip disabled tables
+                if let Some(enabled) = enabled_col {
+                    if !enabled.value(i) {
+                        continue;
+                    }
+                }
+
+                let fq_name = fq.value(i);
+                let source_id = src.value(i);
+                let fq_lower = fq_name.to_lowercase();
+
+                // Check for exact match first
+                if fq_lower == table_name_lower {
+                    matches.push((source_id.to_string(), fq_name.to_string()));
+                    continue;
+                }
+
+                // Check if table_name matches the last part (e.g., "chicago_crimes" matches "main.chicago_crimes")
+                let parts: Vec<&str> = fq_lower.split('.').collect();
+                if let Some(last_part) = parts.last() {
+                    if *last_part == table_name_lower {
+                        matches.push((source_id.to_string(), fq_name.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    match matches.len() {
+        0 => Err(format!(
+            "Table '{}' not found in any enabled database source. Available sources: {}",
+            table_name,
+            enabled_sources.join(", ")
+        )),
+        1 => {
+            let (source_id, fq_name) = matches.remove(0);
+            println!(
+                "[SchemaVectorActor] Resolved table '{}' -> source='{}', fq_name='{}'",
+                table_name, source_id, fq_name
+            );
+            Ok((source_id, fq_name))
+        }
+        _ => {
+            let conflicts: Vec<String> = matches
+                .iter()
+                .map(|(src, fq)| format!("{} (source: {})", fq, src))
+                .collect();
+            Err(format!(
+                "Ambiguous table name '{}' matches multiple tables: {}. Please use the fully-qualified name.",
+                table_name,
+                conflicts.join(", ")
+            ))
+        }
+    }
 }
 
 // ========== Clear Operations ==========

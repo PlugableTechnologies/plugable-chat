@@ -405,6 +405,20 @@ impl AgenticStateMachine {
                 // Model produced final response - go to conversational
                 AgenticState::Conversational
             }
+            
+            StateEvent::SqlFailed { sql, error, source_id } => {
+                // SQL failed - transition to error recovery state for retry
+                println!(
+                    "[StateMachine] SQL failed (source: {}): {}",
+                    if source_id.is_empty() { "<none>" } else { &source_id },
+                    error
+                );
+                AgenticState::SqlErrorRecovery {
+                    failed_sql: sql,
+                    error_message: error,
+                    source_id,
+                }
+            }
         };
 
         self.transition_to(new_state);
@@ -478,6 +492,11 @@ impl AgenticStateMachine {
                 tool_name == "python_execution"
                     || available_for_call.iter().any(|s| s.name == tool_name)
             }
+            
+            // Allow sql_select in error recovery state for retry
+            AgenticState::SqlErrorRecovery { .. } => {
+                tool_name == "sql_select" || tool_name == "schema_search"
+            }
         }
     }
 
@@ -543,6 +562,11 @@ impl AgenticStateMachine {
                 tools.extend(available_for_call.iter().map(|s| s.name.clone()));
                 tools
             }
+            
+            // Allow sql_select in error recovery state for retry
+            AgenticState::SqlErrorRecovery { .. } => {
+                vec!["sql_select".to_string(), "schema_search".to_string()]
+            }
         }
     }
 
@@ -553,6 +577,7 @@ impl AgenticStateMachine {
             AgenticState::CodeExecutionHandoff { .. }
                 | AgenticState::ToolsDiscovered { .. }
                 | AgenticState::SqlResultCommentary { .. }
+                | AgenticState::SqlErrorRecovery { .. }
         )
     }
 
@@ -894,6 +919,29 @@ impl AgenticStateMachine {
                     {}",
                     newly_str,
                     schemas_text
+                ))
+            }
+            
+            AgenticState::SqlErrorRecovery { failed_sql, error_message, source_id } => {
+                // Provide error context and schema to help model retry
+                let source_info = if source_id.is_empty() {
+                    "No database source was specified.".to_string()
+                } else {
+                    format!("Database source: `{}`", source_id)
+                };
+                
+                Some(format!(
+                    "## SQL Error Recovery\n\n\
+                    Your previous SQL query failed. Please review the error and try again.\n\n\
+                    **Failed Query**:\n```sql\n{}\n```\n\n\
+                    **Error**: {}\n\n\
+                    {}\n\n\
+                    **Tips**:\n\
+                    - Check column names match the schema exactly\n\
+                    - Verify table names are correct\n\
+                    - Ensure SQL syntax is valid for this database\n\n\
+                    Please execute a corrected `sql_select` tool call.",
+                    failed_sql, error_message, source_info
                 ))
             }
         }

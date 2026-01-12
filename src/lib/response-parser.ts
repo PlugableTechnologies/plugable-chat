@@ -292,13 +292,57 @@ function looksLikeToolCallJson(jsonStr: string): boolean {
 }
 
 /**
+ * Find the end index of a complete JSON object by counting balanced braces.
+ * Returns -1 if no complete JSON object is found (still streaming).
+ */
+function findBalancedJsonEnd(content: string): number {
+    let braceCount = 0;
+    let inString = false;
+    let escapeNext = false;
+    
+    for (let i = 0; i < content.length; i++) {
+        const char = content[i];
+        
+        if (escapeNext) {
+            escapeNext = false;
+            continue;
+        }
+        
+        if (char === '\\' && inString) {
+            escapeNext = true;
+            continue;
+        }
+        
+        if (char === '"') {
+            inString = !inString;
+            continue;
+        }
+        
+        if (inString) continue;
+        
+        if (char === '{') {
+            braceCount++;
+        } else if (char === '}') {
+            braceCount--;
+            if (braceCount === 0) {
+                // Found balanced JSON end
+                return i;
+            }
+        }
+    }
+    
+    // No complete JSON found
+    return -1;
+}
+
+/**
  * Extract tool_call blocks from text content.
  * Handles:
  * - <tool_call>...</tool_call> (standard format)
  * - <function_call>...</function_call> (Granite format)
  * - ```json { "name": "...", "arguments": {...} } ``` (markdown code blocks)
  * - Unclosed tags during streaming
- * 
+ *
  * Returns an array of MessageParts with tool_call extracted from text.
  */
 function extractToolCalls(parts: MessagePart[]): MessagePart[] {
@@ -394,7 +438,24 @@ function extractToolCalls(parts: MessagePart[]): MessagePart[] {
             const endIdx = rest.indexOf(closeTag);
             
             if (endIdx === -1) {
-                // Unclosed tag (streaming) - capture everything as tool_call
+                // No closing tag found - try to find complete JSON by balanced braces
+                // This handles cases where model generates <tool_call>{...} without </tool_call>
+                const jsonEndIdx = findBalancedJsonEnd(rest);
+                
+                if (jsonEndIdx !== -1) {
+                    // Found complete JSON - extract it as tool_call
+                    const toolContent = rest.substring(0, jsonEndIdx + 1);
+                    result.push({ type: 'tool_call', content: toolContent });
+                    
+                    // Anything after the JSON is text content
+                    const afterJson = rest.substring(jsonEndIdx + 1).trim();
+                    if (afterJson) {
+                        result.push({ type: 'text', content: afterJson });
+                    }
+                    break;
+                }
+                
+                // No complete JSON found (still streaming) - capture everything as tool_call
                 result.push({ type: 'tool_call', content: rest });
                 break;
             }
@@ -457,6 +518,7 @@ export function parseMessageContent(content: string, modelFamily?: ModelFamily):
     // Post-process to extract tool_call blocks from text parts
     // This handles <tool_call> and <function_call> tags that can appear in any format
     const result = extractToolCalls(parts);
+    
     return result;
 }
 

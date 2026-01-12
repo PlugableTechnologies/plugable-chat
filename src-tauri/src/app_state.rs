@@ -7,6 +7,7 @@
 use crate::actors::database_toolbox_actor::DatabaseToolboxMsg;
 use crate::actors::python_actor::PythonMsg;
 use crate::actors::schema_vector_actor::SchemaVectorMsg;
+use crate::actors::startup_actor::StartupMsg;
 use crate::protocol::{FoundryMsg, McpHostMsg, RagMsg, VectorMsg};
 use crate::settings::AppSettings;
 use crate::settings_state_machine::SettingsStateMachine;
@@ -68,6 +69,8 @@ pub struct ActorHandles {
     pub python_tx: mpsc::Sender<PythonMsg>,
     pub database_toolbox_tx: mpsc::Sender<DatabaseToolboxMsg>,
     pub schema_tx: mpsc::Sender<SchemaVectorMsg>,
+    /// Startup coordinator for frontend handshake
+    pub startup_tx: mpsc::Sender<StartupMsg>,
     #[allow(dead_code)]
     pub logging_persistence: Arc<LoggingPersistence>,
     /// GPU resource guard for serializing GPU operations (LLM inference, embeddings)
@@ -134,6 +137,8 @@ pub struct CancellationState {
 /// Progress tracking for a single turn in the chat
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct TurnProgress {
+    /// Whether a turn is actively being processed
+    pub active: bool,
     pub chat_id: Option<String>,
     pub generation_id: u32,
     pub assistant_response: String,

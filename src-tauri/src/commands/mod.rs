@@ -8,6 +8,7 @@
 //! - `database`: Database schema cache management
 //! - `tool`: Tool call detection, execution, and approval
 //! - `chat`: Chat and history management
+//! - `startup`: Startup coordination and handshake
 
 pub mod chat;
 pub mod database;
@@ -15,6 +16,7 @@ pub mod mcp;
 pub mod model;
 pub mod rag;
 pub mod settings;
+pub mod startup;
 pub mod tool;
 
 // Re-export all commands for easy access from lib.rs
@@ -24,4 +26,5 @@ pub use mcp::*;
 pub use model::*;
 pub use rag::*;
 pub use settings::*;
+pub use startup::*;
 pub use tool::*;
