@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "postinstall": "node -e \"const fs=require('fs');const p='node_modules/.bin/tauri';try{fs.unlinkSync(p)}catch{};fs.symlinkSync('../../scripts/tauri-offline.mjs',p)\"",
+    "postinstall": "node scripts/postinstall.mjs",
     "generate-icons": "node node_modules/@tauri-apps/cli/tauri.js icon src-tauri/icons/icon.png --output src-tauri/icons",
     "dev": "vite",
     "build": "npm run generate-icons && tsc && vite build",
