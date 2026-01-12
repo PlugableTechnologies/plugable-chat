@@ -4,6 +4,9 @@
 //! This module provides a trait to hide those windows when spawning external processes
 //! like the Foundry CLI or MCP servers.
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 /// Windows creation flag to prevent console window creation
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -30,7 +33,6 @@ pub trait HideConsoleWindow {
 #[cfg(windows)]
 impl HideConsoleWindow for std::process::Command {
     fn hide_console_window(&mut self) -> &mut Self {
-        use std::os::windows::process::CommandExt;
         self.creation_flags(CREATE_NO_WINDOW)
     }
 }
@@ -38,7 +40,6 @@ impl HideConsoleWindow for std::process::Command {
 #[cfg(windows)]
 impl HideConsoleWindow for tokio::process::Command {
     fn hide_console_window(&mut self) -> &mut Self {
-        use std::os::windows::process::CommandExt;
         self.creation_flags(CREATE_NO_WINDOW)
     }
 }
