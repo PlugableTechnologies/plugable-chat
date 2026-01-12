@@ -1077,7 +1077,16 @@ function Install-WasmTarget {
     }
     
     # Check if target is already installed (check both old and new names)
-    $installedTargets = rustup target list --installed 2>&1
+    # rustup outputs info messages to stderr which PowerShell treats as errors
+    $previousErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $installedTargets = rustup target list --installed 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorPreference
+    }
+    
     if ($installedTargets -match "wasm32-wasi(p1)?$") {
         Write-Host "already installed" -ForegroundColor Green
         return
@@ -1085,8 +1094,11 @@ function Install-WasmTarget {
     
     Write-Host "installing..." -ForegroundColor Yellow
     
+    # rustup outputs info messages to stderr which PowerShell treats as errors
+    $previousErrorPreference = $ErrorActionPreference
     try {
-        rustup target add wasm32-wasip1
+        $ErrorActionPreference = "Continue"
+        $null = rustup target add wasm32-wasip1 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  -> Installed successfully" -ForegroundColor Green
         }
@@ -1098,6 +1110,9 @@ function Install-WasmTarget {
     catch {
         Write-Host "  -> Installation failed: $_" -ForegroundColor Red
         Write-Host "  -> (WASM sandboxing will be disabled, but Python sandboxing still works)" -ForegroundColor Gray
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorPreference
     }
 }
 
@@ -1586,9 +1601,17 @@ function Install-Requirements {
         }
         
         # Run rustup to install the stable toolchain
+        # Note: rustup outputs info messages to stderr which PowerShell treats as errors
         if (Test-CommandExists "rustup") {
             Write-Host "  Running 'rustup default stable'..." -ForegroundColor Gray
-            rustup default stable
+            $previousErrorPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Continue"
+                $null = rustup default stable 2>&1
+            }
+            finally {
+                $ErrorActionPreference = $previousErrorPreference
+            }
         }
         
         # Verify Rust installation
@@ -1596,8 +1619,19 @@ function Install-Requirements {
     }
     
     # Disable rustup auto-self-update (reduces network calls, enables air-gapped builds)
+    # Note: rustup outputs info messages to stderr which PowerShell treats as errors with $ErrorActionPreference = "Stop"
     if (Test-CommandExists "rustup") {
-        rustup set auto-self-update disable 2>$null
+        $previousErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $null = rustup set auto-self-update disable 2>&1
+        }
+        catch {
+            # Ignore - this is optional
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorPreference
+        }
     }
     
     # Install wasm32-wasi target for WASM sandboxing (optional but recommended)
