@@ -5,6 +5,7 @@
 
 pub mod agentic_integration;
 pub mod embedded_sqlite_tests;
+pub mod tabular_integration;
 pub mod tool_capability_integration;
 
 

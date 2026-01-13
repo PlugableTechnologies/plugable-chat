@@ -29,6 +29,7 @@ pub mod settings;
 pub mod settings_state_machine;
 pub mod state_machine;
 pub mod system_prompt;
+pub mod tabular_parser;
 pub mod tool_execution;
 pub mod tool_parsing;
 pub mod tool_capability;
@@ -300,6 +301,68 @@ async fn auto_enable_sql_select(
     }
 }
 
+/// Build Python context JSON from parsed tabular files.
+/// 
+/// Creates variables for each file:
+/// - `headers1`, `headers2`, etc. - Tuples of column names
+/// - `rows1`, `rows2`, etc. - Lists of typed tuples
+/// 
+/// Values are pre-converted to int/float/datetime/None to reduce model errors.
+fn build_tabular_python_context(files: &[tabular_parser::TabularFileData]) -> Option<serde_json::Value> {
+    if files.is_empty() {
+        return None;
+    }
+
+    let mut context = serde_json::Map::new();
+
+    for (index, file) in files.iter().enumerate() {
+        let var_index = index + 1; // 1-indexed
+
+        // Add headers as tuple
+        let headers_key = format!("headers{}", var_index);
+        let headers_value: Vec<serde_json::Value> = file
+            .headers
+            .iter()
+            .map(|h| serde_json::Value::String(h.clone()))
+            .collect();
+        context.insert(headers_key, serde_json::Value::Array(headers_value));
+
+        // Add rows as list of tuples (typed values)
+        let rows_key = format!("rows{}", var_index);
+        let rows_value: Vec<serde_json::Value> = file
+            .rows
+            .iter()
+            .map(|row| {
+                serde_json::Value::Array(
+                    row.iter()
+                        .map(|cell| typed_value_to_json(cell))
+                        .collect(),
+                )
+            })
+            .collect();
+        context.insert(rows_key, serde_json::Value::Array(rows_value));
+    }
+
+    Some(serde_json::Value::Object(context))
+}
+
+/// Convert a TypedValue to a JSON value for Python context injection.
+fn typed_value_to_json(value: &tabular_parser::TypedValue) -> serde_json::Value {
+    match value {
+        tabular_parser::TypedValue::Null => serde_json::Value::Null,
+        tabular_parser::TypedValue::Bool(b) => serde_json::Value::Bool(*b),
+        tabular_parser::TypedValue::Int(i) => serde_json::json!(i),
+        tabular_parser::TypedValue::Float(f) => serde_json::json!(f),
+        tabular_parser::TypedValue::DateTime(s) => {
+            // Wrap datetime as a special object for Python parsing
+            serde_json::json!({
+                "__datetime__": s
+            })
+        }
+        tabular_parser::TypedValue::String(s) => serde_json::Value::String(s.clone()),
+    }
+}
+
 // NOTE: The following functions have been moved to agentic_loop.rs:
 // - extract_python_program_from_response()
 // - is_valid_python_syntax_check()
@@ -333,6 +396,7 @@ async fn chat(
     attached_files: Vec<String>,
     attached_tables: Vec<crate::settings_state_machine::AttachedTableInfo>,
     attached_tools: Vec<String>,
+    attached_tabular_files: Vec<String>, // Paths to CSV/TSV/XLS/XLSX files for Python analysis
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
     settings_sm_state: State<'_, SettingsStateMachineState>,
@@ -524,10 +588,39 @@ async fn chat(
         }
     }
 
+    // Parse tabular files for Python injection
+    let mut parsed_tabular_files: Vec<tabular_parser::TabularFileData> = Vec::new();
+    let mut turn_attached_tabular_files: Vec<crate::settings_state_machine::AttachedTabularFile> = Vec::new();
+    
+    for (index, file_path) in attached_tabular_files.iter().enumerate() {
+        let path = std::path::Path::new(file_path);
+        match tabular_parser::parse_tabular_file(path) {
+            Ok(data) => {
+                let variable_index = index + 1; // 1-indexed for user clarity
+                turn_attached_tabular_files.push(crate::settings_state_machine::AttachedTabularFile {
+                    file_path: data.file_path.clone(),
+                    file_name: data.file_name.clone(),
+                    headers: data.headers.clone(),
+                    row_count: data.row_count,
+                    variable_index,
+                });
+                parsed_tabular_files.push(data);
+                println!("[Chat] Parsed tabular file {}: {} ({} rows, {} columns)", 
+                    variable_index, file_path, 
+                    turn_attached_tabular_files.last().unwrap().row_count,
+                    turn_attached_tabular_files.last().unwrap().headers.len());
+            }
+            Err(e) => {
+                println!("[Chat] Warning: Failed to parse tabular file '{}': {}", file_path, e);
+            }
+        }
+    }
+
     let turn_context = ChatTurnContext {
         attached_files: attached_files.clone(),
         attached_tables: turn_attached_tables.clone(),
         attached_tools: attached_tools.clone(),
+        attached_tabular_files: turn_attached_tabular_files.clone(),
     };
 
     // Let state machine compute turn-specific configuration
@@ -1128,12 +1221,20 @@ async fn chat(
         &server_configs,
     );
     
+    // Extract column info from parsed tabular files for prompt generation
+    let tabular_column_info: Vec<Vec<crate::tabular_parser::ColumnInfo>> = parsed_tabular_files
+        .iter()
+        .map(|f| f.columns.clone())
+        .collect();
+
     // Build prompt context - use the raw system prompt, let state machine add context
     let prompt_context = agentic_state::PromptContext {
         base_prompt: configured_system_prompt.clone(),
         has_attachments,
         attached_tables: turn_attached_tables.clone(),
         attached_tools: attached_tools.clone(),
+        attached_tabular_files: turn_attached_tabular_files.clone(),
+        tabular_column_info,
         mcp_context,
         tool_call_format: primary_format_for_prompt,
         model_tool_format: resolved_model_tool_format,
@@ -1290,6 +1391,13 @@ async fn chat(
         pending_approvals: approval_state.pending.clone(),
     };
 
+    // Check if python_execution is in the native tools list
+    // This enables fallback detection of ```python blocks when model doesn't use native format
+    let python_execution_in_native_tools = openai_tools
+        .as_ref()
+        .map(|tools| tools.iter().any(|t| t.function.name == "python_execution"))
+        .unwrap_or(false);
+
     // Build agentic loop config (behavior parameters)
     let agentic_config = AgenticLoopConfig {
         chat_id: chat_id.clone(),
@@ -1308,6 +1416,8 @@ async fn chat(
         chat_format_overrides: chat_format_overrides.clone(),
         enabled_db_sources,
         server_configs: server_configs.clone(), // Combined list!
+        tabular_context: build_tabular_python_context(&parsed_tabular_files),
+        python_execution_in_native_tools,
     };
 
     let turn_progress = turn_tracker.progress.clone();
@@ -1336,6 +1446,7 @@ async fn get_system_prompt_preview(
     attached_files: Vec<String>,
     attached_tables: Vec<crate::settings_state_machine::AttachedTableInfo>,
     attached_tools: Vec<String>,
+    attached_tabular_files: Vec<String>, // Paths to CSV/TSV/XLS/XLSX files
     handles: State<'_, ActorHandles>,
     settings_state: State<'_, SettingsState>,
     launch_config: State<'_, LaunchConfigState>,
@@ -1441,10 +1552,31 @@ async fn get_system_prompt_preview(
         }
     }
 
+    // Build tabular file metadata for preview (lightweight)
+    let turn_attached_tabular_files: Vec<crate::settings_state_machine::AttachedTabularFile> = attached_tabular_files
+        .iter()
+        .enumerate()
+        .map(|(idx, path)| {
+            let file_name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            crate::settings_state_machine::AttachedTabularFile {
+                file_path: path.clone(),
+                file_name,
+                headers: Vec::new(), // Not needed for preview
+                row_count: 0,
+                variable_index: idx + 1,
+            }
+        })
+        .collect();
+
     let turn_context = ChatTurnContext {
         attached_files: attached_files.clone(),
         attached_tables: turn_attached_tables,
         attached_tools: attached_tools.clone(),
+        attached_tabular_files: turn_attached_tabular_files,
     };
 
     let tool_filter = launch_config.tool_filter.clone();
@@ -1559,6 +1691,8 @@ async fn get_system_prompt_preview(
             base_prompt: base_prompt.clone(),
             attached_tables: turn_context.attached_tables.clone(),
             attached_tools: attached_tools,
+            attached_tabular_files: turn_context.attached_tabular_files.clone(),
+            tabular_column_info: Vec::new(), // Not needed for preview
             mcp_context,
             tool_call_format: resolved_capabilities.primary_format,
             model_tool_format,
@@ -1983,6 +2117,7 @@ pub fn run() {
             remove_rag_file,
             get_rag_indexed_files,
             get_test_data_directory,
+            parse_tabular_headers,
             // Settings commands
             get_settings,
             get_default_mcp_test_server,
@@ -2039,7 +2174,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod inline_tests {
-    use crate::settings::{AppSettings, ToolCallFormatName};
+    use crate::settings::{AppSettings, ToolCallFormatName, ToolCallFormatConfig, McpServerConfig};
     use crate::protocol::{ToolFormat, ParsedToolCall};
     use crate::tool_capability::ToolLaunchFilter;
     use crate::python_helpers::{fix_python_indentation, strip_unsupported_python};
@@ -2060,7 +2195,8 @@ mod inline_tests {
         formats: &crate::settings::ToolCallFormatConfig,
         primary_format: ToolCallFormatName,
     ) -> AgenticLoopAction {
-        detect_agentic_loop_action(response, model_family, tool_format, python_tool_mode, formats, primary_format)
+        // Pass false for python_execution_in_native_tools in legacy tests
+        detect_agentic_loop_action(response, model_family, tool_format, python_tool_mode, formats, primary_format, false)
     }
 
     fn hermes_call(name: &str, args: serde_json::Value) -> String {
@@ -2115,18 +2251,20 @@ mod inline_tests {
 
     #[test]
     fn test_fix_python_indentation_preserves_existing() {
+        // When input has existing indentation, preserve it as-is
+        // This prevents incorrectly indenting top-level code after functions
         let input = vec![
             "for i in range(10):".to_string(),
-            "    print(i)".to_string(), // Already indented - resets tracking
-            "print('done')".to_string(), // After explicit indent, we follow it
+            "    print(i)".to_string(), // Already indented
+            "print('done')".to_string(), // Top-level, should stay top-level
         ];
 
         let result = fix_python_indentation(&input);
 
+        // With existing indentation, we preserve the structure exactly
         assert_eq!(result[0], "for i in range(10):");
         assert_eq!(result[1], "    print(i)"); // Preserved
-                                               // After seeing explicit indent, we reset to that level
-        assert_eq!(result[2], "    print('done')");
+        assert_eq!(result[2], "print('done')"); // Stays at top level!
     }
 
     #[test]
@@ -2302,6 +2440,8 @@ mod inline_tests {
                 base_prompt: base_prompt.to_string(),
                 attached_tables: Vec::new(),
                 attached_tools: Vec::new(),
+                attached_tabular_files: Vec::new(),
+                tabular_column_info: Vec::new(),
                 mcp_context: crate::agentic_state::McpToolContext::from_tool_lists(
                     &active_tools,
                     &Vec::new(),

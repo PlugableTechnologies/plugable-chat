@@ -1,0 +1,6 @@
+name,age,salary,hire_date,active,department
+Alice,30,$75000.50,2024-01-15,true,Engineering
+Bob,25,$82000.00,2023-06-01,yes,Sales
+Carol,N/A,$65000.25,2022-03-10,false,Marketing
+David,35,$95000.00,2021-12-25,TRUE,Engineering
+Eve,28,,01/15/2024,no,Sales

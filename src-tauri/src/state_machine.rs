@@ -84,6 +84,10 @@ pub struct AgenticStateMachine {
     attached_tables: Vec<crate::settings_state_machine::AttachedTableInfo>,
     /// Per-chat attached tools
     attached_tools: Vec<String>,
+    /// Per-chat attached tabular files (CSV/TSV/Excel) for Python analysis
+    attached_tabular_files: Vec<crate::settings_state_machine::AttachedTabularFile>,
+    /// Column type info for attached tabular files (parallel to attached_tabular_files)
+    tabular_column_info: Vec<Vec<crate::tabular_parser::ColumnInfo>>,
     
     /// Turn-specific configuration computed from attachments
     turn_config: Option<TurnConfiguration>,
@@ -146,6 +150,8 @@ impl AgenticStateMachine {
             has_attachments: prompt_context.has_attachments,
             attached_tables: prompt_context.attached_tables,
             attached_tools: prompt_context.attached_tools,
+            attached_tabular_files: prompt_context.attached_tabular_files,
+            tabular_column_info: prompt_context.tabular_column_info,
             turn_config: None,
             auto_tool_search: None,
             auto_schema_search: None,
@@ -597,6 +603,7 @@ impl AgenticStateMachine {
             attached_files: Vec::new(), // Not used for mode computation in SM yet
             attached_tables: self.attached_tables.clone(),
             attached_tools: self.attached_tools.clone(),
+            attached_tabular_files: self.attached_tabular_files.clone(),
         };
         
         let config = self.settings_sm.compute_for_turn(settings, filter, &turn_context);
@@ -741,6 +748,17 @@ impl AgenticStateMachine {
         // 7. Python execution section (if enabled and in code mode)
         if self.python_primary && active_capabilities.contains(&Capability::PythonExecution) {
             sections.push(self.build_python_section());
+        }
+
+        // 8. Tabular data section (if tabular files are attached)
+        if !self.attached_tabular_files.is_empty() {
+            let tabular_section = system_prompt::build_tabular_data_prompt(
+                &self.attached_tabular_files,
+                &self.tabular_column_info,
+            );
+            if !tabular_section.is_empty() {
+                sections.push(tabular_section);
+            }
         }
 
         sections
@@ -1360,6 +1378,8 @@ mod tests {
                 mcp_context: crate::agentic_state::McpToolContext::default(),
                 attached_tables: Vec::new(),
                 attached_tools: Vec::new(),
+                attached_tabular_files: Vec::new(),
+                tabular_column_info: Vec::new(),
                 tool_call_format: ToolCallFormatName::Hermes,
                 model_tool_format: None,
                 custom_tool_prompts: HashMap::new(),
@@ -1560,6 +1580,8 @@ mod tests {
                 mcp_context: crate::agentic_state::McpToolContext::default(),
                 attached_tables: Vec::new(),
                 attached_tools: vec!["builtin::python_execution".to_string()],
+                attached_tabular_files: Vec::new(),
+                tabular_column_info: Vec::new(),
                 tool_call_format: ToolCallFormatName::Hermes,
                 model_tool_format: None,
                 custom_tool_prompts: HashMap::new(),
@@ -1614,6 +1636,8 @@ mod tests {
                 mcp_context: crate::agentic_state::McpToolContext::default(),
                 attached_tables: Vec::new(),
                 attached_tools: vec!["my-mcp-server::some_tool".to_string()],
+                attached_tabular_files: Vec::new(),
+                tabular_column_info: Vec::new(),
                 tool_call_format: ToolCallFormatName::Hermes,
                 model_tool_format: None,
                 custom_tool_prompts: HashMap::new(),
@@ -1661,6 +1685,8 @@ mod tests {
                 mcp_context: crate::agentic_state::McpToolContext::default(),
                 attached_tables: vec![attached_table],
                 attached_tools: Vec::new(),
+                attached_tabular_files: Vec::new(),
+                tabular_column_info: Vec::new(),
                 tool_call_format: ToolCallFormatName::Hermes,
                 model_tool_format: None,
                 custom_tool_prompts: HashMap::new(),

@@ -186,6 +186,8 @@ impl Default for HeartbeatState {
 pub struct LaunchOverrides {
     pub model: Option<String>,
     pub initial_prompt: Option<String>,
+    /// Tabular data files to attach for Python analysis (from --table-file)
+    pub table_files: Vec<String>,
 }
 
 /// Global launch configuration state

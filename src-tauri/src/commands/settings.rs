@@ -453,6 +453,8 @@ pub async fn get_state_machine_preview(
         has_attachments: false,
         attached_tables: Vec::new(),
         attached_tools: Vec::new(),
+        attached_tabular_files: Vec::new(),
+        tabular_column_info: Vec::new(),
         mcp_context: agentic_state::McpToolContext::default(),
         tool_call_format: guard.tool_call_formats.primary,
         model_tool_format: None,

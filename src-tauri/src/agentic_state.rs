@@ -153,6 +153,10 @@ pub struct PromptContext {
     pub attached_tables: Vec<crate::settings_state_machine::AttachedTableInfo>,
     /// Per-chat attached tools
     pub attached_tools: Vec<String>,
+    /// Per-chat attached tabular files (CSV/TSV/Excel)
+    pub attached_tabular_files: Vec<crate::settings_state_machine::AttachedTabularFile>,
+    /// Column type info for attached tabular files
+    pub tabular_column_info: Vec<Vec<crate::tabular_parser::ColumnInfo>>,
     /// MCP tool context
     pub mcp_context: McpToolContext,
     /// Tool call format to use
@@ -172,6 +176,8 @@ impl Default for PromptContext {
             has_attachments: false,
             attached_tables: Vec::new(),
             attached_tools: Vec::new(),
+            attached_tabular_files: Vec::new(),
+            tabular_column_info: Vec::new(),
             mcp_context: McpToolContext::default(),
             tool_call_format: ToolCallFormatName::Hermes,
             model_tool_format: None,
@@ -225,6 +231,8 @@ pub enum Capability {
     SchemaSearch,
     /// Tool search (MCP tool discovery)
     ToolSearch,
+    /// Tabular data analysis (CSV/TSV/Excel files with Python)
+    TabularDataAnalysis,
 }
 
 // ============ Context Data Structures ============

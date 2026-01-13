@@ -102,8 +102,31 @@ pub fn parse_python_execution_args(arguments: &serde_json::Value) -> CodeExecuti
 /// block-starting keywords (for, if, while, def, etc.) and keywords that
 /// indicate staying at the same or reduced level (else, elif, return, etc.).
 ///
+/// IMPORTANT: If the input already has SOME indentation (mixed indented/unindented),
+/// we assume the structure is intentional. Lines with no indentation are top-level.
+/// This prevents incorrectly indenting code like:
+///   def foo():
+///       return x
+///   result = foo()  # This should stay at level 0, not get indented!
+///
 /// This is a best-effort fix and may not handle all edge cases perfectly.
 pub fn fix_python_indentation(lines: &[String]) -> Vec<String> {
+    // First, check if the input already has meaningful indentation
+    // If ANY line has existing indentation, we should preserve the structure
+    // and NOT add indentation to lines that don't have it
+    let has_existing_indentation = lines.iter().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && line.starts_with(' ') || line.starts_with('\t')
+    });
+
+    if has_existing_indentation {
+        // Input has structured indentation - don't modify it
+        // Just ensure consistent formatting (no changes to indentation levels)
+        println!("[python_execution] Code has existing indentation structure, preserving as-is");
+        return lines.to_vec();
+    }
+
+    // Input has NO indentation - apply our heuristic to add it
     // Patterns that start a block (require indented lines after)
     let block_starters = Regex::new(
         r"^\s*(for\s+.+:|while\s+.+:|if\s+.+:|elif\s+.+:|else\s*:|def\s+.+:|class\s+.+:|try\s*:|except.*:|finally\s*:|with\s+.+:)\s*(#.*)?$"
@@ -126,20 +149,6 @@ pub fn fix_python_indentation(lines: &[String]) -> Vec<String> {
         // Skip empty lines
         if trimmed.is_empty() {
             result.push(String::new());
-            continue;
-        }
-
-        // Check if line already has indentation
-        let existing_indent = line.len() - line.trim_start().len();
-        if existing_indent > 0 {
-            // Line already has indentation - trust it and reset our tracking
-            result.push(line.clone());
-            let indent_units = existing_indent / 4;
-            indent_stack.clear();
-            indent_stack.push(indent_units);
-            if block_starters.is_match(trimmed) {
-                indent_stack.push(indent_units + 1);
-            }
             continue;
         }
 
@@ -185,7 +194,7 @@ pub fn fix_python_indentation(lines: &[String]) -> Vec<String> {
     // Check if any indentation was applied
     let had_changes = result.iter().zip(lines.iter()).any(|(a, b)| a != b);
     if had_changes {
-        println!("[python_execution] Auto-fixed Python indentation");
+        println!("[python_execution] Auto-fixed Python indentation (added missing indentation)");
     }
 
     result
@@ -505,18 +514,42 @@ mod tests {
 
     #[test]
     fn test_fix_python_indentation_preserves_existing() {
+        // When input has existing indentation, preserve it as-is
+        // This prevents incorrectly indenting top-level code after functions
         let input = vec![
             "for i in range(10):".to_string(),
-            "    print(i)".to_string(), // Already indented - resets tracking
-            "print('done')".to_string(), // After explicit indent, we follow it
+            "    print(i)".to_string(), // Already indented
+            "print('done')".to_string(), // Top-level, should stay top-level
         ];
 
         let result = fix_python_indentation(&input);
 
+        // With existing indentation, we preserve the structure exactly
         assert_eq!(result[0], "for i in range(10):");
         assert_eq!(result[1], "    print(i)"); // Preserved
-        // After seeing explicit indent, we reset to that level
-        assert_eq!(result[2], "    print('done')");
+        assert_eq!(result[2], "print('done')"); // Stays at top level!
+    }
+
+    #[test]
+    fn test_fix_python_indentation_function_then_call() {
+        // Critical case: function definition followed by call at top level
+        // This is what broke in the reported bug
+        let input = vec![
+            "def sum_units_by_sku(rows1):".to_string(),
+            "    from collections import defaultdict".to_string(),
+            "    unit_sums = defaultdict(int)".to_string(),
+            "    for row in rows1:".to_string(),
+            "        unit_sums[row[0]] += row[1]".to_string(),
+            "    return dict(unit_sums)".to_string(),
+            "result = sum_units_by_sku(rows1)".to_string(),  // Must stay at level 0!
+            "print(json.dumps(result, indent=2))".to_string(), // Must stay at level 0!
+        ];
+
+        let result = fix_python_indentation(&input);
+
+        // Since input has indentation, it should be preserved exactly
+        assert_eq!(result[6], "result = sum_units_by_sku(rows1)");
+        assert_eq!(result[7], "print(json.dumps(result, indent=2))");
     }
 
     #[test]

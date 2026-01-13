@@ -150,6 +150,8 @@ pub struct ChatTurnContext {
     pub attached_tables: Vec<AttachedTableInfo>,
     /// Tools explicitly attached for this chat (built-in and MCP)
     pub attached_tools: Vec<String>,
+    /// Tabular files attached for Python analysis (CSV, TSV, XLS, XLSX)
+    pub attached_tabular_files: Vec<AttachedTabularFile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +160,21 @@ pub struct AttachedTableInfo {
     pub table_fq_name: String,
     pub column_count: usize,
     pub schema_text: Option<String>, // Full schema definition
+}
+
+/// Information about an attached tabular file (CSV, TSV, XLS, XLSX).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachedTabularFile {
+    /// Full path to the file
+    pub file_path: String,
+    /// File name for display
+    pub file_name: String,
+    /// Column headers
+    pub headers: Vec<String>,
+    /// Number of data rows
+    pub row_count: usize,
+    /// Variable index (1-indexed: headers1/rows1, headers2/rows2, etc.)
+    pub variable_index: usize,
 }
 
 /// Configuration for a specific chat turn
@@ -304,6 +321,17 @@ impl SettingsStateMachine {
             // Implicitly enable sql_select if tables are attached
             if filter.builtin_allowed("sql_select") {
                 enabled_tools.push("sql_select".to_string());
+            }
+        }
+
+        // 2b. Tabular Data Analysis Mode (CSV/TSV/Excel files)
+        if !turn_context.attached_tabular_files.is_empty() {
+            enabled_modes.insert(SimplifiedMode::Code);
+            // Implicitly enable python_execution for tabular data analysis
+            if filter.builtin_allowed("python_execution") {
+                if !enabled_tools.contains(&"python_execution".to_string()) {
+                    enabled_tools.push("python_execution".to_string());
+                }
             }
         }
 

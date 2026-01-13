@@ -100,6 +100,11 @@ pub struct AgenticLoopConfig {
     pub enabled_db_sources: Vec<String>,
     /// MCP server configurations
     pub server_configs: Vec<McpServerConfig>,
+    /// Parsed tabular files for Python context injection
+    pub tabular_context: Option<serde_json::Value>,
+    /// Whether python_execution is included in native tools
+    /// (enables fallback detection of ```python blocks when model doesn't use native format)
+    pub python_execution_in_native_tools: bool,
 }
 
 /// Actor handles and shared state for the agentic loop.
@@ -134,6 +139,8 @@ pub struct AgenticLoopHandles {
 ///
 /// This function examines the model's response and determines the next action:
 /// - If Python tool mode is enabled, looks for Python code blocks
+/// - If native tool calling includes python_execution, also checks for Python blocks
+///   (models may output ```python blocks even when they should use native tool calls)
 /// - If tool call formats are enabled, parses for tool call syntax
 /// - Otherwise, treats the response as final text
 pub fn detect_agentic_loop_action(
@@ -143,12 +150,19 @@ pub fn detect_agentic_loop_action(
     python_tool_mode: bool,
     formats: &ToolCallFormatConfig,
     primary_format: ToolCallFormatName,
+    python_execution_in_native_tools: bool,
 ) -> AgenticLoopAction {
     let non_code_formats_enabled = formats.any_non_code();
 
-    if python_tool_mode {
+    // Check for Python code blocks when:
+    // 1. python_tool_mode is enabled (Code Mode), OR
+    // 2. python_execution is available as a native tool (model may output ```python blocks instead of calling the tool)
+    let should_detect_python_blocks = python_tool_mode || python_execution_in_native_tools;
+
+    if should_detect_python_blocks {
         if let Some(code_lines) = extract_python_program_from_response(model_response_text) {
             if is_valid_python_syntax_check(&code_lines) {
+                println!("[detect_agentic_loop_action] Found Python code block, converting to python_execution tool call");
                 return AgenticLoopAction::ToolCalls {
                     calls: vec![ParsedToolCall {
                         server: "builtin".to_string(),
@@ -161,7 +175,8 @@ pub fn detect_agentic_loop_action(
             }
         }
 
-        if !non_code_formats_enabled {
+        // In pure code mode with no other formats, return final response if no code found
+        if python_tool_mode && !non_code_formats_enabled {
             return AgenticLoopAction::Final {
                 response: model_response_text.to_string(),
             };
@@ -332,7 +347,29 @@ pub async fn execute_builtin_tool_call(
             let _ = std::io::stdout().flush();
             let exec_start = std::time::Instant::now();
 
-            let input: CodeExecutionInput = parse_python_execution_args(arguments);
+            let mut input: CodeExecutionInput = parse_python_execution_args(arguments);
+            
+            // Inject tabular file context (headers1/rows1, headers2/rows2, etc.)
+            if let Some(ref tabular_ctx) = config.tabular_context {
+                let merged_context = if let Some(existing) = input.context.take() {
+                    // Merge with any existing context
+                    if let (serde_json::Value::Object(mut existing_map), serde_json::Value::Object(tabular_map)) = 
+                        (existing, tabular_ctx.clone()) 
+                    {
+                        for (k, v) in tabular_map {
+                            existing_map.insert(k, v);
+                        }
+                        serde_json::Value::Object(existing_map)
+                    } else {
+                        tabular_ctx.clone()
+                    }
+                } else {
+                    tabular_ctx.clone()
+                };
+                input.context = Some(merged_context);
+                println!("[AgenticLoop] Injected tabular context into python_execution");
+            }
+            
             let exec_id = format!(
                 "{}-{}-{}",
                 config.chat_id, loop_iteration_index, call_index
@@ -362,19 +399,33 @@ pub async fn execute_builtin_tool_call(
 
                     let has_stdout = !output.stdout.trim().is_empty();
                     let has_stderr = !output.stderr.trim().is_empty();
-                    let result = if output.success {
+                    let (result, is_error) = if output.success {
                         match (has_stdout, has_stderr) {
                             (true, true) => {
-                                format!("STDOUT:\n{}\n\nSTDERR:\n{}", output.stdout, output.stderr)
+                                (format!("STDOUT:\n{}\n\nSTDERR:\n{}", output.stdout, output.stderr), false)
                             }
-                            (true, false) => output.stdout,
-                            (false, true) => format!("(no stdout)\nSTDERR:\n{}", output.stderr),
-                            (false, false) => "(execution completed with no output)".to_string(),
+                            (true, false) => (output.stdout, false),
+                            (false, true) => (format!("(no stdout)\nSTDERR:\n{}", output.stderr), false),
+                            (false, false) => {
+                                // No output at all - this is likely a bug in the code
+                                // (e.g., forgot to call the function, or print statement is unreachable)
+                                // Mark as error so the model gets a chance to fix it
+                                println!("[AgenticLoop] WARNING: Python execution produced no output - treating as error for model feedback");
+                                (
+                                    "Error: Execution completed with no output. Your code ran without errors, but nothing was printed. \
+                                    Common causes:\n\
+                                    1. You defined a function but forgot to call it\n\
+                                    2. You called print() inside a function after a return statement (unreachable code)\n\
+                                    3. You forgot to add a print() statement for the result\n\n\
+                                    Please fix your code and try again.".to_string(),
+                                    true
+                                )
+                            }
                         }
                     } else {
-                        format!("Error: {}", output.stderr)
+                        (format!("Error: {}", output.stderr), true)
                     };
-                    (result, !output.success)
+                    (result, is_error)
                 }
                 Err(e) => {
                     let elapsed = exec_start.elapsed();
@@ -667,6 +718,9 @@ pub async fn run_agentic_loop(
     // Track repeated errors to detect when model is stuck
     let mut last_error_signature: Option<String> = None;
     let mut tools_disabled_due_to_repeated_error = false;
+    
+    // Track if previous iteration had errors - allows tool retry even if state machine would block
+    let mut previous_iteration_had_errors = false;
 
     let verbose_logging = crate::is_verbose_logging_enabled();
     
@@ -890,6 +944,7 @@ pub async fn run_agentic_loop(
                 config.python_tool_mode,
                 &config.format_config,
                 config.primary_format,
+                config.python_execution_in_native_tools,
             )
         };
 
@@ -983,7 +1038,12 @@ pub async fn run_agentic_loop(
 
         for (idx, resolved_tool_call) in resolved_tool_calls.iter().enumerate() {
             // Check if blocked by state machine
-            if !state_machine.is_tool_allowed(&resolved_tool_call.tool) {
+            // EXCEPTION: If previous iteration had errors, allow the tool to retry
+            // This prevents the state machine from blocking error recovery
+            let tool_allowed = state_machine.is_tool_allowed(&resolved_tool_call.tool) 
+                || previous_iteration_had_errors;
+            
+            if !tool_allowed {
                 let current_state = state_machine.current_state().name();
                 println!(
                     "[AgenticLoop] Tool '{}' blocked by state machine (state: {})",
@@ -1000,6 +1060,13 @@ pub async fn run_agentic_loop(
                     }),
                 );
                 continue;
+            }
+            
+            if previous_iteration_had_errors {
+                println!(
+                    "[AgenticLoop] Tool '{}' allowed due to error retry (bypassing state machine)",
+                    resolved_tool_call.tool
+                );
             }
 
             // Check if approval required
@@ -1307,12 +1374,16 @@ pub async fn run_agentic_loop(
             }
         }
 
+        // Check if any tool had an error - if so, continue the loop to let model fix it
+        let had_errors_this_iteration = tool_results.iter().any(|(_, _, is_err)| *is_err);
+        
         // Update system prompt from state machine if changed
-        let should_continue = state_machine.should_continue_loop();
+        let should_continue = state_machine.should_continue_loop() || had_errors_this_iteration;
         println!(
-            "[AgenticLoop] State machine: state={}, should_continue={}",
+            "[AgenticLoop] State machine: state={}, should_continue={} (had_errors={})",
             state_machine.current_state().name(),
-            should_continue
+            should_continue,
+            had_errors_this_iteration
         );
 
         if !should_continue {
@@ -1336,10 +1407,14 @@ pub async fn run_agentic_loop(
             }
         }
 
+        // Track if this iteration had errors for next iteration's state machine bypass
+        previous_iteration_had_errors = had_errors_this_iteration;
+        
         println!(
-            "[AgenticLoop] Continuing to iteration {} (state: {})...",
+            "[AgenticLoop] Continuing to iteration {} (state: {}, error_retry={})...",
             loop_iteration_index + 1,
-            state_machine.current_state().name()
+            state_machine.current_state().name(),
+            previous_iteration_had_errors
         );
         loop_iteration_index += 1;
     }
@@ -1444,6 +1519,7 @@ mod tests {
             false,
             &ToolCallFormatConfig::default(),
             ToolCallFormatName::Hermes,
+            false, // python_execution_in_native_tools
         );
 
         match action {
@@ -1469,6 +1545,7 @@ mod tests {
             false,
             &config,
             ToolCallFormatName::Hermes,
+            false, // python_execution_in_native_tools
         );
 
         match action {
@@ -1478,6 +1555,43 @@ mod tests {
             }
             AgenticLoopAction::Final { .. } => {
                 panic!("Expected ToolCalls, got Final");
+            }
+        }
+    }
+
+    #[test]
+    fn test_detect_python_block_when_in_native_tools() {
+        // When python_execution is in native tools but model outputs a ```python block,
+        // we should detect it and convert to a python_execution tool call
+        let response = r#"Here's how to calculate the answer:
+
+```python
+result = 2 + 2
+print(f"The answer is {result}")
+```"#;
+        
+        let action = detect_agentic_loop_action(
+            response,
+            ModelFamily::Generic, // Qwen-like models use Generic family
+            ToolFormat::OpenAI,
+            false, // python_tool_mode (code mode)
+            &ToolCallFormatConfig::default(),
+            ToolCallFormatName::Native,
+            true, // python_execution_in_native_tools - this is the key!
+        );
+
+        match action {
+            AgenticLoopAction::ToolCalls { calls } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].tool, "python_execution");
+                assert_eq!(calls[0].server, "builtin");
+                // Check that the code was extracted
+                let code = calls[0].arguments.get("code").expect("should have code");
+                let lines = code.as_array().expect("code should be array");
+                assert!(lines.len() >= 2, "should have at least 2 lines of code");
+            }
+            AgenticLoopAction::Final { .. } => {
+                panic!("Expected ToolCalls for Python block detection, got Final");
             }
         }
     }

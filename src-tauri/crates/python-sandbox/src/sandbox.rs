@@ -421,7 +421,11 @@ pub fn pyobject_to_json(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Valu
     Ok(Value::String(s))
 }
 
-/// Convert a JSON Value to Python object
+/// Convert a JSON Value to Python object.
+/// 
+/// Special handling for datetime objects:
+/// - `{"__datetime__": "2024-01-15"}` -> `datetime(2024, 1, 15)`
+/// - `{"__datetime__": "2024-01-15T10:30:00"}` -> `datetime(2024, 1, 15, 10, 30, 0)`
 pub fn json_to_pyobject(value: &Value, vm: &VirtualMachine) -> PyResult {
     match value {
         Value::Null => Ok(vm.ctx.none()),
@@ -441,6 +445,11 @@ pub fn json_to_pyobject(value: &Value, vm: &VirtualMachine) -> PyResult {
             Ok(vm.ctx.new_list(items?).into())
         }
         Value::Object(obj) => {
+            // Check for special __datetime__ marker
+            if let Some(Value::String(datetime_str)) = obj.get("__datetime__") {
+                return parse_datetime_to_pyobject(datetime_str, vm);
+            }
+            
             let dict = PyDict::new_ref(&vm.ctx);
             for (k, v) in obj {
                 let py_value = json_to_pyobject(v, vm)?;
@@ -451,9 +460,76 @@ pub fn json_to_pyobject(value: &Value, vm: &VirtualMachine) -> PyResult {
     }
 }
 
+/// Parse a datetime string and convert to Python datetime object.
+/// 
+/// Supports formats:
+/// - "2024-01-15" (date only)
+/// - "2024-01-15T10:30:00" (date and time)
+fn parse_datetime_to_pyobject(datetime_str: &str, vm: &VirtualMachine) -> PyResult {
+    // Import datetime module and get datetime class
+    let datetime_module = vm.import("datetime", 0)?;
+    let datetime_class = datetime_module.get_attr("datetime", vm)?;
+    
+    // Parse the datetime string
+    if datetime_str.contains('T') {
+        // Date with time: "2024-01-15T10:30:00"
+        let parts: Vec<&str> = datetime_str.split('T').collect();
+        if parts.len() == 2 {
+            let date_parts: Vec<&str> = parts[0].split('-').collect();
+            let time_parts: Vec<&str> = parts[1].split(':').collect();
+            
+            if date_parts.len() >= 3 && time_parts.len() >= 2 {
+                let year: i32 = date_parts[0].parse().unwrap_or(1970);
+                let month: i32 = date_parts[1].parse().unwrap_or(1);
+                let day: i32 = date_parts[2].parse().unwrap_or(1);
+                let hour: i32 = time_parts[0].parse().unwrap_or(0);
+                let minute: i32 = time_parts[1].parse().unwrap_or(0);
+                let second: i32 = time_parts.get(2)
+                    .and_then(|s| s.split('.').next())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                
+                // Call datetime(year, month, day, hour, minute, second)
+                let args = vec![
+                    vm.ctx.new_int(year).into(),
+                    vm.ctx.new_int(month).into(),
+                    vm.ctx.new_int(day).into(),
+                    vm.ctx.new_int(hour).into(),
+                    vm.ctx.new_int(minute).into(),
+                    vm.ctx.new_int(second).into(),
+                ];
+                return datetime_class.call(args, vm);
+            }
+        }
+    } else {
+        // Date only: "2024-01-15"
+        let date_parts: Vec<&str> = datetime_str.split('-').collect();
+        if date_parts.len() >= 3 {
+            let year: i32 = date_parts[0].parse().unwrap_or(1970);
+            let month: i32 = date_parts[1].parse().unwrap_or(1);
+            let day: i32 = date_parts[2].parse().unwrap_or(1);
+            
+            // Call datetime(year, month, day)
+            let args = vec![
+                vm.ctx.new_int(year).into(),
+                vm.ctx.new_int(month).into(),
+                vm.ctx.new_int(day).into(),
+            ];
+            return datetime_class.call(args, vm);
+        }
+    }
+    
+    // Fallback: return the string as-is
+    Ok(vm.ctx.new_str(datetime_str.to_string()).into())
+}
+
 /// The list of modules allowed in the Python sandbox.
 /// This is exposed as a constant so it can be referenced in error messages.
+/// 
+/// NOTE: This list includes both user-facing modules AND their internal dependencies.
+/// Internal modules (prefixed with _) are needed for the public modules to work correctly.
 pub const ALLOWED_MODULES: &[&str] = &[
+    // User-facing modules
     "math",
     "json",
     "random",
@@ -477,6 +553,49 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "base64",
     "binascii",
     "html",
+    // Internal modules (dependencies of the above)
+    "_collections_abc",  // Required by collections, typing
+    "_operator",         // Required by operator
+    "_functools",        // Required by functools
+    "_random",           // Required by random
+    "_json",             // Required by json
+    "_string",           // Required by string
+    "_datetime",         // Required by datetime
+    "_decimal",          // Required by decimal
+    "_hashlib",          // Required by hashlib (if compiled in)
+    "_sha256",           // Required by hashlib
+    "_sha512",           // Required by hashlib
+    "_md5",              // Required by hashlib
+    "_blake2",           // Required by hashlib
+    "_sha1",             // Required by hashlib
+    "_sha3",             // Required by hashlib
+    "encodings",         // Required for string encoding
+    "codecs",            // Required for string encoding
+    "_codecs",           // Required by codecs
+    "io",                // Required by json, other stdlib modules
+    "_io",               // Required by io
+    "struct",            // Required by some stdlib modules
+    "_struct",           // Required by struct
+    "warnings",          // Required by many stdlib modules
+    "_warnings",         // Required by warnings
+    "enum",              // Required by re, statistics
+    "sre_compile",       // Required by re
+    "sre_parse",         // Required by re
+    "sre_constants",     // Required by re
+    "copyreg",           // Required by copy, pickle-lite
+    "keyword",           // Required by some introspection
+    "token",             // Required by tokenize
+    "tokenize",          // Required by some stdlib modules
+    "linecache",         // Required by traceback
+    "traceback",         // Required for error formatting
+    "reprlib",           // Required by collections
+    "heapq",             // Required by statistics (for median)
+    "_heapq",            // Required by heapq
+    "bisect",            // Required by statistics
+    "_bisect",           // Required by bisect
+    "weakref",           // Required by typing, functools
+    "_weakref",          // Required by weakref
+    "contextlib",        // Commonly used with with statements
 ];
 
 /// Setup code to inject sandbox helpers into Python
@@ -739,10 +858,21 @@ def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
     if name == 'datetime':
         return _datetime_instance
     
+    # For relative imports (level > 0), get the parent package from globals
+    if level > 0 and globals:
+        package = globals.get('__package__', '') or globals.get('__name__', '')
+        if package:
+            # The actual module being imported is relative to the package
+            # e.g., in json, "from . import decoder" means importing json.decoder
+            parent = package.split('.')[0]
+            if parent in _sandbox_allowed_modules:
+                return _original_import(name, globals, locals, fromlist, level)
+    
     top_level = name.split('.')[0]
     if top_level not in _sandbox_allowed_modules:
+        # Only show user-facing modules in error message (hide internal _ prefixed modules)
         allowed_list = ', '.join(sorted(m for m in _sandbox_allowed_modules 
-                                        if m not in ('_sandbox', 'builtins')))
+                                        if m not in ('_sandbox', 'builtins') and not m.startswith('_')))
         raise ImportError(
             f"Import '{name}' is not allowed in the sandbox. "
             f"Allowed modules: {allowed_list}. "

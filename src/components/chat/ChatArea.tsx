@@ -20,7 +20,7 @@ const logToBackend = (message: string) => {
 import { SearchingIndicator, ToolExecutionIndicator } from './indicators';
 import { AssistantMessage } from './messages';
 import { ToolApprovalDialog } from './tools';
-import { RagFilePills, AttachedTablePills, AttachedToolPills } from './attachments';
+import { RagFilePills, AttachedTablePills, AttachedToolPills, TabularFilePills } from './attachments';
 import { InputBar } from './input';
 import { DatabaseAttachmentModal, ToolAttachmentModal } from './modals';
 
@@ -43,9 +43,10 @@ export function ChatArea() {
         attachedPaths, ragIndexedFiles, isIndexingRag,
         addAttachment, searchRagContext, clearRagContext, removeRagFile,
         // Attachment state
-        attachedDatabaseTables, attachedTools,
-        removeAttachedTable, removeAttachedTool,
+        attachedDatabaseTables, attachedTools, attachedTabularFiles,
+        removeAttachedTable, removeAttachedTool, removeTabularFile,
         clearAttachedTables, clearAttachedTools,
+        addTabularFile,
         // Always-on state (synced from settings)
         alwaysOnTools, alwaysOnTables, alwaysOnRagPaths, syncAlwaysOnFromSettings,
         // Tool execution state
@@ -160,6 +161,9 @@ export function ChatArea() {
         }
     }, [chatInputValue, triggerRelevanceSearch, clearRelevanceSearch]);
 
+    // Tabular file extensions that should be routed to Python analysis
+    const TABULAR_EXTENSIONS = ['csv', 'tsv', 'xls', 'xlsx', 'xlsm', 'xlsb', 'ods'];
+
     // Handle file selection via Tauri dialog
     const handleAttachFiles = async () => {
         try {
@@ -171,18 +175,53 @@ export function ChatArea() {
                 defaultPath: defaultPath || undefined,
                 filters: [{
                     name: 'Documents',
-                    extensions: ['txt', 'csv', 'tsv', 'md', 'json', 'pdf', 'docx']
+                    extensions: ['txt', 'csv', 'tsv', 'md', 'json', 'pdf', 'docx', 'xls', 'xlsx']
                 }]
             });
             if (selected) {
                 const paths = Array.isArray(selected) ? selected : [selected];
-                // Process each file sequentially (addAttachment now triggers immediate indexing)
                 for (const path of paths) {
-                    if (path) await addAttachment(path);
+                    if (!path) continue;
+                    
+                    // Check if this is a tabular file
+                    const ext = path.split('.').pop()?.toLowerCase() || '';
+                    if (TABULAR_EXTENSIONS.includes(ext)) {
+                        // Route to tabular file handler
+                        await handleTabularFileAttachment(path);
+                    } else {
+                        // Route to RAG handler (original behavior)
+                        await addAttachment(path);
+                    }
                 }
             }
         } catch (e) {
             console.error('[ChatArea] Failed to open file dialog:', e);
+        }
+    };
+
+    // Handle tabular file attachment (CSV, TSV, XLS, XLSX)
+    const handleTabularFileAttachment = async (filePath: string) => {
+        try {
+            console.log('[ChatArea] Attaching tabular file:', filePath);
+            // Parse headers from backend
+            const preview = await invoke<{
+                file_path: string;
+                file_name: string;
+                headers: string[];
+                row_count: number;
+            }>('parse_tabular_headers', { filePath });
+            
+            // Add to store
+            addTabularFile({
+                filePath: preview.file_path,
+                fileName: preview.file_name,
+                headers: preview.headers,
+                rowCount: preview.row_count,
+                variableIndex: 0, // Will be reassigned by the store
+            });
+            console.log('[ChatArea] Tabular file attached:', preview.file_name, preview.row_count, 'rows');
+        } catch (e) {
+            console.error('[ChatArea] Failed to parse tabular file:', e);
         }
     };
 
@@ -357,6 +396,7 @@ export function ChatArea() {
                         schema_text: null
                     })),
                     attachedTools: storeState.attachedTools.map(t => t.key),
+                    attachedTabularFiles: storeState.attachedTabularFiles.map(f => f.filePath),
                 });
             } catch (e) {
                 console.error('[ChatArea] Failed to fetch system prompt preview:', e);
@@ -396,6 +436,7 @@ export function ChatArea() {
                     schema_text: null
                 })),
                 attachedTools: storeState.attachedTools.map(t => t.key),
+                attachedTabularFiles: storeState.attachedTabularFiles.map(f => f.filePath),
             });
             logToBackend(`[FRONTEND] ✅ Backend chat command returned | returnedChatId=${returnedChatId?.slice(0,8)}`);
 
@@ -580,6 +621,10 @@ export function ChatArea() {
                         alwaysOnTools={alwaysOnTools}
                         onRemove={removeAttachedTool}
                     />
+                    <TabularFilePills
+                        files={attachedTabularFiles}
+                        onRemove={removeTabularFile}
+                    />
                 </div>
                 <div className="chat-input-bar-row px-2 sm:px-6">
                     <InputBar
@@ -591,7 +636,7 @@ export function ChatArea() {
                         handleKeyDown={handleKeyDown}
                         textareaRef={textareaRef}
                         isLoading={assistantStreamingActive}
-                        attachedCount={attachedPaths.length + attachedDatabaseTables.length + attachedTools.length}
+                        attachedCount={attachedPaths.length + attachedDatabaseTables.length + attachedTools.length + attachedTabularFiles.length}
                         onAttachFiles={handleAttachFiles}
                         onAttachFolder={handleAttachFolder}
                         onAttachDatabase={handleAttachDatabase}

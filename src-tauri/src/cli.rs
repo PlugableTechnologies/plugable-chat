@@ -111,6 +111,11 @@ pub struct CliArgs {
     #[arg(long = "always-on-rag", value_delimiter = ',', env = "PLUGABLE_ALWAYS_ON_RAG")]
     pub always_on_rag: Option<Vec<String>>,
     
+    /// Tabular data files to attach for Python analysis (comma-separated paths).
+    /// Supports CSV, TSV, XLS, XLSX formats. Values are pre-typed (int/float/datetime/None).
+    #[arg(long = "table-file", value_delimiter = ',', env = "PLUGABLE_TABLE_FILES")]
+    pub table_files: Option<Vec<String>>,
+    
     /// Enable the built-in dev MCP test server (off by default)
     #[arg(
         long,
@@ -517,8 +522,15 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
         println!("[Launch] Demo database enabled (--enable-demo-db)");
     }
 
+    // Collect table files from CLI
+    let table_files = args.table_files.clone().unwrap_or_default();
+    if !table_files.is_empty() {
+        println!("[Launch] Tabular data files attached via --table-file: {:?}", table_files);
+    }
+
     LaunchOverrides {
         model: launch_model,
         initial_prompt: launch_prompt.or(enable_mcp_prompt),
+        table_files,
     }
 }

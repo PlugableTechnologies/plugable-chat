@@ -55,6 +55,8 @@ impl AgenticIntegrationTestHarness {
             mcp_context: McpToolContext::default(),
             attached_tables: Vec::new(),
             attached_tools: Vec::new(),
+            attached_tabular_files: Vec::new(),
+            tabular_column_info: Vec::new(),
             tool_call_format: settings.tool_call_formats.primary,
             model_tool_format: None,
             custom_tool_prompts: HashMap::new(),

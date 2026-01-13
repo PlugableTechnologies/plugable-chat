@@ -38,38 +38,56 @@ rather than inventing results.";
 pub const PYTHON_SANDBOX_RULES_TEXT_MODE: &str = "\
 - You must return exactly one runnable Python program in a single ```python ... ``` block. Do not return explanations or multiple blocks.
 - Your Python code will be executed directly. Do NOT emit <tool_call> tags, JSON tool calls, or any other format - ONLY valid Python code.
-- Use print(...) for user-facing output on stdout.
+- **CRITICAL: Only stdout (print output) is visible to the user.** This is NOT a REPL - expressions like `result` do NOT display anything. You MUST use print() to show results.
 - Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.
 
-**EXAMPLE** - This is the EXACT format required:
+**HELLO WORLD EXAMPLE** - This is the EXACT format required:
+
+```python
+print(\"Hello, World!\")
+```
+
+**CALCULATION EXAMPLE** - Always end with print():
 
 ```python
 import math
-# Calculate and print result
-result = math.pi
-print(f\"Pi to 50 decimal places: {result:.50f}\")
+result = math.pi * 2
+print(f\"Result: {result:.2f}\")  # REQUIRED - without print(), nothing is shown!
 ```
 
-Do NOT wrap code in tool_call tags. Just write Python code like the example above.";
+**WRONG** - This produces NO output (not a REPL):
+```python
+result = 2 + 2
+result  # WRONG - expressions don't display, must use print(result)
+```
+
+Do NOT wrap code in tool_call tags. Just write Python code like the examples above.";
 
 /// Python sandbox rules for native tool calling mode (call python_execution tool)
 pub const PYTHON_SANDBOX_RULES_NATIVE_MODE: &str = "\
 - You MUST call the `python_execution` tool to execute Python code. Do NOT output raw code blocks.
 - The `code` parameter is a JSON array of strings, where each string is one line of Python code.
-- Use print(...) for user-facing output - it will be shown directly to the user.
+- **CRITICAL: Only stdout (print output) is visible to the user.** This is NOT a REPL - expressions like `result` do NOT display anything. You MUST use print() to show results.
 - Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.
 
-**CORRECT EXAMPLE** - The `code` argument must be a JSON array (NOT a string):
-```json
-{\"name\": \"python_execution\", \"arguments\": {\"code\": [\"import math\", \"result = math.pi\", \"print(f'Pi: {result:.50f}')\"]}}
+**HELLO WORLD EXAMPLE** - Call python_execution with code as a JSON array:
+```
+python_execution(code=[\"print('Hello, World!')\"])
 ```
 
-**WRONG** - Do NOT stringify the array:
+**COMPLETE EXAMPLE** - Always include print() in your code:
 ```json
-{\"arguments\": {\"code\": \"[...]\"}}  // WRONG - code is a string
+{\"name\": \"python_execution\", \"arguments\": {\"code\": [\"result = 2 + 2\", \"print(f'The answer is {result}')\"]}}
 ```
 
-The tool executes the code and shows print output to the user.";
+**WRONG** - This produces NO output:
+```json
+{\"code\": [\"result = 2 + 2\", \"result\"]}  // WRONG - \"result\" alone doesn't print!
+```
+
+**CRITICAL**: 
+1. The `code` argument MUST be an array of strings like `[\"line1\", \"line2\"]`, NOT a single string.
+2. Always include print() to display results - expressions alone produce no output!";
 
 /// Allowed Python imports list
 pub const PYTHON_ALLOWED_IMPORTS: &str = "math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html";
@@ -186,6 +204,98 @@ pub fn build_python_prompt(available_tools: &[String], has_attachments: bool, us
 
     prompt
 }
+
+/// Build the tabular data analysis prompt section.
+/// 
+/// This provides guidance for analyzing attached CSV/TSV/Excel files using Python.
+/// The files have been pre-processed with:
+/// - Type inference (int/float/datetime/None)
+/// - Currency/percentage cleaning
+/// - Missing value normalization
+pub fn build_tabular_data_prompt(
+    attached_files: &[crate::settings_state_machine::AttachedTabularFile],
+    column_infos: &[Vec<crate::tabular_parser::ColumnInfo>],
+) -> String {
+    if attached_files.is_empty() {
+        return String::new();
+    }
+
+    let mut prompt = String::from("## Tabular Data Analysis\n\n");
+    prompt.push_str("You have tabular data files available as Python variables:\n\n");
+
+    for (i, file) in attached_files.iter().enumerate() {
+        let var_idx = file.variable_index;
+        prompt.push_str(&format!(
+            "**File {}: {}** ({} rows)\n",
+            var_idx, file.file_name, file.row_count
+        ));
+        prompt.push_str(&format!(
+            "- `headers{}` = tuple of {} column names\n",
+            var_idx,
+            file.headers.len()
+        ));
+        prompt.push_str(&format!("- `rows{}` = list of {} tuples\n\n", var_idx, file.row_count));
+
+        // Add column type table if we have column info
+        if let Some(cols) = column_infos.get(i) {
+            prompt.push_str("Column types (auto-detected):\n");
+            prompt.push_str("| Column | Type | Notes |\n|--------|------|-------|\n");
+            for col in cols {
+                let notes = if col.null_count > 0 {
+                    format!("{} None values", col.null_count)
+                } else {
+                    String::new()
+                };
+                prompt.push_str(&format!("| {} | {} | {} |\n", col.name, col.column_type, notes));
+            }
+            prompt.push('\n');
+        } else {
+            // Fall back to showing just headers
+            let headers_preview: String = file.headers.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+            let suffix = if file.headers.len() > 5 { ", ..." } else { "" };
+            prompt.push_str(&format!("Columns: {}{}\n\n", headers_preview, suffix));
+        }
+    }
+
+    prompt.push_str(TABULAR_DATA_GUARANTEES);
+    prompt.push_str("\n\n");
+    prompt.push_str(TABULAR_DATA_USAGE_PATTERNS);
+
+    prompt
+}
+
+/// Guarantees about pre-processed tabular data
+const TABULAR_DATA_GUARANTEES: &str = "\
+**GUARANTEES** (preprocessing already done):
+- Numeric columns are int/float (no casting needed)
+- Missing values are Python `None` (not strings like \"N/A\")
+- Currency symbols and commas already stripped
+- Percentages converted to decimals (50% → 0.50)
+- Dates are datetime objects (use .year, .month, .strftime())";
+
+/// Usage patterns for tabular data analysis
+const TABULAR_DATA_USAGE_PATTERNS: &str = "\
+**USAGE PATTERNS** (ALWAYS use print() to show results!):
+```python
+# Sum a column (handle None) - MUST print result!
+total = sum(r[2] for r in rows1 if r[2] is not None)
+print(f\"Total: {total}\")
+
+# Filter and count rows
+q1_data = [r for r in rows1 if r[0].month <= 3]
+print(f\"Q1 rows: {len(q1_data)}\")
+
+# Group by column value
+from collections import defaultdict
+by_category = defaultdict(int)
+for r in rows1:
+    by_category[r[3]] += 1
+print(\"Counts by category:\")
+for cat, count in by_category.items():
+    print(f\"  {cat}: {count}\")
+```
+
+**REMINDER**: Only print() output is visible. Variables alone (like `total` or `result`) produce NO output!";
 
 /// Build the tool documentation for tool_search.
 pub fn build_tool_search_documentation(python_tool_mode: bool, use_native_tools: bool, has_deferred_tools: bool) -> String {

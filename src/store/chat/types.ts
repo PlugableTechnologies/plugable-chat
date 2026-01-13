@@ -210,6 +210,19 @@ export interface AttachedTool {
     isBuiltin: boolean;
 }
 
+export interface AttachedTabularFile {
+    /** Full file path */
+    filePath: string;
+    /** File name for display */
+    fileName: string;
+    /** Column headers */
+    headers: string[];
+    /** Number of data rows */
+    rowCount: number;
+    /** Variable index (1-indexed: headers1/rows1) */
+    variableIndex: number;
+}
+
 // ============ Tool Execution Types ============
 
 // Tool execution state for UI display

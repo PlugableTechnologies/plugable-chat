@@ -1,5 +1,5 @@
 import type { StateCreator } from 'zustand';
-import type { AttachedTable, AttachedTool } from '../types';
+import type { AttachedTable, AttachedTool, AttachedTabularFile } from '../types';
 
 export interface AttachmentSlice {
     // Per-chat attached database tables
@@ -13,6 +13,12 @@ export interface AttachmentSlice {
     addAttachedTool: (tool: AttachedTool) => void;
     removeAttachedTool: (toolKey: string) => void;
     clearAttachedTools: () => void;
+    
+    // Per-chat attached tabular files (CSV, TSV, XLS, XLSX)
+    attachedTabularFiles: AttachedTabularFile[];
+    addTabularFile: (file: AttachedTabularFile) => void;
+    removeTabularFile: (filePath: string) => void;
+    clearTabularFiles: () => void;
     
     // Always-on configuration (synced from settings store)
     // These are displayed as locked pills and always sent with chat requests
@@ -47,6 +53,23 @@ export const createAttachmentSlice: StateCreator<
         attachedTools: s.attachedTools.filter(t => t.key !== toolKey)
     })),
     clearAttachedTools: () => set({ attachedTools: [] }),
+    
+    // Per-chat attached tabular files
+    attachedTabularFiles: [],
+    addTabularFile: (file) => set((s) => {
+        // Avoid duplicates and assign variable index
+        const existing = s.attachedTabularFiles.filter(f => f.filePath !== file.filePath);
+        const newFile = { ...file, variableIndex: existing.length + 1 };
+        return { attachedTabularFiles: [...existing, newFile] };
+    }),
+    removeTabularFile: (filePath) => set((s) => {
+        // Remove file and reassign variable indices
+        const remaining = s.attachedTabularFiles
+            .filter(f => f.filePath !== filePath)
+            .map((f, idx) => ({ ...f, variableIndex: idx + 1 }));
+        return { attachedTabularFiles: remaining };
+    }),
+    clearTabularFiles: () => set({ attachedTabularFiles: [] }),
     
     // Always-on configuration (synced from settings store)
     alwaysOnTools: [],

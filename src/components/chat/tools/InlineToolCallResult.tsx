@@ -12,8 +12,11 @@ interface InlineToolCallResultProps {
  * This component shows the raw data inside an expandable accordion
  */
 export const InlineToolCallResult = ({ call }: InlineToolCallResultProps) => {
-    const [showArgs, setShowArgs] = useState(false);
-    const [argsText, setArgsText] = useState<string | null>(null);
+    // Auto-expand arguments on error for easier debugging
+    const [showArgs, setShowArgs] = useState(call.isError);
+    const [argsText, setArgsText] = useState<string | null>(
+        call.isError ? JSON.stringify(call.arguments, null, 2) : null
+    );
     const [showResult, setShowResult] = useState(false);
     const [resultText, setResultText] = useState<string | null>(null);
 
@@ -97,18 +100,21 @@ export const InlineToolCallResult = ({ call }: InlineToolCallResultProps) => {
                             <span className="text-xs text-gray-400">{formatMillisecondsAsDuration(call.durationMs)}</span>
                         )}
                     </div>
-                    {Object.keys(call.arguments).length > 0 && (
-                        <details className="mt-2" onToggle={(e) => handleToggleArgs((e.target as HTMLDetailsElement).open)}>
-                            <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
-                                Arguments
-                            </summary>
-                            <pre className="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto text-gray-700">
-                                {showArgs
-                                    ? argsText ?? 'Loading arguments...'
-                                    : 'Expand to view arguments'}
-                            </pre>
-                        </details>
-                    )}
+                    {/* Show arguments - always visible for errors so users can debug */}
+                    <details 
+                        className="mt-2" 
+                        onToggle={(e) => handleToggleArgs((e.target as HTMLDetailsElement).open)}
+                        open={call.isError} // Auto-expand arguments on error
+                    >
+                        <summary className={`text-xs cursor-pointer hover:text-gray-700 ${call.isError ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
+                            Arguments {call.isError && '(inspect for debugging)'}
+                        </summary>
+                        <pre className={`mt-1 text-xs p-2 rounded overflow-x-auto whitespace-pre-wrap ${call.isError ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-gray-50 text-gray-700'}`}>
+                            {showArgs || call.isError
+                                ? (argsText ?? JSON.stringify(call.arguments, null, 2) ?? '(no arguments)')
+                                : 'Expand to view arguments'}
+                        </pre>
+                    </details>
                     {/* Always show raw result in accordion (formatted table is shown outside) */}
                     <details className="mt-2" onToggle={(e) => handleToggleResult((e.target as HTMLDetailsElement).open)}>
                         <summary className={`text-xs cursor-pointer hover:text-gray-700 ${call.isError ? 'text-red-500' : 'text-gray-500'}`}>

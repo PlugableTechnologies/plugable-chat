@@ -188,3 +188,12 @@ pub fn get_test_data_directory() -> Option<String> {
     // If nothing found, return Downloads as fallback
     dirs::download_dir().and_then(|p| p.to_str().map(String::from))
 }
+
+/// Parse headers and row count from a tabular file (CSV, TSV, XLS, XLSX).
+/// 
+/// Returns a lightweight preview for the UI without loading all data into memory.
+#[tauri::command]
+pub fn parse_tabular_headers(file_path: String) -> Result<crate::tabular_parser::TabularHeaderPreview, String> {
+    let path = std::path::Path::new(&file_path);
+    crate::tabular_parser::parse_tabular_headers(path)
+}

@@ -8,6 +8,8 @@
 use crate::protocol::{
     FileError, RagChunk, RagIndexResult, RagMsg, RagProgressEvent, RemoveFileResult,
 };
+#[cfg(test)]
+use sha2::{Sha256, Digest};
 use arrow_array::types::Float32Type;
 use arrow_array::{
     Array, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,

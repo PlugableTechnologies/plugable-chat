@@ -210,7 +210,11 @@ pub struct CodeExecutionExecutor {
 }
 
 /// Modules allowed in the Python sandbox (matches python_sandbox::ALLOWED_MODULES)
+/// 
+/// NOTE: This list includes both user-facing modules AND their internal dependencies.
+/// Internal modules (prefixed with _) are needed for the public modules to work correctly.
 pub const ALLOWED_MODULES: &[&str] = &[
+    // User-facing modules
     "math",
     "json",
     "random",
@@ -234,6 +238,49 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "base64",
     "binascii",
     "html",
+    // Internal modules (dependencies of the above)
+    "_collections_abc",
+    "_operator",
+    "_functools",
+    "_random",
+    "_json",
+    "_string",
+    "_datetime",
+    "_decimal",
+    "_hashlib",
+    "_sha256",
+    "_sha512",
+    "_md5",
+    "_blake2",
+    "_sha1",
+    "_sha3",
+    "encodings",
+    "codecs",
+    "_codecs",
+    "io",
+    "_io",
+    "struct",
+    "_struct",
+    "warnings",
+    "_warnings",
+    "enum",
+    "sre_compile",
+    "sre_parse",
+    "sre_constants",
+    "copyreg",
+    "keyword",
+    "token",
+    "tokenize",
+    "linecache",
+    "traceback",
+    "reprlib",
+    "heapq",
+    "_heapq",
+    "bisect",
+    "_bisect",
+    "weakref",
+    "_weakref",
+    "contextlib",
 ];
 
 /// Default global functions that are allowed without explicit tool stubs.
