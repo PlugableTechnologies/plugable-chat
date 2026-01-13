@@ -39,7 +39,7 @@ pub const PYTHON_SANDBOX_RULES_TEXT_MODE: &str = "\
 - You must return exactly one runnable Python program in a single ```python ... ``` block. Do not return explanations or multiple blocks.
 - Your Python code will be executed directly. Do NOT emit <tool_call> tags, JSON tool calls, or any other format - ONLY valid Python code.
 - **CRITICAL: Only stdout (print output) is visible to the user.** This is NOT a REPL - expressions like `result` do NOT display anything. You MUST use print() to show results.
-- Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.
+- Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.
 
 **HELLO WORLD EXAMPLE** - This is the EXACT format required:
 
@@ -68,7 +68,7 @@ pub const PYTHON_SANDBOX_RULES_NATIVE_MODE: &str = "\
 - You MUST call the `python_execution` tool to execute Python code. Do NOT output raw code blocks.
 - The `code` parameter is a JSON array of strings, where each string is one line of Python code.
 - **CRITICAL: Only stdout (print output) is visible to the user.** This is NOT a REPL - expressions like `result` do NOT display anything. You MUST use print() to show results.
-- Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.
+- Allowed imports only: math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html.
 
 **HELLO WORLD EXAMPLE** - Call python_execution with code as a JSON array:
 ```
@@ -90,7 +90,8 @@ python_execution(code=[\"print('Hello, World!')\"])
 2. Always include print() to display results - expressions alone produce no output!";
 
 /// Allowed Python imports list
-pub const PYTHON_ALLOWED_IMPORTS: &str = "math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, typing, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html";
+/// Note: typing is excluded because RustPython's typing module requires 'os' internally
+pub const PYTHON_ALLOWED_IMPORTS: &str = "math, json, random, re, datetime, collections, itertools, functools, operator, string, textwrap, copy, types, abc, numbers, decimal, fractions, statistics, hashlib, base64, binascii, html";
 
 /// Legacy alias for backwards compatibility
 pub const PYTHON_SANDBOX_RULES: &str = PYTHON_SANDBOX_RULES_TEXT_MODE;

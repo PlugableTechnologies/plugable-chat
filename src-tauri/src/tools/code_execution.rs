@@ -239,6 +239,7 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "binascii",
     "html",
     // Internal modules (dependencies of the above)
+    "_py_abc",
     "_collections_abc",
     "_operator",
     "_functools",
@@ -247,6 +248,7 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "_string",
     "_datetime",
     "_decimal",
+    "_pydecimal",
     "_hashlib",
     "_sha256",
     "_sha512",
@@ -267,6 +269,7 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "sre_compile",
     "sre_parse",
     "sre_constants",
+    "_sre",
     "copyreg",
     "keyword",
     "token",
@@ -280,6 +283,8 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "_bisect",
     "weakref",
     "_weakref",
+    "_weakrefset",
+    "_thread",
     "contextlib",
 ];
 

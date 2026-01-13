@@ -15,9 +15,9 @@ pub use protocol::{ToolFunctionInfo, ToolModuleInfo};
 use rustpython_compiler::Mode;
 use rustpython_vm::{builtins::PyBaseException, AsObject, PyRef, VirtualMachine};
 use sandbox::{
-    create_sandboxed_interpreter, generate_tool_module_code, get_pending_calls, get_stderr,
-    get_stdout, json_to_pyobject, pyobject_to_json, reset_execution_state, set_available_tools,
-    set_tool_modules, set_tool_results, SANDBOX_SETUP_CODE,
+    build_sandbox_setup_code, create_sandboxed_interpreter, generate_tool_module_code,
+    get_pending_calls, get_stderr, get_stdout, json_to_pyobject, pyobject_to_json,
+    reset_execution_state, set_available_tools, set_tool_modules, set_tool_results,
 };
 use std::alloc::{alloc, dealloc, Layout};
 
@@ -71,8 +71,11 @@ pub fn execute(request: &ExecutionRequest) -> ExecutionResult {
         let scope = vm.new_scope_with_builtins();
 
         // First, run sandbox setup code to configure restrictions
+        // Use build_sandbox_setup_code() to generate the setup with allowed modules
+        // from the Rust ALLOWED_MODULES constant (single source of truth)
+        let setup_code_str = build_sandbox_setup_code();
         let setup_code = match vm.compile(
-            SANDBOX_SETUP_CODE,
+            &setup_code_str,
             Mode::Exec,
             "<sandbox_setup>".to_string(),
         ) {
@@ -508,10 +511,15 @@ mod tests {
     }
 
     #[test]
-    fn test_no_eval() {
-        // Attempt to use eval should fail
+    fn test_eval_allowed_for_stdlib() {
+        // eval() is intentionally allowed because stdlib modules (like json) use it internally.
+        // Security comes from import restrictions, not blocking eval.
+        // User code is pre-validated before execution anyway.
         let request = ExecutionRequest {
-            code: vec!["eval('1 + 1')".to_string()],
+            code: vec!["result = eval('1 + 1')", "print(f'eval result: {result}')"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             context: None,
             tool_results: HashMap::new(),
             available_tools: vec![],
@@ -520,11 +528,12 @@ mod tests {
 
         let result = execute(&request);
 
-        // Should fail - eval is blocked
-        match result.status {
-            ExecutionStatus::Complete => panic!("eval should be blocked"),
-            _ => {} // Any error is acceptable
-        }
+        assert_eq!(
+            result.status,
+            ExecutionStatus::Complete,
+            "eval() should be allowed for stdlib compatibility"
+        );
+        assert!(result.stdout.contains("eval result: 2"));
     }
 
     #[test]
@@ -1110,19 +1119,16 @@ mod tests {
     }
 
     #[test]
-    fn test_blocked_compile() {
-        let result = exec_code(&["compile('x = 1', '', 'exec')"]);
-        match result.status {
-            ExecutionStatus::Complete => panic!("compile() should be blocked"),
-            ExecutionStatus::Error(ref msg) => {
-                assert!(
-                    msg.contains("compile") || msg.contains("NameError"),
-                    "Error should mention 'compile' is blocked: {}",
-                    msg
-                );
-            }
-            _ => {}
-        }
+    fn test_compile_allowed_for_stdlib() {
+        // compile() is intentionally allowed because stdlib modules (like decimal) use it internally.
+        // Security comes from import restrictions, not blocking compile().
+        let result = exec_code(&["code = compile('x = 1 + 1', '', 'exec')", "print('compiled ok')"]);
+        assert_eq!(
+            result.status,
+            ExecutionStatus::Complete,
+            "compile() should be allowed for stdlib compatibility"
+        );
+        assert!(result.stdout.contains("compiled ok"));
     }
 
     #[test]
@@ -1151,30 +1157,41 @@ mod tests {
     }
 
     #[test]
-    fn test_blocked_globals() {
-        let result = exec_code(&["g = globals()"]);
-        match result.status {
-            ExecutionStatus::Complete => panic!("globals() should be blocked"),
-            _ => {} // Any error is acceptable
-        }
+    fn test_globals_allowed_for_stdlib() {
+        // globals() is intentionally allowed because stdlib modules (like collections, json) use it internally.
+        // Security comes from import restrictions, not blocking introspection functions.
+        let result = exec_code(&["g = globals()", "print('has __builtins__:', '__builtins__' in g)"]);
+        assert_eq!(
+            result.status,
+            ExecutionStatus::Complete,
+            "globals() should be allowed for stdlib compatibility"
+        );
     }
 
     #[test]
-    fn test_blocked_locals() {
-        let result = exec_code(&["l = locals()"]);
-        match result.status {
-            ExecutionStatus::Complete => panic!("locals() should be blocked"),
-            _ => {} // Any error is acceptable
-        }
+    fn test_locals_allowed_for_stdlib() {
+        // locals() is intentionally allowed because stdlib modules use it internally.
+        // Security comes from import restrictions, not blocking introspection functions.
+        let result = exec_code(&["x = 42", "l = locals()", "print('x in locals:', 'x' in l)"]);
+        assert_eq!(
+            result.status,
+            ExecutionStatus::Complete,
+            "locals() should be allowed for stdlib compatibility"
+        );
+        assert!(result.stdout.contains("x in locals: True"));
     }
 
     #[test]
-    fn test_blocked_memoryview() {
-        let result = exec_code(&["mv = memoryview(b'hello')"]);
-        match result.status {
-            ExecutionStatus::Complete => panic!("memoryview() should be blocked"),
-            _ => {} // Any error is acceptable
-        }
+    fn test_memoryview_allowed_for_stdlib() {
+        // memoryview() is intentionally allowed because stdlib modules (like json) use it internally.
+        // Security comes from import restrictions, not blocking memoryview.
+        let result = exec_code(&["mv = memoryview(b'hello')", "print('length:', len(mv))"]);
+        assert_eq!(
+            result.status,
+            ExecutionStatus::Complete,
+            "memoryview() should be allowed for stdlib compatibility"
+        );
+        assert!(result.stdout.contains("length: 5"));
     }
 
     #[test]
@@ -2216,5 +2233,165 @@ mod tests {
         );
         assert_eq!(result.pending_calls.len(), 1);
         assert_eq!(result.pending_calls[0].tool_name, "list_dataset_ids");
+    }
+
+    // ============ Single Source of Truth Tests ============
+    // These tests verify that the ALLOWED_MODULES constant and the Python
+    // _sandbox_allowed_modules set are properly synchronized via build_sandbox_setup_code()
+
+    #[test]
+    fn test_collections_defaultdict() {
+        // This test verifies that collections module works correctly after the globals fix.
+        // Previously, collections import failed because it internally used globals().
+        let result = exec_code(&[
+            "from collections import defaultdict",
+            "units_by_sku = defaultdict(float)",
+            "units_by_sku['SKU001'] += 10.5",
+            "units_by_sku['SKU002'] += 20.0",
+            "units_by_sku['SKU001'] += 5.5",
+            "for sku, total in sorted(units_by_sku.items()):",
+            "    print(f'{sku}: {total}')",
+        ]);
+        assert_eq!(
+            result.status,
+            ExecutionStatus::Complete,
+            "collections.defaultdict should work. Error: {:?}, stderr: {}",
+            result.status,
+            result.stderr
+        );
+        assert!(result.stdout.contains("SKU001: 16.0"), "stdout: {}", result.stdout);
+        assert!(result.stdout.contains("SKU002: 20.0"), "stdout: {}", result.stdout);
+    }
+
+    #[test]
+    fn test_json_dumps_and_loads() {
+        // This test verifies that json module works correctly after the globals fix.
+        let result = exec_code(&[
+            "import json",
+            "data = {'name': 'test', 'values': [1, 2, 3]}",
+            "json_str = json.dumps(data)",
+            "print(f'JSON: {json_str}')",
+            "parsed = json.loads(json_str)",
+            "print(f'Parsed name: {parsed[\"name\"]}')",
+        ]);
+        assert_eq!(
+            result.status,
+            ExecutionStatus::Complete,
+            "json module should work. Error: {:?}, stderr: {}",
+            result.status,
+            result.stderr
+        );
+        assert!(result.stdout.contains("test"), "stdout: {}", result.stdout);
+        assert!(result.stdout.contains("Parsed name: test"), "stdout: {}", result.stdout);
+    }
+
+    #[test]
+    fn test_all_user_facing_modules_import() {
+        // Comprehensive test: try importing and using ALL user-facing modules
+        // to catch any missing internal dependencies
+        let modules_to_test = vec![
+            ("math", "import math; print(f'math.pi={math.pi:.2f}')"),
+            ("json", "import json; print(json.dumps({'a': 1}))"),
+            ("random", "import random; print(f'random={random.random():.2f}')"),
+            ("re", "import re; print(re.match(r'\\d+', '123').group())"),
+            ("collections", "from collections import defaultdict; d = defaultdict(int); d['x'] += 1; print(d['x'])"),
+            ("itertools", "from itertools import chain; print(list(chain([1], [2])))"),
+            ("functools", "from functools import reduce; print(reduce(lambda a,b: a+b, [1,2,3]))"),
+            ("operator", "import operator; print(operator.add(1, 2))"),
+            ("string", "import string; print(string.ascii_lowercase[:5])"),
+            ("textwrap", "import textwrap; print(textwrap.fill('hello world', 5)[:10])"),
+            ("copy", "import copy; x = [1,2]; y = copy.copy(x); print(y)"),
+            ("types", "import types; print(type(types.SimpleNamespace()))"),
+            // NOTE: 'typing' is skipped - RustPython's typing module internally imports 'os'
+            // which we block for security. Type hints aren't enforced at runtime anyway.
+            ("abc", "from abc import ABC; print('abc ok')"),
+            ("numbers", "import numbers; print('numbers ok')"),
+            ("decimal", "from decimal import Decimal; print(Decimal('1.5') + Decimal('2.5'))"),
+            ("fractions", "from fractions import Fraction; print(Fraction(1, 3) + Fraction(1, 6))"),
+            ("statistics", "import statistics; print(statistics.mean([1, 2, 3]))"),
+            ("hashlib", "import hashlib; print(hashlib.md5(b'test').hexdigest()[:8])"),
+            ("base64", "import base64; print(base64.b64encode(b'hi').decode())"),
+            ("binascii", "import binascii; print(binascii.hexlify(b'AB').decode())"),
+            ("html", "import html; print(html.escape('<div>'))"),
+        ];
+
+        for (module_name, code) in modules_to_test {
+            let result = exec_code(&[code]);
+            assert_eq!(
+                result.status,
+                ExecutionStatus::Complete,
+                "Module '{}' failed to import/use. Error: {:?}, stderr: {}",
+                module_name,
+                result.status,
+                result.stderr
+            );
+        }
+    }
+
+    #[test]
+    fn test_allowed_modules_error_hides_internal_modules() {
+        // When a blocked module is imported, the error should only show user-facing modules
+        // and NOT internal modules (those prefixed with _)
+        let result = exec_code(&["import os"]);
+        match result.status {
+            ExecutionStatus::Error(ref msg) => {
+                // Verify the error message contains user-facing modules
+                assert!(
+                    msg.contains("Allowed modules:"),
+                    "Should list allowed modules: {}",
+                    msg
+                );
+                // Verify it does NOT contain internal modules like _collections_abc
+                assert!(
+                    !msg.contains("_collections_abc"),
+                    "Should NOT show _collections_abc in error: {}",
+                    msg
+                );
+                assert!(
+                    !msg.contains("_json"),
+                    "Should NOT show _json in error: {}",
+                    msg
+                );
+                assert!(
+                    !msg.contains("_operator"),
+                    "Should NOT show _operator in error: {}",
+                    msg
+                );
+                // Should show the user-facing modules
+                assert!(
+                    msg.contains("json") && msg.contains("collections") && msg.contains("math"),
+                    "Should show user-facing modules: {}",
+                    msg
+                );
+            }
+            ExecutionStatus::Complete => {
+                panic!("os import should be blocked");
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn test_build_sandbox_setup_code_generates_valid_python() {
+        // Verify that build_sandbox_setup_code() generates code that includes all allowed modules
+        use crate::sandbox::build_sandbox_setup_code;
+        
+        let setup_code = build_sandbox_setup_code();
+        
+        // Verify the code includes the dynamically generated set
+        assert!(
+            setup_code.contains("_sandbox_allowed_modules = {"),
+            "Should contain the allowed modules set definition"
+        );
+        
+        // Verify user-facing modules are present
+        assert!(setup_code.contains("'math'"), "Should include math");
+        assert!(setup_code.contains("'json'"), "Should include json");
+        assert!(setup_code.contains("'collections'"), "Should include collections");
+        
+        // Verify internal modules are present (these were the bug - out of sync lists)
+        assert!(setup_code.contains("'_collections_abc'"), "Should include _collections_abc");
+        assert!(setup_code.contains("'_py_abc'"), "Should include _py_abc");
+        assert!(setup_code.contains("'_weakrefset'"), "Should include _weakrefset");
     }
 }

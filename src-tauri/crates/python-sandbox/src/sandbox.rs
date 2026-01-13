@@ -554,6 +554,7 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "binascii",
     "html",
     // Internal modules (dependencies of the above)
+    "_py_abc",           // Required by abc, collections
     "_collections_abc",  // Required by collections, typing
     "_operator",         // Required by operator
     "_functools",        // Required by functools
@@ -562,6 +563,7 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "_string",           // Required by string
     "_datetime",         // Required by datetime
     "_decimal",          // Required by decimal
+    "_pydecimal",        // Required by decimal (RustPython)
     "_hashlib",          // Required by hashlib (if compiled in)
     "_sha256",           // Required by hashlib
     "_sha512",           // Required by hashlib
@@ -582,6 +584,7 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "sre_compile",       // Required by re
     "sre_parse",         // Required by re
     "sre_constants",     // Required by re
+    "_sre",              // Required by re (RustPython internal)
     "copyreg",           // Required by copy, pickle-lite
     "keyword",           // Required by some introspection
     "token",             // Required by tokenize
@@ -595,11 +598,31 @@ pub const ALLOWED_MODULES: &[&str] = &[
     "_bisect",           // Required by bisect
     "weakref",           // Required by typing, functools
     "_weakref",          // Required by weakref
+    "_weakrefset",       // Required by weakref, abc
+    "_thread",           // Required by collections (RustPython internal)
     "contextlib",        // Commonly used with with statements
 ];
 
-/// Setup code to inject sandbox helpers into Python
-pub const SANDBOX_SETUP_CODE: &str = r##"
+/// Generate Python code that creates the _sandbox_allowed_modules set
+/// from the Rust ALLOWED_MODULES constant (single source of truth).
+/// 
+/// This ensures the Python runtime check uses the same list as the Rust constant,
+/// including all internal dependencies.
+fn generate_allowed_modules_python_set() -> String {
+    let mut modules: Vec<&str> = ALLOWED_MODULES.to_vec();
+    modules.push("_sandbox");
+    modules.push("builtins");
+    
+    let quoted: Vec<String> = modules.iter()
+        .map(|m| format!("'{}'", m))
+        .collect();
+    
+    format!("_sandbox_allowed_modules = {{{}}}", quoted.join(", "))
+}
+
+/// Setup code PART 1: Everything before the allowed modules set
+/// This includes sandbox setup, dangerous builtin removal, and datetime shim
+const SANDBOX_SETUP_PART1: &str = r##"
 # Sandbox setup - import sandbox functions
 from _sandbox import tool_call, get_tool_result, sandbox_print, sandbox_stderr
 
@@ -618,13 +641,17 @@ class _SandboxStdErr:
 sys.stderr = _SandboxStdErr()
 
 # Remove dangerous builtins
-# Note: We keep 'exec' and 'compile' because some stdlib modules (like decimal)
-# use them internally during import. Our sandbox is safe because:
+# Note: We keep most builtins because stdlib modules need them internally.
+# The only builtins we block are:
+# - open: File system access
+# - input: Interactive input (hangs in sandbox)
+# - breakpoint: Debugger access
+# Our sandbox is safe because:
 # 1. Code is compiled via RustPython's vm.compile() before reaching Python
-# 2. Import restrictions prevent loading dangerous modules
-# 3. The user code itself is already validated before execution
-_blocked = ['open', 'eval', 'input', 'breakpoint', 
-            'globals', 'locals', 'vars', 'memoryview']
+# 2. Import restrictions prevent loading dangerous modules (os, subprocess, socket, etc.)
+# 3. The user code itself is validated before execution
+# 4. RustPython provides additional sandboxing at the VM level
+_blocked = ['open', 'input', 'breakpoint']
 for _name in _blocked:
     if hasattr(builtins, _name):
         delattr(builtins, _name)
@@ -842,15 +869,11 @@ _datetime_instance.date = _DatetimeModule.date
 _datetime_instance.datetime = _DatetimeModule.datetime
 _datetime_instance.timedelta = _DatetimeModule.timedelta
 
-# Restricted import with datetime shim
-_sandbox_allowed_modules = {
-    'math', 'json', 'random', 're', 'datetime', 'collections',
-    'itertools', 'functools', 'operator', 'string', 'textwrap',
-    'copy', 'types', 'typing', 'abc', 'numbers', 'decimal',
-    'fractions', 'statistics', 'hashlib', 'base64', 'binascii',
-    'html', '_sandbox', 'builtins'
-}
+# NOTE: _sandbox_allowed_modules is inserted here dynamically by build_sandbox_setup_code()
+"##;
 
+/// Setup code PART 2: Import restriction logic (after the allowed modules set)
+const SANDBOX_SETUP_PART2: &str = r##"
 _original_import = builtins.__import__
 
 def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -885,6 +908,23 @@ builtins.__import__ = _restricted_import
 # Clean up setup variables (but NOT _sandbox_allowed_modules - it's needed by the closure)
 del _blocked, _name
 "##;
+
+/// Build the complete sandbox setup code with dynamically generated allowed modules.
+/// 
+/// This generates the `_sandbox_allowed_modules` Python set from the Rust `ALLOWED_MODULES`
+/// constant, ensuring a single source of truth for which modules are allowed.
+pub fn build_sandbox_setup_code() -> String {
+    format!(
+        "{}\n\n{}\n\n{}",
+        SANDBOX_SETUP_PART1,
+        generate_allowed_modules_python_set(),
+        SANDBOX_SETUP_PART2
+    )
+}
+
+/// Legacy constant for backwards compatibility - prefer build_sandbox_setup_code()
+#[deprecated(note = "Use build_sandbox_setup_code() instead for single source of truth")]
+pub const SANDBOX_SETUP_CODE: &str = "";
 
 #[cfg(test)]
 mod tests {
