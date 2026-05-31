@@ -32,6 +32,7 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 // use ort::execution_providers::{CUDAExecutionProvider, DirectMLExecutionProvider};
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -41,8 +42,9 @@ use tokio::time::{sleep, timeout};
 
 // Import from sibling modules in the foundry package
 use super::request_builder::build_foundry_chat_request_body;
+use super::backend::FoundryBackend; // brings trait methods into scope on SdkBackend
 use super::service_manager::{
-    find_foundry_binary, parse_foundry_service_status_output, 
+    find_foundry_binary, get_foundry_version, parse_foundry_service_status_output,
     FoundryModel, FoundryModelsResponse, ServiceStatus, DEFAULT_FALLBACK_MODEL,
 };
 use super::stream_handler::{extract_text_from_stream_chunk, StreamingToolCalls};
@@ -80,6 +82,13 @@ pub struct ModelGatewayActor {
     gpu_guard: Arc<GpuResourceGuard>,
     /// Channel to report status to the startup coordinator
     startup_tx: Option<mpsc::Sender<StartupMsg>>,
+    /// Detected Foundry Local version (e.g. "0.8.119"), lazily resolved.
+    /// Used to key the incompatible-models blocklist so a runtime upgrade re-evaluates models.
+    foundry_version: Option<String>,
+    /// When `Some`, the foundry-local-sdk backend is active and all Foundry I/O is routed
+    /// through it instead of the CLI + raw HTTP path. Selected via `AppSettings.foundry_backend`
+    /// / the `PLUGABLE_FOUNDRY_BACKEND` env override.
+    sdk: Option<super::backend::sdk::SdkBackend>,
 }
 
 impl ModelGatewayActor {
@@ -92,6 +101,9 @@ impl ModelGatewayActor {
         gpu_guard: Arc<GpuResourceGuard>,
         startup_tx: Option<mpsc::Sender<StartupMsg>>,
     ) -> Self {
+        // Clone the handle for backend resolution (the original is moved into the struct).
+        let app_handle_for_backend = app_handle.clone();
+
         // Create HTTP client with connection pooling optimized for local service
         let http_client = reqwest::Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
@@ -116,13 +128,194 @@ impl ModelGatewayActor {
             http_client,
             gpu_guard,
             startup_tx,
+            foundry_version: None,
+            sdk: Self::resolve_sdk_backend(&app_handle_for_backend),
         }
+    }
+
+    /// Resolve the configured backend. Returns `Some(SdkBackend)` when the SDK backend is
+    /// selected (env `PLUGABLE_FOUNDRY_BACKEND` overrides `AppSettings.foundry_backend`),
+    /// reusing the existing `~/.foundry/cache`. Falls back to `None` (CLI/HTTP) on any error.
+    fn resolve_sdk_backend(app_handle: &AppHandle) -> Option<super::backend::sdk::SdkBackend> {
+        let setting = app_handle
+            .try_state::<SettingsState>()
+            .map(|s| futures::executor::block_on(s.settings.read()).foundry_backend)
+            .unwrap_or_default();
+        match crate::settings::FoundryBackendKind::resolve(setting) {
+            crate::settings::FoundryBackendKind::CliHttp => {
+                println!("[FoundryActor] Backend: CLI + HTTP (legacy)");
+                None
+            }
+            crate::settings::FoundryBackendKind::Sdk => {
+                let cache = match dirs::home_dir() {
+                    Some(h) => h.join(".foundry").join("cache"),
+                    None => {
+                        println!("[FoundryActor] SDK backend: no home dir; falling back to CLI");
+                        return None;
+                    }
+                };
+                // In packaged builds, point the SDK loader at the bundled native libs;
+                // `None` in dev lets the SDK use its compile-time OUT_DIR.
+                let library_dir = Self::foundry_library_dir(app_handle);
+                match super::backend::sdk::SdkBackend::new(&cache, library_dir.as_deref()) {
+                    Ok(b) => {
+                        match &library_dir {
+                            Some(d) => println!(
+                                "[FoundryActor] Backend: foundry-local-sdk 1.2.0 (bundled runtime @ {})",
+                                d.display()
+                            ),
+                            None => println!(
+                                "[FoundryActor] Backend: foundry-local-sdk 1.2.0 (dev runtime from OUT_DIR)"
+                            ),
+                        }
+                        Some(b)
+                    }
+                    Err(e) => {
+                        println!("[FoundryActor] SDK backend init failed ({e}); falling back to CLI");
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// Locate the bundled `foundry-local-sdk` native runtime libraries inside the packaged
+    /// app. Returns the directory containing `Microsoft.AI.Foundry.Local.Core.<ext>` (its
+    /// onnxruntime siblings live alongside it), or `None` in dev — where the SDK loads from
+    /// its compile-time OUT_DIR instead.
+    ///
+    /// Probes the candidate locations the per-platform Tauri config bundles into:
+    ///   - Windows/Linux: the Tauri resource dir's `foundry-libs/` subdir (and the resource
+    ///     dir itself / next to the executable as fallbacks).
+    ///   - macOS: `Contents/Frameworks` (reached from the resource or executable dir).
+    /// The first directory that actually contains the core library wins, so this stays
+    /// correct regardless of which bundling mechanism placed the files.
+    fn foundry_library_dir(app_handle: &AppHandle) -> Option<PathBuf> {
+        let core_lib = if cfg!(target_os = "windows") {
+            "Microsoft.AI.Foundry.Local.Core.dll"
+        } else if cfg!(target_os = "macos") {
+            "Microsoft.AI.Foundry.Local.Core.dylib"
+        } else {
+            "Microsoft.AI.Foundry.Local.Core.so"
+        };
+
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(res) = app_handle.path().resource_dir() {
+            candidates.push(res.join("foundry-libs"));
+            candidates.push(res.clone());
+            // macOS bundle layout: .../Contents/Resources -> .../Contents/Frameworks
+            if let Some(contents) = res.parent() {
+                candidates.push(contents.join("Frameworks"));
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.to_path_buf());
+                // macOS: .../Contents/MacOS -> .../Contents/Frameworks
+                if let Some(contents) = dir.parent() {
+                    candidates.push(contents.join("Frameworks"));
+                }
+            }
+        }
+
+        candidates.into_iter().find(|d| d.join(core_lib).exists())
     }
 
     fn model_supports_responses(model_id: &str) -> bool {
         let lower = model_id.to_lowercase();
         // Heuristic: gpt-oss models expose /v1/responses in Foundry Local (see model card)
         lower.contains("gpt-oss")
+    }
+
+    // ============ Incompatible-model blocklist ============
+    // Some models can't be loaded by the installed Foundry Local runtime (e.g. an
+    // architecture the bundled onnxruntime-genai doesn't support yet). Loading them
+    // returns a deterministic 5xx. Rather than letting the user hit a raw error and
+    // having their selection silently overwritten, we learn from the failure: record
+    // the model (keyed by Foundry version) and never offer it again on this version.
+    // Because the key is the version, a Foundry upgrade re-evaluates the model.
+
+    /// Detected Foundry version, using the cached value when available and otherwise
+    /// detecting on demand. Returns "unknown" if it can't be determined (still a valid
+    /// blocklist key — a later successful detection simply prunes the "unknown" entries).
+    fn current_foundry_version(&self) -> String {
+        // SDK backend: key the blocklist on the SDK runtime (e.g. "sdk-1.2.0") rather than
+        // the CLI's `foundry --version`. Distinct key spaces mean a model blocklisted on the
+        // old CLI runtime is automatically re-evaluated under the SDK runtime.
+        if let Some(sdk) = &self.sdk {
+            return sdk.runtime_version_key();
+        }
+        self.foundry_version
+            .clone()
+            .or_else(get_foundry_version)
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// True if `model_id` is recorded as incompatible with the current Foundry version.
+    fn is_model_incompatible(&self, model_id: &str) -> bool {
+        let version = self.current_foundry_version();
+        if let Some(settings_state) = self.app_handle.try_state::<SettingsState>() {
+            let guard = futures::executor::block_on(settings_state.settings.read());
+            return guard.incompatible_models.get(model_id) == Some(&version);
+        }
+        false
+    }
+
+    /// Record `model_id` as incompatible with the current Foundry version and persist it.
+    async fn mark_model_incompatible(&self, model_id: &str, reason: &str) {
+        let version = self.current_foundry_version();
+        if let Some(settings_state) = self.app_handle.try_state::<SettingsState>() {
+            let mut guard = settings_state.settings.write().await;
+            if guard.incompatible_models.get(model_id) == Some(&version) {
+                return; // already recorded for this version
+            }
+            guard
+                .incompatible_models
+                .insert(model_id.to_string(), version.clone());
+            println!(
+                "[FoundryActor] 🚫 Marked '{}' incompatible with Foundry {} ({})",
+                model_id, version, reason
+            );
+            if let Err(e) = settings::save_settings(&guard).await {
+                println!(
+                    "[FoundryActor] ❌ Failed to persist incompatible model '{}': {}",
+                    model_id, e
+                );
+            }
+        }
+    }
+
+    /// Detect the Foundry version once per session, cache it on the actor, and drop any
+    /// blocklist entries recorded under a *different* version — so an upgrade gives every
+    /// model a fresh chance. Cheap no-op after the first call (the subprocess runs once).
+    async fn ensure_foundry_version_and_prune_blocklist(&mut self) {
+        if self.foundry_version.is_some() {
+            return;
+        }
+        // SDK backend uses its build-pinned runtime key; CLI uses `foundry --version`.
+        let version = if let Some(sdk) = &self.sdk {
+            sdk.runtime_version_key()
+        } else {
+            get_foundry_version().unwrap_or_else(|| "unknown".to_string())
+        };
+        self.foundry_version = Some(version.clone());
+        if let Some(settings_state) = self.app_handle.try_state::<SettingsState>() {
+            let mut guard = settings_state.settings.write().await;
+            let before = guard.incompatible_models.len();
+            guard
+                .incompatible_models
+                .retain(|_, v| *v == version);
+            let pruned = before - guard.incompatible_models.len();
+            if pruned > 0 {
+                println!(
+                    "[FoundryActor] Foundry version is {} — pruned {} stale incompatible-model entry(ies)",
+                    version, pruned
+                );
+                if let Err(e) = settings::save_settings(&guard).await {
+                    println!("[FoundryActor] ❌ Failed to persist pruned blocklist: {}", e);
+                }
+            }
+        }
     }
 
     /// Check if Foundry reports GPU execution providers are available
@@ -732,13 +925,18 @@ impl ModelGatewayActor {
                 }
                 FoundryMsg::GetCachedModels { respond_to } => {
                     // Use REST API to get models (same as available_models)
-                    // Convert to CachedModel format for compatibility
+                    // Convert to CachedModel format for compatibility.
+                    // Exclude models known incompatible with the installed Foundry runtime so
+                    // they never appear as a selectable option in the UI.
                     let cached: Vec<CachedModel> = self
                         .available_models
                         .iter()
+                        .filter(|model_id| !self.is_model_incompatible(model_id))
                         .map(|model_id| CachedModel {
                             alias: model_id.clone(), // Use model_id as alias since REST API doesn't provide aliases
                             model_id: model_id.clone(),
+                            incompatible: false,
+                            incompatible_reason: None,
                         })
                         .collect();
                     let _ = respond_to.send(cached);
@@ -1036,6 +1234,50 @@ impl ModelGatewayActor {
                         println!("[FoundryActor] Model: {} | family: {:?} | reasoning: {} | tools: {} | reasoning_effort: {}",
                             model, model_family, model_supports_reasoning, use_native_tools, supports_reasoning_effort);
 
+                        // ---- SDK backend chat fast-path ----
+                        // Reuse all the message prep + capability derivation above, but stream
+                        // through the SDK's typed ChatClient instead of HTTP/SSE. Native tool
+                        // calls are re-emitted as <tool_call> text by the backend, so downstream
+                        // parsing is unchanged. A deterministic Server error (incl. generation
+                        // failures like qwen3.5's WebGPU bug) feeds the version-keyed blocklist
+                        // and triggers fallback — mirroring the CLI 5xx behavior.
+                        if let Some(sdk) = &self.sdk {
+                            let _ = self.app_handle.emit(
+                                "chat-stream-status",
+                                json!({ "phase": "generating", "message": "Generating response..." }),
+                            );
+                            let req = super::backend::ChatStreamRequest {
+                                model: model.clone(),
+                                family: model_family,
+                                messages: messages.clone(),
+                                tools: native_tool_specs.clone(),
+                                use_native_tools,
+                                supports_reasoning: model_supports_reasoning,
+                                supports_reasoning_effort,
+                                reasoning_effort: reasoning_effort.clone(),
+                                use_responses_api: false,
+                            };
+                            let outcome = sdk
+                                .chat_stream(req, respond_to.clone(), stream_cancel_rx)
+                                .await;
+                            if let Some(be) = outcome.error {
+                                let msg = be.message().to_string();
+                                println!("[FoundryActor] SDK chat error: {}", msg);
+                                if be.is_server()
+                                    && !model.to_lowercase().contains(DEFAULT_FALLBACK_MODEL)
+                                {
+                                    self.mark_model_incompatible(&model, &msg).await;
+                                    self.emit_model_fallback_required(&model, &msg);
+                                    let _ = respond_to.send(
+                                        "⚠️ This model isn't compatible with your Foundry Local runtime. Switching to a supported model…".to_string(),
+                                    );
+                                } else {
+                                    let _ = respond_to.send(format!("Error: {}", msg));
+                                }
+                            }
+                            continue;
+                        }
+
                         if use_native_tools {
                             let tool_names: Vec<&str> = native_tool_specs
                                 .as_ref()
@@ -1209,12 +1451,22 @@ impl ModelGatewayActor {
                                         // Other non-success errors (5XX, etc.)
                                         let text = resp.text().await.unwrap_or_default();
                                         println!("Foundry error ({}): {}", status, text);
-                                        // Emit fallback suggestion for 5XX errors
+                                        // Emit fallback suggestion for 5XX errors so the frontend
+                                        // auto-switches to a known-good model. We do NOT blocklist
+                                        // here: the model already loaded, so a mid-chat 5xx is more
+                                        // likely transient than a true incompatibility (those are
+                                        // caught and recorded at load time in load_model_impl).
                                         let error_msg = format!("HTTP {}: {}", status, text);
                                         if !model.to_lowercase().contains(DEFAULT_FALLBACK_MODEL) {
                                             self.emit_model_fallback_required(&model, &error_msg);
+                                            // Show a friendly message instead of the raw HTTP/JSON
+                                            // body; the fallback listener switches models from here.
+                                            let _ = respond_to_clone.send(
+                                                "⚠️ The current model ran into a problem with your Foundry Local runtime. Switching to a supported model…".to_string(),
+                                            );
+                                        } else {
+                                            let _ = respond_to_clone.send(format!("Error: {}", text));
                                         }
-                                        let _ = respond_to_clone.send(format!("Error: {}", text));
                                         break;
                                     } else {
                                         // Success - stream the response
@@ -1599,7 +1851,19 @@ impl ModelGatewayActor {
                 FoundryMsg::GetCatalogModels { respond_to } => {
                     println!("FoundryActor: Getting catalog models");
                     if let Some(port) = self.port {
-                        let catalog = self.get_catalog_models_impl(&self.http_client, port).await;
+                        let mut catalog = self.get_catalog_models_impl(&self.http_client, port).await;
+                        // Annotate (don't hide) models known incompatible with this Foundry
+                        // version so the Models tab can grey them out and disable download.
+                        let version = self.current_foundry_version();
+                        for model in catalog.iter_mut() {
+                            if self.is_model_incompatible(&model.name) {
+                                model.incompatible = true;
+                                model.incompatible_reason = Some(format!(
+                                    "Not supported by your installed Foundry Local version ({})",
+                                    version
+                                ));
+                            }
+                        }
                         let _ = respond_to.send(catalog);
                     } else {
                         let _ = respond_to.send(Vec::new());
@@ -1703,6 +1967,12 @@ impl ModelGatewayActor {
         if let Some(p) = self.port {
             println!("Foundry service detected on port {}", p);
             println!("FoundryActor: Valid EPs: {:?}", self.valid_eps);
+
+            // Resolve the Foundry version once and prune blocklist entries from other
+            // versions, so a runtime upgrade re-evaluates previously-incompatible models.
+            // Done here (not just at model selection) so the version is cached for the
+            // whole session and `is_model_incompatible` never re-spawns a subprocess.
+            self.ensure_foundry_version_and_prune_blocklist().await;
 
             if self.valid_eps.is_empty() {
                 println!(
@@ -1825,11 +2095,14 @@ impl ModelGatewayActor {
             // NO "first model" fallback - that causes problems!
             if self.model_id.is_none() {
                 use std::io::Write;
-                
+
                 println!("\n[FoundryActor] ========== MODEL SELECTION AT STARTUP ==========");
                 println!("[FoundryActor] Available models: {:?}", self.available_models);
                 let _ = std::io::stdout().flush();
-                
+
+                // Version detection + blocklist pruning already ran above (right after the
+                // port was detected), so the version is cached for `is_model_incompatible`.
+
                 // Step 1: Read persisted model from settings
                 let persisted_model: Option<String> = if let Some(settings_state) = self.app_handle.try_state::<SettingsState>() {
                     let guard = futures::executor::block_on(settings_state.settings.read());
@@ -1843,14 +2116,20 @@ impl ModelGatewayActor {
                     None
                 };
                 
-                // Step 2: Check if persisted model exists in available models
+                // Step 2: Check if persisted model exists in available models AND is not
+                // known-incompatible with the installed Foundry runtime.
                 let persisted_available = persisted_model.as_ref().and_then(|pm| {
+                    if self.is_model_incompatible(pm) {
+                        println!("[FoundryActor] ⚠️  Persisted model '{}' is incompatible with this Foundry version — skipping", pm);
+                        return None;
+                    }
                     self.available_models.iter().find(|m| *m == pm).cloned()
                 });
-                
-                // Step 3: Find phi-4-mini-instruct as fallback
+
+                // Step 3: Find phi-4-mini-instruct as fallback (also skip if blocklisted)
                 let fallback_model = self.available_models.iter().find(|m| {
                     m.to_lowercase().contains(DEFAULT_FALLBACK_MODEL)
+                        && !self.is_model_incompatible(m)
                 }).cloned();
                 
                 println!("[FoundryActor] Persisted model available: {:?}", persisted_available);
@@ -1905,6 +2184,16 @@ impl ModelGatewayActor {
     /// Get models via REST API: GET /openai/models
     /// Returns a list of model info objects
     async fn get_models_via_rest(&self, port: u16) -> Vec<FoundryModel> {
+        // SDK backend: list cached models via the typed catalog API instead of /openai/models.
+        if let Some(sdk) = &self.sdk {
+            return sdk
+                .list_models()
+                .await
+                .into_iter()
+                .map(|m| FoundryModel { id: m.id, tags: m.tags })
+                .collect();
+        }
+
         let url = format!("http://127.0.0.1:{}/openai/models", port);
         println!("FoundryActor: Fetching models via REST API: {}", url);
 
@@ -2145,6 +2434,14 @@ impl ModelGatewayActor {
     }
 
     async fn ensure_service_running(&self) -> std::io::Result<()> {
+        // SDK backend: start the embedded web service instead of the CLI service.
+        if let Some(sdk) = &self.sdk {
+            return sdk
+                .ensure_service()
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        }
+
         println!("FoundryActor: Checking/Starting Foundry service...");
         // Try to start service via CLI: `foundry service start`
         // We use a timeout to prevent hanging indefinitely
@@ -2256,6 +2553,14 @@ impl ModelGatewayActor {
     }
 
     async fn restart_service(&mut self) -> std::io::Result<()> {
+        // SDK backend: restart the embedded web service.
+        if let Some(sdk) = &self.sdk {
+            return sdk
+                .restart_service()
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        }
+
         println!("Restarting Foundry service (stop then start)...");
 
         let stop_timeout_secs: u64 = 20;
@@ -2381,6 +2686,22 @@ impl ModelGatewayActor {
     /// Valid EPs: CPUExecutionProvider, WebGpuExecutionProvider, NvTensorRTRTXExecutionProvider, OpenVINOExecutionProvider, CUDAExecutionProvider
     /// ```
     async fn detect_port_and_eps(&self) -> ServiceStatus {
+        // SDK backend: start the embedded service and derive port/EPs from it.
+        if let Some(sdk) = &self.sdk {
+            let _ = sdk.ensure_service().await;
+            let info = sdk.connection_info().await;
+            let port = info
+                .base_url
+                .as_deref()
+                .and_then(|u| u.rsplit(':').next())
+                .and_then(|p| p.trim_end_matches('/').parse::<u16>().ok());
+            return ServiceStatus {
+                port,
+                registered_eps: info.registered_eps,
+                valid_eps: info.valid_eps,
+            };
+        }
+
         let foundry_bin = find_foundry_binary();
         println!("FoundryActor: Detecting port and EPs via '{} service status'...", foundry_bin);
 
@@ -2420,6 +2741,20 @@ impl ModelGatewayActor {
         port: u16,
         model_name: &str,
     ) -> Result<(), String> {
+        // SDK backend: download via the typed model API, forwarding progress to the same
+        // `model-download-progress` event the frontend already listens for.
+        if let Some(sdk) = &self.sdk {
+            let app = self.app_handle.clone();
+            let file = model_name.to_string();
+            let progress: super::backend::ProgressSink = Box::new(move |p: f64| {
+                let _ = app.emit(
+                    "model-download-progress",
+                    serde_json::json!({ "file": file, "progress": p }),
+                );
+            });
+            return sdk.download(model_name, progress).await;
+        }
+
         let url = format!("http://127.0.0.1:{}/openai/download", port);
         println!(
             "FoundryActor: Downloading model {} from {}",
@@ -2757,6 +3092,36 @@ impl ModelGatewayActor {
         port: u16,
         model_name: &str,
     ) -> Result<(), String> {
+        // SDK backend: load via the typed model API. A Server error is deterministic
+        // per (model, runtime) — record it in the version-keyed blocklist and emit fallback,
+        // mirroring the CLI/HTTP server-error handling.
+        if let Some(sdk) = &self.sdk {
+            return match sdk.load(model_name).await {
+                Ok(()) => {
+                    let _ = self.app_handle.emit(
+                        "model-load-complete",
+                        serde_json::json!({ "model": model_name, "success": true }),
+                    );
+                    self.emit_model_selected(model_name);
+                    Ok(())
+                }
+                Err(be) => {
+                    let error_msg = be.message().to_string();
+                    let _ = self.app_handle.emit(
+                        "model-load-complete",
+                        serde_json::json!({ "model": model_name, "success": false, "error": error_msg }),
+                    );
+                    if be.is_server()
+                        && !model_name.to_lowercase().contains(DEFAULT_FALLBACK_MODEL)
+                    {
+                        self.mark_model_incompatible(model_name, &error_msg).await;
+                        self.emit_model_fallback_required(model_name, &error_msg);
+                    }
+                    Err(error_msg)
+                }
+            };
+        }
+
         // URL encode the model name in case it has special characters
         let encoded_name = urlencoding::encode(model_name);
         let url = format!(
@@ -2818,10 +3183,14 @@ impl ModelGatewayActor {
                 }),
             );
 
-            // On 5XX server errors, emit fallback event so the frontend can auto-switch
-            // to a known-good model. This prevents users from getting stuck with a broken
-            // model that always returns 500 errors.
+            // On 5XX server errors, the model can't be loaded by the installed Foundry
+            // runtime (e.g. an unsupported architecture or a config its onnxruntime-genai
+            // build can't parse). A load failure is deterministic per model+version, so we
+            // record it in the version-keyed blocklist and emit a fallback so the frontend
+            // auto-switches to a known-good model. This prevents the user from getting stuck
+            // on a broken model. (The phi-4 fallback itself is never blocklisted.)
             if status.is_server_error() && !model_name.to_lowercase().contains(DEFAULT_FALLBACK_MODEL) {
+                self.mark_model_incompatible(model_name, &error_msg).await;
                 self.emit_model_fallback_required(model_name, &error_msg);
             }
 
@@ -2832,6 +3201,10 @@ impl ModelGatewayActor {
     /// Get currently loaded models
     /// GET /openai/loadedmodels
     async fn get_loaded_models_impl(&self, client: &reqwest::Client, port: u16) -> Vec<String> {
+        if let Some(sdk) = &self.sdk {
+            return sdk.list_loaded().await;
+        }
+
         let url = format!("http://127.0.0.1:{}/openai/loadedmodels", port);
         println!("FoundryActor: Getting loaded models from {}", url);
 
@@ -2877,6 +3250,10 @@ impl ModelGatewayActor {
         client: &reqwest::Client,
         port: u16,
     ) -> Vec<CatalogModel> {
+        if let Some(sdk) = &self.sdk {
+            return sdk.list_catalog().await;
+        }
+
         let url = format!("http://127.0.0.1:{}/foundry/list", port);
         println!("FoundryActor: Getting catalog models from {}", url);
 
@@ -2923,6 +3300,10 @@ impl ModelGatewayActor {
         port: u16,
         model_name: &str,
     ) -> Result<(), String> {
+        if let Some(sdk) = &self.sdk {
+            return sdk.unload(model_name).await;
+        }
+
         let encoded_name = urlencoding::encode(model_name);
         let url = format!(
             "http://127.0.0.1:{}/openai/unload/{}?force=true",
@@ -2969,6 +3350,18 @@ impl ModelGatewayActor {
         client: &reqwest::Client,
         port: u16,
     ) -> Result<FoundryServiceStatus, String> {
+        if let Some(sdk) = &self.sdk {
+            sdk.ensure_service().await.ok();
+            let model_dir_path = dirs::home_dir()
+                .map(|h| h.join(".foundry").join("cache").to_string_lossy().to_string())
+                .unwrap_or_default();
+            return Ok(FoundryServiceStatus {
+                endpoints: sdk.base_url().into_iter().collect(),
+                model_dir_path,
+                is_auto_registration_resolved: true,
+            });
+        }
+
         let url = format!("http://127.0.0.1:{}/openai/status", port);
         println!("FoundryActor: Getting service status from {}", url);
 
@@ -3008,6 +3401,10 @@ impl ModelGatewayActor {
     /// Remove a model from the disk cache using CLI
     /// foundry cache remove --yes <model>
     async fn remove_cached_model_impl(&self, model_name: &str) -> Result<(), String> {
+        if let Some(sdk) = &self.sdk {
+            return sdk.remove_cached(model_name).await;
+        }
+
         let foundry_bin = find_foundry_binary();
         println!(
             "FoundryActor: Removing model from cache via CLI: {} (using {})",

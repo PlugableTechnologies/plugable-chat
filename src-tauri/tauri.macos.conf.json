@@ -1,0 +1,12 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "bundle": {
+    "macOS": {
+      "frameworks": [
+        "foundry-libs/Microsoft.AI.Foundry.Local.Core.dylib",
+        "foundry-libs/libonnxruntime.dylib",
+        "foundry-libs/libonnxruntime-genai.dylib"
+      ]
+    }
+  }
+}

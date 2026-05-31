@@ -832,11 +832,12 @@ export const createListenerSlice: StateCreator<
                     );
                     
                     if (fallbackModelInfo && state.currentModel !== fallbackModelInfo.model_id) {
+                        const fallbackName = fallbackModelInfo.alias || fallbackModelInfo.model_id;
                         console.log(`[ChatStore] Switching to fallback model: ${fallbackModelInfo.model_id}`);
                         set({
                             operationStatus: {
                                 type: 'loading',
-                                message: `Switching to ${fallbackModelInfo.alias || fallbackModelInfo.model_id} due to error with current model...`,
+                                message: `“${current_model}” isn’t compatible with your Foundry Local version — switching to ${fallbackName}…`,
                                 startTime: Date.now(),
                             },
                             statusBarDismissed: false,
@@ -850,7 +851,7 @@ export const createListenerSlice: StateCreator<
                             set({
                                 operationStatus: {
                                     type: 'loading',
-                                    message: `Switched to ${fallbackModelInfo.alias || fallbackModelInfo.model_id}`,
+                                    message: `Switched to ${fallbackName}`,
                                     completed: true,
                                     startTime: Date.now(),
                                 },

@@ -6,6 +6,7 @@
 //! - Streaming response handlers
 //! - Service lifecycle management
 
+mod backend;
 mod model_gateway_actor;
 mod request_builder;
 mod service_manager;

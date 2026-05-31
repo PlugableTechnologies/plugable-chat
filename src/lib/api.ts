@@ -16,6 +16,10 @@ export interface FoundryCatalogModel {
     supportsToolCalling: boolean;
     runtime: FoundryCatalogModelRuntime;
     publisher: string;
+    /** True if this model can't be loaded by the installed Foundry Local version. */
+    incompatible?: boolean;
+    /** Human-readable reason shown when `incompatible` is true. */
+    incompatibleReason?: string | null;
 }
 
 /** Runtime info for a catalog model */

@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -56,6 +56,11 @@ fn main() {
     // // Copy ONNX Runtime DLLs to binaries directory on Windows for bundling
     // #[cfg(target_os = "windows")]
     // copy_onnx_runtime_dlls(manifest_path);
+
+    // Stage the foundry-local-sdk native runtime libraries (downloaded by the SDK's own
+    // build.rs into its OUT_DIR) into a stable directory the Tauri bundler can include,
+    // so packaged releases run on machines without the cargo target dir present.
+    copy_foundry_native_libs(manifest_path);
 
     tauri_build::build()
 }
@@ -540,6 +545,127 @@ fn find_onnx_dlls_recursive(dir: &Path) -> Option<std::path::PathBuf> {
     }
     
     None
+}
+
+/// Copy the `foundry-local-sdk` native runtime libraries into `src-tauri/foundry-libs/`
+/// so the Tauri bundler can include them in packaged builds.
+///
+/// The SDK's own build.rs downloads these from NuGet into its `OUT_DIR`
+/// (`target/<profile>/build/foundry-local-sdk-<hash>/out/`) and loads them at runtime via
+/// libloading. That OUT_DIR only exists on the build machine, so a distributed
+/// `.app`/`.dmg`/installer would otherwise fail to load the runtime at startup. We stage
+/// the libs into a stable directory referenced by the per-platform Tauri config:
+///   - macOS:         `bundle.macOS.frameworks` -> Contents/Frameworks/ (gets code-signed)
+///   - Windows/Linux: `bundle.resources`        -> alongside the bundled resources
+///
+/// The runtime resolver (`model_gateway_actor::foundry_library_dir`) then points the SDK's
+/// `FoundryLocalConfig::library_path` at whichever bundled location actually holds the libs.
+///
+/// Best-effort: if the SDK's libs aren't extracted yet (its build script may not have run
+/// before ours on a fully clean build), this warns and returns; a second build copies them.
+/// This mirrors the (currently disabled) `copy_onnx_runtime_dlls` pattern above.
+fn copy_foundry_native_libs(manifest_path: &Path) {
+    // Platform-specific native library file names produced by the SDK build.rs.
+    // Core has NO `lib` prefix on any platform; ORT/GenAI use the platform prefix.
+    let (prefix, ext) = if cfg!(target_os = "windows") {
+        ("", "dll")
+    } else if cfg!(target_os = "macos") {
+        ("lib", "dylib")
+    } else {
+        ("lib", "so")
+    };
+    let core = format!("Microsoft.AI.Foundry.Local.Core.{ext}");
+    let wanted = [
+        core.clone(),
+        format!("{prefix}onnxruntime.{ext}"),
+        format!("{prefix}onnxruntime-genai.{ext}"),
+    ];
+
+    let dest_dir = manifest_path.join("foundry-libs");
+    if let Err(e) = fs::create_dir_all(&dest_dir) {
+        println!("cargo:warning=Failed to create foundry-libs dir: {e}");
+        return;
+    }
+
+    // Build the list of `build/` dirs to search for the SDK's extracted libs.
+    let mut search_roots: Vec<PathBuf> = Vec::new();
+    // Our own OUT_DIR is `.../target/<profile>/build/<pkg>-<hash>/out`; the SDK's libs are a
+    // sibling under the same `build/` dir, so walk up two levels to reach it.
+    if let Ok(out_dir) = env::var("OUT_DIR") {
+        if let Some(build_dir) = Path::new(&out_dir).ancestors().nth(2) {
+            search_roots.push(build_dir.to_path_buf());
+        }
+    }
+    // Also probe both profiles under the workspace target, in case a previous dev build
+    // (`cargo run`) extracted the libs under a different profile than the current bundle.
+    if let Some(target) = manifest_path.parent().map(|p| p.join("target")) {
+        for profile in ["release", "debug"] {
+            search_roots.push(target.join(profile).join("build"));
+        }
+    }
+
+    let src_dir = match find_foundry_out_dir(&search_roots, &core) {
+        Some(d) => d,
+        None => {
+            println!(
+                "cargo:warning=foundry-local-sdk native libs not found yet (looked for {core}). \
+                 Packaged build will be incomplete until extracted; re-run the build."
+            );
+            return;
+        }
+    };
+    println!("cargo:rerun-if-changed={}", src_dir.join(&core).display());
+
+    for name in &wanted {
+        let src = src_dir.join(name);
+        if !src.exists() {
+            // ORT/GenAI naming can vary slightly per platform/feature; skip what isn't present.
+            continue;
+        }
+        let dest = dest_dir.join(name);
+        // Skip the (large) copy when the destination is already up to date by size.
+        let up_to_date = fs::metadata(&dest)
+            .ok()
+            .zip(fs::metadata(&src).ok())
+            .map(|(d, s)| d.len() == s.len())
+            .unwrap_or(false);
+        if up_to_date {
+            continue;
+        }
+        match fs::copy(&src, &dest) {
+            Ok(_) => println!("cargo:warning=Bundled foundry native lib: {name}"),
+            Err(e) => println!("cargo:warning=Failed to copy {name}: {e}"),
+        }
+    }
+}
+
+/// Find the `foundry-local-sdk-<hash>/out` directory that actually contains the extracted
+/// native core library, searching the given `build/` roots and returning the newest match.
+fn find_foundry_out_dir(roots: &[PathBuf], core_lib: &str) -> Option<PathBuf> {
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for root in roots {
+        let entries = match fs::read_dir(root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("foundry-local-sdk-")
+            {
+                continue;
+            }
+            let out = entry.path().join("out");
+            if let Ok(meta) = fs::metadata(out.join(core_lib)) {
+                let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                if newest.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+                    newest = Some((mtime, out));
+                }
+            }
+        }
+    }
+    newest.map(|(_, p)| p)
 }
 
 /// Copy all DLL files from source directory to destination

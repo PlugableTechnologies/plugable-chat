@@ -23,6 +23,9 @@ export interface OperationStatus {
 export interface CachedModel {
     alias: string;
     model_id: string;
+    /** True if known incompatible with the installed Foundry runtime (filtered out server-side). */
+    incompatible?: boolean;
+    incompatible_reason?: string | null;
 }
 
 // Model family for format-specific handling

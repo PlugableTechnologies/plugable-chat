@@ -87,6 +87,48 @@ pub fn find_foundry_binary() -> String {
     "foundry".to_string()
 }
 
+/// Detect the installed Foundry Local version by running `foundry --version`.
+///
+/// Used to key the incompatible-models blocklist: a model that fails to load under
+/// one runtime version may load fine after an upgrade, so blocklist entries are scoped
+/// to the version that produced the failure. Returns the trimmed version string
+/// (e.g. "0.8.119") or `None` if the binary can't be run / parsed.
+pub fn get_foundry_version() -> Option<String> {
+    let foundry_bin = find_foundry_binary();
+    let output = std::process::Command::new(&foundry_bin)
+        .arg("--version")
+        .hide_console_window()
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_foundry_version_output(&stdout)
+}
+
+/// Extract a version string from `foundry --version` output.
+///
+/// `foundry --version` prints just the semver (e.g. "0.8.119"), but we stay tolerant of any
+/// surrounding text by grabbing the first dotted-numeric token on the first non-empty line,
+/// falling back to the whole trimmed line.
+pub fn parse_foundry_version_output(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(token) = trimmed
+            .split_whitespace()
+            .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.'))
+        {
+            return Some(token.to_string());
+        }
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
 /// Result of parsing `foundry service status` output
 pub struct ServiceStatus {
     pub port: Option<u16>,
@@ -161,5 +203,49 @@ pub fn parse_foundry_service_status_output(output: &str) -> ServiceStatus {
         port,
         registered_eps,
         valid_eps,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_bare_semver() {
+        // `foundry --version` on 0.8.119 prints just the version.
+        assert_eq!(
+            parse_foundry_version_output("0.8.119\n"),
+            Some("0.8.119".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_version_with_surrounding_text() {
+        assert_eq!(
+            parse_foundry_version_output("foundry version 1.2.3 (build abc)"),
+            Some("1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn skips_leading_blank_lines() {
+        assert_eq!(
+            parse_foundry_version_output("\n\n   0.9.0  \n"),
+            Some("0.9.0".to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_trimmed_line_when_no_dotted_token() {
+        // No dotted-numeric token: return the trimmed line rather than nothing.
+        assert_eq!(
+            parse_foundry_version_output("dev"),
+            Some("dev".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_for_empty_output() {
+        assert_eq!(parse_foundry_version_output("   \n  \n"), None);
     }
 }

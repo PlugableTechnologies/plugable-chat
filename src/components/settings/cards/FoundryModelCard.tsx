@@ -1,4 +1,4 @@
-import { HardDrive, Wrench, CheckCircle, Zap, Download, Trash2, Loader2 } from 'lucide-react';
+import { HardDrive, Wrench, CheckCircle, Zap, Download, Trash2, Loader2, AlertTriangle } from 'lucide-react';
 import type { FoundryModelCardProps } from '../types';
 
 export function FoundryModelCard({
@@ -15,6 +15,11 @@ export function FoundryModelCard({
     const fileSizeGB = (model.fileSizeMb / 1024).toFixed(2);
     const tasks = model.task?.replace('-completion', '') || 'chat';
     const supportsTools = model.supportsToolCalling;
+    // A compatibility *warning*: the model may not run on this device's runtime, but the
+    // user can still install and try it (their informed choice).
+    const hasWarning = !!model.incompatible;
+    const warningReason =
+        model.incompatibleReason || 'May not run on this device';
 
     // Device badge colors
     const deviceBadgeClass = deviceType === 'GPU'
@@ -28,8 +33,14 @@ export function FoundryModelCard({
         ? 'border-2 border-blue-400 shadow-lg shadow-blue-100'
         : 'border border-gray-200';
 
+    // Models with a compatibility warning get a subtle amber ring but stay fully usable.
+    const warnClass = hasWarning ? 'ring-1 ring-amber-200 hover:shadow-md' : 'hover:shadow-md';
+
     return (
-        <div className={`model-card bg-white rounded-xl p-4 ${cardBorderClass} transition-all duration-200 hover:shadow-md`}>
+        <div
+            className={`model-card bg-white rounded-xl p-4 ${cardBorderClass} transition-all duration-200 ${warnClass}`}
+            title={hasWarning ? warningReason : undefined}
+        >
             {/* Header: Device badge, alias, license */}
             <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
@@ -69,6 +80,15 @@ export function FoundryModelCard({
 
             {/* Status badges */}
             <div className="flex items-center gap-2 mb-4">
+                {hasWarning && (
+                    <span
+                        className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700 flex items-center gap-1"
+                        title={warningReason}
+                    >
+                        <AlertTriangle size={12} />
+                        May not run here
+                    </span>
+                )}
                 {isCached && (
                     <span className="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700 flex items-center gap-1">
                         <CheckCircle size={12} />
@@ -106,13 +126,15 @@ export function FoundryModelCard({
 
             {/* Action buttons */}
             <div className="flex items-center gap-2">
+                {/* Warned models are still installable — the user can try them (informed choice). */}
                 {!isCached && !isDownloading && (
                     <button
                         onClick={onDownload}
-                        className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm font-medium"
+                        title={hasWarning ? warningReason : undefined}
+                        className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-colors text-sm font-medium text-white ${hasWarning ? 'bg-amber-500 hover:bg-amber-600' : 'bg-blue-500 hover:bg-blue-600'}`}
                     >
                         <Download size={16} />
-                        Download
+                        {hasWarning ? 'Download anyway' : 'Download'}
                     </button>
                 )}
                 {isCached && !isLoaded && (

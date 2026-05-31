@@ -162,7 +162,8 @@ export function ModelsTab() {
         window.open('https://plugable.com/products/tbt5-ai', '_blank');
     };
 
-    // Filter and sort models
+    // Filter and sort models. Models with a compatibility warning are still listed and
+    // installable (the card shows a "May not run here" badge) — we don't hide them.
     const filteredModels = catalogModels
         .filter((model) => {
             if (deviceFilter === 'Auto') return true;

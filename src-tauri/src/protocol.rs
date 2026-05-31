@@ -619,6 +619,12 @@ fn parse_combined_tool_name(combined: &str) -> Option<(String, String)> {
 pub struct CachedModel {
     pub alias: String,
     pub model_id: String,
+    /// True if this model is known incompatible with the installed Foundry runtime.
+    /// Computed server-side from the version-keyed blocklist (not part of any API response).
+    #[serde(default)]
+    pub incompatible: bool,
+    #[serde(default)]
+    pub incompatible_reason: Option<String>,
 }
 
 /// Model family for determining response format and capabilities
@@ -1104,6 +1110,13 @@ pub struct CatalogModel {
     pub runtime: CatalogModelRuntime,
     #[serde(default)]
     pub publisher: String,
+    /// True if this model is known incompatible with the installed Foundry runtime.
+    /// Computed server-side from the version-keyed blocklist; `skip_deserializing` because
+    /// `/foundry/list` does not provide it (we set it after fetching the catalog).
+    #[serde(default, skip_deserializing)]
+    pub incompatible: bool,
+    #[serde(default, skip_deserializing)]
+    pub incompatible_reason: Option<String>,
 }
 
 /// Runtime info for a catalog model

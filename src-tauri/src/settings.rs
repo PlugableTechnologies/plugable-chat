@@ -71,6 +71,51 @@ impl ChatFormatName {
     }
 }
 
+/// Which Foundry Local integration backend the model gateway should use.
+///
+/// `CliHttp` is the legacy path (shell out to the `foundry` CLI + raw HTTP to the local
+/// service). `Sdk` uses the `foundry-local-sdk` 1.2.0 crate (bundled newer runtime, typed API).
+/// During migration the default stays `CliHttp`; the SDK path is opt-in via this setting or the
+/// `PLUGABLE_FOUNDRY_BACKEND` env override, then becomes the default once validated.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FoundryBackendKind {
+    CliHttp,
+    Sdk,
+}
+
+impl Default for FoundryBackendKind {
+    fn default() -> Self {
+        // Migrated default: the foundry-local-sdk backend (bundled, maintained runtime).
+        // The legacy CLI/HTTP path remains available via this setting or
+        // `PLUGABLE_FOUNDRY_BACKEND=cli_http` until it is removed in a later release.
+        FoundryBackendKind::Sdk
+    }
+}
+
+impl FoundryBackendKind {
+    /// Resolve the effective backend: the `PLUGABLE_FOUNDRY_BACKEND` env override wins
+    /// (`sdk` | `cli_http`), otherwise the persisted setting.
+    pub fn resolve(setting: FoundryBackendKind) -> FoundryBackendKind {
+        match std::env::var("PLUGABLE_FOUNDRY_BACKEND")
+            .ok()
+            .map(|s| s.trim().to_lowercase())
+            .as_deref()
+        {
+            Some("sdk") => FoundryBackendKind::Sdk,
+            Some("cli_http") | Some("cli") | Some("http") => FoundryBackendKind::CliHttp,
+            _ => setting,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FoundryBackendKind::CliHttp => "cli_http",
+            FoundryBackendKind::Sdk => "sdk",
+        }
+    }
+}
+
 fn default_chat_format() -> ChatFormatName {
     ChatFormatName::OpenaiCompletions
 }
@@ -612,6 +657,15 @@ pub struct AppSettings {
     /// Persisted model selection - applied on app startup
     #[serde(default)]
     pub selected_model: Option<String>,
+    /// Models known to be incompatible with the installed Foundry runtime.
+    /// Maps model_id -> the Foundry version under which the model failed to load.
+    /// Re-evaluated (pruned) whenever the detected Foundry version changes, so a
+    /// runtime upgrade that adds support for a model automatically re-enables it.
+    #[serde(default)]
+    pub incompatible_models: HashMap<String, String>,
+    /// Which Foundry integration backend to use (legacy CLI/HTTP vs foundry-local-sdk).
+    #[serde(default)]
+    pub foundry_backend: FoundryBackendKind,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
     /// Default chat format when no per-model override is present
@@ -878,6 +932,8 @@ impl Default for AppSettings {
         Self {
             system_prompt: default_system_prompt(),
             selected_model: None,
+            incompatible_models: HashMap::new(),
+            foundry_backend: FoundryBackendKind::default(),
             mcp_servers: vec![default_mcp_test_server()],
             chat_format_default: default_chat_format(),
             chat_format_overrides: HashMap::new(),
