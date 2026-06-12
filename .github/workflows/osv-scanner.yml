@@ -1,0 +1,25 @@
+name: OSV vulnerability scan
+# Weekly multi-ecosystem vulnerability scan (npm/PyPI/crates lockfiles + requirements).
+# Org supply-chain standard: see PlugableTechnologies/.github SECURITY.md.
+on:
+  schedule:
+    - cron: "23 5 * * 1" # Mondays 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  osv-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download OSV-Scanner (pinned release)
+        run: |
+          curl -sSL -o /usr/local/bin/osv-scanner \
+            https://github.com/google/osv-scanner/releases/download/v2.3.8/osv-scanner_linux_amd64
+          chmod +x /usr/local/bin/osv-scanner
+
+      - name: Scan repository
+        run: osv-scanner scan --recursive .
