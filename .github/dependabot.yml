@@ -1,0 +1,21 @@
+# Org standard: 7-day cooldown on dependency updates (30 days for majors).
+# Security updates bypass cooldown automatically. See PlugableTechnologies/.github SECURITY.md.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+  - package-ecosystem: "cargo"
+    directories:
+      - "/"
+      - "/src-tauri"
+      - "/mcp-test-server"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
