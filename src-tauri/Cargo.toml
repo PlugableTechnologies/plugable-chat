@@ -68,7 +68,7 @@ lazy_static = "1.4"
 
 # WASM runtime for Python sandbox
 wasmtime = "22"
-wasmtime-wasi = "22"
+wasmtime-wasi = "24"
 
 # Async channel for WASM callbacks  
 async-channel = "2"
