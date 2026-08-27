@@ -1054,6 +1054,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "built"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8814,7 +8824,7 @@ checksum = "d22a5c520662f0ff98d717e2c4e52d8ba35eb1d99ee771dbdba7f09908b75bbb"
 dependencies = [
  "ascii",
  "bitflags 2.10.0",
- "bstr",
+ "bstr 0.2.17",
  "cfg-if",
  "itertools 0.11.0",
  "libc",
@@ -9072,7 +9082,7 @@ dependencies = [
  "ascii",
  "atty",
  "bitflags 2.10.0",
- "bstr",
+ "bstr 0.2.17",
  "caseless",
  "cfg-if",
  "chrono",
@@ -9612,9 +9622,12 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "similar"
-version = "2.7.0"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+checksum = "04d93e861ede2e497b47833469b8ec9d5c07fa4c78ce7a00f6eb7dd8168b4b3f"
+dependencies = [
+ "bstr 1.12.1",
+]
 
 [[package]]
 name = "siphasher"
