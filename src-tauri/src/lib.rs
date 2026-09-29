@@ -30,6 +30,7 @@ pub mod settings_state_machine;
 pub mod state_machine;
 pub mod system_prompt;
 pub mod tabular_parser;
+pub mod toolbox_install;
 pub mod tool_execution;
 pub mod tool_parsing;
 pub mod tool_capability;
@@ -2121,6 +2122,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_toolbox_install_status,
+            install_toolbox,
             search_history,
             chat,
             get_models,

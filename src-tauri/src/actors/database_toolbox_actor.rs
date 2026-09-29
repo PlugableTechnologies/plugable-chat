@@ -9,7 +9,7 @@
 use crate::actors::mcp_host_actor::McpTool;
 use crate::protocol::McpHostMsg;
 use crate::settings::{
-    is_embedded_demo_source, regenerate_demo_source_args, CachedColumnSchema, CachedTableSchema,
+    find_toolbox_binary, is_embedded_demo_source, regenerate_demo_source_args, CachedColumnSchema, CachedTableSchema,
     DatabaseSourceConfig, DatabaseToolboxConfig, McpServerConfig, SupportedDatabaseKind,
 };
 use serde::{Deserialize, Serialize};
@@ -250,6 +250,11 @@ impl DatabaseToolboxActor {
             .filter_map(|(id, res)| match res {
                 Ok(_) => None,
                 Err(err) => {
+                    let err = if is_embedded_demo_source(&id) && err.contains("No command specified") {
+                        crate::toolbox_install::TOOLBOX_MISSING_MESSAGE.to_string()
+                    } else {
+                        err
+                    };
                     let label = source_labels
                         .get(&id)
                         .cloned()
@@ -311,12 +316,24 @@ impl DatabaseToolboxActor {
             source.args.clone()
         };
 
+        // The stored command may be empty or point at a path from another machine (the settings UI
+        // even defaults to a Homebrew path); re-detect the toolbox at connection time.
+        let command = if is_embedded_demo_source(&source.id) {
+            source
+                .command
+                .clone()
+                .filter(|cmd| std::path::Path::new(cmd).exists())
+                .or_else(find_toolbox_binary)
+        } else {
+            source.command.clone()
+        };
+
         McpServerConfig {
             id: source.id.clone(),
             name: source.name.clone(),
             enabled: source.enabled,
             transport: source.transport.clone(),
-            command: source.command.clone(),
+            command,
             args,
             env,
             auto_approve_tools: true, // Always true for database sources

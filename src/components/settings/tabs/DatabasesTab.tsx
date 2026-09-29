@@ -7,6 +7,20 @@ import { SettingsEnvVarInput } from '../common/SettingsEnvVarInput';
 import { SchemaRefreshStatusBar } from '../preview/SchemaRefreshStatusBar';
 import type { SchemaRefreshProgress, SchemaRefreshStatus, SchemaRefreshError, SchemaRefreshResult } from '../types';
 
+interface ToolboxInstallStatus {
+    toolbox_path: string | null;
+    download_supported: boolean;
+    download_size_bytes: number | null;
+    pinned_version: string;
+}
+
+interface ToolboxInstallProgress {
+    downloaded_bytes: number;
+    total_bytes: number;
+    is_complete: boolean;
+    error: string | null;
+}
+
 interface DatabasesTabProps {
     onDirtyChange?: (dirty: boolean) => void;
     onRegisterSave?: (handler: () => Promise<void>) => void;
@@ -30,6 +44,47 @@ export function DatabasesTab({
     const [refreshStatus, setRefreshStatus] = useState<SchemaRefreshStatus | null>(null);
     // Per-source errors from the last refresh attempt
     const [sourceErrors, setSourceErrors] = useState<Record<string, SchemaRefreshError>>({});
+    const [toolboxInstallStatus, setToolboxInstallStatus] = useState<ToolboxInstallStatus | null>(null);
+    const [toolboxInstallProgress, setToolboxInstallProgress] = useState<ToolboxInstallProgress | null>(null);
+    const [toolboxInstalling, setToolboxInstalling] = useState(false);
+    const [toolboxInstallError, setToolboxInstallError] = useState<string | null>(null);
+
+    const loadToolboxInstallStatus = useCallback(async () => {
+        try {
+            setToolboxInstallStatus(await invoke<ToolboxInstallStatus>('get_toolbox_install_status'));
+        } catch (err) {
+            console.error('Failed to read toolbox install status:', err);
+        }
+    }, []);
+
+    useEffect(() => {
+        loadToolboxInstallStatus();
+        const unlistenPromise = listen<ToolboxInstallProgress>('toolbox-install-progress', (event) => {
+            setToolboxInstallProgress(event.payload);
+        });
+        return () => {
+            unlistenPromise.then(unlisten => unlisten());
+        };
+    }, [loadToolboxInstallStatus]);
+
+    const installToolbox = useCallback(async (demoSourceIndex: number) => {
+        setToolboxInstalling(true);
+        setToolboxInstallError(null);
+        setToolboxInstallProgress(null);
+        try {
+            const installedPath = await invoke<string>('install_toolbox');
+            setToolboxConfig(prev => {
+                const sources = [...prev.sources];
+                sources[demoSourceIndex] = { ...sources[demoSourceIndex], command: installedPath };
+                return { ...prev, sources };
+            });
+            await loadToolboxInstallStatus();
+        } catch (err: any) {
+            setToolboxInstallError(err?.message || String(err));
+        } finally {
+            setToolboxInstalling(false);
+        }
+    }, [loadToolboxInstallStatus]);
 
     useEffect(() => {
         const unlistenPromise = listen<SchemaRefreshProgress>('schema-refresh-progress', (event) => {
@@ -352,9 +407,42 @@ export function DatabasesTab({
                                     <p className="font-medium text-green-800 mb-1">Built-in Demo Database</p>
                                     <p className="text-xs text-green-700">
                                         Chicago Crimes dataset (2025) with ~23,000 records. Uses the Google MCP Database Toolbox for SQLite access.
-                                        Set the path to your toolbox binary below, enable this source, and click "Refresh" to cache the schema.
+                                        Download the toolbox (or set the path to an existing binary below), enable this source, and click "Refresh" to cache the schema.
                                     </p>
                                 </div>
+                                {toolboxInstallStatus && !toolboxInstallStatus.toolbox_path && !source.command?.trim() && (
+                                    <div className="demo-toolbox-install rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 space-y-2">
+                                        <p>
+                                            The demo database needs the MCP Database Toolbox, which is not installed on this machine.
+                                        </p>
+                                        {toolboxInstallStatus.download_supported ? (
+                                            <div className="flex items-center gap-3">
+                                                <button
+                                                    onClick={() => installToolbox(idx)}
+                                                    disabled={toolboxInstalling}
+                                                    className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 font-medium text-white hover:bg-amber-700 disabled:opacity-60"
+                                                >
+                                                    {toolboxInstalling && <Loader2 size={12} className="animate-spin" />}
+                                                    Download toolbox v{toolboxInstallStatus.pinned_version}
+                                                    {toolboxInstallStatus.download_size_bytes
+                                                        ? ` (${Math.round(toolboxInstallStatus.download_size_bytes / 1_000_000)} MB)`
+                                                        : ''}
+                                                </button>
+                                                {toolboxInstalling && toolboxInstallProgress && toolboxInstallProgress.total_bytes > 0 && (
+                                                    <span>
+                                                        {Math.min(100, Math.floor(toolboxInstallProgress.downloaded_bytes * 100 / toolboxInstallProgress.total_bytes))}%
+                                                    </span>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <p>No download is available for this platform; install it manually and set the path below.</p>
+                                        )}
+                                        {toolboxInstallError && <p className="text-red-700 break-words">{toolboxInstallError}</p>}
+                                        <p className="text-[10px] text-amber-800">
+                                            One-time download from Google's release storage, verified against a pinned SHA-256 before use.
+                                        </p>
+                                    </div>
+                                )}
                                 <div>
                                     <label className="block text-xs font-medium text-gray-700 mb-1.5">
                                         Toolbox Binary Path <span className="text-red-500">*</span>

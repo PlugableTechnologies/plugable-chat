@@ -163,7 +163,7 @@ within 200 s on any question it was given: it is too slow and verbose as the def
 
 | # | Finding | Status |
 |---|---|---|
-| A9 | The demo database is served by the external MCP Database Toolbox (`toolbox.exe`), which the app neither bundles nor installs; on a fresh machine the demo source fails with "No command specified for stdio transport". `bootstrap-box.ps1` now installs v0.24.0. | Open: bundle it or show a clear message |
+| A9 | The demo database is served by the external MCP Database Toolbox (`toolbox.exe`, 216 MB on Windows, 119 MB macOS arm64, 232 MB Linux), which the installer does not bundle; on a fresh machine the demo source failed with "No command specified for stdio transport". | Fixed in the app: Settings > Databases offers a one-click, SHA-256-verified download of the pinned v0.24.0 into `<data dir>/tools/toolbox/0.24.0/` (`src-tauri/src/toolbox_install.rs`), `find_toolbox_binary()` also checks that location and next to the app's resources, and enabling the demo without a toolbox now reports a plain "toolbox not installed" message. Bundling was rejected because it would add 100+ MB per installer. `bootstrap-box.ps1` keeps its toolbox install step on purpose: unattended `--initial-prompt` runs have no one to click Download. Not yet verified on a Windows box. |
 | A10 | A launch with the demo database never indexed its schema, so the model was told "no tables cached" and `sql_select` was blocked. | Fixed (index at launch; launch prompt waits for it) |
 | A11 | Models call the built-in tool `sql`; an unknown tool ended the reply silently. | Fixed (alias to `sql_select`; warning for unknown tools) |
 | A12 | qwen3.5-4b too slow to answer within 200 s on an A10G. | Open |

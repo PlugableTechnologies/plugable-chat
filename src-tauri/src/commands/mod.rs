@@ -18,6 +18,7 @@ pub mod rag;
 pub mod settings;
 pub mod startup;
 pub mod tool;
+pub mod toolbox;
 
 // Re-export all commands for easy access from lib.rs
 pub use chat::*;
@@ -28,3 +29,4 @@ pub use rag::*;
 pub use settings::*;
 pub use startup::*;
 pub use tool::*;
+pub use toolbox::*;
