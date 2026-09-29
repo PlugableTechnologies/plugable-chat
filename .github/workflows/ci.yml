@@ -11,6 +11,13 @@ on:
 permissions:
   contents: read
 
+# ethnum 1.5.2 (via lancedb > lance > jsonb) fails to compile on the newest stable
+# Rust ("cannot transmute between types of different sizes"). 1.94.1 is what
+# builds locally. RUSTUP_TOOLCHAIN overrides rust-toolchain.toml's "stable".
+# Remove the pin once the lance/jsonb dependency chain moves to a fixed ethnum.
+env:
+  RUSTUP_TOOLCHAIN: "1.94.1"
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -31,6 +38,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev build-essential file libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -54,6 +64,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
