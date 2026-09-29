@@ -1,0 +1,295 @@
+name: Release (sign and publish)
+# Pushing a vMAJOR.MINOR.PATCH tag (optionally -rcN) builds Windows and Linux
+# installers, signs the Windows ones with the company EV code signing
+# certificate (DigiCert KeyLocker), signs Linux artifacts with Sigstore cosign,
+# and publishes a GitHub Release.
+#
+# The Windows job runs in the `release-signing` Environment: it pauses until one
+# of the listed reviewers approves, and only then can it read the KeyLocker
+# credentials. Those credentials are long-lived (KeyLocker has no OIDC option),
+# an accepted exception to the org SECURITY.md "no long-lived credentials" rule;
+# they are rotated yearly by skills/core/scripts/ingest_digicert_signing_secrets.py
+# in brix-cli. Design and recovery: docs/release-signing.md.
+#
+# Secrets are exposed only to the steps that need them (never job-level env), and
+# only after `npm ci` and the dependency compile have finished, so package
+# install scripts and dependency build scripts never see them.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-tag:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Parse the tag
+        id: parse
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          VERSION="${VERSION%%-*}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          case "$TAG" in
+            *-rc*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)     echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # A tag on a side branch could carry a modified copy of this workflow.
+      # Refusing here means such a tag never even asks for approval.
+      - name: Tagged commit must be on main
+        env:
+          TAGGED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$TAGGED_SHA" origin/main; then
+            echo "::error::Tag commit $TAGGED_SHA is not an ancestor of origin/main. Releases are cut from main only."
+            exit 1
+          fi
+
+  build-windows:
+    name: Build and sign (Windows)
+    needs: verify-tag
+    runs-on: windows-latest
+    timeout-minutes: 90
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Install JavaScript dependencies (locked)
+        run: npm ci
+
+      - name: Build the frontend
+        run: npm run build
+
+      # Compiles every dependency, including their build scripts, before any
+      # signing credential is exposed. build.rs also stages the Foundry Local
+      # native libraries into src-tauri/foundry-libs here.
+      - name: Compile the Rust workspace (locked, no secrets)
+        run: cargo build --release --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Install DigiCert signing tools (smctl)
+        uses: digicert/code-signing-software-trust-action@fae23a455ba4bde62b64fd7cb2f81ade788f5a95 # v1.2.1
+        with:
+          simple-signing-mode: true
+          use-github-caching-service: false
+
+      - name: Write the KeyLocker client certificate
+        shell: pwsh
+        env:
+          SM_CLIENT_CERT_FILE_B64: ${{ secrets.SM_CLIENT_CERT_FILE_B64 }}
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP "keylocker-client.p12"
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:SM_CLIENT_CERT_FILE_B64))
+          "SM_CLIENT_CERT_FILE=$path" >> $env:GITHUB_ENV
+
+      - name: Sign bundled native libraries that are not already signed
+        shell: pwsh
+        env:
+          SM_HOST: ${{ secrets.SM_HOST }}
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+          SM_KEYPAIR_ALIAS: ${{ secrets.SM_KEYPAIR_ALIAS }}
+        run: |
+          $libs = Get-ChildItem -Path src-tauri/foundry-libs, src-tauri/binaries -Include *.dll, *.exe -Recurse -File -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName }
+          if (-not $libs) { Write-Host "No bundled native libraries to sign."; exit 0 }
+          node scripts/sign-windows.mjs --skip-signed @libs
+
+      # The frontend is already built, so the beforeBuildCommand is blanked:
+      # project scripts do not run while the credentials are in the environment.
+      - name: Generate the CI-only Tauri config (version, signing command)
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          $config = @{
+            version = $env:APP_VERSION
+            build   = @{ beforeBuildCommand = "" }
+            bundle  = @{
+              windows = @{
+                signCommand = @{
+                  cmd  = "node"
+                  args = @((Join-Path $env:GITHUB_WORKSPACE "scripts/sign-windows.mjs"), "%1")
+                }
+              }
+            }
+          }
+          $path = Join-Path $env:RUNNER_TEMP "tauri.release.json"
+          $config | ConvertTo-Json -Depth 6 | Set-Content -Path $path -Encoding utf8
+          "TAURI_RELEASE_CONFIG=$path" >> $env:GITHUB_ENV
+
+      - name: Build and sign the installers
+        shell: pwsh
+        env:
+          SM_HOST: ${{ secrets.SM_HOST }}
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+          SM_KEYPAIR_ALIAS: ${{ secrets.SM_KEYPAIR_ALIAS }}
+        run: >
+          node node_modules/@tauri-apps/cli/tauri.js build
+          --config $env:TAURI_RELEASE_CONFIG
+          --bundles nsis,msi
+
+      - name: Remove the client certificate from the runner
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:SM_CLIENT_CERT_FILE -and (Test-Path $env:SM_CLIENT_CERT_FILE)) {
+            Remove-Item -Force $env:SM_CLIENT_CERT_FILE
+          }
+
+      - name: Verify every shipped file is signed by our certificate
+        shell: pwsh
+        run: |
+          $files = @("target/release/plugable-chat.exe") +
+            (Get-ChildItem target/release/bundle -Include *.exe, *.msi -Recurse -File | ForEach-Object { $_.FullName })
+          pwsh scripts/verify-windows-signatures.ps1 -Path $files
+
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-files | Out-Null
+          Get-ChildItem target/release/bundle -Include *.exe, *.msi -Recurse -File |
+            Copy-Item -Destination release-files
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-files/*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-signed
+          path: release-files/*
+          if-no-files-found: error
+
+  build-linux:
+    name: Build and sign (Linux)
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Install system libraries for Tauri
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev build-essential file libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev rpm
+
+      - name: Install JavaScript dependencies (locked)
+        run: npm ci
+
+      - name: Generate the CI-only Tauri config (version)
+        env:
+          APP_VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          printf '{"version":"%s"}' "$APP_VERSION" > "$RUNNER_TEMP/tauri.release.json"
+
+      - name: Build the Linux bundles
+        env:
+          TAURI_CONFIG_PATH: ${{ runner.temp }}/tauri.release.json
+        run: >
+          node node_modules/@tauri-apps/cli/tauri.js build
+          --config "$TAURI_CONFIG_PATH"
+          --bundles deb,rpm,appimage
+
+      - name: Collect release files and checksums
+        run: |
+          set -euo pipefail
+          mkdir release-files
+          find target/release/bundle -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) \
+            -exec cp {} release-files/ \;
+          cd release-files
+          sha256sum -- * > SHA256SUMS
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign with Sigstore (keyless, GitHub OIDC)
+        working-directory: release-files
+        run: |
+          set -euo pipefail
+          for f in *; do
+            case "$f" in *.sigstore.json) continue ;; esac
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release-files/*.deb
+            release-files/*.rpm
+            release-files/*.AppImage
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-signed
+          path: release-files/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [verify-tag, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.verify-tag.outputs.prerelease }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          flags=(--repo "$REPO" --title "$TAG" --generate-notes --verify-tag)
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}" artifacts/*

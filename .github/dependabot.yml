@@ -23,3 +23,14 @@ updates:
       semver-major-days: 30
       semver-minor-days: 14
       semver-patch-days: 14
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Actions are pinned to full commit SHAs; Dependabot bumps the SHA and the
+    # version comment. All four levels set explicitly per org SECURITY.md.
+    cooldown:
+      default-days: 14
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 14

@@ -1,0 +1,63 @@
+name: Signing smoke test
+# Proves the DigiCert KeyLocker credentials work before any product release
+# depends on them: compiles a trivial Windows program, signs it, and verifies
+# the signature. Manual only; runs in the same protected Environment as releases,
+# so it needs the same one-reviewer approval and can read the same credentials.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build a trivial test program
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path smoke | Out-Null
+          Set-Content -Path smoke/hello.rs -Value 'fn main() { println!("plugable signing smoke test"); }'
+          rustc smoke/hello.rs -o smoke/hello.exe
+
+      - name: Install DigiCert signing tools (smctl)
+        uses: digicert/code-signing-software-trust-action@fae23a455ba4bde62b64fd7cb2f81ade788f5a95 # v1.2.1
+        with:
+          simple-signing-mode: true
+          use-github-caching-service: false
+
+      - name: Write the KeyLocker client certificate
+        shell: pwsh
+        env:
+          SM_CLIENT_CERT_FILE_B64: ${{ secrets.SM_CLIENT_CERT_FILE_B64 }}
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP "keylocker-client.p12"
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:SM_CLIENT_CERT_FILE_B64))
+          "SM_CLIENT_CERT_FILE=$path" >> $env:GITHUB_ENV
+
+      - name: Sign the test program
+        shell: pwsh
+        env:
+          SM_HOST: ${{ secrets.SM_HOST }}
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+          SM_KEYPAIR_ALIAS: ${{ secrets.SM_KEYPAIR_ALIAS }}
+        run: node scripts/sign-windows.mjs smoke/hello.exe
+
+      - name: Remove the client certificate from the runner
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:SM_CLIENT_CERT_FILE -and (Test-Path $env:SM_CLIENT_CERT_FILE)) {
+            Remove-Item -Force $env:SM_CLIENT_CERT_FILE
+          }
+
+      - name: Verify the signature
+        shell: pwsh
+        run: pwsh scripts/verify-windows-signatures.ps1 -Path smoke/hello.exe

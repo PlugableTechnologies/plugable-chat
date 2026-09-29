@@ -1,0 +1,7 @@
+# Anything that can change what gets signed with the company certificate needs
+# a named reviewer. Enforced by the branch ruleset ("require review from Code Owners").
+/.github/workflows/                     @bernieplug
+/scripts/sign-windows.mjs               @bernieplug
+/scripts/verify-windows-signatures.ps1  @bernieplug
+/src-tauri/tauri*.conf.json             @bernieplug
+/docs/release-signing.md                @bernieplug

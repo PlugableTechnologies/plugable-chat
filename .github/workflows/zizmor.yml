@@ -1,0 +1,21 @@
+name: Workflow security audit (zizmor)
+# Warn-only static audit of GitHub Actions workflows (unpinned actions,
+# template injection, credential persistence). See org SECURITY.md.
+on:
+  push:
+    paths:
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Run zizmor (warn-only)
+        continue-on-error: true
+        run: pipx run zizmor==1.25.2 .github/workflows/
