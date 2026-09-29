@@ -34,6 +34,14 @@
     "resources": {
       "binaries/*": "./",
       "../test-data/*": "test-data/"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "embedBootstrapper", "silent": true },
+      "nsis": {
+        "installMode": "currentUser",
+        "compression": "lzma",
+        "minimumWebview2Version": "110.0.1587.0"
+      }
     }
   }
 }
