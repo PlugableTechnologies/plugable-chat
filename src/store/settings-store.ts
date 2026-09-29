@@ -22,7 +22,7 @@ export interface McpServerConfig {
 }
 
 // Shared tool-calling format names (must match Rust)
-export type ToolCallFormatName = 'native' | 'hermes' | 'mistral' | 'pythonic' | 'pure_json' | 'code_mode';
+export type ToolCallFormatName = 'native' | 'hermes' | 'qwen_xml' | 'mistral' | 'pythonic' | 'pure_json' | 'code_mode';
 
 export interface ToolCallFormatConfig {
     enabled: ToolCallFormatName[];

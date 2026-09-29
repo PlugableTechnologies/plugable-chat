@@ -5,7 +5,7 @@
  * 
  * Supported formats:
  * - gpt-oss: <|channel|>analysis<|message|>...<|end|><|channel|>final<|message|>...
- * - Phi-4-reasoning: <think>...</think>
+ * - Phi-4-reasoning / Qwen3+: <think>...</think> (Qwen may omit the opening tag)
  * - Granite: <|thinking|>...<|/thinking|>
  * - Generic: Plain text (no special formatting)
  */
@@ -41,7 +41,7 @@ export interface MessagePart {
 /**
  * Model family identifiers for response format detection
  */
-export type ModelFamily = 'gpt_oss' | 'phi' | 'gemma' | 'granite' | 'generic';
+export type ModelFamily = 'gpt_oss' | 'qwen' | 'phi' | 'gemma' | 'granite' | 'generic';
 
 /**
  * Detect the response format from content patterns
@@ -50,7 +50,7 @@ export function detectResponseFormat(content: string): ModelFamily {
     if (content.includes('<|channel|>')) {
         return 'gpt_oss';
     }
-    if (content.includes('<think>')) {
+    if (content.includes('<think>') || content.includes('</think>')) {
         return 'phi';
     }
     if (content.includes('<|thinking|>')) {
@@ -174,6 +174,20 @@ function parseChannelFormat(content: string): MessagePart[] {
 function parseThinkFormat(content: string): MessagePart[] {
     const parts: MessagePart[] = [];
     let current = content;
+
+    // Qwen3/3.5 chat templates open the think block inside the generation prompt, so the
+    // streamed output starts mid-thought and only contains the closing tag:
+    //   "reasoning...</think>\n\nvisible response"
+    // A </think> with no earlier <think> therefore closes an implicit leading think block.
+    const firstClose = current.indexOf('</think>');
+    const firstOpen = current.indexOf('<think>');
+    if (firstClose !== -1 && (firstOpen === -1 || firstClose < firstOpen)) {
+        const implicitThink = current.substring(0, firstClose);
+        if (implicitThink.trim()) {
+            parts.push({ type: 'think', content: implicitThink });
+        }
+        current = current.substring(firstClose + 8).replace(/^\s+/, '');
+    }
 
     while (current.length > 0) {
         const start = current.indexOf('<think>');
@@ -494,6 +508,7 @@ export function parseMessageContent(content: string, modelFamily?: ModelFamily):
             parts = parseChannelFormat(cleanedContent);
             break;
         case 'phi':
+        case 'qwen':
             parts = parseThinkFormat(cleanedContent);
             break;
         case 'granite':
@@ -505,7 +520,7 @@ export function parseMessageContent(content: string, modelFamily?: ModelFamily):
             // Check if content actually has any special format markers (auto-detect fallback)
             if (cleanedContent.includes('<|channel|>')) {
                 parts = parseChannelFormat(cleanedContent);
-            } else if (cleanedContent.includes('<think>')) {
+            } else if (cleanedContent.includes('<think>') || cleanedContent.includes('</think>')) {
                 parts = parseThinkFormat(cleanedContent);
             } else if (cleanedContent.includes('<|thinking|>')) {
                 parts = parseGraniteThinkingFormat(cleanedContent);
