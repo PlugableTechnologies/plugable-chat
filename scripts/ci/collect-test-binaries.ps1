@@ -55,7 +55,15 @@ if (-not $directml) {
     Write-Host "DirectML $version from NuGet: $($directml.FullName)"
 }
 
-$toCopy = @($directml) + @($found | Where-Object { $_.Name -like "onnxruntime*" -and $_.FullName -like "*foundry-libs*" })
+# The Foundry Local SDK loads its native libraries (Microsoft.AI.Foundry.Local.Core.dll,
+# onnxruntime, onnxruntime-genai) from beside the program. The build stages all of them
+# in target/debug/foundry-libs; the GPU tests fail with "Could not locate native library
+# 'Microsoft.AI.Foundry.Local.Core.dll'" without the whole set.
+$foundryLibs = @(Get-ChildItem "target/debug/foundry-libs" -Filter *.dll -File -ErrorAction SilentlyContinue)
+if (-not ($foundryLibs | Where-Object { $_.Name -eq "Microsoft.AI.Foundry.Local.Core.dll" })) {
+    throw "Microsoft.AI.Foundry.Local.Core.dll is not in target/debug/foundry-libs"
+}
+$toCopy = @($directml) + $foundryLibs
 foreach ($dll in $toCopy) {
     Copy-Item $dll.FullName -Destination "target/debug/deps" -Force
     Copy-Item $dll.FullName -Destination $Out -Force
