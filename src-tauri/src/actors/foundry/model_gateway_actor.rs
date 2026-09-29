@@ -45,7 +45,7 @@ use super::request_builder::build_foundry_chat_request_body;
 use super::backend::FoundryBackend; // brings trait methods into scope on SdkBackend
 use super::service_manager::{
     find_foundry_binary, get_foundry_version, parse_foundry_service_status_output,
-    FoundryModel, FoundryModelsResponse, ServiceStatus, DEFAULT_FALLBACK_MODEL,
+    FoundryModel, FoundryModelsResponse, ServiceStatus, DEFAULT_FALLBACK_MODEL, DEFAULT_MODEL,
 };
 use super::stream_handler::{extract_text_from_stream_chunk, StreamingToolCalls};
 
@@ -2236,9 +2236,10 @@ impl ModelGatewayActor {
                 })
                 .collect();
 
-            // Select model at startup - SIMPLE LOGIC:
-            // 1. Read selected_model from settings
-            // 2. If not set or not available, use phi-4-mini-instruct
+            // Select model at startup - SIMPLE LOGIC, in this order:
+            // 1. selected_model from settings (if cached and not known-incompatible)
+            // 2. the default model (qwen3.5-4b) if cached and not known-incompatible
+            // 3. the fallback model (phi-4-mini-instruct)
             // NO "first model" fallback - that causes problems!
             if self.model_id.is_none() {
                 use std::io::Write;
@@ -2273,28 +2274,39 @@ impl ModelGatewayActor {
                     self.available_models.iter().find(|m| *m == pm).cloned()
                 });
 
-                // Step 3: Find phi-4-mini-instruct as fallback (also skip if blocklisted)
+                // Step 3a: the default model (skip if not cached or blocklisted on this runtime)
+                let default_model = self.available_models.iter().find(|m| {
+                    m.to_lowercase().contains(DEFAULT_MODEL)
+                        && !self.is_model_incompatible(m)
+                }).cloned();
+
+                // Step 3b: Find phi-4-mini-instruct as fallback (also skip if blocklisted)
                 let fallback_model = self.available_models.iter().find(|m| {
                     m.to_lowercase().contains(DEFAULT_FALLBACK_MODEL)
                         && !self.is_model_incompatible(m)
                 }).cloned();
                 
                 println!("[FoundryActor] Persisted model available: {:?}", persisted_available);
+                println!("[FoundryActor] Default model ({}): {:?}", DEFAULT_MODEL, default_model);
                 println!("[FoundryActor] Fallback model (phi-4-mini): {:?}", fallback_model);
                 let _ = std::io::stdout().flush();
                 
-                // Step 4: Choose model - settings OR phi-4-mini-instruct ONLY
+                // Step 4: Choose model - settings, then the default, then phi-4-mini-instruct ONLY
                 let selected = if let Some(model) = persisted_available {
                     println!("[FoundryActor] ✅ SELECTED: {} (from settings)", model);
                     let _ = std::io::stdout().flush();
                     Some(model)
+                } else if let Some(model) = default_model {
+                    println!("[FoundryActor] ✅ SELECTED: {} (default model)", model);
+                    let _ = std::io::stdout().flush();
+                    Some(model)
                 } else if let Some(model) = fallback_model {
-                    println!("[FoundryActor] ✅ SELECTED: {} (fallback - settings model not available)", model);
+                    println!("[FoundryActor] ✅ SELECTED: {} (fallback - settings and default models not available)", model);
                     let _ = std::io::stdout().flush();
                     Some(model)
                 } else {
-                    // No phi-4-mini available - this is a problem, but don't pick random model
-                    println!("[FoundryActor] ❌ Neither settings model nor phi-4-mini-instruct available!");
+                    // Neither the default nor the fallback is available - don't pick a random model
+                    println!("[FoundryActor] ❌ None of the settings model, {} or phi-4-mini-instruct is available!", DEFAULT_MODEL);
                     println!("[FoundryActor] Available models: {:?}", self.available_models);
                     let _ = std::io::stdout().flush();
                     None
@@ -2310,7 +2322,7 @@ impl ModelGatewayActor {
                 } else {
                     // No model available - transition to error state
                     self.transition_to_error(
-                        "No compatible model available. Please download phi-4-mini-instruct.".to_string(),
+                        format!("No compatible model available. Please download {} or {}.", DEFAULT_MODEL, DEFAULT_FALLBACK_MODEL),
                         None,
                     );
                     return true; // Service is up, but no model selected

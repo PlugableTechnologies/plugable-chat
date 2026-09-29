@@ -24,5 +24,5 @@ pub fn ep_registration_cancel_flag() -> std::sync::Arc<std::sync::atomic::Atomic
 
 // Re-export commonly used items from submodules for internal use
 pub use request_builder::{build_foundry_chat_request_body, convert_chat_messages_to_foundry_format};
-pub use service_manager::{find_foundry_binary, parse_foundry_service_status_output, ServiceStatus, FoundryModel, FoundryModelsResponse, DEFAULT_FALLBACK_MODEL};
+pub use service_manager::{find_foundry_binary, parse_foundry_service_status_output, ServiceStatus, FoundryModel, FoundryModelsResponse, DEFAULT_FALLBACK_MODEL, DEFAULT_MODEL};
 pub use stream_handler::{StreamingToolCalls, extract_text_from_stream_chunk};

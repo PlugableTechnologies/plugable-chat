@@ -175,16 +175,15 @@ async function initializeModelsOnStartup<T extends ListenerSliceDeps>(
                 
                 // Now load the model
                 const updatedState = get();
-                const DEFAULT_FALLBACK = 'phi-4-mini-instruct';
                 const downloadedModel = updatedState.cachedModels.find(m => 
-                    m.model_id.toLowerCase().includes(DEFAULT_FALLBACK.toLowerCase())
+                    m.model_id.toLowerCase().includes(DEFAULT_MODEL_TO_DOWNLOAD.toLowerCase())
                 );
                 
                 if (downloadedModel) {
                     console.log('[ChatStore] Loading downloaded model:', downloadedModel.model_id);
                     await get().loadModel(downloadedModel.model_id);
                 } else if (updatedState.cachedModels.length > 0) {
-                    console.warn('[ChatStore] Could not find phi-4-mini, unexpected state');
+                    console.warn(`[ChatStore] Could not find ${DEFAULT_MODEL_TO_DOWNLOAD} after download, unexpected state`);
                     set({ currentModel: 'No models' } as any);
                 } else {
                     set({

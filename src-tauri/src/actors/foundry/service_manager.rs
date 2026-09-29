@@ -8,8 +8,18 @@
 use crate::process_utils::HideConsoleWindow;
 use serde::Deserialize;
 
-/// Default fallback model to use when no model is specified or when errors occur.
-/// This matches the phi-4-mini-instruct model that is auto-downloaded on first launch.
+/// The model the app selects and downloads by default when the user has not chosen one.
+/// Matched as a substring of the model id (for example `qwen3.5-4b-cuda-gpu:4`).
+///
+/// If it cannot run on this machine (a deterministic load or generation failure is recorded
+/// in the version-keyed blocklist) the app falls back to [`DEFAULT_FALLBACK_MODEL`].
+/// Measured 2026-09-29: this model fails to generate on an NVIDIA T4 (Turing) with
+/// `LinearAttention ... CUDA failure 1: invalid argument`.
+pub const DEFAULT_MODEL: &str = "qwen3.5-4b";
+
+/// The last-resort model, used when [`DEFAULT_MODEL`] is missing or known-incompatible, and
+/// when errors occur. It is never added to the incompatibility blocklist, so the app always
+/// has something to fall back to. Downloaded on demand by the frontend's fallback handler.
 pub const DEFAULT_FALLBACK_MODEL: &str = "phi-4-mini-instruct";
 
 /// Find the foundry CLI executable, checking PATH first then common installation locations.

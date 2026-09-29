@@ -20,7 +20,7 @@ To get started, you'll need to load a model using the **Foundry CLI**:
 1. Open a terminal (Command Prompt on Windows, Terminal on Mac/Linux)
 2. Run the following command:
    \`\`\`bash
-   foundry model load phi-4-mini
+   foundry model load qwen3.5-4b
    \`\`\`
 3. Wait for the download to complete (this may take a few minutes)
 4. Once finished, click the **"No models (click to refresh)"** dropdown in the header to reload
@@ -29,7 +29,8 @@ To get started, you'll need to load a model using the **Foundry CLI**:
 
 | Model | Description | Command |
 |-------|-------------|---------|
-| **phi-4-mini** | Compact and fast Phi-4 model | \`foundry model load phi-4-mini\` |
+| **qwen3.5-4b** | Default model | \`foundry model load qwen3.5-4b\` |
+| **phi-4-mini** | Compact and fast Phi-4 model (used if the default cannot run) | \`foundry model load phi-4-mini\` |
 | **phi-4** | Microsoft's capable Phi-4 model | \`foundry model load phi-4\` |
 | **qwen2.5-coder-0.5b** | Small coding-focused model | \`foundry model load qwen2.5-coder-0.5b\` |
 

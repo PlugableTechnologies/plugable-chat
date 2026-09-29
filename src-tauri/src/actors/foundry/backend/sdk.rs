@@ -88,14 +88,60 @@ impl SdkBackend {
         self.base_url.lock().ok().and_then(|g| g.clone())
     }
 
-    /// Resolve a `Model` handle by its unique id (e.g. `qwen3.5-0.8b-generic-gpu:2`).
+    /// Resolve a `Model` handle from a variant id (`qwen3.5-4b-cuda-gpu:4`), an alias, or a short
+    /// name such as `qwen3.5-4b` or `phi-4-mini-instruct`.
+    ///
+    /// `get_model_variant` only accepts a full variant id, so a short name failed with
+    /// "Unknown variant id" and the first-run download of the default model (and the download
+    /// of the fallback) could not work in SDK mode. A short name now resolves to the variant
+    /// best suited to this machine: GPU before CPU, CUDA before other GPU providers, variants
+    /// flagged incompatible last, then the smallest download.
     async fn model(&self, id: &str) -> Result<std::sync::Arc<foundry_local_sdk::Model>, String> {
-        self.manager
-            .catalog()
-            .get_model_variant(id)
+        let catalog = self.manager.catalog();
+        let variant_err = match catalog.get_model_variant(id).await {
+            Ok(m) => return Ok(m),
+            Err(e) => e.to_string(),
+        };
+        if let Ok(m) = catalog.get_model(id).await {
+            return Ok(m);
+        }
+
+        let wanted = id.to_lowercase();
+        let mut candidates: Vec<CatalogModel> = self
+            .list_catalog()
             .await
-            .map_err(|e| format!("get_model_variant('{id}') failed: {e}"))
+            .into_iter()
+            .filter(|m| {
+                m.name.to_lowercase().contains(&wanted) || m.alias.to_lowercase().contains(&wanted)
+            })
+            .collect();
+        candidates.sort_by_key(variant_preference_key);
+        match candidates.first() {
+            Some(best) => catalog
+                .get_model_variant(&best.name)
+                .await
+                .map_err(|e| format!("get_model_variant('{}') failed: {e}", best.name)),
+            None => Err(format!(
+                "get_model_variant('{id}') failed: {variant_err}; no catalog model matches '{id}'"
+            )),
+        }
     }
+}
+
+/// Sort key for choosing among variants of one model: lower is better.
+fn variant_preference_key(m: &CatalogModel) -> (bool, u8, u8, u64) {
+    let ep = m.runtime.execution_provider.to_lowercase();
+    let provider_rank = if ep.contains("cuda") {
+        0
+    } else if ep.contains("tensorrt") || ep.contains("dml") || ep.contains("directml") {
+        1
+    } else if ep.contains("webgpu") {
+        2
+    } else {
+        3
+    };
+    let device_rank = if m.runtime.device_type == "GPU" { 0 } else { 1 };
+    (m.incompatible, device_rank, provider_rank, m.file_size_mb as u64)
 }
 
 /// What `SdkBackend::register_execution_providers` did.
@@ -626,6 +672,49 @@ fn map_messages(messages: &[ChatMessage]) -> Vec<ChatCompletionRequestMessage> {
 mod tests {
     use super::*;
     use crate::protocol::ChatMessage;
+
+    fn catalog_entry(name: &str, device: &str, ep: &str, size_mb: u64, incompatible: bool) -> CatalogModel {
+        CatalogModel {
+            name: name.to_string(),
+            runtime: CatalogModelRuntime {
+                device_type: device.to_string(),
+                execution_provider: ep.to_string(),
+            },
+            display_name: String::new(),
+            alias: String::new(),
+            uri: String::new(),
+            version: String::new(),
+            file_size_mb: size_mb,
+            license: String::new(),
+            task: "chat-completion".to_string(),
+            supports_tool_calling: false,
+            publisher: String::new(),
+            incompatible,
+            incompatible_reason: None,
+        }
+    }
+
+    /// A short name like `qwen3.5-4b` must pick the variant best suited to the machine:
+    /// GPU before CPU, CUDA before WebGPU, known-incompatible variants last, then the smaller download.
+    #[test]
+    fn variant_preference_orders_gpu_cuda_first() {
+        let mut variants = vec![
+            catalog_entry("qwen3.5-4b-generic-cpu:3", "CPU", "CPUExecutionProvider", 3000, false),
+            catalog_entry("qwen3.5-4b-generic-gpu:4", "GPU", "WebGpuExecutionProvider", 4000, false),
+            catalog_entry("qwen3.5-4b-cuda-gpu:4", "GPU", "CUDAExecutionProvider", 4200, false),
+        ];
+        variants.sort_by_key(variant_preference_key);
+        let order: Vec<&str> = variants.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(order, ["qwen3.5-4b-cuda-gpu:4", "qwen3.5-4b-generic-gpu:4", "qwen3.5-4b-generic-cpu:3"]);
+
+        // A variant flagged incompatible loses even to a CPU build.
+        let mut flagged = vec![
+            catalog_entry("m-cuda-gpu:1", "GPU", "CUDAExecutionProvider", 1000, true),
+            catalog_entry("m-generic-cpu:1", "CPU", "CPUExecutionProvider", 1000, false),
+        ];
+        flagged.sort_by_key(variant_preference_key);
+        assert_eq!(flagged[0].name, "m-generic-cpu:1");
+    }
 
     fn user(content: &str) -> ChatMessage {
         ChatMessage {
