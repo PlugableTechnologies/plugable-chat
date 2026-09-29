@@ -1,6 +1,14 @@
 import type { StateCreator } from 'zustand';
 import type { OperationStatus } from '../types';
 
+/** Shown after a model is blocklisted as incompatible with the installed Foundry runtime. */
+export interface ModelIncompatibleNotice {
+    model: string;
+    reason: string;
+    /** Cached CPU build of the same alias, if any; the banner offers to switch to it. */
+    alternativeModel: string | null;
+}
+
 export interface OperationStatusSlice {
     // Operation status for status bar (downloads, loads, streaming)
     operationStatus: OperationStatus | null;
@@ -18,6 +26,10 @@ export interface OperationStatusSlice {
     modelStuckWarning: string | null;
     setModelStuck: (message: string | null) => void;
     
+    // Model marked incompatible: why, and the CPU build to offer instead
+    modelIncompatibleNotice: ModelIncompatibleNotice | null;
+    setModelIncompatibleNotice: (notice: ModelIncompatibleNotice | null) => void;
+
     // Error handling
     backendError: string | null;
     clearError: () => void;
@@ -46,6 +58,9 @@ export const createOperationStatusSlice: StateCreator<
     modelStuckWarning: null,
     setModelStuck: (message) => set({ modelStuckWarning: message, statusBarDismissed: false }),
     
+    modelIncompatibleNotice: null,
+    setModelIncompatibleNotice: (notice) => set({ modelIncompatibleNotice: notice, statusBarDismissed: false }),
+
     backendError: null,
     clearError: () => set({ backendError: null }),
 });

@@ -13,6 +13,7 @@ import type {
     ModelInfo,
     OperationStatus,
 } from './types';
+import type { ModelIncompatibleNotice } from './slices/operation-status-slice';
 import { parseFoundryModelStateEvent } from './helpers';
 import { DEFAULT_MODEL_TO_DOWNLOAD } from './constants';
 
@@ -72,6 +73,7 @@ interface ListenerSliceDeps {
     
     // Operation status
     operationStatus: OperationStatus | null;
+    setModelIncompatibleNotice: (notice: ModelIncompatibleNotice | null) => void;
     
     // Model state
     currentModel: string;
@@ -921,9 +923,15 @@ export const createListenerSlice: StateCreator<
             });
 
             // Model fallback listener
-            const modelFallbackListener = await listen<{ current_model: string; fallback_model: string; error: string }>('model-fallback-required', async (event) => {
-                const { current_model, fallback_model, error } = event.payload;
+            const modelFallbackListener = await listen<{ current_model: string; fallback_model: string; error: string; reason?: string; alternative_model?: string | null }>('model-fallback-required', async (event) => {
+                const { current_model, fallback_model, error, reason, alternative_model } = event.payload;
                 console.warn(`[ChatStore] 🔄 Model fallback required: ${current_model} -> ${fallback_model}, error: ${error}`);
+                // Tell the user why (not just that we switched) and offer the CPU build if cached.
+                get().setModelIncompatibleNotice({
+                    model: current_model,
+                    reason: reason || error,
+                    alternativeModel: alternative_model ?? null,
+                });
                 
                 const state = get();
                 const fallbackAvailable = state.cachedModels.some(

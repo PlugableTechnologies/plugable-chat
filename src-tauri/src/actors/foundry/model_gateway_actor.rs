@@ -47,6 +47,7 @@ use super::service_manager::{
     find_foundry_binary, get_foundry_version, parse_foundry_service_status_output,
     FoundryModel, FoundryModelsResponse, ServiceStatus, DEFAULT_FALLBACK_MODEL, DEFAULT_MODEL,
 };
+use super::model_incompatibility::{find_cpu_variant_of_same_alias, friendly_incompatibility_reason};
 use super::startup_model_selection::select_startup_model;
 use super::stream_handler::{extract_text_from_stream_chunk, StreamingToolCalls};
 
@@ -264,6 +265,16 @@ impl ModelGatewayActor {
         false
     }
 
+    /// The stored human-readable reason `model_id` was blocklisted, if it is blocklisted now.
+    fn incompatible_reason_for(&self, model_id: &str) -> Option<String> {
+        if !self.is_model_incompatible(model_id) {
+            return None;
+        }
+        let settings_state = self.app_handle.try_state::<SettingsState>()?;
+        let guard = futures::executor::block_on(settings_state.settings.read());
+        guard.incompatible_model_reasons.get(model_id).cloned()
+    }
+
     /// Record `model_id` as incompatible with the current Foundry version and persist it.
     async fn mark_model_incompatible(&self, model_id: &str, reason: &str) {
         let version = self.current_foundry_version();
@@ -275,6 +286,10 @@ impl ModelGatewayActor {
             guard
                 .incompatible_models
                 .insert(model_id.to_string(), version.clone());
+            guard.incompatible_model_reasons.insert(
+                model_id.to_string(),
+                friendly_incompatibility_reason(reason, &version),
+            );
             println!(
                 "[FoundryActor] 🚫 Marked '{}' incompatible with Foundry {} ({})",
                 model_id, version, reason
@@ -308,6 +323,10 @@ impl ModelGatewayActor {
             guard
                 .incompatible_models
                 .retain(|_, v| *v == version);
+            let still_blocked: Vec<String> = guard.incompatible_models.keys().cloned().collect();
+            guard
+                .incompatible_model_reasons
+                .retain(|model_id, _| still_blocked.contains(model_id));
             let pruned = before - guard.incompatible_models.len();
             if pruned > 0 {
                 println!(
@@ -2006,10 +2025,14 @@ impl ModelGatewayActor {
                         for model in catalog.iter_mut() {
                             if self.is_model_incompatible(&model.name) {
                                 model.incompatible = true;
-                                model.incompatible_reason = Some(format!(
-                                    "Not supported by your installed Foundry Local version ({})",
-                                    version
-                                ));
+                                model.incompatible_reason = Some(
+                                    self.incompatible_reason_for(&model.name).unwrap_or_else(|| {
+                                        format!(
+                                            "Not supported by your installed Foundry Local version ({})",
+                                            version
+                                        )
+                                    }),
+                                );
                             }
                         }
                         let _ = respond_to.send(catalog);
@@ -2525,13 +2548,30 @@ impl ModelGatewayActor {
             }
         });
         
+        // Explain why, and offer the same alias's CPU build when it is cached (slower, but works
+        // where the GPU build hits a runtime bug). Only for blocklisted models: a transient
+        // failure like "endpoint not available" is not fixed by switching to the CPU build.
+        let is_blocklisted = self.is_model_incompatible(current_model);
+        let reason = self.incompatible_reason_for(current_model).unwrap_or_else(|| {
+            friendly_incompatibility_reason(error, &self.current_foundry_version())
+        });
+        let alternative_model = if is_blocklisted {
+            find_cpu_variant_of_same_alias(current_model, &self.available_models, &|candidate| {
+                self.is_model_incompatible(candidate)
+            })
+        } else {
+            None
+        };
+
         // Also emit event for frontend (backup mechanism)
         let _ = self.app_handle.emit(
             "model-fallback-required",
             json!({
                 "current_model": current_model,
                 "fallback_model": DEFAULT_FALLBACK_MODEL,
-                "error": error
+                "error": error,
+                "reason": reason,
+                "alternative_model": alternative_model
             }),
         );
     }

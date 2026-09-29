@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import { useChatStore, OperationStatus, ModelStateData, getModelStateMessage, isModelStateBlocking, StartupStateType } from '../store/chat-store';
 
 // Format elapsed time helper
@@ -160,8 +161,12 @@ export function StatusBar() {
         heartbeatWarningStart, 
         heartbeatWarningMessage,
         modelStuckWarning,
-        setModelStuck
+        setModelStuck,
+        modelIncompatibleNotice,
+        setModelIncompatibleNotice,
+        loadModel,
     } = useChatStore();
+    const [switchingToAlternative, setSwitchingToAlternative] = useState(false);
     const [elapsed, setElapsed] = useState(0);
     const [heartbeatElapsed, setHeartbeatElapsed] = useState(0);
     
@@ -221,6 +226,44 @@ export function StatusBar() {
                         onClick={dismissStatusBar}
                         className="flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors text-red-600"
                         aria-label="Dismiss heartbeat warning"
+                    >
+                        <X size={16} />
+                    </button>
+                </div>
+            )}
+
+            {modelIncompatibleNotice && (
+                <div className="model-incompatible-bar flex items-center justify-between px-4 py-2 bg-amber-50 border-b border-amber-200 text-amber-800">
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <span className="text-lg">⚠️</span>
+                        <span className="text-sm">
+                            <span className="font-medium">{modelIncompatibleNotice.model}</span> won&apos;t run on this
+                            Foundry runtime. {modelIncompatibleNotice.reason}
+                        </span>
+                    </div>
+                    {modelIncompatibleNotice.alternativeModel && (
+                        <button
+                            disabled={switchingToAlternative}
+                            onClick={async () => {
+                                const alternative = modelIncompatibleNotice.alternativeModel!;
+                                setSwitchingToAlternative(true);
+                                try {
+                                    await loadModel(alternative);
+                                    await invoke('set_model', { model: alternative });
+                                    setModelIncompatibleNotice(null);
+                                } finally {
+                                    setSwitchingToAlternative(false);
+                                }
+                            }}
+                            className="flex-shrink-0 ml-3 px-3 py-1 rounded-md text-sm font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 transition-colors"
+                        >
+                            {switchingToAlternative ? 'Switching…' : 'Use the CPU version (slower)'}
+                        </button>
+                    )}
+                    <button
+                        onClick={() => setModelIncompatibleNotice(null)}
+                        className="flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors text-amber-600"
+                        aria-label="Dismiss incompatible model notice"
                     >
                         <X size={16} />
                     </button>

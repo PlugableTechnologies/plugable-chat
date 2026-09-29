@@ -667,6 +667,11 @@ pub struct AppSettings {
     /// runtime upgrade that adds support for a model automatically re-enables it.
     #[serde(default)]
     pub incompatible_models: HashMap<String, String>,
+    /// Why each model in `incompatible_models` was blocklisted (model_id -> short human-readable
+    /// reason). Additive and optional so older settings files load unchanged; pruned together
+    /// with `incompatible_models`.
+    #[serde(default)]
+    pub incompatible_model_reasons: HashMap<String, String>,
     /// Which Foundry integration backend to use (legacy CLI/HTTP vs foundry-local-sdk).
     #[serde(default)]
     pub foundry_backend: FoundryBackendKind,
@@ -937,6 +942,7 @@ impl Default for AppSettings {
             system_prompt: default_system_prompt(),
             selected_model: None,
             incompatible_models: HashMap::new(),
+            incompatible_model_reasons: HashMap::new(),
             foundry_backend: FoundryBackendKind::default(),
             mcp_servers: vec![default_mcp_test_server()],
             chat_format_default: default_chat_format(),
