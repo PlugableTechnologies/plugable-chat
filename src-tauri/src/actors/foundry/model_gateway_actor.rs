@@ -88,7 +88,9 @@ pub struct ModelGatewayActor {
     /// When `Some`, the foundry-local-sdk backend is active and all Foundry I/O is routed
     /// through it instead of the CLI + raw HTTP path. Selected via `AppSettings.foundry_backend`
     /// / the `PLUGABLE_FOUNDRY_BACKEND` env override.
-    sdk: Option<super::backend::sdk::SdkBackend>,
+    ///
+    /// Held in an `Arc` so background tasks (model warm-up) can use it without borrowing `self`.
+    sdk: Option<std::sync::Arc<super::backend::sdk::SdkBackend>>,
 }
 
 impl ModelGatewayActor {
@@ -136,7 +138,7 @@ impl ModelGatewayActor {
     /// Resolve the configured backend. Returns `Some(SdkBackend)` when the SDK backend is
     /// selected (env `PLUGABLE_FOUNDRY_BACKEND` overrides `AppSettings.foundry_backend`),
     /// reusing the existing `~/.foundry/cache`. Falls back to `None` (CLI/HTTP) on any error.
-    fn resolve_sdk_backend(app_handle: &AppHandle) -> Option<super::backend::sdk::SdkBackend> {
+    fn resolve_sdk_backend(app_handle: &AppHandle) -> Option<std::sync::Arc<super::backend::sdk::SdkBackend>> {
         let setting = app_handle
             .try_state::<SettingsState>()
             .map(|s| futures::executor::block_on(s.settings.read()).foundry_backend)
@@ -168,7 +170,7 @@ impl ModelGatewayActor {
                                 "[FoundryActor] Backend: foundry-local-sdk 1.2.0 (dev runtime from OUT_DIR)"
                             ),
                         }
-                        Some(b)
+                        Some(std::sync::Arc::new(b))
                     }
                     Err(e) => {
                         println!("[FoundryActor] SDK backend init failed ({e}); falling back to CLI");
@@ -339,6 +341,10 @@ impl ModelGatewayActor {
     /// Pre-warm the HTTP connection pool by making a lightweight request to Foundry.
     /// This ensures the first chat completion doesn't pay the connection establishment cost.
     async fn prewarm_http_connection(&self) {
+        // The SDK backend runs in-process; there is no REST connection to warm.
+        if self.sdk.is_some() {
+            return;
+        }
         if let Some(port) = self.port {
             let url = format!("http://127.0.0.1:{}/openai/status", port);
             println!("FoundryActor: Pre-warming HTTP connection to {}", url);
@@ -370,12 +376,104 @@ impl ModelGatewayActor {
         }
     }
 
+    /// SDK-backend warm-up: load the model in-process with `model.load()`.
+    ///
+    /// The Foundry CLI's service serves `GET /openai/load/{name}`, but the web service the
+    /// SDK hosts answers 404 for it, so warming through REST never loaded anything and left
+    /// the GPU idle. Microsoft's SDK reference loads with `model.load()`. Unlike the REST
+    /// path this reports a failure to the UI instead of only logging it.
+    fn prewarm_model_via_sdk(
+        &self,
+        sdk: std::sync::Arc<super::backend::sdk::SdkBackend>,
+        model_name: String,
+    ) {
+        let app_handle = self.app_handle.clone();
+        let gpu_guard = self.gpu_guard.clone();
+
+        tokio::spawn(async move {
+            // Same GPU mutex as the REST path: no load while embeddings use the GPU.
+            let _gpu_lock = gpu_guard.mutex.lock().await;
+            *gpu_guard.current_operation.write().await =
+                Some(format!("Pre-warming LLM: {}", model_name));
+
+            let _ = app_handle.emit(
+                "gpu-status",
+                json!({ "operation": "prewarm", "model": &model_name, "status": "started" }),
+            );
+            let _ = app_handle.emit(
+                "chat-stream-status",
+                json!({
+                    "phase": "prewarming",
+                    "message": format!("Loading {} into memory...", model_name)
+                }),
+            );
+            println!(
+                "FoundryActor: 🔥 Pre-warming model {} via the SDK (loading into memory)...",
+                model_name
+            );
+            let start = std::time::Instant::now();
+
+            // A first load of a multi-GB model can be slow; allow five minutes.
+            let outcome =
+                tokio::time::timeout(Duration::from_secs(300), sdk.load(&model_name)).await;
+            match outcome {
+                Ok(Ok(())) => {
+                    println!(
+                        "FoundryActor: ✅ Model {} pre-warmed in {:?}",
+                        model_name,
+                        start.elapsed()
+                    );
+                    let _ = app_handle.emit(
+                        "chat-stream-status",
+                        json!({ "phase": "prewarm_complete", "message": format!("{} ready", model_name) }),
+                    );
+                }
+                Ok(Err(e)) => {
+                    println!(
+                        "FoundryActor: ⚠️ Model pre-warm failed (the first chat will retry): {} - {:?}",
+                        model_name, e
+                    );
+                    let _ = app_handle.emit(
+                        "chat-stream-status",
+                        json!({
+                            "phase": "prewarm_failed",
+                            "message": format!("Could not load {} ahead of time; it will load on first use.", model_name)
+                        }),
+                    );
+                }
+                Err(_) => {
+                    println!(
+                        "FoundryActor: ⚠️ Model pre-warm timed out after 300s: {}",
+                        model_name
+                    );
+                    let _ = app_handle.emit(
+                        "chat-stream-status",
+                        json!({
+                            "phase": "prewarm_failed",
+                            "message": format!("Loading {} is taking longer than expected.", model_name)
+                        }),
+                    );
+                }
+            }
+
+            *gpu_guard.current_operation.write().await = None;
+            let _ = app_handle.emit(
+                "gpu-status",
+                json!({ "operation": "prewarm", "model": &model_name, "status": "completed" }),
+            );
+        });
+    }
+
     /// Pre-load a model into VRAM to reduce time-to-first-token.
     /// This is fire-and-forget - we don't wait for completion.
     /// The model load happens in the background and will be ready for the first chat.
     /// 
     /// IMPORTANT: Acquires GPU mutex to prevent contention with embedding operations.
     fn prewarm_model_in_background(&self, model_name: String) {
+        if let Some(sdk) = self.sdk.clone() {
+            self.prewarm_model_via_sdk(sdk, model_name);
+            return;
+        }
         if let Some(port) = self.port {
             let client = self.http_client.clone();
             let app_handle = self.app_handle.clone();

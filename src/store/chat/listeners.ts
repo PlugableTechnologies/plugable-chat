@@ -460,6 +460,21 @@ export const createListenerSlice: StateCreator<
                     });
                     return;
                 }
+
+                // The warm-up could not load the model. Replace the "Loading..." status so it
+                // does not stay on screen; the model still loads on first use.
+                if (phase === 'prewarm_failed') {
+                    set((state) => {
+                        if (state.operationStatus?.type === 'loading') {
+                            return {
+                                operationStatus: { type: 'error', message, startTime: now },
+                                statusBarDismissed: false,
+                            } as any;
+                        }
+                        return state;
+                    });
+                    return;
+                }
                 
                 set((state) => {
                     if (!state.assistantStreamingActive) {

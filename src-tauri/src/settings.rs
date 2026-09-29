@@ -75,8 +75,8 @@ impl ChatFormatName {
 ///
 /// `CliHttp` is the legacy path (shell out to the `foundry` CLI + raw HTTP to the local
 /// service). `Sdk` uses the `foundry-local-sdk` 1.2.0 crate (bundled newer runtime, typed API).
-/// During migration the default stays `CliHttp`; the SDK path is opt-in via this setting or the
-/// `PLUGABLE_FOUNDRY_BACKEND` env override, then becomes the default once validated.
+/// `Sdk` is the default (see `Default` below); `CliHttp` is opt-in via this setting or the
+/// `PLUGABLE_FOUNDRY_BACKEND` env override.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FoundryBackendKind {
