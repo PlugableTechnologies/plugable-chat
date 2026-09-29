@@ -557,6 +557,17 @@ pub async fn get_launch_overrides(
     })
 }
 
+/// Why the `--model` launch override was not applied at startup, if it wasn't.
+/// The gateway records this before the model state becomes `Ready`.
+#[tauri::command]
+pub fn get_launch_model_problem(launch_config: State<'_, LaunchConfigState>) -> Option<String> {
+    launch_config
+        .launch_model_problem
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
 /// Payload for launch overrides
 #[derive(Clone, serde::Serialize)]
 pub struct LaunchOverridesPayload {

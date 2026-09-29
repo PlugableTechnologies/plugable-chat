@@ -197,4 +197,8 @@ pub struct LaunchConfigState {
     /// True while a launch-time schema index (demo database) is still running; the launch
     /// prompt waits for it so the model is not told there are no tables.
     pub schema_index_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the model gateway at startup when the `--model` launch override could not be
+    /// honoured (not cached / incompatible). The frontend shows it instead of running the launch
+    /// prompt on a different model.
+    pub launch_model_problem: std::sync::Arc<std::sync::RwLock<Option<String>>>,
 }

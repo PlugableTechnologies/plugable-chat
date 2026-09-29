@@ -15,7 +15,7 @@ use crate::protocol::{
     CachedModel, CatalogModel, FoundryMsg, FoundryServiceStatus, ModelFamily,
     ModelInfo, ModelState, ReasoningFormat, ResourceStatus, ToolFormat,
 };
-use crate::app_state::{GpuResourceGuard, LoggingPersistence, SettingsState};
+use crate::app_state::{GpuResourceGuard, LaunchConfigState, LoggingPersistence, SettingsState};
 use crate::settings;
 use crate::settings::ChatFormatName;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
@@ -47,6 +47,7 @@ use super::service_manager::{
     find_foundry_binary, get_foundry_version, parse_foundry_service_status_output,
     FoundryModel, FoundryModelsResponse, ServiceStatus, DEFAULT_FALLBACK_MODEL, DEFAULT_MODEL,
 };
+use super::startup_model_selection::select_startup_model;
 use super::stream_handler::{extract_text_from_stream_chunk, StreamingToolCalls};
 
 /// Target embedding dimension (must match LanceDB schema)
@@ -2237,6 +2238,7 @@ impl ModelGatewayActor {
                 .collect();
 
             // Select model at startup - SIMPLE LOGIC, in this order:
+            // 0. the launch override (--model / PLUGABLE_MODEL), if cached and not incompatible
             // 1. selected_model from settings (if cached and not known-incompatible)
             // 2. the default model (qwen3.5-4b) if cached and not known-incompatible
             // 3. the fallback model (phi-4-mini-instruct)
@@ -2264,53 +2266,48 @@ impl ModelGatewayActor {
                     None
                 };
                 
-                // Step 2: Check if persisted model exists in available models AND is not
-                // known-incompatible with the installed Foundry runtime.
-                let persisted_available = persisted_model.as_ref().and_then(|pm| {
-                    if self.is_model_incompatible(pm) {
-                        println!("[FoundryActor] ⚠️  Persisted model '{}' is incompatible with this Foundry version — skipping", pm);
-                        return None;
-                    }
-                    self.available_models.iter().find(|m| *m == pm).cloned()
-                });
+                // Step 2: the `--model` / PLUGABLE_MODEL launch override (if any) outranks settings.
+                // It is applied here, before the first pre-warm, so the launch prompt never runs
+                // on (or races with a switch away from) the previously saved model.
+                let launch_config = self.app_handle.try_state::<LaunchConfigState>();
+                let launch_override_model: Option<String> = launch_config
+                    .as_ref()
+                    .and_then(|state| state.launch_overrides.model.clone());
+                println!("[FoundryActor] Launch override model: {:?}", launch_override_model);
 
-                // Step 3a: the default model (skip if not cached or blocklisted on this runtime)
-                let default_model = self.available_models.iter().find(|m| {
-                    m.to_lowercase().contains(DEFAULT_MODEL)
-                        && !self.is_model_incompatible(m)
-                }).cloned();
-
-                // Step 3b: Find phi-4-mini-instruct as fallback (also skip if blocklisted)
-                let fallback_model = self.available_models.iter().find(|m| {
-                    m.to_lowercase().contains(DEFAULT_FALLBACK_MODEL)
-                        && !self.is_model_incompatible(m)
-                }).cloned();
-                
-                println!("[FoundryActor] Persisted model available: {:?}", persisted_available);
-                println!("[FoundryActor] Default model ({}): {:?}", DEFAULT_MODEL, default_model);
-                println!("[FoundryActor] Fallback model (phi-4-mini): {:?}", fallback_model);
+                // Step 3: choose - launch override, settings, the default, then phi-4-mini-instruct
+                // ONLY. Cached-ness and the version-keyed incompatibility blocklist gate each.
+                let selection = select_startup_model(
+                    launch_override_model.as_deref(),
+                    persisted_model.as_deref(),
+                    &self.available_models,
+                    &|model_id| self.is_model_incompatible(model_id),
+                );
                 let _ = std::io::stdout().flush();
-                
-                // Step 4: Choose model - settings, then the default, then phi-4-mini-instruct ONLY
-                let selected = if let Some(model) = persisted_available {
-                    println!("[FoundryActor] ✅ SELECTED: {} (from settings)", model);
-                    let _ = std::io::stdout().flush();
-                    Some(model)
-                } else if let Some(model) = default_model {
-                    println!("[FoundryActor] ✅ SELECTED: {} (default model)", model);
-                    let _ = std::io::stdout().flush();
-                    Some(model)
-                } else if let Some(model) = fallback_model {
-                    println!("[FoundryActor] ✅ SELECTED: {} (fallback - settings and default models not available)", model);
-                    let _ = std::io::stdout().flush();
+
+                if let Some(problem) = &selection.launch_override_problem {
+                    println!("[FoundryActor] ⚠️  Launch model override not applied: {}", problem);
+                    if let Some(state) = &launch_config {
+                        if let Ok(mut guard) = state.launch_model_problem.write() {
+                            *guard = Some(problem.clone());
+                        }
+                    }
+                    let _ = self.app_handle.emit(
+                        "launch-model-override-failed",
+                        json!({ "requested": launch_override_model, "message": problem }),
+                    );
+                }
+
+                let selected = if let Some((model, source)) = selection.selected_model {
+                    println!("[FoundryActor] ✅ SELECTED: {} ({})", model, source.label());
                     Some(model)
                 } else {
                     // Neither the default nor the fallback is available - don't pick a random model
-                    println!("[FoundryActor] ❌ None of the settings model, {} or phi-4-mini-instruct is available!", DEFAULT_MODEL);
+                    println!("[FoundryActor] ❌ None of the launch override, settings model, {} or phi-4-mini-instruct is available!", DEFAULT_MODEL);
                     println!("[FoundryActor] Available models: {:?}", self.available_models);
-                    let _ = std::io::stdout().flush();
                     None
                 };
+                let _ = std::io::stdout().flush();
                 
                 println!("[FoundryActor] =================================================\n");
                 let _ = std::io::stdout().flush();

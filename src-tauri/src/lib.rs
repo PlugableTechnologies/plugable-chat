@@ -1884,6 +1884,7 @@ pub fn run() {
                 tool_filter: launch_filter.clone(),
                 launch_overrides: launch_overrides.clone(),
                 schema_index_pending: schema_index_pending.clone(),
+                launch_model_problem: Default::default(),
             });
             // A launch that switches the demo database on has nobody to click "Refresh schemas",
             // so index it as soon as the embedding model is ready; otherwise the model is told
@@ -2199,6 +2200,7 @@ pub fn run() {
             get_pending_tool_approvals,
             get_current_model,
             get_launch_overrides,
+            get_launch_model_problem,
             cancel_ep_registration,
             heartbeat_ping,
             // Startup coordination commands

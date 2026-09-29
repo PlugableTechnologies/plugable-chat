@@ -10,6 +10,7 @@ mod backend;
 mod model_gateway_actor;
 mod request_builder;
 mod service_manager;
+mod startup_model_selection;
 mod stream_handler;
 
 pub use model_gateway_actor::ModelGatewayActor;

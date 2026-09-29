@@ -99,6 +99,7 @@ interface ListenerSliceDeps {
     fetchModels: () => Promise<void>;
     fetchModelInfo: () => Promise<void>;
     fetchModelState: () => Promise<void>;
+    modelState: { state: string; modelId?: string; errorMessage?: string };
     loadLaunchOverrides: () => Promise<void>;
     launchOverridesLoaded: boolean;
     launchModelOverride: string | null;
@@ -112,6 +113,73 @@ export interface ListenerSlice {
     isListening: boolean;
     setupListeners: () => Promise<void>;
     cleanupListeners: () => void;
+}
+
+const LAUNCH_MODEL_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
+const LAUNCH_MODEL_POLL_INTERVAL_MS = 300;
+
+function launchModelMatches(readyModelId: string | undefined, requested: string): boolean {
+    if (!readyModelId) return false;
+    const ready = readyModelId.toLowerCase();
+    const want = requested.trim().toLowerCase();
+    // The backend also accepts a unique "<name>-..." / "<name>:..." prefix of a cached model.
+    return ready === want || ready.startsWith(`${want}-`) || ready.startsWith(`${want}:`);
+}
+
+// Waits until the backend model state machine is Ready on the requested launch model.
+// Returns false (after setting a visible backendError) if the override was rejected or the wait failed.
+async function waitForLaunchModelReady<T extends ListenerSliceDeps>(
+    get: () => T,
+    set: (partial: Partial<T> | ((state: T) => Partial<T>)) => void,
+    launchModel: string
+): Promise<boolean> {
+    const fail = (message: string) => {
+        console.error('[ChatStore] Launch model override failed:', message);
+        set({ backendError: message } as any);
+        return false;
+    };
+    const transientStates = new Set([
+        'initializing', 'switching_model', 'unloading_model', 'loading_model', 'reconnecting', 'service_restarting',
+    ]);
+    const deadline = Date.now() + LAUNCH_MODEL_WAIT_TIMEOUT_MS;
+    let requestedLoadFallback = false;
+
+    while (Date.now() < deadline) {
+        await get().fetchModelState();
+        const modelState = get().modelState;
+        if (transientStates.has(modelState.state)) {
+            await new Promise((resolve) => setTimeout(resolve, LAUNCH_MODEL_POLL_INTERVAL_MS));
+            continue;
+        }
+
+        // The backend records why an override was rejected before it leaves Initializing.
+        const problem = await invoke<string | null>('get_launch_model_problem').catch(() => null);
+        if (problem) return fail(problem);
+
+        if (modelState.state === 'ready') {
+            if (launchModelMatches(modelState.modelId, launchModel)) {
+                set({ currentModel: modelState.modelId } as any);
+                console.log('[ChatStore] Launch model ready:', modelState.modelId);
+                return true;
+            }
+            if (requestedLoadFallback) {
+                return fail(`Model ${launchModel} was requested at launch but ${modelState.modelId} is active.`);
+            }
+            // Backend did not apply the override at startup (e.g. it restarted); switch explicitly once.
+            requestedLoadFallback = true;
+            console.log('[ChatStore] Backend not on launch model, switching to:', launchModel);
+            try {
+                await get().loadModel(launchModel);
+            } catch (e: any) {
+                return fail(`Failed to load model ${launchModel}: ${e?.message || e}`);
+            }
+            continue;
+        }
+        return fail(
+            `Model ${launchModel} was requested at launch but the model is unavailable (${modelState.errorMessage || modelState.state}).`
+        );
+    }
+    return fail(`Timed out waiting for model ${launchModel} to become ready.`);
 }
 
 // Helper function to initialize models on startup
@@ -227,27 +295,26 @@ async function initializeModelsOnStartup<T extends ListenerSliceDeps>(
             }
         }
 
-        // Apply model override if provided
+        // Launch model override: the backend applies it in its startup selection (ahead of
+        // settings), so normally there is nothing to load here - we only wait until the backend
+        // reports Ready on that model. The launch prompt must not run before that.
         const launchModel = get().launchModelOverride;
+        let launchModelReady = true;
         if (launchModel) {
-            const current = get().currentModel;
-            if (current !== launchModel) {
-                console.log('[ChatStore] Applying launch model override:', launchModel);
-                try {
-                    await get().loadModel(launchModel);
-                } catch (e: any) {
-                    console.error('[ChatStore] Failed to load launch override model:', e);
-                    set({ backendError: `Failed to load model ${launchModel}: ${e?.message || e}` } as any);
-                }
-            }
+            launchModelReady = await waitForLaunchModelReady(get, set, launchModel);
         }
 
         // Auto-send initial prompt if provided and not yet applied
         if (get().launchInitialPrompt && !get().launchPromptApplied) {
-            try {
-                await get().sendLaunchPrompt();
-            } catch (e: any) {
-                console.error('[ChatStore] Failed to send launch initial prompt:', e);
+            if (!launchModelReady) {
+                // Visible message already set; do not run the prompt on some other model.
+                set({ launchPromptApplied: true } as any);
+            } else {
+                try {
+                    await get().sendLaunchPrompt();
+                } catch (e: any) {
+                    console.error('[ChatStore] Failed to send launch initial prompt:', e);
+                }
             }
         }
     } catch (e: any) {
