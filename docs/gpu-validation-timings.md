@@ -37,6 +37,18 @@ in `aws ec2 describe-instances`.
 | Wasted on the first driver download attempt | ~16 min | progress bar left on |
 | Waiting for CI to produce something to test | see below | the dominant cost |
 
+### Windows Server 2025 box, provisioned from the repo scripts (2026-09-29)
+
+| Step | Time | Note |
+|---|---|---|
+| Launch to reachable by SSM | **100 s** | measured |
+| Bootstrap (driver 2 min 29 s, Node 14 s, ffmpeg 9 s, rest) | ~3.5 min | WebView2 already on Server 2025 |
+| Reboot for auto-logon until SSM is back | 28 s | desktop session present after ~20 s more |
+| **Launch to ready, total** | **~6.5 min** | replaces the 9 to 10 min estimate |
+| Execution providers, first time (`winml`, fresh box) | **45.5 s** | 4 min 39 s on the earlier Server 2022 box |
+| Phi-4-mini CUDA model download | 58 s | ~4 GB |
+| Phi-4-mini chat round trip | 11 s | GPU 91%, 9,685 MiB |
+
 The T4 box cost is **$0.526/hour for the instance plus ~$0.011/hour for the disk**. The
 box in this session ran for many hours, mostly idle while CI was fixed; that is a cost of
 developing the pipeline, not of running it.

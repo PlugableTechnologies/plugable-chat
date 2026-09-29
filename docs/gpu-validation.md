@@ -119,6 +119,26 @@ SPIKE_SSM=1 ./launch.sh               # prints the instance id; adds a temporary
     it when the SDK backend is active. `SdkBackend` is not `Clone`, so this needs the actor
     to hold it in an `Arc` (or expose the static manager handle).
 
+**Windows ML (`winml`) on Windows Server 2025 (build 26100), T4 (2026-09-29)**
+
+23. **`winml` did not register execution providers by itself.** With the `winml` feature on and
+    the production `register_execution_providers` step removed from the picture, the SDK still
+    reported nothing registered (`already_registered: []`); providers registered only because our
+    code asked. The log shows Foundry's own CUDA and WebGPU bootstrappers, not a Windows-managed
+    provider. So the explicit start-up step is needed with `winml` too.
+24. **Result with `winml` + the production method:** CUDA and WebGPU both registered, no failures,
+    in 45.5 s on a fresh box; 48 of 48 catalog models are GPU variants (all CUDA). A Phi-4-mini
+    CUDA chat ran with the GPU at 91% and 9,685 MiB of VRAM (baseline 80 MiB), reply in 11 s,
+    model download 58 s.
+25. **The `winml` build bundles `Microsoft.Windows.AI.MachineLearning.dll`** (the Windows ML runtime,
+    0.9 MB) next to a larger `Microsoft.AI.Foundry.Local.Core.dll` (23.9 MB vs 22.4 MB).
+26. **Server 2025 needed no changes to the bootstrap** apart from two bugs in it that the new
+    image exposed and that were ours: the Node lookup piped `Invoke-RestMethod` output into
+    `Where-Object` (which passes the whole JSON array as one item and builds a 400 URL), and
+    downloads had no retry. WebView2 is already present on Server 2025.
+27. **Download bootstrap scripts by commit hash**, not by branch name. `raw.githubusercontent.com`
+    serves a cached copy of a branch file for a few minutes, so a fresh push was not what the box ran.
+
 **Driving the box (mechanics)**
 
 19. Run screenshots through a scheduled task in the desktop session and start `ffmpeg`
