@@ -199,3 +199,76 @@ renders), and runs upgrade over a running copy, repair, silent uninstall and rei
 runs the old per-user flow.
 
 Results of the perMachine run: **not yet run on a box** (see below for the record once it is).
+
+## qwen3.5 WebGPU failure on macOS and the Foundry SDK upgrade options (2026-09-29)
+
+**Symptom.** On macOS arm64 (Foundry CLI 0.8.119, `foundry-local-sdk` 1.2.0) the first chat with
+`qwen3.5-4b-generic-gpu:4` fails in `OnnxChatGenerator.CreateOnnxChatGenerator` with `WebGPU validation
+failed ... usage (Storage(read-write)|Storage(read-only)) includes writable usage and another usage in the
+same synchronization scope`. The app blocklists the model for that SDK version and falls back to phi-4-mini.
+The CPU build `qwen3.5-4b-generic-cpu:3` works but decodes at about 3 tokens/s.
+
+**It is a known bug, already fixed upstream.**
+- Cause: ONNX Runtime GenAI's `RecurrentState` (qwen3.5's linear-attention layers) used one buffer for both
+  past and present state. Under WebGPU that buffer is bound read-write and read-only in one compute pass.
+  Some drivers tolerate it; Metal (via Dawn) and Intel Arc reject it.
+- Tracked as [microsoft/foundry-local#779](https://github.com/microsoft/foundry-local/issues/779) and
+  [#799](https://github.com/microsoft/foundry-local/issues/799) (same error, `qwen3.5-4b-generic-gpu:2`, Intel Arc).
+  A maintainer's reply on #799 says the CPU variant is the right workaround until the CLI is rebuilt.
+- Fix: [onnxruntime-genai#2191](https://github.com/microsoft/onnxruntime-genai/pull/2191) (merged 2026-06-02) uses
+  separate past/present buffers on WebGPU. Per the #799 maintainer reply it shipped in Foundry Local **SDK 1.2.1**.
+  SDK 1.2.0 (our pin) bundles GenAI 0.14.0, which was released 2026-05-29, before the fix.
+- Follow-ups that do **not** address our error: #2244 (graph-capture aliasing, in 0.15.x) and #2564 (WebGPU
+  graph-capture variants, merged 2026-09-17, in 0.16/0.17). Neither matters until graph capture is enabled.
+- Brew's `microsoft/foundrylocal/foundrylocal` now offers CLI **0.10.3**, built on SDK 1.2.4, so it should
+  include the fix. Untested (see "Not yet verified").
+
+**What each SDK version bundles** (from the crates' `deps_versions*.json`):
+
+| Crate | Foundry Core | ONNX Runtime | GenAI | WinML | Source change vs 1.2.0 |
+|---|---|---|---|---|---|
+| 1.2.0 (pinned now) | 1.2.0 | 1.26.0 | 0.14.0 | 2.1.1 | none |
+| **1.2.3** | 1.2.3 | 1.26.0 | 0.14.1 (on nuget) | 2.1.1 | `catalog.rs` only: re-scans the cache when an alias or id is unknown (BYOM self-heal) |
+| 2.0.1 | (new `foundry_local` runtime) | 1.28.0 | 0.15.2 | 2.1.70, bundled, no feature | Session API, new native library, `winml` feature removed |
+| 2.1.0 | not assessed (published today) | | | | |
+
+**Recommendation: bump to `foundry-local-sdk = "1.2.3"` first; do not jump to 2.x for this bug.**
+- 1.2.1 to 1.2.3 keep ORT 1.26.0, the same native file set, the same `winml` feature and the same public API,
+  so `build.rs` staging, `library_path` handling and the Windows CUDA/WinML setup stay valid.
+  I diffed `src/` of 1.2.0 against 1.2.3: only `catalog.rs` changed.
+- Also required: `async-openai = "=0.33.1"` still matches (`Cargo.toml` of 1.2.3 differs only in the version line).
+- The unverified part is that 0.14.1 contains #2191. There is no public git tag for 0.14.1; the evidence is the
+  maintainer statement plus the fact that 1.2.1+ pin it. Only a test on the failing Mac settles it.
+
+**What SDK 2.0.1 would change** (assessed from the published crate; nothing built):
+- Inference moves to `ChatSession` / `Request` / `Response` items. The old `ChatClient` still exists but is
+  deprecated and scheduled for removal at the end of 2026. `ChatToolChoice` and `DeviceType` are still exported,
+  so `backend/sdk.rs` compiles in principle, but streaming, tool calls and reasoning effort would be re-plumbed
+  onto sessions to avoid building on a deprecated API.
+- Native library: 2.x loads `foundry_local` (`libfoundry_local.dylib`, `foundry_local.dll`) through `libloading`,
+  next to ORT and GenAI. Our `build.rs` (`copy foundry-local-sdk native runtime libraries`, around line 564)
+  stages `Microsoft.AI.Foundry.Local.Core.*` and lists `onnxruntime_providers_shared` and the WinML DLL by name,
+  so the staged list, the tauri `frameworks`/`resources` entries and the runtime `library_path` all need rework
+  (see the `foundry-native-lib-bundling` memory note).
+- Windows: the `winml` feature is gone and one runtime bundles WinML 2.x, so `default = ["winml"]` in
+  `src-tauri/Cargo.toml` must go. The SDK now picks WinML, WebGPU, CPU or CUDA itself; our explicit
+  `register_execution_providers` step and the CUDA provider workarounds (A7, `onnxruntime_providers_shared`)
+  must be re-validated. ORT moves 1.26 to 1.28, which is the biggest risk for the CUDA T4/A10G results.
+- Node/other bindings are irrelevant to us; `async-openai` stays at `=0.33.1`.
+- Cost: a multi-day change touching the backend, the packaging and the Windows GPU results. It does buy GenAI
+  0.15.2 and the maintained API, but none of that is needed for this bug.
+
+**Test plan** (each step gates the next; GPU runs are capped at three per task):
+1. Free, on the Mac: install CLI 0.10.3 (needs `brew trust` of the tap) or build a scratch crate against
+   `foundry-local-sdk =1.2.3` and load `qwen3.5-4b-generic-gpu:4`. Pass: a 50-token reply with no WebGPU error.
+   Compare tokens/s with the CPU build (about 3/s).
+2. Free, CI: change only the pin to 1.2.3 (on a branch of the CI, not `main` release paths), build all three
+   platforms, run the unit tests. The gpu-tests artifact shows whether the native staging still works.
+3. Box run 1, A10G: `PLUGABLE_MODEL=phi-4-mini-instruct`, then `qwen3.5-4b`, ask the Chicago questions with
+   `ask.sh`, compare answers with `chicago-questions.json` and the earlier results in this file. Pass: no
+   regression versus build 5d3385a, and read the screenshots.
+4. Box run 2, T4: the same two models. A7 (`qwen3.5-4b` fails on Turing) is expected to persist; confirm it does not get worse.
+5. Only after 1.2.3 is proven: decide on 2.x as its own task, with the same plan plus a `build.rs`/packaging rework and an ORT 1.28 regression pass.
+
+**Not yet verified.** No CLI or SDK newer than 1.2.0 has been run on the failing Mac. The `brew trust` and
+the install of CLI 0.10.3 (replacing 0.8.119) need the user's approval.
