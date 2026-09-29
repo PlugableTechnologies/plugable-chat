@@ -152,3 +152,23 @@ run (80 s) and its warm-up put the model on the GPU (VRAM 80 MiB to about 5 GB).
 - Every run ends with `teardown.sh`, which lists anything tagged for this project that still exists
   (instances, volumes, snapshots, images, addresses, NAT gateways, buckets, schedules) and fails if it
   finds any.
+
+## Chicago crimes run and installer lifecycle (2026-09-29, build 5d3385a)
+
+Phi-4-mini (CUDA) on the T4 answered all seven questions correctly through the installed app, each with
+a real SQL tool call: 227,299 crimes; THEFT 52,813 / BATTERY 41,130 / CRIMINAL DAMAGE 25,135; 36,070
+arrests; Austin 11,358; 407 homicides; 18,608 with a gun; July 22,561. About 2 to 3 minutes per
+question. qwen3.5-4b (CUDA) on the A10G loaded and reasoned, but had not produced a query result
+within 200 s on any question it was given: it is too slow and verbose as the default model on this hardware.
+
+| # | Finding | Status |
+|---|---|---|
+| A9 | The demo database is served by the external MCP Database Toolbox (`toolbox.exe`), which the app neither bundles nor installs; on a fresh machine the demo source fails with "No command specified for stdio transport". `bootstrap-box.ps1` now installs v0.24.0. | Open: bundle it or show a clear message |
+| A10 | A launch with the demo database never indexed its schema, so the model was told "no tables cached" and `sql_select` was blocked. | Fixed (index at launch; launch prompt waits for it) |
+| A11 | Models call the built-in tool `sql`; an unknown tool ended the reply silently. | Fixed (alias to `sql_select`; warning for unknown tools) |
+| A12 | qwen3.5-4b too slow to answer within 200 s on an A10G. | Open |
+
+Installer lifecycle (`infra/aws-gpu/installer-lifecycle.ps1`): fresh install 22 s, launch, install over a
+running copy, uninstall, reinstall all pass. Lessons: the per-user installer run as SYSTEM (as IT tools
+and SSM do) installs into the SYSTEM profile unless given `/D=`; run the ask scripts against `C:\gpu\app`.
+Parallel `ask.sh` runs need per-instance S3 keys (fixed).
