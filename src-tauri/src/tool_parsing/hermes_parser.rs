@@ -130,6 +130,11 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
         calls = parse_braintrust_function_calls(content);
     }
 
+    // Fallback: Qwen3-Coder / Qwen3.5 XML: <function=name><parameter=key>value</parameter></function>
+    if calls.is_empty() {
+        calls = parse_qwen_xml_function_calls(content);
+    }
+
     // Fallback: check for markdown code blocks containing JSON tool calls
     // This handles smaller models that output ```json {...} ``` instead of <tool_call>
     if calls.is_empty() {
@@ -173,6 +178,39 @@ pub fn parse_hermes_tool_calls(content: &str) -> Vec<ParsedToolCall> {
         }
     }
 
+    calls
+}
+
+
+/// Parse Qwen XML tool calls:
+/// `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`.
+/// Parameter values are taken as JSON when they parse (numbers, booleans, objects) and as
+/// plain strings otherwise.
+pub fn parse_qwen_xml_function_calls(content: &str) -> Vec<ParsedToolCall> {
+    let function_re = Regex::new(r"(?s)<function=([^>\s]+)>(.*?)</function>").unwrap();
+    let parameter_re = Regex::new(r"(?s)<parameter=([^>\s]+)>\s*(.*?)\s*</parameter>").unwrap();
+    let mut calls = Vec::new();
+
+    for cap in function_re.captures_iter(content) {
+        let name = cap[1].trim().to_string();
+        let mut arguments = serde_json::Map::new();
+        for param in parameter_re.captures_iter(&cap[2]) {
+            let raw_value = param[2].to_string();
+            let value = serde_json::from_str::<serde_json::Value>(raw_value.trim())
+                .ok()
+                .filter(|v| !v.is_string())
+                .unwrap_or(serde_json::Value::String(raw_value));
+            arguments.insert(param[1].trim().to_string(), value);
+        }
+        let (server, tool) = parse_combined_tool_name(&name);
+        calls.push(ParsedToolCall {
+            server,
+            tool,
+            arguments: serde_json::Value::Object(arguments),
+            raw: cap[0].to_string(),
+            id: None,
+        });
+    }
     calls
 }
 
@@ -281,5 +319,18 @@ Done."#;
         let calls = parse_hermes_tool_calls(content);
         assert_eq!(calls.len(), 1, "Should find JSON in text via fallback");
         assert_eq!(calls[0].tool, "test");
+    }
+
+    #[test]
+    fn test_qwen_xml_parameter_format() {
+        // Qwen3-Coder / Qwen3.5 style: XML function and parameter tags inside <tool_call>.
+        let content = "<tool_call>\n<function=sql_select>\n<parameter=sql>\nSELECT COUNT(*) FROM main.chicago_crimes\n</parameter>\n</function>\n</tool_call>";
+        let calls = parse_hermes_tool_calls(content);
+        assert_eq!(calls.len(), 1, "Qwen XML tool call should parse");
+        assert_eq!(calls[0].tool, "sql_select");
+        assert_eq!(
+            calls[0].arguments.get("sql").and_then(|v| v.as_str()),
+            Some("SELECT COUNT(*) FROM main.chicago_crimes")
+        );
     }
 }
