@@ -18,6 +18,8 @@ pub enum ToolCallFormatName {
     Native,
     /// Text-based: `<tool_call>{"name": "...", "arguments": {...}}</tool_call>`
     Hermes,
+    /// Text-based (Qwen3.5+ native): `<tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>`
+    QwenXml,
     /// Text-based: `[TOOL_CALLS] [{"name": "...", "arguments": {...}}]`
     Mistral,
     /// Text-based: `tool_name(arg1="value", arg2=123)`
@@ -33,6 +35,7 @@ impl ToolCallFormatName {
         match self {
             ToolCallFormatName::Native => "native",
             ToolCallFormatName::Hermes => "hermes",
+            ToolCallFormatName::QwenXml => "qwen_xml",
             ToolCallFormatName::Mistral => "mistral",
             ToolCallFormatName::Pythonic => "pythonic",
             ToolCallFormatName::PureJson => "pure_json",
@@ -45,6 +48,7 @@ impl ToolCallFormatName {
         matches!(
             self,
             ToolCallFormatName::Hermes
+                | ToolCallFormatName::QwenXml
                 | ToolCallFormatName::Mistral
                 | ToolCallFormatName::Pythonic
                 | ToolCallFormatName::PureJson
@@ -1007,6 +1011,17 @@ pub fn find_test_data_dir() -> Option<std::path::PathBuf> {
 /// Find the MCP Database Toolbox binary by searching PATH and common installation locations.
 /// Returns the path to the toolbox binary if found, None otherwise.
 pub fn find_toolbox_binary() -> Option<String> {
+    // Prefer a toolbox that ships with, or was downloaded by, the app: it is the pinned version.
+    let app_owned_candidates = std::iter::once(crate::toolbox_install::installed_toolbox_path())
+        .chain(crate::toolbox_install::bundled_toolbox_candidate_paths());
+    for candidate in app_owned_candidates {
+        if candidate.is_file() {
+            let path = candidate.canonicalize().unwrap_or(candidate);
+            println!("[Settings] Found app-managed toolbox: {}", path.display());
+            return Some(path.to_string_lossy().to_string());
+        }
+    }
+
     // First, try to find it in PATH using which/where
     #[cfg(windows)]
     let which_result = std::process::Command::new("where.exe")

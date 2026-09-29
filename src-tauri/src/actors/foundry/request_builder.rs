@@ -38,7 +38,7 @@ pub fn build_foundry_chat_request_body(
 
     // Add model-family-specific parameters
     match family {
-        ModelFamily::GptOss => {
+        ModelFamily::GptOss | ModelFamily::Qwen => {
             // GPT-OSS models: standard OpenAI-compatible parameters
             body[if use_responses_api { "max_output_tokens" } else { "max_tokens" }] =
                 json!(16384);

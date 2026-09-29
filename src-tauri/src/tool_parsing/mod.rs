@@ -73,8 +73,8 @@ pub fn format_tools_for_model(
     tool_format: ToolFormat,
 ) -> Value {
     match tool_format {
-        ToolFormat::OpenAI | ToolFormat::Hermes => {
-            // OpenAI and Hermes use the same tool definition format
+        ToolFormat::OpenAI | ToolFormat::Hermes | ToolFormat::QwenXml => {
+            // OpenAI, Hermes and Qwen XML use the same tool definition format
             json!(tools)
         }
         ToolFormat::Gemini => {
@@ -134,7 +134,10 @@ pub fn parse_tool_calls_for_model_profile(
 
     for fmt in ordered {
         let calls = match fmt {
-            ToolCallFormatName::Hermes => hermes_parser::parse_hermes_tool_calls(response),
+            // The Hermes parser also understands Qwen's <function=...><parameter=...> XML body
+            ToolCallFormatName::Hermes | ToolCallFormatName::QwenXml => {
+                hermes_parser::parse_hermes_tool_calls(response)
+            }
             ToolCallFormatName::Mistral => tagged_parser::parse_tagged_tool_calls(response),
             ToolCallFormatName::Pythonic => pythonic_parser::parse_pythonic_tool_calls(response),
             ToolCallFormatName::PureJson => json_parser::parse_pure_json_tool_calls(response),
@@ -148,7 +151,7 @@ pub fn parse_tool_calls_for_model_profile(
 
     // Fallback to model-specific parsing only if the format is enabled.
     match tool_format {
-        ToolFormat::OpenAI | ToolFormat::Hermes => {
+        ToolFormat::OpenAI | ToolFormat::Hermes | ToolFormat::QwenXml => {
             if formats.is_enabled(ToolCallFormatName::Hermes) {
                 hermes_parser::parse_hermes_tool_calls(response)
             } else {

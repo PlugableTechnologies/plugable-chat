@@ -466,7 +466,7 @@ impl FoundryBackend for SdkBackend {
         // `repetition_penalty` (Granite); those tuning hints are dropped on this backend.
         let mut client = model.create_chat_client();
         match req.family {
-            ModelFamily::GptOss => {
+            ModelFamily::GptOss | ModelFamily::Qwen => {
                 client = client.max_tokens(16384).temperature(0.7);
             }
             ModelFamily::Phi => {

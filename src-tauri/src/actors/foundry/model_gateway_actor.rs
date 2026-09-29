@@ -2178,8 +2178,10 @@ impl ModelGatewayActor {
                         ToolFormat::TextBased
                     } else {
                         match family {
-                            // Qwen, Mistral, LLaMA use Hermes-style <tool_call> format
+                            // Mistral, LLaMA use Hermes-style <tool_call> format
                             ModelFamily::GptOss => ToolFormat::Hermes,
+                            // Qwen3.5+ speaks XML, older Qwen speaks Hermes JSON (see model_profiles.rs)
+                            ModelFamily::Qwen => crate::model_profiles::resolve_profile(&id).tool_call_format,
                             ModelFamily::Gemma => ToolFormat::Gemini,
                             ModelFamily::Phi => ToolFormat::Hermes,
                             ModelFamily::Granite => ToolFormat::Granite,
@@ -2196,7 +2198,7 @@ impl ModelGatewayActor {
                     } else {
                         match family {
                             ModelFamily::GptOss => ReasoningFormat::ChannelBased,
-                            ModelFamily::Phi => ReasoningFormat::ThinkTags,
+                            ModelFamily::Phi | ModelFamily::Qwen => ReasoningFormat::ThinkTags,
                             ModelFamily::Granite => ReasoningFormat::ThinkingTags,
                             _ => ReasoningFormat::None,
                         }

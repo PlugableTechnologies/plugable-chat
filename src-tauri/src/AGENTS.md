@@ -97,6 +97,7 @@ The `tool_parsing` module provides format-specific parsers for different model f
 **Supported Formats:**
 - `ToolFormat::OpenAI` - Standard OpenAI tool_calls
 - `ToolFormat::Hermes` - `<tool_call>JSON</tool_call>` XML format
+- `ToolFormat::QwenXml` - Qwen3.5+ native `<tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>` (Qwen2.5/Qwen3 stay `Hermes` JSON); the system prompt shows this same syntax
 - `ToolFormat::Harmony` - `<|channel|>commentary to=tool...` tokens
 - `ToolFormat::Granite` - `<function_call>XML</function_call>` format
 - `ToolFormat::Gemini` - function_call in response

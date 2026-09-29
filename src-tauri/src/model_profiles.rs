@@ -64,7 +64,9 @@ impl ModelProfile {
         }
 
         match self.model_family {
-            ModelFamily::GptOss => self.build_prompt_openai_style(history, tools, options),
+            ModelFamily::GptOss | ModelFamily::Qwen => {
+                self.build_prompt_openai_style(history, tools, options)
+            }
             ModelFamily::Phi => self.build_prompt_phi(history, tools, options),
             ModelFamily::Granite => self.build_prompt_granite(history, tools, options),
             ModelFamily::Gemma => self.build_prompt_gemma_like(history, tools, options),
@@ -79,7 +81,8 @@ impl ModelProfile {
                 // OpenAI format typically uses structured responses, but we can fall back to Hermes
                 parse_hermes_tool_calls(output)
             }
-            ToolFormat::Hermes => parse_hermes_tool_calls(output),
+            // parse_hermes_tool_calls handles both <tool_call>JSON</tool_call> and Qwen's XML body
+            ToolFormat::Hermes | ToolFormat::QwenXml => parse_hermes_tool_calls(output),
             ToolFormat::Granite => parse_granite_tool_calls(output),
             ToolFormat::Gemini => parse_gemini_tool_calls(output),
             ToolFormat::Harmony => {
@@ -705,11 +708,26 @@ lazy_static::lazy_static! {
             ModelFamily::GptOss,
             ToolFormat::Harmony,
         ),
-        // OpenAI-style models (Qwen, LLaMA-Instruct, Mistral) - use Hermes format
-        // Note: gpt-oss removed - now uses harmony format above
+        // Qwen3.5+ (and Qwen3-Coder / Qwen3-Next) natively emit XML tool calls:
+        // <tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>
+        // Must be listed BEFORE qwen_hermes.
+        ModelProfile::new(
+            "qwen_xml",
+            r"qwen[-_ ]?3[._][5-9]|qwen[-_ ]?3[-_]?(coder|next)|qwen[-_ ]?[4-9]",
+            ModelFamily::Qwen,
+            ToolFormat::QwenXml,
+        ),
+        // Qwen2.5 / Qwen3 (and other Qwen) use Hermes-style <tool_call>{JSON}</tool_call>
+        ModelProfile::new(
+            "qwen_hermes",
+            r"qwen",
+            ModelFamily::Qwen,
+            ToolFormat::Hermes,
+        ),
+        // OpenAI-style models (LLaMA-Instruct, Mistral) - use Hermes format
         ModelProfile::new(
             "openai_style",
-            r"qwen|llama.*instruct|mistral.*instruct",
+            r"llama.*instruct|mistral.*instruct",
             ModelFamily::GptOss,
             ToolFormat::Hermes,
         ),
@@ -773,7 +791,7 @@ mod tests {
     fn test_profile_matching() {
         // Test Qwen matching
         let profile = resolve_profile("Qwen2.5-32B-Instruct");
-        assert_eq!(profile.id, "openai_style");
+        assert_eq!(profile.id, "qwen_hermes");
 
         // Test Granite matching
         let profile = resolve_profile("granite-3b-code-instruct");
@@ -853,6 +871,84 @@ mod tests {
             system_content.contains("Factual Grounding"),
             "System prompt should have Factual Grounding section"
         );
+    }
+
+    #[test]
+    fn test_qwen_is_not_labelled_gpt_oss() {
+        for id in [
+            "qwen3.5-4b-generic-cpu:3",
+            "Qwen2.5-32B-Instruct",
+            "qwen2.5-coder-7b-instruct-generic-gpu:4",
+        ] {
+            assert_eq!(ModelFamily::from_model_id(id), ModelFamily::Qwen, "{id}");
+            assert_eq!(resolve_profile(id).model_family, ModelFamily::Qwen, "{id}");
+        }
+        // gpt-oss is still GptOss
+        assert_eq!(ModelFamily::from_model_id("gpt-oss-20b"), ModelFamily::GptOss);
+    }
+
+    #[test]
+    fn test_qwen35_uses_xml_and_older_qwen_uses_hermes_json() {
+        for id in [
+            "qwen3.5-4b-generic-cpu:3",
+            "qwen3.5-0.8b-generic-gpu:4",
+            "Qwen3.5-9B",
+            "qwen3-coder-30b",
+            "qwen3-next-80b",
+        ] {
+            let profile = resolve_profile(id);
+            assert_eq!(profile.id, "qwen_xml", "{id}");
+            assert_eq!(profile.tool_call_format, ToolFormat::QwenXml, "{id}");
+        }
+        for id in [
+            "qwen2.5-7b-instruct-generic-gpu:4",
+            "qwen2.5-coder-1.5b-instruct",
+            "qwen3-8b",
+            "Qwen3-4B-Instruct-2507",
+        ] {
+            let profile = resolve_profile(id);
+            assert_eq!(profile.id, "qwen_hermes", "{id}");
+            assert_eq!(profile.tool_call_format, ToolFormat::Hermes, "{id}");
+        }
+    }
+
+    #[test]
+    fn test_phi_profile_unchanged_by_qwen_split() {
+        let profile = resolve_profile("Phi-4-mini-instruct-generic-gpu:5");
+        assert_eq!(profile.id, "phi");
+        assert_eq!(profile.model_family, ModelFamily::Phi);
+        assert_eq!(profile.tool_call_format, ToolFormat::Hermes);
+    }
+
+    #[test]
+    fn test_qwen_profile_parses_xml_and_json_tool_calls() {
+        let xml = "<tool_call>\n<function=sql_select>\n<parameter=sql>\nSELECT COUNT(*) FROM t\n</parameter>\n</function>\n</tool_call>";
+        let json = r#"<tool_call>{"name": "sql_select", "arguments": {"sql": "SELECT 1"}}</tool_call>"#;
+        for id in ["qwen3.5-4b", "qwen2.5-7b-instruct"] {
+            let profile = resolve_profile(id);
+            let xml_calls = profile.parse_tool_calls(xml);
+            assert_eq!(xml_calls.len(), 1, "{id} xml");
+            assert_eq!(xml_calls[0].tool, "sql_select");
+            assert_eq!(xml_calls[0].arguments["sql"], "SELECT COUNT(*) FROM t");
+            let json_calls = profile.parse_tool_calls(json);
+            assert_eq!(json_calls.len(), 1, "{id} json");
+            assert_eq!(json_calls[0].arguments["sql"], "SELECT 1");
+        }
+    }
+
+    #[test]
+    fn test_qwen_prompt_lists_tools() {
+        let profile = resolve_profile("qwen3.5-4b");
+        let mut sql_select = ToolSchema::new("sql_select");
+        sql_select.description = Some("Execute SQL queries".to_string());
+        let options = PromptOptions {
+            tools_available: true,
+            code_mode_enabled: false,
+            reasoning_style: ReasoningStyle::Default,
+        };
+        let input = profile.build_prompt(&[], &[sql_select], &options);
+        assert!(input.messages[0].content.contains("sql_select"));
+        assert!(input.tools.is_some(), "tools are also sent via the API");
     }
 
     #[test]

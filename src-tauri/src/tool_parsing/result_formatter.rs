@@ -54,7 +54,7 @@ pub fn format_tool_result(
                 )
             }
         }
-        ToolFormat::Hermes => {
+        ToolFormat::Hermes | ToolFormat::QwenXml => {
             // Hermes models expect results in a similar XML format
             if is_error {
                 format!(

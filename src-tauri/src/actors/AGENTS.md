@@ -2,13 +2,13 @@
 
 ## Model Profiles (`model_profiles.rs`)
 Each model has a `ModelProfile` that defines:
-- **`ModelFamily`**: `GptOss`, `Phi`, `Gemma`, `Granite`, `Generic`
-- **`ToolFormat`**: How the model outputs tool calls (`OpenAI`, `Hermes`, `Granite`, `Gemini`, `TextBased`).
+- **`ModelFamily`**: `GptOss`, `Qwen`, `Phi`, `Gemma`, `Granite`, `Generic`
+- **`ToolFormat`**: How the model outputs tool calls (`OpenAI`, `Hermes`, `QwenXml`, `Granite`, `Gemini`, `TextBased`).
 - **`ReasoningFormat`**: `None`, `ThinkTags`, `ThinkingTags`, `ChannelBased`.
 
 ## Execution Parameters (`foundry/request_builder.rs`)
 `build_foundry_chat_request_body()` sets model-family-specific parameters:
-- **GptOss**: `max_tokens=16384`, `temperature=0.7`, native tools.
+- **GptOss / Qwen**: `max_tokens=16384`, `temperature=0.7`, native tools.
 - **Phi**: Supports `reasoning_effort` when reasoning model.
 - **Gemma**: `top_k=40`.
 - **Granite**: `repetition_penalty=1.05`.

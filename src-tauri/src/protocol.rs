@@ -633,6 +633,8 @@ pub struct CachedModel {
 pub enum ModelFamily {
     /// GPT-OSS models (gpt-oss-20b, gpt-oss-120b) - use channel-based response format
     GptOss,
+    /// Alibaba Qwen models - OpenAI-compatible responses; Qwen3+ may emit <think> blocks
+    Qwen,
     /// Google Gemma models - standard response format
     Gemma,
     /// Microsoft Phi models - use <think> tags for reasoning variants
@@ -649,10 +651,12 @@ impl ModelFamily {
     pub fn from_model_id(model_id: &str) -> Self {
         let lower = model_id.to_lowercase();
 
-        // Qwen, Mistral, LLaMA-Instruct models use OpenAI-compatible tool calling
-        if lower.contains("qwen") || lower.contains("mistral") || lower.contains("llama") {
-            ModelFamily::GptOss
+        if lower.contains("qwen") {
+            ModelFamily::Qwen
         } else if lower.contains("gpt-oss") {
+            ModelFamily::GptOss
+        } else if lower.contains("mistral") || lower.contains("llama") {
+            // Mistral / LLaMA-Instruct use OpenAI-compatible tool calling
             ModelFamily::GptOss
         } else if lower.contains("gemma") {
             ModelFamily::Gemma
@@ -673,8 +677,11 @@ pub enum ToolFormat {
     /// OpenAI-compatible tool_calls array in response
     #[default]
     OpenAI,
-    /// Hermes-style <tool_call> XML format (Phi, Qwen)
+    /// Hermes-style <tool_call>JSON</tool_call> format (Phi, Qwen2.5, Qwen3)
     Hermes,
+    /// Qwen3.5+ native XML format:
+    /// <tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>
+    QwenXml,
     /// Gemini function_call format
     Gemini,
     /// Granite <function_call> XML format

@@ -107,6 +107,7 @@ pub fn resolve_effective_format(
     if primary_format == ToolCallFormatName::Native {
         match model_tool_format {
             Some(ToolFormat::Hermes) => ToolCallFormatName::Hermes,
+            Some(ToolFormat::QwenXml) => ToolCallFormatName::QwenXml,
             Some(ToolFormat::Granite) => ToolCallFormatName::Mistral,
             _ => ToolCallFormatName::Native,
         }
@@ -133,6 +134,7 @@ pub fn tool_call_syntax(
             tool_name, sql
         ),
         ToolCallFormatName::Hermes => format!("<tool_call>{{\"name\": \"{}\", \"arguments\": {{\"sql\": \"{}\"}}}}</tool_call>", tool_name, sql),
+        ToolCallFormatName::QwenXml => format!("<tool_call>\n<function={}>\n<parameter=sql>\n{}\n</parameter>\n</function>\n</tool_call>", tool_name, sql),
         ToolCallFormatName::Mistral => format!("[TOOL_CALLS] [{{\"name\": \"{}\", \"arguments\": {{\"sql\": \"{}\"}}}}] ", tool_name, sql),
         ToolCallFormatName::Pythonic => format!("{}(sql=\"{}\")", tool_name, sql),
         ToolCallFormatName::PureJson => format!("{{\"name\": \"{}\", \"arguments\": {{\"sql\": \"{}\"}}}}", tool_name, sql),
@@ -618,6 +620,11 @@ pub fn build_format_instructions(
             When you need to use a tool, output ONLY:\n\
             <tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>".to_string()
         ),
+        ToolCallFormatName::QwenXml => Some(
+            "## Tool Calling Format\n\n\
+            When you need to use a tool, output ONLY:\n\
+            <tool_call>\n<function=tool_name>\n<parameter=arg_name>\nvalue\n</parameter>\n</function>\n</tool_call>".to_string()
+        ),
         ToolCallFormatName::Mistral => {
             match model_tool_format {
                 Some(ToolFormat::Granite) => Some(
@@ -1063,4 +1070,51 @@ pub fn format_mcp_tool_documentation(
         body.push_str(&format!("Arguments: {}\n", schema));
     }
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NATIVE: ToolCallFormatName = ToolCallFormatName::Native;
+
+    #[test]
+    fn qwen_xml_model_gets_xml_tool_instructions_not_json() {
+        let sql = build_sql_instructions(NATIVE, Some(ToolFormat::QwenXml), Some("main.chicago_crimes"));
+        assert!(sql.contains("<function=sql_select>"), "{sql}");
+        assert!(sql.contains("<parameter=sql>"), "{sql}");
+        assert!(!sql.contains("\"arguments\""), "no JSON tool-call example for Qwen XML: {sql}");
+
+        let format = build_format_instructions(NATIVE, Some(ToolFormat::QwenXml)).unwrap();
+        assert!(format.contains("<function=tool_name>"), "{format}");
+        assert!(!format.contains("\"arguments\""), "{format}");
+    }
+
+    #[test]
+    fn hermes_json_models_keep_json_tool_instructions() {
+        // Phi-4-mini / Qwen2.5 / Qwen3: must not regress.
+        let sql = build_sql_instructions(NATIVE, Some(ToolFormat::Hermes), Some("t"));
+        assert!(sql.contains(r#"<tool_call>{"name": "sql_select""#), "{sql}");
+        assert!(!sql.contains("<function="), "{sql}");
+
+        let format = build_format_instructions(NATIVE, Some(ToolFormat::Hermes)).unwrap();
+        assert!(format.contains(r#"<tool_call>{"name": "tool_name""#), "{format}");
+    }
+
+    #[test]
+    fn effective_format_maps_model_format() {
+        assert_eq!(
+            resolve_effective_format(NATIVE, Some(ToolFormat::QwenXml)),
+            ToolCallFormatName::QwenXml
+        );
+        assert_eq!(
+            resolve_effective_format(NATIVE, Some(ToolFormat::Hermes)),
+            ToolCallFormatName::Hermes
+        );
+        // An explicit user-chosen primary format is never overridden.
+        assert_eq!(
+            resolve_effective_format(ToolCallFormatName::PureJson, Some(ToolFormat::QwenXml)),
+            ToolCallFormatName::PureJson
+        );
+    }
 }
