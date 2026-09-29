@@ -157,6 +157,7 @@ impl AgenticIntegrationTestHarness {
 }
 
 #[tokio::test]
+#[ignore = "Requires Foundry Local to be running (run on the GPU test box)"]
 async fn test_sql_select_triggering() {
     // 1. Enable SQL
     let settings = AgenticIntegrationTestHarness::create_test_settings(true, false, ToolCallFormatName::Hermes);
@@ -248,6 +249,7 @@ async fn test_sql_select_triggering() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Foundry Local to be running (run on the GPU test box)"]
 async fn test_python_execution_triggering() {
     // 1. Enable Python in Code Mode
     let settings = AgenticIntegrationTestHarness::create_test_settings(false, true, ToolCallFormatName::CodeMode);
@@ -309,6 +311,7 @@ async fn test_python_execution_triggering() {
 /// schema directly into the error response so small models don't have to look back
 /// in context.
 #[tokio::test]
+#[ignore = "Requires Foundry Local to be running (run on the GPU test box)"]
 async fn test_sql_error_recovery_with_schema_injection() {
     use crate::system_prompt::build_sql_error_recovery_prompt;
     
@@ -478,6 +481,7 @@ async fn test_sql_error_recovery_with_schema_injection() {
 /// Uses Chain-of-Thought prompting to force the model to reason about which table
 /// has the column it needs.
 #[tokio::test]
+#[ignore = "Requires Foundry Local to be running (run on the GPU test box)"]
 async fn test_sql_error_recovery_wrong_table() {
     use crate::system_prompt::build_sql_error_recovery_prompt;
     
