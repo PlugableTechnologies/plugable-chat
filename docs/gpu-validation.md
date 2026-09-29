@@ -139,6 +139,28 @@ SPIKE_SSM=1 ./launch.sh               # prints the instance id; adds a temporary
 27. **Download bootstrap scripts by commit hash**, not by branch name. `raw.githubusercontent.com`
     serves a cached copy of a branch file for a few minutes, so a fresh push was not what the box ran.
 
+**Choosing the default model (2026-09-29)**
+
+28. **`qwen3.5-4b` (CUDA build) fails to generate on an NVIDIA T4 (Turing, compute capability 7.5).**
+    The error is inside the model's linear-attention layer: `LinearAttention ... CUDA failure 1:
+    invalid argument` (`linear_attention_impl.cu:702`), at layer 0. It is not out-of-memory.
+    Phi-4-mini works on the same card (91% GPU, 9.7 GB).
+29. **On an NVIDIA A10G (Ampere, 8.6) the same model generates**, without that error, but it
+    produced 17,379 characters for a one-line prompt and hit the test's five-minute limit
+    (peak 7.6 GB). It is a reasoning model, so simple prompts can take minutes. Treat this as
+    measured, not final: the test sends no reasoning-effort setting, and the app does.
+30. **Short model names did not resolve in SDK mode.** `get_model_variant` needs a full variant id
+    (`qwen3.5-4b-cuda-gpu:4`); the first-run download of the default and the fallback download
+    used short names, so both failed. Fixed: short names now resolve to the best variant for the
+    machine (GPU, then CUDA, then smaller).
+31. **Default `qwen3.5-4b`, fallback `phi-4-mini-instruct`** (commit 6cb0a47). The fallback is never
+    blocklisted; a deterministic failure switches to it and downloads it if missing.
+32. **`--initial-prompt` failed in the app**: the launch-prompt call omitted the four attachment
+    lists the `chat` command requires ("missing required key attachedFiles"). Found only by running
+    the installed app and reading the screenshot. Fixed (cd6d222). Pass prompts to the app through
+    `PLUGABLE_INITIAL_PROMPT`, not the command line: `Start-Process -ArgumentList` does not quote
+    array items, so a prompt with spaces is split into separate arguments.
+
 **Driving the box (mechanics)**
 
 19. Run screenshots through a scheduled task in the desktop session and start `ffmpeg`

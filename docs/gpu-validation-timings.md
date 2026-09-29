@@ -49,6 +49,17 @@ in `aws ec2 describe-instances`.
 | Phi-4-mini CUDA model download | 58 s | ~4 GB |
 | Phi-4-mini chat round trip | 11 s | GPU 91%, 9,685 MiB |
 
+### NVIDIA A10G (g5.xlarge, Server 2025), provisioned from the same scripts
+
+| Step | Time |
+|---|---|
+| Launch to reachable by SSM | 69 s |
+| Bootstrap (driver ~1 min 50 s, Node, ffmpeg) | 158 s |
+| Reboot until the desktop session exists | 48 s |
+| **Launch to ready** | **~4.5 min** |
+| qwen3.5-4b CUDA download | 64 s |
+| qwen3.5-4b prompt on the A10G | timed out at ~5 min (17,379 characters) |
+
 The T4 box cost is **$0.526/hour for the instance plus ~$0.011/hour for the disk**. The
 box in this session ran for many hours, mostly idle while CI was fixed; that is a cost of
 developing the pipeline, not of running it.
