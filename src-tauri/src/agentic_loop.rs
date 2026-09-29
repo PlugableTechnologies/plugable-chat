@@ -991,6 +991,15 @@ pub async fn run_agentic_loop(
         // Resolve servers for tools
         let mut resolved_tool_calls: Vec<ParsedToolCall> = Vec::new();
         for call in &parsed_tool_calls {
+            // Small models often say "sql" for the built-in sql_select tool.
+            let canonical_tool = match call.tool.as_str() {
+                "sql" | "run_sql" | "execute_sql" | "sql_query" => "sql_select",
+                other => other,
+            };
+            let call = &ParsedToolCall {
+                tool: canonical_tool.to_string(),
+                ..call.clone()
+            };
             let resolved_server = if is_builtin_tool(&call.tool) {
                 "builtin".to_string()
             } else if call.server == "unknown" {
@@ -1006,6 +1015,12 @@ pub async fn run_agentic_loop(
                         println!(
                             "[AgenticLoop] ERROR: Could not resolve server for tool '{}', skipping",
                             call.tool
+                        );
+                        let _ = app_handle.emit(
+                            "chat-warning",
+                            serde_json::json!({
+                                "message": format!("The model asked for a tool that does not exist ('{}'), so it was skipped.", call.tool)
+                            }),
                         );
                         continue;
                     }

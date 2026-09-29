@@ -1881,6 +1881,36 @@ pub fn run() {
                 tool_filter: launch_filter.clone(),
                 launch_overrides: launch_overrides.clone(),
             });
+            // A launch that switches the demo database on has nobody to click "Refresh schemas",
+            // so index it as soon as the embedding model is ready; otherwise the model is told
+            // there are no tables and guesses at SQL.
+            if cli_args_for_setup.enable_demo_db == Some(true) {
+                let refresh_handle = app.handle().clone();
+                let refresh_model = cpu_embedding_model_arc.clone();
+                tauri::async_runtime::spawn(async move {
+                    for _ in 0..240 {
+                        if refresh_model.read().await.is_some() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    let handles = refresh_handle.state::<ActorHandles>();
+                    let embedding_state = refresh_handle.state::<EmbeddingModelState>();
+                    let settings_state = refresh_handle.state::<SettingsState>();
+                    let toolbox_config = settings_state.settings.read().await.database_toolbox.clone();
+                    match commands::database::refresh_database_schemas_for_config(
+                        &refresh_handle,
+                        &handles,
+                        &embedding_state,
+                        &toolbox_config,
+                    )
+                    .await
+                    {
+                        Ok(_) => println!("[Launch] Demo database schema indexed"),
+                        Err(e) => println!("[Launch] Demo database schema indexing failed: {}", e),
+                    }
+                });
+            }
             if launch_filter.allow_all() {
                 println!("[Launch] Tool filter: all tools allowed");
             } else {
