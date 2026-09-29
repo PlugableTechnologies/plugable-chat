@@ -37,9 +37,23 @@ $found = Get-ChildItem -Path $roots -Recurse -Include "onnxruntime*.dll", "Direc
 Write-Host "candidate runtime DLLs:"
 $found | ForEach-Object { Write-Host "  $($_.FullName)  $($_.VersionInfo.FileVersion)" }
 
-$directml = $found | Where-Object { $_.Name -ieq "DirectML.dll" } |
-    Sort-Object { [version]($_.VersionInfo.ProductVersion -replace '[^0-9.].*$','') } -Descending | Select-Object -First 1
-if (-not $directml) { throw "DirectML.dll not found in: $($roots -join ', ')" }
+$directml = $found | Where-Object { $_.Name -ieq "DirectML.dll" } | Select-Object -First 1
+if (-not $directml) {
+    # Not under target/ (the ONNX Runtime download cache is outside it and is not
+    # restored on a warm-cache run), so fetch Microsoft's official redistributable.
+    # Pinned by version and SHA-256. Only bin/x64-win/DirectML.dll is used.
+    $version = "1.15.4"
+    $nupkgHash = "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9"
+    $nupkg = Join-Path $env:RUNNER_TEMP "directml.nupkg"
+    $ProgressPreference = "SilentlyContinue"
+    Invoke-WebRequest "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/$version" -OutFile $nupkg
+    $actual = (Get-FileHash $nupkg -Algorithm SHA256).Hash.ToLower()
+    if ($actual -ne $nupkgHash) { throw "DirectML package hash mismatch: $actual" }
+    $extract = Join-Path $env:RUNNER_TEMP "directml"
+    Expand-Archive $nupkg $extract -Force
+    $directml = Get-Item (Join-Path $extract "bin/x64-win/DirectML.dll")
+    Write-Host "DirectML $version from NuGet: $($directml.FullName)"
+}
 
 $toCopy = @($directml) + @($found | Where-Object { $_.Name -like "onnxruntime*" -and $_.FullName -like "*foundry-libs*" })
 foreach ($dll in $toCopy) {
