@@ -37,10 +37,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev build-essential file libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev protobuf-compiler
+            libayatana-appindicator3-dev librsvg2-dev protobuf-compiler libprotobuf-dev
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -78,6 +83,11 @@ jobs:
           Expand-Archive $zip (Join-Path $env:RUNNER_TEMP "protoc")
           "PROTOC=$(Join-Path $env:RUNNER_TEMP 'protoc\bin\protoc.exe')" >> $env:GITHUB_ENV
 
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -89,12 +99,12 @@ jobs:
       - name: Type-check and build the frontend
         run: npm run build
 
-      - name: Rust unit tests
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
-
-      - name: Compile the tests for the GPU box
+      - name: Compile the tests, and place the ONNX Runtime DLLs beside them
         shell: pwsh
         run: pwsh scripts/ci/collect-test-binaries.ps1 -Out gpu-tests
+
+      - name: Rust unit tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Build the unsigned installer
         run: node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis
