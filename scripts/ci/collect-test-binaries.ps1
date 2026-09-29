@@ -60,6 +60,9 @@ if (-not $directml) {
 # in target/debug/foundry-libs; the GPU tests fail with "Could not locate native library
 # 'Microsoft.AI.Foundry.Local.Core.dll'" without the whole set.
 $foundryLibs = @(Get-ChildItem "target/debug/foundry-libs" -Filter *.dll -File -ErrorAction SilentlyContinue)
+if (-not ($foundryLibs | Where-Object { $_.Name -eq "onnxruntime_providers_shared.dll" })) {
+    throw "onnxruntime_providers_shared.dll is not in target/debug/foundry-libs (the CUDA provider cannot load without it)"
+}
 if (-not ($foundryLibs | Where-Object { $_.Name -eq "Microsoft.AI.Foundry.Local.Core.dll" })) {
     throw "Microsoft.AI.Foundry.Local.Core.dll is not in target/debug/foundry-libs"
 }

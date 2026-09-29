@@ -593,6 +593,11 @@ fn copy_foundry_native_libs(manifest_path: &Path) {
         core.clone(),
         format!("{prefix}onnxruntime.{ext}"),
         format!("{prefix}onnxruntime-genai.{ext}"),
+        // The CUDA and WebGPU execution providers (downloaded at run time) load this next
+        // to onnxruntime. Without it the CUDA EP fails to register on Windows with
+        // "onnxruntime_providers_cuda.dll depends on onnxruntime_providers_shared.dll which
+        // is missing (Error 126)" and Foundry offers only CPU models. Skipped when absent.
+        format!("{prefix}onnxruntime_providers_shared.{ext}"),
     ];
 
     let dest_dir = manifest_path.join("foundry-libs");

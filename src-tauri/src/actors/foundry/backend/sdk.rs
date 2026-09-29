@@ -632,6 +632,9 @@ mod tests {
         let cache = home.join(".foundry").join("cache");
         let backend = SdkBackend::new(&cache, None).expect("new");
         backend.ensure_service().await.expect("service");
+        // GPU providers are registered per process and are not registered by default on
+        // Windows; without this a GPU model fails to load ("requires the CUDAExecutionProvider").
+        register_all_eps(&backend).await;
 
         // Pick a cached non-qwen3.5 chat model (qwen3.5 generation hits the upstream WebGPU bug).
         let cached = backend.list_cached().await;
@@ -685,6 +688,9 @@ mod tests {
         let cache = home.join(".foundry").join("cache");
         let backend = SdkBackend::new(&cache, None).expect("new");
         backend.ensure_service().await.expect("service");
+        // GPU providers are registered per process and are not registered by default on
+        // Windows; without this a GPU model fails to load ("requires the CUDAExecutionProvider").
+        register_all_eps(&backend).await;
 
         let cached = backend.list_cached().await;
         assert!(!cached.is_empty(), "no cached models to test");
