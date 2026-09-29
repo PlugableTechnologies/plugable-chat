@@ -36,7 +36,7 @@ $code = Install
 Check "fresh install exit code 0" ($code -eq 0) "(exit $code, $([int]$sw.Elapsed.TotalSeconds) s)"
 foreach ($n in $needed) { Check "installed: $n" (Test-Path "$Dir\$n") }
 Check "uninstall entry registered" ($null -ne (UninstallEntry))
-Check "start-menu shortcut" ([bool](Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu", "C:\Users\*\AppData\Roaming\Microsoft\Windows\Start Menu" -Recurse -Filter "plugable-chat*.lnk" -ErrorAction SilentlyContinue))
+Check "start-menu shortcut" ([bool](Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu", "C:\Users\*\AppData\Roaming\Microsoft\Windows\Start Menu", "C:\Windows\System32\config\systemprofile\AppData\Roaming\Microsoft\Windows\Start Menu" -Recurse -Filter "plugable-chat*.lnk" -ErrorAction SilentlyContinue))
 
 # 2. the installed app starts and stays up
 LaunchInSession
@@ -50,7 +50,8 @@ $code = Install
 Start-Sleep 5
 Check "install over a running copy exit code 0" ($code -eq 0) "(exit $code)"
 Check "exe present after upgrade" (Test-Path "$Dir\plugable-chat.exe")
-Stop-Process -Name plugable-chat -Force -ErrorAction SilentlyContinue
+Stop-Process -Name plugable-chat, msedgewebview2 -Force -ErrorAction SilentlyContinue
+Start-Sleep 5
 
 # 4. repair: delete the exe and a bundled native library, reinstall, expect both back
 Remove-Item "$Dir\plugable-chat.exe" -Force -ErrorAction SilentlyContinue
