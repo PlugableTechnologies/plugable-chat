@@ -773,6 +773,52 @@ impl ModelGatewayActor {
         // Ok(model)
     }
 
+    /// Register GPU execution providers before the catalog is read (SDK backend only).
+    ///
+    /// Without this the app runs with only `CPUExecutionProvider` ("EP registration deferred"
+    /// in Foundry's log), the catalog offers only CPU variants and GPU models cannot load.
+    /// First run downloads about 1.5 GB; the UI shows progress and `cancel_ep_registration`
+    /// stops it. Failure or cancellation never blocks start-up: CPU models still work.
+    async fn register_gpu_execution_providers(&self) {
+        let Some(sdk) = self.sdk.clone() else {
+            return;
+        };
+        let cancel = super::ep_registration_cancel_flag();
+        cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let progress_handle = self.app_handle.clone();
+        let summary = sdk
+            .register_execution_providers(
+                move |ep, percent| {
+                    let _ = progress_handle.emit(
+                        "ep-registration-progress",
+                        json!({ "phase": "downloading", "ep": ep, "percent": percent }),
+                    );
+                },
+                cancel,
+            )
+            .await;
+
+        let message = if summary.cancelled {
+            "GPU acceleration setup cancelled; using CPU models.".to_string()
+        } else if summary.registered.is_empty() && summary.failed.is_empty() {
+            String::new()
+        } else if summary.failed.is_empty() {
+            format!("GPU acceleration ready ({}).", summary.registered.join(", "))
+        } else {
+            format!(
+                "GPU acceleration ready: {}; not available on this machine: {}.",
+                if summary.registered.is_empty() { "none".to_string() } else { summary.registered.join(", ") },
+                summary.failed.join(", ")
+            )
+        };
+        let _ = self.app_handle.emit(
+            "ep-registration-progress",
+            json!({ "phase": "done", "message": message, "registered": summary.registered,
+                    "failed": summary.failed, "seconds": summary.seconds }),
+        );
+    }
+
     pub async fn run(mut self) {
         println!("Initializing Foundry Local Manager via CLI...");
         
@@ -787,6 +833,9 @@ impl ModelGatewayActor {
             );
             self.transition_to_service_unavailable(format!("Failed to start service: {}", e));
         }
+
+        // GPU providers must be registered before the catalog and model selection are read.
+        self.register_gpu_execution_providers().await;
 
         // Try to get the port and EPs with retries
         // Foundry may take time to start up, so we retry with exponential backoff

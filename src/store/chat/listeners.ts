@@ -50,6 +50,7 @@ let unlistenModelStuck: (() => void) | undefined;
 let unlistenModelFallback: (() => void) | undefined;
 let unlistenEmbeddingInit: (() => void) | undefined;
 let unlistenChatStreamStatus: (() => void) | undefined;
+let unlistenEpRegistration: (() => void) | undefined;
 let unlistenAvailableModelsChanged: (() => void) | undefined;
 let unlistenModelStateChanged: (() => void) | undefined;
 let unlistenStartupProgress: (() => void) | undefined;
@@ -428,6 +429,30 @@ export const createListenerSlice: StateCreator<
                         set({ operationStatus: null } as any);
                     }
                 }, 5000);
+            });
+
+            // First-run download of GPU execution providers (about 1.5 GB, several minutes)
+            const epRegistrationListener = await listen<{ phase: string; ep?: string; percent?: number; message?: string }>('ep-registration-progress', (event) => {
+                const { phase, ep, percent, message } = event.payload;
+                const label = 'Preparing GPU acceleration (first run only)';
+                if (phase === 'downloading') {
+                    set((state) => ({
+                        operationStatus: {
+                            type: 'downloading',
+                            message: `${label}: ${ep ?? ''} ${Math.round(percent ?? 0)}%`,
+                            startTime: state.operationStatus?.startTime || Date.now(),
+                        },
+                        statusBarDismissed: false,
+                    } as any));
+                    return;
+                }
+                // done: clear our status, and show the outcome briefly when there is one
+                set((state) => {
+                    if (state.operationStatus?.message?.startsWith(label)) {
+                        return { operationStatus: message ? { type: 'none', message, startTime: Date.now() } : null } as any;
+                    }
+                    return state;
+                });
             });
 
             // Chat stream status listener
@@ -1198,6 +1223,7 @@ export const createListenerSlice: StateCreator<
                 serviceRestartCompleteListener();
                 embeddingInitListener();
                 chatStreamStatusListener();
+                epRegistrationListener();
                 availableModelsChangedListener();
                 modelStateChangedListener();
                 startupProgressListener();
@@ -1212,6 +1238,7 @@ export const createListenerSlice: StateCreator<
             unlistenChatError = chatErrorListener;
             unlistenChatWarning = chatWarningListener;
             unlistenChatStreamStatus = chatStreamStatusListener;
+            unlistenEpRegistration = epRegistrationListener;
             unlistenModelSelected = modelSelectedListener;
             unlistenModelStateChanged = modelStateChangedListener;
             unlistenToolBlocked = toolBlockedListener;
@@ -1286,6 +1313,7 @@ export const createListenerSlice: StateCreator<
         if (unlistenServiceRestartStarted) { unlistenServiceRestartStarted(); unlistenServiceRestartStarted = undefined; }
         if (unlistenServiceRestartComplete) { unlistenServiceRestartComplete(); unlistenServiceRestartComplete = undefined; }
         if (unlistenChatStreamStatus) { unlistenChatStreamStatus(); unlistenChatStreamStatus = undefined; }
+        if (unlistenEpRegistration) { unlistenEpRegistration(); unlistenEpRegistration = undefined; }
         if (unlistenAvailableModelsChanged) { unlistenAvailableModelsChanged(); unlistenAvailableModelsChanged = undefined; }
         if (unlistenStartupProgress) { unlistenStartupProgress(); unlistenStartupProgress = undefined; }
         

@@ -10,7 +10,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessage,
@@ -95,6 +95,93 @@ impl SdkBackend {
             .get_model_variant(id)
             .await
             .map_err(|e| format!("get_model_variant('{id}') failed: {e}"))
+    }
+}
+
+/// What `SdkBackend::register_execution_providers` did.
+///
+/// A provider in `failed` is normal on hardware that does not support it (CUDA on a machine
+/// without an NVIDIA GPU, for example) and must never stop the app from starting.
+#[derive(Debug, Clone, Default)]
+pub struct EpRegistrationSummary {
+    /// Registered before this call (a previous run's downloads are still on disk).
+    pub already_registered: Vec<String>,
+    /// Downloaded (if needed) and registered by this call.
+    pub registered: Vec<String>,
+    /// Could not be registered.
+    pub failed: Vec<String>,
+    /// The caller cancelled the download.
+    pub cancelled: bool,
+    pub seconds: f64,
+}
+
+impl SdkBackend {
+    /// Discover the execution providers valid for this machine and register any that are not
+    /// yet registered, downloading their packages the first time.
+    ///
+    /// Microsoft's SDK reference calls this "Explicit EP Management" (`discover_eps` +
+    /// `download_and_register_eps`). Registration is per process and the SDK does not do it on
+    /// its own, so without this step the catalog offers only CPU model variants and GPU models
+    /// fail to load ("requires the CUDAExecutionProvider ... not available").
+    ///
+    /// First run downloads about 1.5 GB (measured: 4 min 39 s on a T4 box); later runs find the
+    /// files already on disk and finish in about 3 s. `progress` receives `(provider, percent)`;
+    /// setting `cancel` stops a download in flight.
+    pub async fn register_execution_providers<F>(
+        &self,
+        progress: F,
+        cancel: Arc<AtomicBool>,
+    ) -> EpRegistrationSummary
+    where
+        F: FnMut(&str, f64) + Send + 'static,
+    {
+        let started = std::time::Instant::now();
+        let mut summary = EpRegistrationSummary::default();
+
+        let eps = match self.manager.discover_eps() {
+            Ok(eps) => eps,
+            Err(e) => {
+                println!("[SdkBackend] discover_eps failed: {e}");
+                return summary;
+            }
+        };
+        summary.already_registered = eps
+            .iter()
+            .filter(|e| e.is_registered)
+            .map(|e| e.name.clone())
+            .collect();
+        let missing: Vec<String> = eps
+            .iter()
+            .filter(|e| !e.is_registered)
+            .map(|e| e.name.clone())
+            .collect();
+        if missing.is_empty() {
+            return summary;
+        }
+
+        println!("[SdkBackend] registering execution providers: {missing:?}");
+        let result = self
+            .manager
+            .download_and_register_eps_builder()
+            .names(missing.clone())
+            .progress(progress)
+            .cancel(Arc::clone(&cancel))
+            .run()
+            .await;
+        match result {
+            Ok(r) => {
+                summary.registered = r.registered_eps;
+                summary.failed = r.failed_eps;
+            }
+            Err(e) => {
+                println!("[SdkBackend] execution provider registration failed: {e}");
+                summary.failed = missing;
+            }
+        }
+        summary.cancelled = cancel.load(Ordering::SeqCst);
+        summary.seconds = started.elapsed().as_secs_f64();
+        println!("[SdkBackend] execution providers: {summary:?}");
+        summary
     }
 }
 
@@ -756,29 +843,18 @@ mod tests {
     /// Report the execution providers, download and register any that are not yet
     /// registered, and return what the catalog then offers.
     async fn register_all_eps(backend: &SdkBackend) {
-        let before = backend.manager.discover_eps().expect("discover_eps");
-        eprintln!(
-            "[gpu] execution providers before: {:?}",
-            before.iter().map(|e| (&e.name, e.is_registered)).collect::<Vec<_>>()
-        );
-        let missing: Vec<&str> = before
-            .iter()
-            .filter(|e| !e.is_registered)
-            .map(|e| e.name.as_str())
-            .collect();
-        if !missing.is_empty() {
-            let started = std::time::Instant::now();
-            let result = backend.manager.download_and_register_eps(Some(&missing)).await;
-            eprintln!(
-                "[gpu] download_and_register_eps({missing:?}) -> {result:?} in {:.0}s",
-                started.elapsed().as_secs_f64()
-            );
-        }
-        let after = backend.manager.discover_eps().expect("discover_eps");
-        eprintln!(
-            "[gpu] execution providers after: {:?}",
-            after.iter().map(|e| (&e.name, e.is_registered)).collect::<Vec<_>>()
-        );
+        // The production method, so the tests exercise the code the app runs.
+        let summary = backend
+            .register_execution_providers(
+                |ep, percent| {
+                    if percent >= 100.0 {
+                        eprintln!("[gpu] {ep} downloaded");
+                    }
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await;
+        eprintln!("[gpu] execution providers: {summary:?}");
     }
 
     /// GPU test box: with the GPU execution providers registered, the catalog must offer

@@ -527,6 +527,13 @@ pub async fn update_database_toolbox_config(
     Ok(())
 }
 
+/// Cancel the first-run download of GPU execution providers. The app stays usable on CPU models.
+#[tauri::command]
+pub fn cancel_ep_registration() {
+    crate::actors::foundry::ep_registration_cancel_flag()
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Get launch overrides from CLI
 #[tauri::command]
 pub async fn get_launch_overrides(

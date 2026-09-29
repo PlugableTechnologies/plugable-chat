@@ -2163,6 +2163,7 @@ pub fn run() {
             get_pending_tool_approvals,
             get_current_model,
             get_launch_overrides,
+            cancel_ep_registration,
             heartbeat_ping,
             // Startup coordination commands
             frontend_ready,
