@@ -102,6 +102,22 @@ SPIKE_SSM=1 ./launch.sh               # prints the instance id; adds a temporary
     environmental: 4 call the `foundry` command-line tool that the box does not have, 3
     cannot find `test-data/` (not shipped beside the tests), 1 assumes a Mac WebGPU host.
     Two (`native_fallback_to_hermes`, `tool_search_discovers_deferred`) are not diagnosed.
+21. **Microsoft's Rust SDK docs say Windows apps should use the `winml` feature** (`cargo add
+    foundry-local-sdk --features winml`), which "integrates with the Windows ML runtime" and
+    does "automatic download and registration of appropriate ONNX Runtime execution
+    providers (CUDA, Vitis, QNN, OpenVINO, TensorRT)". `src-tauri/Cargo.toml` uses
+    `foundry-local-sdk = "1.2.0"` without it, which matches what the GPU box saw: providers
+    "deferred" and CPU only. Two ways to fix it, and a decision for the owner: enable
+    `winml` (Microsoft's recommended path; needs a Windows 11 24H2 / Server 2025 class OS,
+    so the test box would need a Server 2025 image), or keep the cross-platform crate and
+    call `download_and_register_eps` at start-up (what the GPU tests do; works on Server 2022).
+22. **The app warms models with the CLI's REST call, which the SDK's own web service does
+    not serve.** `model_gateway_actor.rs:399` sends `GET /openai/load/{name}?ttl=0`; the
+    REST reference documents that call as part of the Foundry Local CLI service, and the
+    SDK-hosted service answers `404`. The SDK path is `model.load()` (already wrapped as
+    `FoundryBackend::load` in `backend/sdk.rs`). `prewarm_model_in_background` should use
+    it when the SDK backend is active. `SdkBackend` is not `Clone`, so this needs the actor
+    to hold it in an `Arc` (or expose the static manager handle).
 
 **Driving the box (mechanics)**
 
