@@ -18,12 +18,12 @@ if [ ${#NAMES[@]} -eq 0 ]; then
 fi
 for NAME in "${NAMES[@]}"; do
   QUESTION="$(python3 -c "import json;print(next(q['question'] for q in json.load(open('$HERE/chicago-questions.json')) if q['name']=='$NAME'))")"
-  URL="$(python3 -c "import boto3;print(boto3.client('s3').generate_presigned_url('put_object',Params={'Bucket':'$BUCKET','Key':'ask-$NAME.png'},ExpiresIn=3600))")"
+  URL="$(python3 -c "import boto3;print(boto3.client('s3').generate_presigned_url('put_object',Params={'Bucket':'$BUCKET','Key':'ask-$IID-$NAME.png'},ExpiresIn=3600))")"
   echo "=== $NAME: $QUESTION"
   "$HERE/ssm.sh" "$IID" "
 \$ProgressPreference='SilentlyContinue'
 Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/PlugableTechnologies/plugable-chat/$SHA/infra/aws-gpu/ask-app.ps1' -OutFile C:\\gpu\\ask-app.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Question '$QUESTION' -Model '$MODEL' -PutUrl '$URL'
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Question '$QUESTION' -Model '$MODEL' -PutUrl '$URL' -WaitSeconds ${WAIT:-240}
 " 600 2>&1 | tail -4
-  aws s3 cp "s3://$BUCKET/ask-$NAME.png" "$OUT/$NAME.png" --only-show-errors && echo "screenshot: $OUT/$NAME.png"
+  aws s3 cp "s3://$BUCKET/ask-$IID-$NAME.png" "$OUT/$NAME.png" --only-show-errors && echo "screenshot: $OUT/$NAME.png"
 done
