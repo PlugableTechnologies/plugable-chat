@@ -254,7 +254,6 @@ The CPU build `qwen3.5-4b-generic-cpu:3` works but decodes at about 3 tokens/s.
   `src-tauri/Cargo.toml` must go. The SDK now picks WinML, WebGPU, CPU or CUDA itself; our explicit
   `register_execution_providers` step and the CUDA provider workarounds (A7, `onnxruntime_providers_shared`)
   must be re-validated. ORT moves 1.26 to 1.28, which is the biggest risk for the CUDA T4/A10G results.
-- Node/other bindings are irrelevant to us; `async-openai` stays at `=0.33.1`.
 - Cost: a multi-day change touching the backend, the packaging and the Windows GPU results. It does buy GenAI
   0.15.2 and the maintained API, but none of that is needed for this bug.
 
@@ -262,8 +261,8 @@ The CPU build `qwen3.5-4b-generic-cpu:3` works but decodes at about 3 tokens/s.
 1. Free, on the Mac: install CLI 0.10.3 (needs `brew trust` of the tap) or build a scratch crate against
    `foundry-local-sdk =1.2.3` and load `qwen3.5-4b-generic-gpu:4`. Pass: a 50-token reply with no WebGPU error.
    Compare tokens/s with the CPU build (about 3/s).
-2. Free, CI: change only the pin to 1.2.3 (on a branch of the CI, not `main` release paths), build all three
-   platforms, run the unit tests. The gpu-tests artifact shows whether the native staging still works.
+2. Free, CI: after the user approves the upgrade, change only the pin to 1.2.3 on `main` (no release tag, no
+   signing-workflow changes), build all three platforms, run the unit tests. The gpu-tests artifact shows whether the native staging still works.
 3. Box run 1, A10G: `PLUGABLE_MODEL=phi-4-mini-instruct`, then `qwen3.5-4b`, ask the Chicago questions with
    `ask.sh`, compare answers with `chicago-questions.json` and the earlier results in this file. Pass: no
    regression versus build 5d3385a, and read the screenshots.
