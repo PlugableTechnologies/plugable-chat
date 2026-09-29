@@ -598,6 +598,9 @@ fn copy_foundry_native_libs(manifest_path: &Path) {
         // "onnxruntime_providers_cuda.dll depends on onnxruntime_providers_shared.dll which
         // is missing (Error 126)" and Foundry offers only CPU models. Skipped when absent.
         format!("{prefix}onnxruntime_providers_shared.{ext}"),
+        // Windows ML runtime, present only in the `winml` build of the SDK (skipped otherwise).
+        // Named without a platform prefix; other platforms never produce it.
+        "Microsoft.Windows.AI.MachineLearning.dll".to_string(),
     ];
 
     let dest_dir = manifest_path.join("foundry-libs");

@@ -61,8 +61,11 @@ if (-not $directml) {
 # 'Microsoft.AI.Foundry.Local.Core.dll'" without the whole set.
 $foundryLibs = @(Get-ChildItem "target/debug/foundry-libs" -Filter *.dll -File -ErrorAction SilentlyContinue)
 if (-not ($foundryLibs | Where-Object { $_.Name -eq "onnxruntime_providers_shared.dll" })) {
-    throw "onnxruntime_providers_shared.dll is not in target/debug/foundry-libs (the CUDA provider cannot load without it)"
+    # Fatal for the cross-platform variant (the CUDA provider cannot load without it). Under
+    # the winml variant Windows manages providers, so report it and keep going.
+    Write-Warning "onnxruntime_providers_shared.dll is not in target/debug/foundry-libs"
 }
+Write-Host "foundry-libs: $(($foundryLibs | ForEach-Object { $_.Name }) -join ', ')"
 if (-not ($foundryLibs | Where-Object { $_.Name -eq "Microsoft.AI.Foundry.Local.Core.dll" })) {
     throw "Microsoft.AI.Foundry.Local.Core.dll is not in target/debug/foundry-libs"
 }

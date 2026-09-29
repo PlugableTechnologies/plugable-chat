@@ -140,3 +140,12 @@ tempfile = "3"
 #
 # [target.'cfg(target_os = "linux")'.dependencies]
 # ort = { version = "=2.0.0-rc.9", features = ["cuda", "tensorrt"] }
+
+[features]
+# Windows ML: Microsoft's recommended Windows build of the Foundry Local SDK. Windows installs
+# and keeps the GPU/NPU execution providers up to date, and the SDK bundles the Windows ML
+# runtime. macOS and Linux ignore this flag (the SDK builds its standard variant there). It is
+# on by default; build with `--no-default-features` for the cross-platform variant, which
+# relies on `SdkBackend::register_execution_providers` to download providers instead.
+default = ["winml"]
+winml = ["foundry-local-sdk/winml"]
