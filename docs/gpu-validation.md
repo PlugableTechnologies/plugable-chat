@@ -269,5 +269,11 @@ The CPU build `qwen3.5-4b-generic-cpu:3` works but decodes at about 3 tokens/s.
 4. Box run 2, T4: the same two models. A7 (`qwen3.5-4b` fails on Turing) is expected to persist; confirm it does not get worse.
 5. Only after 1.2.3 is proven: decide on 2.x as its own task, with the same plan plus a `build.rs`/packaging rework and an ORT 1.28 regression pass.
 
-**Not yet verified.** No CLI or SDK newer than 1.2.0 has been run on the failing Mac. The `brew trust` and
-the install of CLI 0.10.3 (replacing 0.8.119) need the user's approval.
+**Verified on the failing Mac (2026-09-29, M5 Max, macOS arm64).** After `brew trust microsoft/foundrylocal` and
+`brew upgrade` (CLI 0.8.119 to **0.10.3**, SDK 1.2.4), `foundry chat qwen3.5-4b-generic-gpu:4` loads and answers.
+The daemon log shows `Using WebGPU EP for model: qwen3.5-4b-generic-gpu:4` then `Model loaded successfully`, with no
+validation error. A 200-token completion through the local service took 2.1 s (about **95 tokens/s**, against about 3
+tokens/s for the CPU build). So the fix is in the 1.2.x line, and the CLI test used SDK 1.2.4, not 1.2.3.
+
+**Still not verified.** The crate `foundry-local-sdk =1.2.3` itself (step 1 above with a scratch crate) and anything on
+Windows. The app's stale blocklist entry expires by itself once the pinned SDK version changes (it is keyed on it).
