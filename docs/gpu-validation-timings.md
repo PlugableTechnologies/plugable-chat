@@ -41,7 +41,7 @@ in `aws ec2 describe-instances`.
 
 | Step | Time | Note |
 |---|---|---|
-| Launch to reachable by SSM | **100 s** | measured |
+| Launch to reachable by SSM | **100 s** (69 s on the A10G box) | measured |
 | Bootstrap (driver 2 min 29 s, Node 14 s, ffmpeg 9 s, rest) | ~3.5 min | WebView2 already on Server 2025 |
 | Reboot for auto-logon until SSM is back | 28 s | desktop session present after ~20 s more |
 | **Launch to ready, total** | **~6.5 min** | replaces the 9 to 10 min estimate |
@@ -59,6 +59,13 @@ in `aws ec2 describe-instances`.
 | **Launch to ready** | **~4.5 min** |
 | qwen3.5-4b CUDA download | 64 s |
 | qwen3.5-4b prompt on the A10G | timed out at ~5 min (17,379 characters) |
+
+### AWS-side hard stop (proved 2026-09-29)
+
+A throwaway t3.nano was given a 3-minute cap by `create_terminate_schedule` and nothing else. AWS
+terminated it at 11:13:03 UTC, 3 min 19 s after launch (scheduled for 11:12:41; the scheduler can lag
+by about a minute), with no help from inside the machine, and the schedule deleted itself. Cost of the
+test: a fraction of a cent. Plan for the cap to fire up to ~1 minute late.
 
 The T4 box cost is **$0.526/hour for the instance plus ~$0.011/hour for the disk**. The
 box in this session ran for many hours, mostly idle while CI was fixed; that is a cost of

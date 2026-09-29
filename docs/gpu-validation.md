@@ -1,182 +1,154 @@
 # GPU validation: how it works and what we learned
 
-Plugable Chat is tested on a real Windows machine with an NVIDIA GPU before any
-release is signed. The machine exists only for the length of a test run: it is
-created fresh from Amazon's stock Windows image and destroyed at the end. Nothing
-is kept on AWS between runs, so there is no cost between runs.
-
-This page is the runbook and the record of what was learned building it. The
-scripts are in [`infra/aws-gpu/`](../infra/aws-gpu/); the build and unit tests are
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+Plugable Chat is tested on a real Windows machine with an NVIDIA GPU before any release is
+signed. The machine exists only for the length of a test run: it is created fresh from
+Amazon's stock Windows image and destroyed at the end. Nothing is kept on AWS between runs, so
+there is no cost between runs. This page is the runbook and the record of what was learned;
+timings and cost are in [gpu-validation-timings.md](gpu-validation-timings.md).
 
 ## The pieces
 
 | Piece | What it does | Cost |
 |---|---|---|
-| `ci.yml` | Builds on Windows and Linux, runs unit tests, keeps the unsigned installer and the compiled GPU tests | Free (public repo) |
+| [`ci.yml`](../.github/workflows/ci.yml) | Builds on Windows and Linux, runs unit tests, keeps the unsigned (debug) installer and the compiled GPU tests | Free (public repo) |
 | `infra/aws-gpu/10_network.sh` | One isolated network with no inbound access | Free |
 | `infra/aws-gpu/00_budget.sh` | Monthly cost alert ($25 by default) | Free |
-| `infra/aws-gpu/launch.sh` | Starts one g4dn.xlarge (NVIDIA T4, 16 GB) | About $0.53/hour while running |
-| `infra/aws-gpu/bootstrap-box.ps1` | Sets up the box: driver, WebView2, Node, ffmpeg, auto-logon, failsafe | (part of the run) |
-| `infra/aws-gpu/capture.ps1`, `run-in-session.ps1` | Record the screen inside the desktop session | (part of the run) |
-| `infra/aws-gpu/teardown.sh` | Destroys the box and proves nothing billable is left | Free |
+| `infra/aws-gpu/20_scheduler_role.sh` | The role and group behind the AWS-side hard stop (below) | Free |
+| `infra/aws-gpu/launch.sh` | Starts one GPU box (default g4dn.xlarge, T4, 16 GB; `INSTANCE_TYPE=g5.xlarge` for an A10G) on Windows Server 2025 and sets its hard stop | T4 $0.526/h, A10G ~$1.0-1.4/h while running |
+| `infra/aws-gpu/bootstrap-box.ps1` | Sets up the box: failsafe, NVIDIA driver, WebView2, Node, ffmpeg, auto-logon | (part of the run) |
+| `infra/aws-gpu/ssm.sh` | Runs PowerShell on the box (debugging; needs `SPIKE_SSM=1`) | Free |
+| `infra/aws-gpu/run-in-session.ps1`, `capture.ps1` | Run things and record the screen inside the desktop session | (part of the run) |
+| `infra/aws-gpu/ask.sh` + `ask-app.ps1` + `chicago-questions.json` | Ask the installed app the Chicago crimes questions, one fresh launch each, and bring back screenshots | (part of the run) |
+| `infra/aws-gpu/extend.sh` | Moves a box's hard stop to N minutes from now | Free |
+| `infra/aws-gpu/teardown.sh` | Destroys the box(es) and proves nothing billable is left | Free |
 
-## Running one by hand (debugging)
+## Hard time limits (three layers, so a hung run cannot keep costing)
+
+1. **AWS terminates the box at a fixed time**, whatever the machine is doing. `launch.sh` creates a
+   one-time EventBridge Scheduler entry (`MAX_RUN_MINUTES`, default 180) that calls
+   `ec2:TerminateInstances`; it deletes itself after running. The role behind it can only terminate
+   instances tagged `Project=plugable-chat-gpu`. Use `extend.sh <id> <minutes>` to move it; nothing
+   extends it automatically.
+2. **The guest powers itself off** at a stored deadline (`C:\gpu\deadline.txt`, default 150 minutes
+   from bootstrap). It is a scheduled task that checks every 5 minutes, not a `shutdown /t` timer,
+   because a one-shot timer is lost when the box reboots (auto-logon needs a reboot).
+3. **The disk is deleted on termination and the instance terminates on shutdown.** A monthly budget
+   alerts by e-mail, and `teardown.sh` fails if anything tagged for the project is still there.
+
+## Running a test, start to finish
 
 ```bash
 cd infra/aws-gpu
-./10_network.sh                       # once
-SPIKE_SSM=1 ./launch.sh               # prints the instance id; adds a temporary SSM role
-./ssm.sh <id> 'C:\gpu\...'            # run PowerShell on the box (wait ~2 min after launch)
-./teardown.sh                         # ALWAYS finish with this; it exits non-zero if anything is left
+./10_network.sh && ./00_budget.sh && ./20_scheduler_role.sh     # once per AWS account
+
+SPIKE_SSM=1 ./launch.sh                 # prints the instance id (also sets the AWS hard stop)
+# ~100 s later the box answers. Provision it from the repo, by COMMIT HASH (not branch name):
+./ssm.sh <id> "Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/PlugableTechnologies/plugable-chat/<sha>/infra/aws-gpu/bootstrap-box.ps1' -OutFile C:\gpu\bootstrap-box.ps1; powershell -File C:\gpu\bootstrap-box.ps1"
+aws ec2 reboot-instances --instance-ids <id>                    # auto-logon creates the desktop
+# deploy CI's gpu-tests / installer artifacts (lesson 9), then:
+OUT=./ask-out ./ask.sh <id> <model-id> <bucket>                 # Chicago crimes questions
+./teardown.sh                           # ALWAYS finish here; exits non-zero if anything is left
 ```
 
-## What we learned (each of these cost real time)
+Expected answers for the Chicago questions are in `chicago-questions.json`, computed from
+`test-data/demo.db` itself (for example 227,299 crimes; top types THEFT 52,813, BATTERY 41,130,
+CRIMINAL DAMAGE 25,135; 36,070 arrests; Austin the busiest area with 11,358; 407 homicides).
 
-**On the box**
+## What the GPU box found about the app (2026-09-29)
 
-1. **Turn the PowerShell progress bar off** (`$ProgressPreference = "SilentlyContinue"`)
-   before any download. With it on, the 748 MB NVIDIA driver never finished in 15
-   minutes; with it off it took 13 seconds.
-2. **The NVIDIA driver AWS publishes for G-instances works with no Marketplace
-   subscription.** It is free from the public bucket `ec2-windows-nvidia-drivers`.
-   Silent install takes about 110 seconds and needs no reboot for the T4 to appear
-   (Tesla T4, 15,360 MiB, driver 596.86, CUDA 13.2, Windows display mode).
-3. **Auto-logon is what creates a desktop.** Commands from SSM or user-data run in
-   session 0, which has no desktop, so no screen capture and no app window. Setting
-   auto-logon and rebooting once gives a console session 1 with Explorer running. Use
-   `run-in-session.ps1` (a scheduled task with `/it`) to run anything there.
-4. **A one-shot `shutdown /t` timer is lost when the box reboots** and auto-logon
-   needs a reboot. We found this when the original 2-hour failsafe silently vanished.
-   The failsafe is now a scheduled task that checks a stored deadline every 5 minutes.
-5. **Record with `gdigrab`, not `ddagrab`.** `ddagrab` fails to open on this driver;
-   `gdigrab` gave video and screenshots that were real desktop content (not black).
-6. **Windows Server has no WebView2**, which the Tauri app needs. Install it (67 s).
-7. **SSM output stops at about 24 KB** and long commands outlive most tool timeouts,
-   so write results to a file and run long steps in the background.
+| # | Finding | Status |
+|---|---|---|
+| A1 | The CUDA provider could not load: `onnxruntime_providers_cuda.dll` needs `onnxruntime_providers_shared.dll` (Windows error 126), which `build.rs` did not bundle, so Foundry offered CPU-only models. | Fixed (bundled) |
+| A2 | Nothing in the app registered GPU execution providers, and registration is per process. The app's log said "EP registration deferred" and ran CPU-only. | Fixed: `register_execution_providers` at start-up, with progress events and a cancel command |
+| A3 | Model warm-up called the CLI's `GET /openai/load/{name}`; the SDK-hosted service answers 404, so no model ever loaded and the GPU stayed idle. | Fixed: warm-up uses `model.load()`; a failed warm-up now shows in the UI |
+| A4 | `--initial-prompt` failed: the launch-prompt call omitted the four attachment lists the `chat` command requires ("missing required key attachedFiles"). Found only by running the installed app. | Fixed |
+| A5 | In SDK mode a short model name (`phi-4-mini-instruct`, `qwen3.5-4b`) could not be resolved, so the first-run download and the fallback download failed. | Fixed: short names resolve to the best variant for the machine |
+| A6 | `winml` did not register providers by itself: `already_registered` was empty and the log showed Foundry's own CUDA/WebGPU bootstrappers. The explicit start-up step is needed with `winml` too. | Known; `winml` is the Windows default |
+| A7 | `qwen3.5-4b` (CUDA) fails to generate on an NVIDIA T4 (Turing): `LinearAttention ... CUDA failure 1: invalid argument` at layer 0. On an A10G (Ampere) it runs but wrote 17,379 characters for a one-line prompt and hit a five-minute limit (measured without a reasoning-effort setting, which the app does send). | Default is `qwen3.5-4b`, fallback `phi-4-mini-instruct`; the fallback only triggers after a first failed chat (see open items) |
+| A8 | Ignored suite on the T4: 10 of 20 pass. Failures are environmental: 4 call the `foundry` command-line tool the box lacks, 3 cannot find `test-data/`, 1 assumes a Mac WebGPU host; 2 (`native_fallback_to_hermes`, `tool_search_discovers_deferred`) are undiagnosed. | Open |
 
-**In CI**
+Measured with the production code on Windows Server 2025 (build 26100) with `winml`: CUDA and WebGPU
+both registered in 45.5 s on a fresh box; 48 of 48 catalog models became GPU variants (all CUDA);
+a Phi-4-mini chat ran at 91% GPU and 9,685 MiB; the real app registered its own providers on first
+run (80 s) and its warm-up put the model on the GPU (VRAM 80 MiB to about 5 GB).
 
-8. **Pin Rust 1.94.1.** `ethnum 1.5.2` (via lancedb, lance and jsonb) does not compile
-   on the newest stable ("cannot transmute between types of different sizes"). Remove
-   the pin when that dependency chain moves. The release workflow needs the same pin.
-9. **Install `protoc`** (the protobuf compiler): `lance-encoding` needs it. On Linux
-   also install `libprotobuf-dev` for the standard `.proto` includes. Windows uses a
-   pinned, hash-checked download.
-10. **Linux never built.** `rfd` (the crash dialog) enabled its `xdg-portal` backend
-    by default while Tauri's dialog plugin enabled `gtk3`, and `rfd` refuses both.
-    Fixed in `src-tauri/Cargo.toml` (`default-features = false, features = ["gtk3"]`).
-    Linux also needs `libgtk-3-dev`.
-11. **The Windows test program imports `directml.dll` directly.** Windows ships an
-    older one in System32 (1.15.5 on the runner), so the program died at start-up
-    with `STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139) before running a single test.
-    The matching `DirectML.dll` comes with the ONNX Runtime download and must sit
-    beside the program. `scripts/ci/collect-test-binaries.ps1` does this. The same
-    is likely true of the installed app: check that the installer ships it.
-12. **A cold Windows build takes about 19 minutes.** CI caches Rust builds on `main`,
-    and keeps the cache even when a run fails, so iterating on a failure is quick.
-    The release workflow deliberately uses no cache.
-13. **Do not let a new push cancel a running build on `main`.** A documentation-only
-    push cancelled a 19-minute Windows build. CI now ignores changes that only touch
-    `docs/`, `infra/` or Markdown, and only cancels superseded pull-request runs.
+## Lessons: the box
 
-**What the GPU box found about the app itself (2026-09-29)**
+1. **Turn the PowerShell progress bar off** (`$ProgressPreference = "SilentlyContinue"`) before any
+   download. With it on, the 748 MB NVIDIA driver never finished in 15 minutes; with it off, 13 seconds.
+2. **The NVIDIA driver AWS publishes for G instances needs no Marketplace subscription** (public bucket
+   `ec2-windows-nvidia-drivers`). Silent install ~2 minutes; the T4 and A10G appear without a reboot.
+3. **Auto-logon is what creates a desktop.** SSM and user-data run in session 0 with no desktop, so no
+   screen capture and no app window. Set auto-logon (random one-run password), reboot once, and session 1
+   exists. Run anything that needs the desktop through a scheduled task with `/it`
+   (`run-in-session.ps1`).
+4. **A one-shot `shutdown /t` is lost on reboot.** The guest failsafe is a scheduled task that checks a
+   stored deadline; the AWS-side schedule is the backstop.
+5. **Record with `gdigrab`, not `ddagrab`** (`ddagrab` fails to open on this driver). Take stills from a
+   hidden `wscript.exe` launch, otherwise a black `cmd` window appears in the picture.
+6. **Windows Server 2022 has no WebView2** (Server 2025 does). Install it if missing (67 s).
+7. **SSM output stops at ~24 KB** and long commands outlive most tool timeouts. Write results to a file
+   and run long steps in the background.
+8. **Put scripts in the repo and fetch them by commit hash**, not by branch name (`raw.githubusercontent.com`
+   serves a cached branch file for minutes) and not pasted inline (bash-to-PowerShell quoting broke
+   several one-liners).
+9. **Sending files.** Get CI artifacts with `GET /repos/.../actions/artifacts/<id>/zip`: it answers 302 with
+   a short-lived signed URL the box fetches in about a second (100 MB through a laptop connection kept
+   resetting). Send results back with a presigned S3 `PUT` and `curl.exe -T`.
+10. **Pipelines in PowerShell can hand over a whole list as one item.**
+    `Invoke-RestMethod ... | Where-Object {...}` gave one item containing all 288 Node versions and a
+    400-error URL. Assign to a variable first, then filter. Retry every download.
+11. **Pass prompts to the app through `PLUGABLE_INITIAL_PROMPT`** (and `PLUGABLE_MODEL`,
+    `PLUGABLE_ENABLE_DEMO_DB`, `PLUGABLE_ALWAYS_ON_TABLES`), not the command line: `Start-Process
+    -ArgumentList` does not quote array items, so a prompt with spaces is split into arguments.
+12. **The first run of provider registration downloads ~1.5 GB.** It took 279 s on the first box and 45 to
+    80 s on later ones; afterwards it takes ~3 s. Nothing is kept between runs, so every fresh box pays it.
 
-14. **The CUDA provider could not load because `onnxruntime_providers_shared.dll` was not
-    bundled.** `onnxruntime_providers_cuda.dll` depends on it (Windows error 126), so
-    Foundry offered only CPU models. `build.rs` now bundles it. Verified on the T4: the
-    catalog went from 36 to 48 GPU variants and CUDA registered.
-15. **GPU execution providers are registered per process and the SDK does not register
-    them by itself.** The app's own log says "EP registration deferred. Call
-    DownloadAndRegisterEpsAsync to begin" and runs with only `CPUExecutionProvider`.
-    Nothing in the app calls `download_and_register_eps`; only the GPU tests do. Loading
-    a CUDA model from the real app returned `404` on `/openai/load/...` and the GPU stayed
-    idle. **Open product decision:** the app should register providers on start (a first-run
-    download of about 1.5 GB that took 4 min 39 s).
-16. **Registering providers for the first time is slow (279 s); afterwards it takes 3 s.**
-    Every fresh box pays the 279 s, because nothing is kept between runs.
-17. **The app wants `phi-4-mini-instruct`.** With another model cached it shows "No
-    compatible model available. Please download phi-4-mini-instruct" and sits on
-    "Connecting to Foundry". With `Phi-4-mini-instruct-cuda-gpu:5` cached it connects.
-18. **Results of the ignored suite on the T4 (20 tests): 10 pass, 10 fail.** Failures are
-    environmental: 4 call the `foundry` command-line tool that the box does not have, 3
-    cannot find `test-data/` (not shipped beside the tests), 1 assumes a Mac WebGPU host.
-    Two (`native_fallback_to_hermes`, `tool_search_discovers_deferred`) are not diagnosed.
-21. **Microsoft's Rust SDK docs say Windows apps should use the `winml` feature** (`cargo add
-    foundry-local-sdk --features winml`), which "integrates with the Windows ML runtime" and
-    does "automatic download and registration of appropriate ONNX Runtime execution
-    providers (CUDA, Vitis, QNN, OpenVINO, TensorRT)". `src-tauri/Cargo.toml` uses
-    `foundry-local-sdk = "1.2.0"` without it, which matches what the GPU box saw: providers
-    "deferred" and CPU only. Two ways to fix it, and a decision for the owner: enable
-    `winml` (Microsoft's recommended path; needs a Windows 11 24H2 / Server 2025 class OS,
-    so the test box would need a Server 2025 image), or keep the cross-platform crate and
-    call `download_and_register_eps` at start-up (what the GPU tests do; works on Server 2022).
-22. **The app warms models with the CLI's REST call, which the SDK's own web service does
-    not serve.** `model_gateway_actor.rs:399` sends `GET /openai/load/{name}?ttl=0`; the
-    REST reference documents that call as part of the Foundry Local CLI service, and the
-    SDK-hosted service answers `404`. The SDK path is `model.load()` (already wrapped as
-    `FoundryBackend::load` in `backend/sdk.rs`). `prewarm_model_in_background` should use
-    it when the SDK backend is active. `SdkBackend` is not `Clone`, so this needs the actor
-    to hold it in an `Arc` (or expose the static manager handle).
+## Lessons: CI
 
-**Windows ML (`winml`) on Windows Server 2025 (build 26100), T4 (2026-09-29)**
+13. **Pin Rust 1.94.1.** `ethnum 1.5.2` (via lancedb, lance, jsonb) does not compile on the newest stable
+    ("cannot transmute between types of different sizes"). Remove the pin when that chain moves. The
+    release workflow needs the same pin.
+14. **Install `protoc`** (`lance-encoding` needs it); on Linux also `libprotobuf-dev` and `libgtk-3-dev`.
+    Windows uses a pinned, hash-checked download.
+15. **Linux never built:** `rfd` enabled its `xdg-portal` backend by default while Tauri's dialog plugin
+    enabled `gtk3`, and `rfd` refuses both. Fixed with `default-features = false, features = ["gtk3"]`.
+16. **The Windows unit-test program died at start-up with `STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139).**
+    The cause was **not** DirectML (that was a wrong first guess). `rfd` imports `TaskDialogIndirect`,
+    which only Common Controls v6 exports; a test program has no application manifest, so Windows binds
+    it to the old comctl32 v5.82 and it dies before any test runs. `scripts/ci/check-imports.ps1` found
+    it by listing every import and the DLL that lacks it. Fix: `build.rs` delay-loads `comctl32.dll`.
+    (A linker-embedded manifest would clash with Tauri's own; `rustc-link-arg-tests` does not reach unit
+    tests inside the library.)
+17. **A cold Windows build takes ~19 minutes; with the Rust cache ~5 to 6.** The cache is saved from `main`
+    even when a run fails. The release workflow deliberately uses no cache.
+18. **The optimized release build did not finish in 77 minutes** (fat LTO, one codegen unit, lancedb and
+    datafusion) and hit the 90-minute job limit. CI builds the validation installer in the debug profile
+    (~9 minutes). `release.yml` would hit the same limit: raise its timeout or relax LTO.
+19. **Do not let a new push cancel a running build on `main`,** and skip docs- and infra-only pushes.
+    CI now cancels only superseded pull-request runs and ignores `docs/`, `infra/` and Markdown.
+20. **Upload the GPU tests right after building them,** not at the end of the job (~8 minutes earlier).
+21. **A YAML edit that matched the wrong step duplicated part of a workflow** and GitHub rejected it with
+    no jobs. Check with `python3 -c "import yaml..."` and read the job list after scripted edits.
 
-23. **`winml` did not register execution providers by itself.** With the `winml` feature on and
-    the production `register_execution_providers` step removed from the picture, the SDK still
-    reported nothing registered (`already_registered: []`); providers registered only because our
-    code asked. The log shows Foundry's own CUDA and WebGPU bootstrappers, not a Windows-managed
-    provider. So the explicit start-up step is needed with `winml` too.
-24. **Result with `winml` + the production method:** CUDA and WebGPU both registered, no failures,
-    in 45.5 s on a fresh box; 48 of 48 catalog models are GPU variants (all CUDA). A Phi-4-mini
-    CUDA chat ran with the GPU at 91% and 9,685 MiB of VRAM (baseline 80 MiB), reply in 11 s,
-    model download 58 s.
-25. **The `winml` build bundles `Microsoft.Windows.AI.MachineLearning.dll`** (the Windows ML runtime,
-    0.9 MB) next to a larger `Microsoft.AI.Foundry.Local.Core.dll` (23.9 MB vs 22.4 MB).
-26. **Server 2025 needed no changes to the bootstrap** apart from two bugs in it that the new
-    image exposed and that were ours: the Node lookup piped `Invoke-RestMethod` output into
-    `Where-Object` (which passes the whole JSON array as one item and builds a 400 URL), and
-    downloads had no retry. WebView2 is already present on Server 2025.
-27. **Download bootstrap scripts by commit hash**, not by branch name. `raw.githubusercontent.com`
-    serves a cached copy of a branch file for a few minutes, so a fresh push was not what the box ran.
+## Open items
 
-**Choosing the default model (2026-09-29)**
-
-28. **`qwen3.5-4b` (CUDA build) fails to generate on an NVIDIA T4 (Turing, compute capability 7.5).**
-    The error is inside the model's linear-attention layer: `LinearAttention ... CUDA failure 1:
-    invalid argument` (`linear_attention_impl.cu:702`), at layer 0. It is not out-of-memory.
-    Phi-4-mini works on the same card (91% GPU, 9.7 GB).
-29. **On an NVIDIA A10G (Ampere, 8.6) the same model generates**, without that error, but it
-    produced 17,379 characters for a one-line prompt and hit the test's five-minute limit
-    (peak 7.6 GB). It is a reasoning model, so simple prompts can take minutes. Treat this as
-    measured, not final: the test sends no reasoning-effort setting, and the app does.
-30. **Short model names did not resolve in SDK mode.** `get_model_variant` needs a full variant id
-    (`qwen3.5-4b-cuda-gpu:4`); the first-run download of the default and the fallback download
-    used short names, so both failed. Fixed: short names now resolve to the best variant for the
-    machine (GPU, then CUDA, then smaller).
-31. **Default `qwen3.5-4b`, fallback `phi-4-mini-instruct`** (commit 6cb0a47). The fallback is never
-    blocklisted; a deterministic failure switches to it and downloads it if missing.
-32. **`--initial-prompt` failed in the app**: the launch-prompt call omitted the four attachment
-    lists the `chat` command requires ("missing required key attachedFiles"). Found only by running
-    the installed app and reading the screenshot. Fixed (cd6d222). Pass prompts to the app through
-    `PLUGABLE_INITIAL_PROMPT`, not the command line: `Start-Process -ArgumentList` does not quote
-    array items, so a prompt with spaces is split into separate arguments.
-
-**Driving the box (mechanics)**
-
-19. Run screenshots through a scheduled task in the desktop session and start `ffmpeg`
-    from `wscript.exe` with a hidden window; otherwise a black `cmd` window appears in the
-    picture. `ffmpeg.exe` must be at the path the script uses (`C:\gpu\ffmpeg.exe`).
-20. Send files to the box through short-lived links, not through SSM. Get GitHub artifacts
-    with `GET /repos/.../actions/artifacts/<id>/zip` (it answers 302 with a signed URL that
-    the box can fetch in about a second; downloading 100 MB through a laptop connection
-    kept resetting). Send results back with a presigned S3 `PUT` and `curl.exe -T`.
+- **Proactive check of the default model.** On a T4 the first chat with `qwen3.5-4b` fails, then the app
+  falls back to Phi-4-mini (a second ~4 GB download). A one-token generation at warm-up would find this
+  before the user does.
+- Re-measure `qwen3.5-4b` on the A10G through the app (with its reasoning-effort setting).
+- First-run provider download: the cancel command exists (`cancel_ep_registration`), the button does not.
+- Undiagnosed ignored tests (A8), and porting the four `foundry`-CLI tests to the SDK.
+- The agent loop (a script that dispatches a run, reads the artifacts and iterates) is not built; agents
+  can follow the runbook above and `AGENTS.md`.
+- Raise the release build's time limit, or relax LTO, before the first release.
 
 ## Rules that keep the cost at zero
 
 - Every AWS resource carries the tag `Project=plugable-chat-gpu`.
-- The box has no IAM role in production, no Elastic IP, no NAT gateway, no S3 bucket
-  that outlives the run, no saved image and no snapshot.
-- The disk is deleted on termination and the instance terminates when it shuts down.
-- The failsafe powers the box off after `DeadlineMinutes` (default 90) whatever happens.
-- Every run ends with `teardown.sh`, which lists anything tagged for this project that
-  still exists and fails if it finds any.
+- Permanent, free pieces only: the network, the budget, the scheduler role and group. No Elastic IP, NAT
+  gateway, saved image, snapshot, standing volume or bucket outlives a run.
+- Every box has an AWS-side hard stop (default 180 minutes) and a guest-side deadline.
+- Every run ends with `teardown.sh`, which lists anything tagged for this project that still exists
+  (instances, volumes, snapshots, images, addresses, NAT gateways, buckets, schedules) and fails if it
+  finds any.

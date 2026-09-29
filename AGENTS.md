@@ -68,3 +68,28 @@ When a tool fails, don't just return the error. Re-inject the context the model 
 The goal is always: **don't make the model figure it out; tell it exactly what to do**.
 
 See `build_sql_error_recovery_prompt()` in `system_prompt.rs` for the reference implementation.
+
+## GPU validation (for agents)
+
+The app is tested on a real Windows + NVIDIA GPU box that exists only for the length of a run.
+Read [`docs/gpu-validation.md`](docs/gpu-validation.md) first; it is the runbook, the record of what
+went wrong before, and the list of open items. Rules that matter when you run it:
+
+- **Cost and time limits.** A box costs about $0.53/hour (T4) or $1.0-1.4/hour (A10G). Every box gets
+  an AWS-side hard stop (`MAX_RUN_MINUTES`, default 180) from `launch.sh`; do not remove it. **Do not
+  start more than 3 GPU runs per task,** fix what CI (free) can show first, and stop and report after
+  the same failure twice. Always finish with `infra/aws-gpu/teardown.sh` (it fails if anything billable
+  is left). Never leave a box up while waiting for CI: launch it when the artifacts are nearly ready.
+- **What you can rely on.** CI builds the unsigned debug installer and the compiled GPU tests
+  (`gpu-tests-<sha>` is ready ~8 minutes after a push, the installer ~15 to 20). The box installs them,
+  registers GPU providers itself, and can be asked the Chicago crimes questions with `ask.sh`; the
+  expected answers are in `infra/aws-gpu/chicago-questions.json`.
+- **Look at the screenshots.** The most important bugs so far (no GPU use, a broken `--initial-prompt`)
+  were invisible to unit tests and found only by reading a screenshot of the installed app.
+- **Drive the app with environment variables** (`PLUGABLE_MODEL`, `PLUGABLE_INITIAL_PROMPT`,
+  `PLUGABLE_ENABLE_DEMO_DB`, `PLUGABLE_ALWAYS_ON_TABLES`), not command-line arguments with spaces.
+- **Do not change** `.github/workflows/release.yml`, `scripts/sign-windows.mjs`,
+  `scripts/verify-windows-signatures.ps1`, `.github/CODEOWNERS` or `src-tauri/tauri*.conf.json`
+  without asking; they control what gets signed with the company certificate.
+- **Default model:** `qwen3.5-4b`, fallback `phi-4-mini-instruct` (never blocklisted). `qwen3.5-4b`
+  fails on an NVIDIA T4 (Turing) and is slow on an A10G; test both models when changing this.

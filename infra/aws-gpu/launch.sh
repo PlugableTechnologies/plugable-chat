@@ -36,4 +36,7 @@ IID="$(aws ec2 run-instances --image-id "$AMI" --instance-type "$INSTANCE_TYPE" 
   --metadata-options HttpTokens=required \
   --tag-specifications "$(tag_spec instance)" "$(tag_spec volume)" \
   --query 'Instances[0].InstanceId' --output text)"
+# Hard stop enforced by AWS itself, created at once. If the guest hangs or its own failsafe is
+# lost, AWS still terminates the box at this time. MAX_RUN_MINUTES (default 180) sets it.
+create_terminate_schedule "$IID" "$MAX_RUN_MINUTES"
 echo "$IID"

@@ -76,3 +76,15 @@ expires (by mid-June 2027). The API token and client certificate should be rotat
 - Signature verifies but has no timestamp: the release job fails on purpose. Check the
   `smctl` version the DigiCert action installed.
 - Never re-run a release job to "just get it out" with a step disabled. Fix and re-tag.
+
+## Known issues found by the first CI and GPU-box runs (2026-09-29)
+
+- **The release build needs the same fixes CI got:** Rust is pinned to 1.94.1 (`ethnum` does not compile on
+  the newest stable), `protoc` is installed, and Linux needs `libprotobuf-dev` and `libgtk-3-dev`. These are
+  already in `release.yml`.
+- **The optimized release build may not fit in the 90-minute job limit.** A release-profile build of the app
+  (fat LTO, one codegen unit, lancedb and datafusion) ran 77 minutes in CI without finishing. The `release.yml`
+  Windows job has `timeout-minutes: 90`; raise it (GitHub allows up to 6 hours on hosted runners) or relax LTO
+  (`lto = "thin"`, more codegen units) before cutting a release. This has not been changed.
+- **Validate before signing.** Run the GPU validation ([gpu-validation.md](gpu-validation.md)) on the tagged
+  commit first: the installed app, not just the unit tests, is what found the bugs that mattered.

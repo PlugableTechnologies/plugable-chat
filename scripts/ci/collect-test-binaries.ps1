@@ -22,14 +22,15 @@ foreach ($line in $lines) {
 }
 if ($copied -eq 0) { throw "no test executables found" }
 
-# The test programs import directml.dll directly. Windows ships an older
-# DirectML.dll in System32 (1.15.5 on the CI runner) and the program finds that
-# one first, then dies at start-up with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139).
-# The ONNX Runtime download that the build uses includes a matching DirectML.dll,
-# but it stays in that download cache rather than under target/. Put it, and the
-# ONNX Runtime files the build produces, next to the test programs: here (for
-# `cargo test`, which runs from target/debug/deps) and in the output folder (for
-# the GPU test box).
+# Put the native libraries the tests load next to the test programs: here (for `cargo test`,
+# which runs from target/debug/deps) and in the output folder (for the GPU test box).
+#
+# History, so nobody repeats it: the test program used to die at start-up with
+# STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139). It imports directml.dll and Windows ships an older
+# copy in System32, so DirectML was blamed first; copying a matching DirectML.dll did NOT fix it.
+# The real cause was comctl32 v5.82 lacking TaskDialogIndirect (fixed in build.rs by delay-loading
+# comctl32; see docs/gpu-validation.md, lesson 16). The DirectML copy below is kept because it is
+# harmless and matches what the ONNX Runtime download expects.
 $roots = @("target", (Join-Path $env:LOCALAPPDATA "ort.pyke.io"), (Join-Path $env:USERPROFILE ".cache")) |
     Where-Object { Test-Path $_ }
 $found = Get-ChildItem -Path $roots -Recurse -Include "onnxruntime*.dll", "DirectML*.dll" -File -ErrorAction SilentlyContinue |

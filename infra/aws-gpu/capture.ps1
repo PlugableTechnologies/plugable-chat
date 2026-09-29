@@ -1,4 +1,5 @@
-# Record the desktop and take screenshots. Must run INSIDE the logged-on desktop
+# Record the desktop and take screenshots. (Stills: ask-app.ps1 shows the hidden-window way to take
+# one and upload it; use run-in-session.ps1, which hides the window, to start this script.) Must run INSIDE the logged-on desktop
 # session (session 1), so start it through run-in-session.ps1, not directly from SSM.
 #
 #   capture.ps1 -Out C:\gpu\out -Seconds 60

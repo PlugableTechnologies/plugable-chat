@@ -18,6 +18,11 @@ if [ ${#IDS[@]} -gt 0 ] && [ -n "${IDS[0]}" ]; then
   echo "terminated: ${IDS[*]}"
 fi
 
+# Remove any hard-stop schedules that did not run (they delete themselves after running).
+for sched in $(aws scheduler list-schedules --group-name "$SCHEDULE_GROUP" --query 'Schedules[].Name' --output text 2>/dev/null); do
+  aws scheduler delete-schedule --name "$sched" --group-name "$SCHEDULE_GROUP" >/dev/null && echo "deleted schedule $sched"
+done
+
 ROLE=plugable-chat-gpu-spike
 if aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
   aws iam remove-role-from-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE" 2>/dev/null || true
@@ -39,5 +44,6 @@ report "snapshots" "$(aws ec2 describe-snapshots --owner-ids self --filters "$TA
 report "images" "$(aws ec2 describe-images --owners self --filters "$TAG_FILTER" --query 'length(Images)' --output text)"
 report "elastic IPs" "$(aws ec2 describe-addresses --filters "$TAG_FILTER" --query 'length(Addresses)' --output text)"
 report "NAT gateways" "$(aws ec2 describe-nat-gateways --filter "Name=tag:${PROJECT_TAG_KEY},Values=${PROJECT_TAG_VALUE}" "Name=state,Values=pending,available" --query 'length(NatGateways)' --output text)"
+report "terminate schedules" "$(aws scheduler list-schedules --group-name "$SCHEDULE_GROUP" --query 'length(Schedules)' --output text 2>/dev/null || echo 0)"
 report "S3 buckets" "$(aws s3api list-buckets --query "length(Buckets[?starts_with(Name, 'plugable-chat-gpu-')])" --output text)"
 exit $LEFT

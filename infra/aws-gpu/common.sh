@@ -30,3 +30,30 @@ find_vpc() {
   aws ec2 describe-vpcs --filters "Name=tag:${PROJECT_TAG_KEY},Values=${PROJECT_TAG_VALUE}" \
     --query 'Vpcs[0].VpcId' --output text | sed 's/^None$//'
 }
+
+# ---- Hard time limit, enforced by AWS (not by the guest) ---------------------------------
+# The guest has its own failsafe (bootstrap-box.ps1), but a hung or mis-armed guest cannot be
+# trusted to stop itself. Every box also gets a one-time EventBridge Scheduler entry that calls
+# ec2:TerminateInstances at a fixed time. The entry deletes itself after it runs, so nothing
+# is left between runs. Scheduler is free at this volume.
+SCHEDULER_ROLE_NAME="plugable-chat-gpu-scheduler"
+SCHEDULE_GROUP="plugable-chat-gpu"
+MAX_RUN_MINUTES="${MAX_RUN_MINUTES:-180}"
+
+utc_in_minutes() { # utc_in_minutes <minutes>  -> 2026-09-29T13:00:00
+  python3 -c "import datetime,sys;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(minutes=int(sys.argv[1]))).strftime('%Y-%m-%dT%H:%M:%S'))" "$1"
+}
+
+# create_terminate_schedule <instance-id> <minutes-from-now>; replaces an existing entry.
+create_terminate_schedule() {
+  local iid="$1" minutes="$2" name="gpu-terminate-$1" role when
+  role="$(aws iam get-role --role-name "$SCHEDULER_ROLE_NAME" --query Role.Arn --output text)"
+  when="$(utc_in_minutes "$minutes")"
+  aws scheduler delete-schedule --name "$name" --group-name "$SCHEDULE_GROUP" >/dev/null 2>&1 || true
+  aws scheduler create-schedule --name "$name" --group-name "$SCHEDULE_GROUP" \
+    --schedule-expression "at($when)" --schedule-expression-timezone UTC \
+    --flexible-time-window Mode=OFF --action-after-completion DELETE \
+    --description "Hard stop for GPU test box $iid" \
+    --target "{\"Arn\":\"arn:aws:scheduler:::aws-sdk:ec2:terminateInstances\",\"RoleArn\":\"$role\",\"Input\":\"{\\\"InstanceIds\\\":[\\\"$iid\\\"]}\"}" >/dev/null
+  echo "AWS will terminate $iid at $when UTC (in $minutes min)" >&2
+}
