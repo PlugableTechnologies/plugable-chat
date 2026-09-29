@@ -112,6 +112,59 @@ jobs:
         shell: pwsh
         run: pwsh scripts/ci/collect-test-binaries.ps1 -Out gpu-tests
 
+      - name: Diagnose test start-up (which import is missing)
+        if: always()
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem target/debug/deps -Filter "plugable_chat_lib-*.exe" | Sort-Object LastWriteTime | Select-Object -Last 1
+          pwsh scripts/ci/check-imports.ps1 -Exe $exe.FullName
+
+      - name: Rust unit tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+  build-windows:
+    name: Build and unit tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+
+      - name: Install protoc (pinned, hash-checked)
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "protoc.zip"
+          Invoke-WebRequest "https://github.com/protocolbuffers/protobuf/releases/download/v30.2/protoc-30.2-win64.zip" -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne "10f35df7722a69dde8ee92b4a16a4e1cc91cfce82fbb4a371bd046de139aa4a9") { throw "protoc hash mismatch: $hash" }
+          Expand-Archive $zip (Join-Path $env:RUNNER_TEMP "protoc")
+          "PROTOC=$(Join-Path $env:RUNNER_TEMP 'protoc\bin\protoc.exe')" >> $env:GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Install JavaScript dependencies (locked)
+        run: npm ci
+
+      - name: Type-check and build the frontend
+        run: npm run build
+
+      - name: Compile the tests, and place the ONNX Runtime DLLs beside them
+        shell: pwsh
+        run: pwsh scripts/ci/collect-test-binaries.ps1 -Out gpu-tests
+
       - name: Diagnose test start-up (imports and DLL versions)
         if: always()
         shell: pwsh
