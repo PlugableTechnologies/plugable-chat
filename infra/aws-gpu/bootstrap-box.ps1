@@ -18,6 +18,19 @@ $work = "C:\gpu"
 New-Item -ItemType Directory -Force $work | Out-Null
 function Step($msg) { "[{0:HH:mm:ss}] {1}" -f (Get-Date), $msg }
 
+# Lesson: a single download failed with a transient "400 Bad Request" from nodejs.org, and the
+# same URL worked a minute later. Retry every download instead of failing the whole run.
+function Get-File($url, $out, [int]$attempts = 4) {
+    for ($i = 1; $i -le $attempts; $i++) {
+        try { Invoke-WebRequest -UseBasicParsing $url -OutFile $out; return }
+        catch {
+            if ($i -eq $attempts) { throw }
+            Step "download failed ($($_.Exception.Message)); retry $i of $($attempts - 1)"
+            Start-Sleep -Seconds (5 * $i)
+        }
+    }
+}
+
 # 1. Failsafe FIRST, so a broken run can never leave the box (and its bill) running.
 # Lesson: `shutdown /t N` is a one-shot timer and is silently lost by any reboot
 # (which auto-logon requires). Instead store a deadline and check it every 5 minutes
@@ -43,7 +56,7 @@ Register-ScheduledTask -TaskName "gpu-failsafe" -Action $action -Trigger $trigge
 if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue) -and -not (Test-Path C:\Windows\System32\nvidia-smi.exe)) {
     Step "installing NVIDIA driver"
     $name = "596.86__grid_win10_win11_server2022_server2025_dch_64bit_international_aws_swl.exe"
-    Invoke-WebRequest -UseBasicParsing "https://ec2-windows-nvidia-drivers.s3.amazonaws.com/latest/$name" -OutFile "$work\driver.exe"
+    Get-File "https://ec2-windows-nvidia-drivers.s3.amazonaws.com/latest/$name" "$work\driver.exe"
     $p = Start-Process "$work\driver.exe" -ArgumentList "-s","-noreboot","-noeula","-clean" -Wait -PassThru
     if ($p.ExitCode -ne 0) { throw "driver installer exit code $($p.ExitCode)" }
 }
@@ -52,7 +65,7 @@ if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue) -and -not (Test-
 # Measured: 67 s.
 if (-not (Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" -ErrorAction SilentlyContinue)) {
     Step "installing WebView2 runtime"
-    Invoke-WebRequest -UseBasicParsing "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "$work\wv2.exe"
+    Get-File "https://go.microsoft.com/fwlink/p/?LinkId=2124703" "$work\wv2.exe"
     Start-Process "$work\wv2.exe" -ArgumentList "/silent","/install" -Wait | Out-Null
 }
 
@@ -60,7 +73,7 @@ if (-not (Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clie
 if (-not (Get-Command node -ErrorAction SilentlyContinue) -and -not (Test-Path "C:\Program Files\nodejs\node.exe")) {
     Step "installing Node LTS"
     $v = (Invoke-RestMethod https://nodejs.org/dist/index.json | Where-Object { $_.lts } | Select-Object -First 1).version
-    Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$v/node-$v-x64.msi" -OutFile "$work\node.msi"
+    Get-File "https://nodejs.org/dist/$v/node-$v-x64.msi" "$work\node.msi"
     Start-Process msiexec -ArgumentList "/i","$work\node.msi","/qn","/norestart" -Wait | Out-Null
 }
 
@@ -69,7 +82,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue) -and -not (Test-Path "
 # ("Failed to configure output pad"); gdigrab captured video and stills fine.
 if (-not (Test-Path "$work\ffmpeg.exe")) {
     Step "installing ffmpeg"
-    Invoke-WebRequest -UseBasicParsing "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile "$work\ffmpeg.zip"
+    Get-File "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" "$work\ffmpeg.zip"
     Expand-Archive "$work\ffmpeg.zip" "$work\ffmpeg-unzipped" -Force
     Copy-Item (Get-ChildItem "$work\ffmpeg-unzipped" -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName "$work\ffmpeg.exe"
 }
