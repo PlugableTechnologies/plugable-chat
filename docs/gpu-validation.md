@@ -172,3 +172,30 @@ Installer lifecycle (`infra/aws-gpu/installer-lifecycle.ps1`): fresh install 22 
 running copy, uninstall, reinstall all pass. Lessons: the per-user installer run as SYSTEM (as IT tools
 and SSM do) installs into the SYSTEM profile unless given `/D=`; run the ask scripts against `C:\gpu\app`.
 Parallel `ask.sh` runs need per-instance S3 keys (fixed).
+
+## Installer scope: perMachine (decided 2026-09-29)
+
+`bundle.windows.nsis.installMode` is `perMachine` (Program Files, HKLM uninstall entry, all-users Start
+Menu shortcut). The per-user mode installed into `C:\Windows\System32\config\systemprofile\AppData\Local\plugable-chat`
+when run silently as SYSTEM, which is how SSM, Intune and SCCM run installers, so managed fleets never
+saw the app.
+
+| | currentUser | perMachine (shipped) | both |
+|---|---|---|---|
+| `/S` as SYSTEM | Lands in the SYSTEM profile unless `/D=` is given; no shortcut or uninstall entry for real users | Correct: Program Files, HKLM, all-users shortcut | Per-machine (correct) |
+| `/S` as standard user | Works, per user | Needs elevation; fails silently without it | Works, per user |
+| Upgrade | Per user; each user updates | One copy for everyone; installing needs admin | Must match the original scope; mixed fleets can end up with two copies |
+| Uninstall | Only that user's copy; IT cannot remove centrally | One HKLM entry, removed for all users | Depends on the scope used |
+| Model cache | Per user | Still per user (`%USERPROFILE%`), so each user downloads their own multi-GB models | Same |
+
+Cost of the choice: a person without admin rights cannot self-install. The app only reads next to its
+exe (`onnxruntime.dll`, `foundry-libs`, `test-data`), so the read-only Program Files location is fine.
+
+`infra/aws-gpu/installer-lifecycle.ps1` now defaults to `-Mode perMachine`: run it as SYSTEM (`ssm.sh`) with
+no `/D=`. It checks the install lands in Program Files by itself, the uninstall entry is in HKLM and not
+HKCU, nothing lands in the SYSTEM profile, the shortcut is all-users, then launches the app as a standard
+non-admin user (batch logon, session 0: proves the exe runs under a limited token, not that a window
+renders), and runs upgrade over a running copy, repair, silent uninstall and reinstall. `-Mode currentUser -Dir C:\gpu\life`
+runs the old per-user flow.
+
+Results of the perMachine run: **not yet run on a box** (see below for the record once it is).
