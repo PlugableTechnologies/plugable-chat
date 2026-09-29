@@ -1,0 +1,9 @@
+[
+  {"name": "total",     "question": "How many crimes are in the chicago_crimes table?",                                   "expect": ["227,299", "227299"]},
+  {"name": "top-types", "question": "What are the top 3 primary types of crime by number of incidents?",                  "expect": ["THEFT", "BATTERY", "CRIMINAL DAMAGE", "52,813", "41,130", "25,135"]},
+  {"name": "arrests",   "question": "How many crimes resulted in an arrest?",                                             "expect": ["36,070", "36070"]},
+  {"name": "area",      "question": "Which community area has the most crimes, and how many?",                            "expect": ["Austin", "11,358", "11358"]},
+  {"name": "homicides", "question": "How many homicides were there?",                                                     "expect": ["407"]},
+  {"name": "guns",      "question": "How many crimes involved a gun?",                                                    "expect": ["18,608", "18608"]},
+  {"name": "month",     "question": "Which month had the most crimes?",                                                   "expect": ["July", "22,561", "22561"]}
+]
