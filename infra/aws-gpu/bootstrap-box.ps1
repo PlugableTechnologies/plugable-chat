@@ -72,7 +72,11 @@ if (-not (Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clie
 # 4. Node (for Playwright). Measured: ~10 s.
 if (-not (Get-Command node -ErrorAction SilentlyContinue) -and -not (Test-Path "C:\Program Files\nodejs\node.exe")) {
     Step "installing Node LTS"
-    $v = (Invoke-RestMethod https://nodejs.org/dist/index.json | Where-Object { $_.lts } | Select-Object -First 1).version
+    # Assign first, then filter. Piping Invoke-RestMethod straight into Where-Object hands over
+    # the whole JSON array as ONE item, `.version` then becomes all 288 versions joined together,
+    # and the download URL is a 400 Bad Request (this cost a failed bootstrap on 2026-09-29).
+    $nodeIndex = Invoke-RestMethod https://nodejs.org/dist/index.json
+    $v = @($nodeIndex | Where-Object { $_.lts })[0].version
     Get-File "https://nodejs.org/dist/$v/node-$v-x64.msi" "$work\node.msi"
     Start-Process msiexec -ArgumentList "/i","$work\node.msi","/qn","/norestart" -Wait | Out-Null
 }
