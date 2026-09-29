@@ -108,6 +108,13 @@ export const createSendMessageSlice: StateCreator<
                 history: [],
                 reasoningEffort: state.reasoningEffort,
                 model: state.currentModel, // Frontend is source of truth for model
+                // The backend command requires all four attachment lists (ChatArea passes the
+                // real ones). Without them the launch prompt failed with "missing required key
+                // attachedFiles". A launch prompt has no attachments.
+                attachedFiles: [],
+                attachedTables: [],
+                attachedTools: [],
+                attachedTabularFiles: [],
             });
 
             if (returnedChatId && returnedChatId !== chatId) {
