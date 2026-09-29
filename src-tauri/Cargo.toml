@@ -24,7 +24,10 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = "0.4"
 
 # Native dialogs for crash reporting (works without Tauri runtime)
-rfd = "0.15"
+# default-features = false: rfd's default turns on the `xdg-portal` backend on Linux, which
+# conflicts with the `gtk3` backend tauri-plugin-dialog enables ("You can't enable both
+# `gtk3` and `xdg-portal`"). Windows and macOS have no backend feature to choose.
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 
 # LanceDB & Arrow Stack
 lancedb = { version = "0.23", default-features = false }
