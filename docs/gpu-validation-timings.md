@@ -17,25 +17,29 @@ in `aws ec2 describe-instances`.
 | GitHub-hosted runners | $0 (public repository) | |
 | Everything else in the AWS setup | $0 (VPC, security group, budget) | |
 
-## The GPU box, first hands-on run (2026-09-29)
+## The GPU box, measured end to end (2026-09-29)
 
 | Step | Time | Note |
 |---|---|---|
 | Launch to reachable by SSM | ~3 min | not timed precisely |
-| NVIDIA driver download | 13 s | after switching off the progress bar |
-| NVIDIA driver install | 110 s | no reboot needed for the T4 to appear |
+| NVIDIA driver download / install | 13 s / 110 s | no reboot needed for the T4 to appear |
 | WebView2 runtime | 67 s | includes download |
 | Node LTS | ~10 s | |
 | ffmpeg download, unzip, capture test | ~1 min | |
 | Auto-logon reboot until a desktop exists | ~2 min | |
-| **Provisioning total, if done in one pass** | **~9 to 10 min** | driver + installs + one reboot |
-| Wasted on the first driver download attempt | ~16 min | progress bar left on; never finished |
-| Waiting for CI to produce an installer | see below | the dominant cost so far |
+| **Provisioning total, done in one pass** | **~9 to 10 min** | driver + installs + one reboot |
+| Installer from GitHub to the box | 1 s | direct short-lived link; 104 MB |
+| Silent install of the app | 19 s | |
+| GPU execution providers: download and register (first time) | **279 s** | ~1.5 GB CUDA package + WebGPU; every fresh box pays this |
+| Same, second time (already on disk) | 3 s | |
+| Small GPU model download (0.5 to 0.6B) | 5 to 6 s | |
+| CUDA chat round trip (model load + one reply) | 16 s | GPU 95% busy, 4,320 MiB VRAM used |
+| Wasted on the first driver download attempt | ~16 min | progress bar left on |
+| Waiting for CI to produce something to test | see below | the dominant cost |
 
-Cost so far for this box (launched 03:04 UTC, still running): read the meter with
-`aws ec2 describe-instances --instance-ids <id> --query 'Reservations[0].Instances[0].LaunchTime'`
-and multiply by $0.537/hour (instance plus disk). About 2 hours in, that is roughly **$1.10**.
-Most of that is time spent waiting for CI, not testing.
+The T4 box cost is **$0.526/hour for the instance plus ~$0.011/hour for the disk**. The
+box in this session ran for many hours, mostly idle while CI was fixed; that is a cost of
+developing the pipeline, not of running it.
 
 ## CI (GitHub-hosted, free), 2026-09-29
 

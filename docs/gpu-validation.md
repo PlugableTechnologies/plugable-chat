@@ -80,6 +80,39 @@ SPIKE_SSM=1 ./launch.sh               # prints the instance id; adds a temporary
     push cancelled a 19-minute Windows build. CI now ignores changes that only touch
     `docs/`, `infra/` or Markdown, and only cancels superseded pull-request runs.
 
+**What the GPU box found about the app itself (2026-09-29)**
+
+14. **The CUDA provider could not load because `onnxruntime_providers_shared.dll` was not
+    bundled.** `onnxruntime_providers_cuda.dll` depends on it (Windows error 126), so
+    Foundry offered only CPU models. `build.rs` now bundles it. Verified on the T4: the
+    catalog went from 36 to 48 GPU variants and CUDA registered.
+15. **GPU execution providers are registered per process and the SDK does not register
+    them by itself.** The app's own log says "EP registration deferred. Call
+    DownloadAndRegisterEpsAsync to begin" and runs with only `CPUExecutionProvider`.
+    Nothing in the app calls `download_and_register_eps`; only the GPU tests do. Loading
+    a CUDA model from the real app returned `404` on `/openai/load/...` and the GPU stayed
+    idle. **Open product decision:** the app should register providers on start (a first-run
+    download of about 1.5 GB that took 4 min 39 s).
+16. **Registering providers for the first time is slow (279 s); afterwards it takes 3 s.**
+    Every fresh box pays the 279 s, because nothing is kept between runs.
+17. **The app wants `phi-4-mini-instruct`.** With another model cached it shows "No
+    compatible model available. Please download phi-4-mini-instruct" and sits on
+    "Connecting to Foundry". With `Phi-4-mini-instruct-cuda-gpu:5` cached it connects.
+18. **Results of the ignored suite on the T4 (20 tests): 10 pass, 10 fail.** Failures are
+    environmental: 4 call the `foundry` command-line tool that the box does not have, 3
+    cannot find `test-data/` (not shipped beside the tests), 1 assumes a Mac WebGPU host.
+    Two (`native_fallback_to_hermes`, `tool_search_discovers_deferred`) are not diagnosed.
+
+**Driving the box (mechanics)**
+
+19. Run screenshots through a scheduled task in the desktop session and start `ffmpeg`
+    from `wscript.exe` with a hidden window; otherwise a black `cmd` window appears in the
+    picture. `ffmpeg.exe` must be at the path the script uses (`C:\gpu\ffmpeg.exe`).
+20. Send files to the box through short-lived links, not through SSM. Get GitHub artifacts
+    with `GET /repos/.../actions/artifacts/<id>/zip` (it answers 302 with a signed URL that
+    the box can fetch in about a second; downloading 100 MB through a laptop connection
+    kept resetting). Send results back with a presigned S3 `PUT` and `curl.exe -T`.
+
 ## Rules that keep the cost at zero
 
 - Every AWS resource carries the tag `Project=plugable-chat-gpu`.
