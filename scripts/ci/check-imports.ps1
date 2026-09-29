@@ -29,7 +29,9 @@ foreach ($name in $imports.Keys) {
     if (-not $path) { Write-Host "MISSING DLL   $name (not beside the program or in System32)"; $problems++; continue }
     $exports = @{}
     foreach ($line in (& $dumpbin /exports $path)) {
-        if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)') { $exports[$Matches[1]] = 1 }
+        # Normal exports: "ordinal hint RVA name". Forwarded exports (e.g. kernel32 ->
+        # ntdll) have no RVA column: "ordinal hint name (forwarded to ...)".
+        if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+(?:[0-9A-Fa-f]{8}\s+)?(\S+)') { $exports[$Matches[1]] = 1 }
     }
     $missing = $imports[$name] | Where-Object { -not $exports.ContainsKey($_) }
     $version = (Get-Item $path).VersionInfo.FileVersion

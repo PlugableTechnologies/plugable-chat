@@ -62,6 +62,15 @@ fn main() {
     // so packaged releases run on machines without the cargo target dir present.
     copy_foundry_native_libs(manifest_path);
 
+    // Test programs on Windows need a Common Controls v6 manifest (see the XML file).
+    // `-tests` limits it to test targets, so the real app keeps Tauri's own manifest.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let test_manifest = manifest_path.join("windows-test-manifest.xml");
+        println!("cargo:rerun-if-changed=windows-test-manifest.xml");
+        println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}", test_manifest.display());
+    }
+
     tauri_build::build()
 }
 
