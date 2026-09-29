@@ -76,6 +76,9 @@ SPIKE_SSM=1 ./launch.sh               # prints the instance id; adds a temporary
 12. **A cold Windows build takes about 19 minutes.** CI caches Rust builds on `main`,
     and keeps the cache even when a run fails, so iterating on a failure is quick.
     The release workflow deliberately uses no cache.
+13. **Do not let a new push cancel a running build on `main`.** A documentation-only
+    push cancelled a 19-minute Windows build. CI now ignores changes that only touch
+    `docs/`, `infra/` or Markdown, and only cancels superseded pull-request runs.
 
 ## Rules that keep the cost at zero
 

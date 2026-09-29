@@ -5,6 +5,11 @@ name: CI
 on:
   push:
     branches: [main]
+    # Documentation and infrastructure-script changes cannot affect the build.
+    paths-ignore:
+      - "docs/**"
+      - "infra/**"
+      - "**/*.md"
   pull_request:
   workflow_dispatch:
 
@@ -20,7 +25,9 @@ env:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs, but never a run on main: a cold Windows build takes
+  # ~19 minutes and its artifacts are what the GPU box tests.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test-linux:
