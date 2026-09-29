@@ -746,4 +746,105 @@ mod tests {
             "models that should work failed to respond: {unexpected:?}"
         );
     }
+
+    /// Report the execution providers, download and register any that are not yet
+    /// registered, and return what the catalog then offers.
+    async fn register_all_eps(backend: &SdkBackend) {
+        let before = backend.manager.discover_eps().expect("discover_eps");
+        eprintln!(
+            "[gpu] execution providers before: {:?}",
+            before.iter().map(|e| (&e.name, e.is_registered)).collect::<Vec<_>>()
+        );
+        let missing: Vec<&str> = before
+            .iter()
+            .filter(|e| !e.is_registered)
+            .map(|e| e.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            let started = std::time::Instant::now();
+            let result = backend.manager.download_and_register_eps(Some(&missing)).await;
+            eprintln!(
+                "[gpu] download_and_register_eps({missing:?}) -> {result:?} in {:.0}s",
+                started.elapsed().as_secs_f64()
+            );
+        }
+        let after = backend.manager.discover_eps().expect("discover_eps");
+        eprintln!(
+            "[gpu] execution providers after: {:?}",
+            after.iter().map(|e| (&e.name, e.is_registered)).collect::<Vec<_>>()
+        );
+    }
+
+    /// GPU test box: with the GPU execution providers registered, the catalog must offer
+    /// GPU model variants. On a machine where Foundry cannot use the GPU every variant is
+    /// CPU and this fails, which is the signal the box is not testing what it should.
+    /// Run: cargo test --lib backend::sdk::tests::sdk_backend_gpu_execution_providers -- --ignored --nocapture
+    #[ignore]
+    #[tokio::test]
+    async fn sdk_backend_gpu_execution_providers() {
+        let home = dirs::home_dir().expect("home");
+        let backend = SdkBackend::new(&home.join(".foundry").join("cache"), None).expect("new");
+        backend.ensure_service().await.expect("service");
+        register_all_eps(&backend).await;
+
+        let catalog = backend.list_catalog().await;
+        let gpu: Vec<_> = catalog.iter().filter(|m| m.runtime.device_type == "GPU").collect();
+        let mut providers: Vec<_> = gpu.iter().map(|m| m.runtime.execution_provider.clone()).collect();
+        providers.sort();
+        providers.dedup();
+        eprintln!(
+            "[gpu] {} of {} catalog models are GPU variants; execution providers: {providers:?}",
+            gpu.len(),
+            catalog.len()
+        );
+        assert!(!gpu.is_empty(), "the catalog offers no GPU model variants");
+    }
+
+    /// GPU test box: download one small GPU chat model so the round-trip tests have
+    /// something to run. PLUGABLE_TEST_MODEL overrides the choice.
+    /// Run: cargo test --lib backend::sdk::tests::sdk_backend_download_gpu_chat_model -- --ignored --nocapture
+    #[ignore]
+    #[tokio::test]
+    async fn sdk_backend_download_gpu_chat_model() {
+        let home = dirs::home_dir().expect("home");
+        let backend = SdkBackend::new(&home.join(".foundry").join("cache"), None).expect("new");
+        backend.ensure_service().await.expect("service");
+        register_all_eps(&backend).await;
+
+        let name = match std::env::var("PLUGABLE_TEST_MODEL") {
+            Ok(n) if !n.is_empty() => n,
+            _ => backend
+                .list_catalog()
+                .await
+                .iter()
+                .filter(|m| {
+                    m.runtime.device_type == "GPU"
+                        && m.task == "chat-completion"
+                        && !m.name.to_lowercase().contains("qwen3.5")
+                })
+                .min_by_key(|m| m.file_size_mb)
+                .map(|m| m.name.clone())
+                .expect("a GPU chat-completion model in the catalog"),
+        };
+        eprintln!("[gpu] downloading {name}");
+        let started = std::time::Instant::now();
+        let mut last = -10.0_f64;
+        backend
+            .download(
+                &name,
+                Box::new(move |p| {
+                    if p - last >= 10.0 || p >= 100.0 {
+                        eprintln!("[gpu] download {p:.0}%");
+                        last = p;
+                    }
+                }),
+            )
+            .await
+            .expect("download");
+        eprintln!("[gpu] downloaded {name} in {:.0}s", started.elapsed().as_secs_f64());
+        assert!(
+            backend.list_cached().await.iter().any(|m| m.model_id == name),
+            "{name} is not in the cache after download"
+        );
+    }
 }
