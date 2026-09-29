@@ -37,7 +37,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev build-essential file libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev protobuf-compiler libprotobuf-dev
+            libayatana-appindicator3-dev librsvg2-dev protobuf-compiler libprotobuf-dev libgtk-3-dev
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
@@ -103,6 +103,22 @@ jobs:
         shell: pwsh
         run: pwsh scripts/ci/collect-test-binaries.ps1 -Out gpu-tests
 
+      - name: Diagnose test start-up (imports and DLL versions)
+        if: always()
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem target/debug/deps -Filter "plugable_chat_lib-*.exe" | Sort-Object LastWriteTime | Select-Object -Last 1
+          "test program: $($exe.FullName)"
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          & $dumpbin.FullName /dependents $exe.FullName
+          "--- system copies"
+          foreach ($n in "onnxruntime.dll","DirectML.dll","WebView2Loader.dll") {
+            Get-Item "C:\Windows\System32\$n" -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName) $($_.VersionInfo.FileVersion)" }
+          }
+          "--- DLLs beside the test program"
+          Get-ChildItem target/debug/deps -Filter *.dll | ForEach-Object { "$($_.Name) $($_.VersionInfo.FileVersion) $($_.Length)" }
+
       - name: Rust unit tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
@@ -122,7 +138,8 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
         with:
           name: gpu-tests-${{ github.sha }}
           path: gpu-tests/*
-          if-no-files-found: error
+          if-no-files-found: warn
