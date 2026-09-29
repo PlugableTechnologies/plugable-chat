@@ -62,13 +62,18 @@ fn main() {
     // so packaged releases run on machines without the cargo target dir present.
     copy_foundry_native_libs(manifest_path);
 
-    // Test programs on Windows need a Common Controls v6 manifest (see the XML file).
-    // `-tests` limits it to test targets, so the real app keeps Tauri's own manifest.
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        let test_manifest = manifest_path.join("windows-test-manifest.xml");
-        println!("cargo:rerun-if-changed=windows-test-manifest.xml");
-        println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
-        println!("cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}", test_manifest.display());
+    // Windows unit-test programs have no application manifest, so the loader binds them to
+    // the old comctl32.dll v5.82. rfd imports TaskDialogIndirect, which only v6 exports, and
+    // the program dies at start-up (STATUS_ENTRYPOINT_NOT_FOUND) before running a test.
+    // Delay-loading comctl32 defers that lookup until the function is first called, which
+    // the tests never do. The real app gets Common Controls v6 from Tauri's own manifest,
+    // so it is unaffected. (A linker-embedded manifest would clash with Tauri's for the app,
+    // and `rustc-link-arg-tests` does not apply to unit tests inside the library.)
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-lib=dylib=delayimp");
+        println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
     }
 
     tauri_build::build()
