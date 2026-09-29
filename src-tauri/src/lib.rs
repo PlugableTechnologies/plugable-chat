@@ -1877,9 +1877,13 @@ pub fn run() {
             app.manage(settings_sm_state);
 
             // Launch config state (tool filters + overrides)
+            let schema_index_pending = Arc::new(std::sync::atomic::AtomicBool::new(
+                cli_args_for_setup.enable_demo_db == Some(true),
+            ));
             app.manage(LaunchConfigState {
                 tool_filter: launch_filter.clone(),
                 launch_overrides: launch_overrides.clone(),
+                schema_index_pending: schema_index_pending.clone(),
             });
             // A launch that switches the demo database on has nobody to click "Refresh schemas",
             // so index it as soon as the embedding model is ready; otherwise the model is told
@@ -1887,6 +1891,7 @@ pub fn run() {
             if cli_args_for_setup.enable_demo_db == Some(true) {
                 let refresh_handle = app.handle().clone();
                 let refresh_model = cpu_embedding_model_arc.clone();
+                let pending_flag = schema_index_pending.clone();
                 tauri::async_runtime::spawn(async move {
                     for _ in 0..240 {
                         if refresh_model.read().await.is_some() {
@@ -1909,6 +1914,7 @@ pub fn run() {
                         Ok(_) => println!("[Launch] Demo database schema indexed"),
                         Err(e) => println!("[Launch] Demo database schema indexing failed: {}", e),
                     }
+                    pending_flag.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
             }
             if launch_filter.allow_all() {

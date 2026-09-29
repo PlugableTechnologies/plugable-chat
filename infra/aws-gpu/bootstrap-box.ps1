@@ -81,6 +81,15 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue) -and -not (Test-Path "
     Start-Process msiexec -ArgumentList "/i","$work\node.msi","/qn","/norestart" -Wait | Out-Null
 }
 
+# 4b. MCP Database Toolbox: the app's Chicago crimes demo database is served by this external
+# program, which the app neither bundles nor installs. Same pinned version as
+# scripts/windows-requirements.ps1. The app looks for it in this directory.
+if (-not (Test-Path "C:\Program Files\toolbox\toolbox.exe")) {
+    Step "installing MCP Database Toolbox 0.24.0"
+    New-Item -ItemType Directory "C:\Program Files\toolbox" -Force | Out-Null
+    Get-File "https://storage.googleapis.com/genai-toolbox/v0.24.0/windows/amd64/toolbox.exe" "C:\Program Files\toolbox\toolbox.exe"
+}
+
 # 5. ffmpeg for screen recording.
 # Lesson: use gdigrab. ddagrab (desktop duplication) failed to open on this driver
 # ("Failed to configure output pad"); gdigrab captured video and stills fine.

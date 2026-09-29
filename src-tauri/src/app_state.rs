@@ -194,4 +194,7 @@ pub struct LaunchOverrides {
 pub struct LaunchConfigState {
     pub tool_filter: ToolLaunchFilter,
     pub launch_overrides: LaunchOverrides,
+    /// True while a launch-time schema index (demo database) is still running; the launch
+    /// prompt waits for it so the model is not told there are no tables.
+    pub schema_index_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
