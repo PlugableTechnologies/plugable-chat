@@ -69,10 +69,6 @@ rustpython-parser = { version = "0.4", default-features = false }
 # Lazy static for profile registry
 lazy_static = "1.4"
 
-# WASM runtime for Python sandbox
-wasmtime = "22"
-wasmtime-wasi = "22"
-
 # Async channel for WASM callbacks  
 async-channel = "2"
 
