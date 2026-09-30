@@ -198,7 +198,21 @@ non-admin user (batch logon, session 0: proves the exe runs under a limited toke
 renders), and runs upgrade over a running copy, repair, silent uninstall and reinstall. `-Mode currentUser -Dir C:\gpu\life`
 runs the old per-user flow.
 
-Results of the perMachine run: **not yet run on a box** (see below for the record once it is).
+Results (2026-09-29, T4 box, Server 2025, installer from CI build 85a7a8f, script at d81ad28): **30 of 30 checks
+pass** when run as SYSTEM with no `/D=`. Fresh install 21 s to `C:\Program Files\plugable-chat`; HKLM uninstall
+entry only; all-users shortcut; nothing in the SYSTEM profile; the app stays up 25 s as Administrator (desktop)
+and as a non-admin local user; upgrade over a running copy leaves one uninstall entry; repair restores the exe and
+a native library; silent uninstall removes the exe, entry and shortcut; reinstall works.
+
+The first attempt (same box) had two failures, both bugs in the test, not the app: `schtasks /tr` split the
+unquoted `C:\Program Files\...` path (now launched through `C:\gpu\life-launch.cmd`), and a new local user has no
+"log on as batch job" right (the script now grants it with `secedit`). One GPU run, one box, torn down
+with `teardown.sh` (all checks `ok`).
+
+Not covered: a standard user launching with a rendered window (needs an interactive session for that user),
+the auto-updater under a non-admin user (Tauri's NSIS updater relaunches the installer, which will ask for
+UAC), and an in-place upgrade from a previous per-user install (that copy stays in `%LOCALAPPDATA%`; the
+per-machine installer does not remove it).
 
 ## qwen3.5 WebGPU failure on macOS and the Foundry SDK upgrade options (2026-09-29)
 
