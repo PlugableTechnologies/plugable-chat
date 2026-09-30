@@ -42,22 +42,10 @@ jobs:
           Set-Content -Path smoke/lib.rs -Value '#[no_mangle] pub extern "C" fn plugable_smoke() -> i32 { 42 }'
           rustc --crate-type cdylib smoke/lib.rs -o smoke/hello.dll
 
-          # A minimal but valid MSI: an empty Windows Installer database with summary information.
-          $msiPath = Join-Path (Resolve-Path smoke).Path "hello.msi"
-          $installer = New-Object -ComObject WindowsInstaller.Installer
-          $db = $installer.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $null, $installer, @($msiPath, 3))
-          $summary = $db.GetType().InvokeMember("SummaryInformation", "GetProperty", $null, $db, @(20))
-          $props = @{ 2 = "Plugable signing smoke test"; 3 = "Smoke"; 4 = "Plugable"; 7 = "x64;1033";
-                      9 = "{6F1F2D0A-3B7C-4C1E-9A4D-5B0E8C2D7A11}"; 14 = 200; 15 = 2; 19 = 2 }
-          foreach ($id in $props.Keys) {
-            $summary.GetType().InvokeMember("Property", "SetProperty", $null, $summary, @([int]$id, $props[$id]))
-          }
-          $summary.GetType().InvokeMember("Persist", "InvokeMethod", $null, $summary, $null)
-          $db.GetType().InvokeMember("Commit", "InvokeMethod", $null, $db, $null)
-          [void][Runtime.InteropServices.Marshal]::ReleaseComObject($summary)
-          [void][Runtime.InteropServices.Marshal]::ReleaseComObject($db)
-          [void][Runtime.InteropServices.Marshal]::ReleaseComObject($installer)
-          if (-not (Test-Path $msiPath)) { throw "could not create the test MSI" }
+          # A minimal but valid MSI, made with Windows Installer COM automation. It must run in
+          # Windows PowerShell 5.1 (powershell.exe); tested on a real Windows box before use here.
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/make-test-msi.ps1 -Path smoke/hello.msi
+          if ($LASTEXITCODE -ne 0) { throw "could not create the test MSI" }
           Get-ChildItem smoke | Format-Table Name, Length
 
       - name: Write the KeyLocker client certificate
