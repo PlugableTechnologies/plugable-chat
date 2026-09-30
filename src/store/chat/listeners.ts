@@ -15,6 +15,7 @@ import type {
 } from './types';
 import type { ModelIncompatibleNotice } from './slices/operation-status-slice';
 import { parseFoundryModelStateEvent } from './helpers';
+import { nextOperationStatusForEpRegistration, type EpRegistrationProgressEvent } from './ep-registration-status';
 import { DEFAULT_MODEL_TO_DOWNLOAD } from './constants';
 
 // Helper to log to backend terminal for debugging
@@ -500,26 +501,14 @@ export const createListenerSlice: StateCreator<
             });
 
             // First-run download of GPU execution providers (about 1.5 GB, several minutes)
-            const epRegistrationListener = await listen<{ phase: string; ep?: string; percent?: number; message?: string }>('ep-registration-progress', (event) => {
-                const { phase, ep, percent, message } = event.payload;
-                const label = 'Preparing GPU acceleration (first run only)';
-                if (phase === 'downloading') {
-                    set((state) => ({
-                        operationStatus: {
-                            type: 'downloading',
-                            message: `${label}: ${ep ?? ''} ${Math.round(percent ?? 0)}%`,
-                            startTime: state.operationStatus?.startTime || Date.now(),
-                        },
-                        statusBarDismissed: false,
-                    } as any));
-                    return;
-                }
-                // done: clear our status, and show the outcome briefly when there is one
+            const epRegistrationListener = await listen<EpRegistrationProgressEvent>('ep-registration-progress', (event) => {
+                const eventTime = Date.now();
                 set((state) => {
-                    if (state.operationStatus?.message?.startsWith(label)) {
-                        return { operationStatus: message ? { type: 'none', message, startTime: Date.now() } : null } as any;
+                    const nextStatus = nextOperationStatusForEpRegistration(state.operationStatus, event.payload, eventTime);
+                    if (nextStatus === state.operationStatus) {
+                        return state;
                     }
-                    return state;
+                    return { operationStatus: nextStatus, statusBarDismissed: false } as any;
                 });
             });
 

@@ -146,6 +146,9 @@ fn variant_preference_key(m: &CatalogModel) -> (bool, u8, u8, u64) {
     (m.incompatible, device_rank, provider_rank, m.file_size_mb as u64)
 }
 
+/// How often a long provider download or registration logs that it is still waiting.
+const EP_REGISTRATION_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// What `SdkBackend::register_execution_providers` did.
 ///
 /// A provider in `failed` is normal on hardware that does not support it (CUDA on a machine
@@ -208,14 +211,49 @@ impl SdkBackend {
         }
 
         println!("[SdkBackend] registering execution providers: {missing:?}");
-        let result = self
+
+        // Remember the latest (provider, percent) so the heartbeat below can say where a long
+        // wait is stuck, and tell the UI right away instead of after the first percent tick.
+        let latest_progress: Arc<std::sync::Mutex<(String, f64)>> =
+            Arc::new(std::sync::Mutex::new((missing[0].clone(), 0.0)));
+        let mut progress = progress;
+        progress(&missing[0], 0.0);
+        let latest_progress_writer = Arc::clone(&latest_progress);
+        let progress_with_latest = move |ep: &str, percent: f64| {
+            if let Ok(mut latest) = latest_progress_writer.lock() {
+                *latest = (ep.to_string(), percent);
+            }
+            progress(ep, percent);
+        };
+
+        let registration = self
             .manager
             .download_and_register_eps_builder()
             .names(missing.clone())
-            .progress(progress)
+            .progress(progress_with_latest)
             .cancel(Arc::clone(&cancel))
-            .run()
-            .await;
+            .run();
+        tokio::pin!(registration);
+        let mut heartbeat_interval = tokio::time::interval(EP_REGISTRATION_HEARTBEAT_INTERVAL);
+        heartbeat_interval.tick().await; // the first tick completes immediately
+        let result = loop {
+            tokio::select! {
+                result = &mut registration => break result,
+                _ = heartbeat_interval.tick() => {
+                    let (ep, percent) = latest_progress
+                        .lock()
+                        .map(|latest| latest.clone())
+                        .unwrap_or_default();
+                    println!(
+                        "[SdkBackend] still registering execution providers after {}s (latest: {} {:.0}%, cancel requested: {})",
+                        started.elapsed().as_secs(),
+                        ep,
+                        percent,
+                        cancel.load(Ordering::SeqCst)
+                    );
+                }
+            }
+        };
         match result {
             Ok(r) => {
                 summary.registered = r.registered_eps;

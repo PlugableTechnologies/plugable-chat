@@ -8,6 +8,7 @@
     "generate-icons": "node node_modules/@tauri-apps/cli/tauri.js icon src-tauri/icons/icon.png --output src-tauri/icons",
     "dev": "vite",
     "build": "npm run generate-icons && tsc && vite build",
+    "test:unit": "node --test src/store/chat/*.test.ts",
     "preview": "npm run generate-icons && vite preview",
     "tauri": "node scripts/tauri-offline.mjs",
     "tauri:dev": "node scripts/tauri-offline.mjs dev",

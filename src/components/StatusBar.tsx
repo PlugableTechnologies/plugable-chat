@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { cancellingEpRegistrationStatus } from '../store/chat/ep-registration-status';
 import { useChatStore, OperationStatus, ModelStateData, getModelStateMessage, isModelStateBlocking, StartupStateType } from '../store/chat-store';
 
 // Format elapsed time helper
@@ -165,6 +166,7 @@ export function StatusBar() {
         modelIncompatibleNotice,
         setModelIncompatibleNotice,
         loadModel,
+        setOperationStatus,
     } = useChatStore();
     const [switchingToAlternative, setSwitchingToAlternative] = useState(false);
     const [elapsed, setElapsed] = useState(0);
@@ -346,6 +348,24 @@ export function StatusBar() {
                         )}
                     </div>
                     
+                    {/* Cancel button for cancellable operations (GPU provider download) */}
+                    {operationStatus.cancelAction === 'ep-registration' && !operationStatus.completed && (
+                        <button
+                            disabled={operationStatus.cancelRequested}
+                            onClick={async () => {
+                                setOperationStatus(cancellingEpRegistrationStatus(operationStatus));
+                                try {
+                                    await invoke('cancel_ep_registration');
+                                } catch (error) {
+                                    console.warn('[StatusBar] cancel_ep_registration failed:', error);
+                                }
+                            }}
+                            className={`ep-registration-cancel-button flex-shrink-0 ml-3 px-3 py-1 rounded-md text-sm font-medium border ${colors!.border} ${colors!.text} hover:bg-black/5 disabled:opacity-50 transition-colors`}
+                        >
+                            {operationStatus.cancelRequested ? 'Cancelling…' : 'Cancel'}
+                        </button>
+                    )}
+
                     {/* Dismiss button */}
                     <button
                         onClick={dismissStatusBar}

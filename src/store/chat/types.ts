@@ -18,6 +18,10 @@ export interface OperationStatus {
     completed?: boolean;
     /** Start time for elapsed timer */
     startTime: number;
+    /** When set, the status bar shows a Cancel button that stops this operation */
+    cancelAction?: 'ep-registration';
+    /** The user clicked Cancel; the button is disabled until the backend confirms */
+    cancelRequested?: boolean;
 }
 
 export interface CachedModel {
