@@ -23,7 +23,7 @@ for NAME in "${NAMES[@]}"; do
   "$HERE/ssm.sh" "$IID" "
 \$ProgressPreference='SilentlyContinue'
 Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/PlugableTechnologies/plugable-chat/$SHA/infra/aws-gpu/ask-app.ps1' -OutFile C:\\gpu\\ask-app.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Question '$QUESTION' -Model '$MODEL' -PutUrl '$URL' -WaitSeconds ${WAIT:-240}
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Question '$QUESTION' -Model '$MODEL' -PutUrl '$URL' -WaitSeconds ${WAIT:-600}
 " 600 2>&1 | tail -4
   aws s3 cp "s3://$BUCKET/ask-$IID-$NAME.png" "$OUT/$NAME.png" --only-show-errors && echo "screenshot: $OUT/$NAME.png"
 done

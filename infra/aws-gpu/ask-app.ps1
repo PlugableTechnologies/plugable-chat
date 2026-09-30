@@ -8,7 +8,7 @@ param(
     [Parameter(Mandatory)][string]$Question,
     [Parameter(Mandatory)][string]$Model,
     [Parameter(Mandatory)][string]$PutUrl,
-    [int]$WaitSeconds = 150,
+    [int]$WaitSeconds = 600,
     [string]$AppDir = "C:\gpu\app"
 )
 $ErrorActionPreference = "Continue"
