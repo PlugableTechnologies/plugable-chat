@@ -275,5 +275,17 @@ The daemon log shows `Using WebGPU EP for model: qwen3.5-4b-generic-gpu:4` then 
 validation error. A 200-token completion through the local service took 2.1 s (about **95 tokens/s**, against about 3
 tokens/s for the CPU build). So the fix is in the 1.2.x line, and the CLI test used SDK 1.2.4, not 1.2.3.
 
-**Still not verified.** The crate `foundry-local-sdk =1.2.3` itself (step 1 above with a scratch crate) and anything on
-Windows. The app's stale blocklist entry expires by itself once the pinned SDK version changes (it is keyed on it).
+**SDK 1.2.3 adopted (2026-09-29).** `src-tauri/Cargo.toml` now pins `foundry-local-sdk` 1.2.3. On the Mac,
+`cargo test --lib backend::sdk::tests::sdk_backend_prompts_every_cached_model -- --ignored` (10 cached models)
+gave 8 responding, 0 unexpected. `qwen3.5-4b-generic-gpu:4`, the variant that failed on 1.2.0, generated
+48,318 characters on WebGPU with no validation error. The other qwen3.5 rows (`gpu:2`, `cpu:3`) were cancelled
+by the test's time limit while still reasoning (the test sets no token cap), which is not a runtime error.
+One change was needed: **1.2.3's `Microsoft.AI.Foundry.Local.Core.WinML` package has no `osx-arm64` binary**, so with
+the old default `winml` feature a macOS build ended without `Microsoft.AI.Foundry.Local.Core.dylib` ("Could not
+locate native library"). The `winml` feature is now enabled only for Windows through a
+`[target.'cfg(windows)'.dependencies]` entry, and the app's own `winml` feature is removed (nothing referenced it).
+Windows builds are unchanged: same crate, same `winml` variant.
+
+**Still not verified.** Windows: CI must build the pinned crate and the A10G/T4 boxes still need the plan above
+(steps 2 to 4). Nothing on Windows has run 1.2.3 yet. Also not exercised: the packaged macOS app (the tauri
+bundle takes the dylibs from `foundry-libs/`, which the build now refreshes from 1.2.3).
