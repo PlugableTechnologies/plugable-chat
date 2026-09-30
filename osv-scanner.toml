@@ -1,0 +1,153 @@
+# Known-and-accepted advisories. Every entry has a reason and expires on 2026-12-28, so it gets re-reviewed.
+# Keep this list in sync with deny.toml (cargo-deny); both scanners must ignore the same IDs.
+# The IDs are listed both as RUSTSEC and GHSA aliases where OSV reports both.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0145"
+ignoreUntil = 2026-12-28
+reason = "atty 0.2.14, pulled in only by rustpython-vm 0.4.0 (Python sandbox; no newer RustPython on crates.io). Unmaintained; the unaligned-read report concerns atty's Windows console check (stream-type query on stdio handles), which takes no untrusted input."
+
+[[IgnoredVulns]]
+id = "GHSA-g98v-hv3f-hcfr"
+ignoreUntil = 2026-12-28
+reason = "atty 0.2.14, pulled in only by rustpython-vm 0.4.0 (Python sandbox; no newer RustPython on crates.io). Unmaintained; the unaligned-read report concerns atty's Windows console check (stream-type query on stdio handles), which takes no untrusted input."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0375"
+ignoreUntil = 2026-12-28
+reason = "atty 0.2.14, pulled in only by rustpython-vm 0.4.0 (Python sandbox; no newer RustPython on crates.io). Unmaintained; the unaligned-read report concerns atty's Windows console check (stream-type query on stdio handles), which takes no untrusted input."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0105"
+ignoreUntil = 2026-12-28
+reason = "core2 0.4.0 (unmaintained, all versions yanked), via fastembed -> image -> ravif -> rav1e -> bitstream-io. Not fixable without moving fastembed 4 -> 7 (separate migration). Already locked, so builds are unaffected by the yank."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0057"
+ignoreUntil = 2026-12-28
+reason = "fxhash 0.2.1 (unmaintained), via tauri-utils -> kuchikiki -> selectors. Unmaintained hasher, no vulnerability; waiting on tauri to replace kuchikiki."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+ignoreUntil = 2026-12-28
+reason = "glib 0.18.5 (unsound VariantStrIter), Linux-only via tauri's gtk3 backend (muda -> gtk). Fix needs glib 0.20 which needs a gtk4-based tauri. We do not call glib Variant iterators; shipped targets are Windows and macOS."
+
+[[IgnoredVulns]]
+id = "GHSA-wrw7-89jp-8q8g"
+ignoreUntil = 2026-12-28
+reason = "glib 0.18.5 (unsound VariantStrIter), Linux-only via tauri's gtk3 backend (muda -> gtk). Fix needs glib 0.20 which needs a gtk4-based tauri. We do not call glib Variant iterators; shipped targets are Windows and macOS."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0002"
+ignoreUntil = 2026-12-28
+reason = "lru 0.12.5, via lancedb -> lance -> tantivy 0.24 (our own direct lru is already 0.18). Fix needs a newer tantivy, i.e. lancedb 0.23 -> 0.39 (arrow 56 pin), a separate migration. Unsoundness in IterMut / panic safety of pop(), not reachable from untrusted input."
+
+[[IgnoredVulns]]
+id = "GHSA-rhfx-m35p-ff5j"
+ignoreUntil = 2026-12-28
+reason = "lru 0.12.5, via lancedb -> lance -> tantivy 0.24 (our own direct lru is already 0.18). Fix needs a newer tantivy, i.e. lancedb 0.23 -> 0.39 (arrow 56 pin), a separate migration. Unsoundness in IterMut / panic safety of pop(), not reachable from untrusted input."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0253"
+ignoreUntil = 2026-12-28
+reason = "lru 0.12.5, via lancedb -> lance -> tantivy 0.24 (our own direct lru is already 0.18). Fix needs a newer tantivy, i.e. lancedb 0.23 -> 0.39 (arrow 56 pin), a separate migration. Unsoundness in IterMut / panic safety of pop(), not reachable from untrusted input."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0186"
+ignoreUntil = 2026-12-28
+reason = "memmap2 0.5.10, via rustpython-stdlib (mmap module). The sandbox import allowlist (ALLOWED_MODULES in python-sandbox/src/sandbox.rs) does not include mmap, so model-written Python cannot reach it."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0119"
+ignoreUntil = 2026-12-28
+reason = "number_prefix 0.4.0 (unmaintained), via fastembed -> hf-hub -> indicatif 0.17. Only used for progress-bar byte formatting; goes away with the fastembed 4 -> 7 migration."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2026-12-28
+reason = "paste 1.0.15 (unmaintained proc-macro), via datafusion (lancedb) and other crates. Proc-macro, so compile-time only; no runtime code."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = 2026-12-28
+reason = "proc-macro-error 1.0.4 (unmaintained proc-macro), via glib-macros (Linux gtk3 backend). Compile-time only."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0097"
+ignoreUntil = 2026-12-28
+reason = "rand 0.7.3, build-dependency only (phf_codegen -> selectors -> kuchikiki -> tauri-utils). Not compiled into the shipped binary; the issue needs a custom logger calling rand at runtime."
+
+[[IgnoredVulns]]
+id = "GHSA-cq8v-f236-94qc"
+ignoreUntil = 2026-12-28
+reason = "rand 0.7.3, build-dependency only (phf_codegen -> selectors -> kuchikiki -> tauri-utils). Not compiled into the shipped binary; the issue needs a custom logger calling rand at runtime."
+
+[[IgnoredVulns]]
+id = "GHSA-2f9f-gq7v-9h6m"
+ignoreUntil = 2026-12-28
+reason = "thrift 0.17.0, via parquet 56 -> datafusion -> lance. Fix is 0.23; parquet 56 pins the old version, so this needs the lancedb migration. Only used to read Parquet metadata in our local Lance data."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0192"
+ignoreUntil = 2026-12-28
+reason = "ttf-parser 0.25.1 (unmaintained), via lopdf 0.42. Accepted trade: lopdf 0.42 fixes the stack overflow RUSTSEC-2026-0187 on untrusted PDFs, which is worse than an unmaintained font parser."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0078"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0079"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0082"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0083"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0090"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0094"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0102"
+ignoreUntil = 2026-12-28
+reason = "unic-* 0.9 family (unmaintained), via rustpython-parser / rustpython-stdlib (Python sandbox and pre-exec syntax validation). No replacement released by RustPython 0.4; pure Unicode tables with no I/O."
