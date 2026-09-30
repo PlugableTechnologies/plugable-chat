@@ -113,8 +113,25 @@ jobs:
       # Compiles every dependency, including their build scripts, before any
       # signing credential is exposed. build.rs also stages the Foundry Local
       # native libraries into src-tauri/foundry-libs here.
+      #
+      # The flags must match what `tauri build` runs later (`cargo build --bins --features
+      # tauri/custom-protocol`, seen with `tauri build --verbose`). With different flags the
+      # tauri crate and everything depending on it was compiled a second time, with full
+      # optimization and with the signing credentials already in the environment.
+      # scripts/ci/check-workflow-parity.py fails if these flags drift.
       - name: Compile the Rust workspace (locked, no secrets)
-        run: cargo build --release --locked --manifest-path src-tauri/Cargo.toml
+        run: >
+          cargo build --release --locked --timings
+          --bins --features tauri/custom-protocol
+          --manifest-path src-tauri/Cargo.toml
+
+      # The compile-time report shows which crates dominate and whether anything was built twice.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: cargo-timings-windows
+          path: target/cargo-timings/*.html
+          if-no-files-found: warn
 
       - name: Install DigiCert signing tools (smctl)
         uses: digicert/code-signing-software-trust-action@fae23a455ba4bde62b64fd7cb2f81ade788f5a95 # v1.2.1

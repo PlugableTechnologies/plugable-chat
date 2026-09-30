@@ -3,8 +3,12 @@ members = ["src-tauri", "mcp-test-server"]
 resolver = "2"
 
 [profile.release]
-codegen-units = 1
-lto = true
+# Thin LTO with parallel code generation: fat LTO + one codegen unit made the optimized Windows
+# build run past 77 minutes on a 4-core hosted runner (the final optimization pass is
+# single-threaded). The app's heavy compute is in ONNX Runtime and the Foundry native libraries,
+# so the small loss in Rust code speed does not matter here.
+codegen-units = 16
+lto = "thin"
 strip = true
 panic = "abort"
 

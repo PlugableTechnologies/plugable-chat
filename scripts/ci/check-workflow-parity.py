@@ -43,6 +43,10 @@ protoc = lambda t: (re.findall(r"protoc-([\d.]+)-win64", t)[:1], re.findall(r'-n
 if protoc(ci) != protoc(rel):
     problems.append(f"protoc pin differs: ci {protoc(ci)} vs release {protoc(rel)}")
 
+# The "no secrets" pre-compile must use the flags tauri build uses, or tauri recompiles (see release.yml).
+if "--features tauri/custom-protocol" not in re.sub(r"\s+", " ", rel) or "--bins" not in rel:
+    problems.append("release.yml's pre-compile step no longer matches `tauri build` (--bins --features tauri/custom-protocol)")
+
 if problems:
     print("\n".join(problems))
     sys.exit(1)

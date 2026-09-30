@@ -45,3 +45,17 @@ Ladder first: run `scripts/preflight.sh` before pushing ([test-ladder](../test-l
 ## Ask-first files
 `.github/workflows/release.yml`, `scripts/sign-windows.mjs`, `scripts/verify-windows-signatures.ps1`,
 `.github/CODEOWNERS`, `src-tauri/tauri*.conf.json`.
+
+## Release compile time (first optimized Windows builds, 2026-09-30)
+- The optimized release build had never finished on a hosted runner (fat LTO + one codegen unit: over 77 minutes, cold,
+  no cache in `release.yml` on purpose). Changes for the next tag: `lto = "thin"` + `codegen-units = 16` in the root
+  `Cargo.toml`, and the "no secrets" pre-compile step now runs **exactly what `tauri build` runs**
+  (`cargo build --release --bins --features tauri/custom-protocol`, found with `tauri build --verbose`). Before, the different
+  flags made tauri and its dependents compile a second time, with full optimization and with the signing credentials already
+  in the environment. `scripts/ci/check-workflow-parity.py` guards the flags; the compile step writes `--timings` and uploads
+  `cargo-timings-windows` so the next run shows where the time goes.
+- Not done (need a security decision or measurement): a read-only dependency cache built by trusted CI, lower dependency
+  `opt-level`, removing duplicate/unused crates (about 130 crates appear in two versions), larger runners (useless until the
+  single-threaded link stage is gone).
+- `tauri build` (or anything running `npm run build`) regenerates the tracked `src-tauri/icons`; `git restore src-tauri/icons`
+  afterwards, and use `npx tsc && npx vite build` for local checks.
