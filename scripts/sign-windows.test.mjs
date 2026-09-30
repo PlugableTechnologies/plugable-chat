@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SIGNATURE_SCRIPT,
+  signatureEnv,
   encodedSignatureScript,
   signAndVerify,
   signatureProblems,
@@ -99,4 +100,11 @@ test('the signature script reads the path from the environment, never from $args
 test('the script is passed encoded, so quotes inside it cannot be mangled', () => {
   const decoded = Buffer.from(encodedSignatureScript(), 'base64').toString('utf16le');
   assert.equal(decoded, SIGNATURE_SCRIPT);
+});
+
+test('the PowerShell child does not inherit PSModulePath from a PowerShell 7 parent', () => {
+  const env = signatureEnv('a.exe', { PSModulePath: 'C:\\Program Files\\PowerShell\\7\\Modules', PATH: 'x' });
+  assert.equal(env.PSModulePath, undefined);
+  assert.equal(env.SIGN_TARGET_FILE, 'a.exe');
+  assert.equal(env.PATH, 'x');
 });

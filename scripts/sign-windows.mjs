@@ -54,12 +54,23 @@ export const SIGNATURE_SCRIPT =
 /** The script as a PowerShell -EncodedCommand argument (UTF-16LE base64): immune to Windows quoting rules. */
 export const encodedSignatureScript = () => Buffer.from(SIGNATURE_SCRIPT, 'utf16le').toString('base64');
 
+/**
+ * Environment for the PowerShell child. When the workflow shell is PowerShell 7, its PSModulePath is
+ * inherited and Windows PowerShell 5.1 then cannot load Microsoft.PowerShell.Security ("the module
+ * could not be loaded"), so Get-AuthenticodeSignature fails. Dropping it lets each PowerShell use its own.
+ */
+export function signatureEnv(file, baseEnv = process.env) {
+  const env = { ...baseEnv, SIGN_TARGET_FILE: file };
+  delete env.PSModulePath;
+  return env;
+}
+
 /** Read the Authenticode signature Windows reports for a file. */
 export function getSignatureFromWindows(file, powershell = process.env.SIGN_POWERSHELL || 'powershell.exe') {
   const result = spawnSync(
     powershell,
     ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedSignatureScript()],
-    { encoding: 'utf8', env: { ...process.env, SIGN_TARGET_FILE: file } },
+    { encoding: 'utf8', env: signatureEnv(file) },
   );
   if (result.status !== 0) {
     console.error(`[sign-windows] could not read the signature of ${file}: ${(result.stderr || '').trim()}`);
