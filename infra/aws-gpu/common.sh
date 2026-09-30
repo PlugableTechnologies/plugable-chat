@@ -13,7 +13,7 @@ VPC_NAME="plugable-chat-gpu"
 VPC_CIDR="10.60.0.0/24"
 SUBNET_AZ="${SUBNET_AZ:-us-east-1a}"   # g4dn.xlarge is offered in 1a-1d and 1f
 SG_NAME="plugable-chat-gpu-no-inbound"
-INSTANCE_TYPE="${INSTANCE_TYPE:-g4dn.xlarge}"
+INSTANCE_TYPE="${INSTANCE_TYPE:-g5.xlarge}"  # A10G (Ampere); Turing (T4) and older are not supported test targets
 # Server 2025 (build 26100, the same base as Windows 11 24H2): Windows ML's hardware-optimized
 # execution providers need 24H2 or newer. Use ...Windows_Server-2022-... to test the older floor.
 AMI_SSM_PARAM="${AMI_SSM_PARAM:-/aws/service/ami-windows-latest/Windows_Server-2025-English-Full-Base}"

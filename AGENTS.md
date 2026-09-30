@@ -77,6 +77,11 @@ only for what needs real Windows or a GPU, and only after preflight passes. If a
 rung than needed, add a check to the lower rung. Details, costs and past escapes:
 [`docs/testing-ladder.md`](docs/testing-ladder.md); the same guidance is available as the `test-ladder` skill.
 
+## Skills
+
+Operational playbooks (what we planned, built, learned) live in `.claude/skills/`: `test-ladder`, `build-and-ci`,
+`installer`, `gpu-validation`, `release-signing`, `models-and-tools`. Read the matching one before touching that area.
+
 ## GPU validation (for agents)
 
 The app is tested on a real Windows + NVIDIA GPU box that exists only for the length of a run.
