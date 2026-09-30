@@ -173,6 +173,26 @@ running copy, uninstall, reinstall all pass. Lessons: the per-user installer run
 and SSM do) installs into the SYSTEM profile unless given `/D=`; run the ask scripts against `C:\gpu\app`.
 Parallel `ask.sh` runs need per-instance S3 keys (fixed).
 
+## SDK 1.2.3 on the T4 box (2026-09-30, build b597ad3, run 1 of 3)
+
+One g4dn.xlarge (Tesla T4, driver 596.86, Windows Server 2025), about 1 h 45 min, roughly $1. CI artifacts
+`windows-unsigned-b597ad3...` and `gpu-tests-b597ad3...` from run 36650701881; torn down cleanly.
+
+**Passed (compiled GPU tests, run as SYSTEM through SSM):**
+- `sdk_backend_gpu_execution_providers`: CUDA and WebGPU both registered (60 s the first time, 10 s afterwards); 48 of 48 catalog models are GPU variants.
+- `sdk_backend_download_gpu_chat_model` (`qwen3-0.6b-cuda-gpu:2` in 5 s; phi-4-mini 61 s; qwen3.5-4b 68 s) and `sdk_backend_chat_roundtrip`.
+- Sweep on `Phi-4-mini-instruct-cuda-gpu:5`: OK in 7 s.
+- `qwen3.5-4b-cuda-gpu:4` fails at generation exactly as before (A7: `LinearAttention ... CUDA failure` at layer 0, Turing). No change from 1.2.0.
+- `sdk_backend_catalog_has_device_type` fails on this box at the Mac-only WebGPU assertion (already noted in A8); not a 1.2.3 effect.
+
+**Installed app, Chicago questions: not completed, and this is the open work.**
+- The first-run provider registration in the interactive Administrator profile took 681 s, then 199 s and 82 s on the next launches, while the same registration in the test program took 10 to 12 s (and 379 s once as Administrator, before dropping to 12 s). The log is silent during it and the box is idle (4% CPU, no disk reads), so it is waiting, not working. Lesson 12's "about 3 s afterwards" did not hold for the app. Unknown whether this is 1.2.3 or the box; a run of the previous build (1.2.0) is the missing comparison.
+- The harness (`ask-app.ps1`) restarts the app for every question and waits a fixed time, so a question whose launch registers slowly is screenshotted at "Connecting to Foundry...". Of the runs that got far enough, one (`top-types`) loaded phi-4-mini and answered with a generic "I don't have access to real-time databases", with no SQL tool call and a 264-character system prompt. A separate launch with the same model did make `sqlite-sql` calls. Not diagnosed; it may predate 1.2.3 (the earlier 5d3385a run had all 7 correct), so it needs a 1.2.0 run for comparison before it is attributed to anything.
+- Two harness mistakes to avoid: the tests write models to the SYSTEM profile cache while the app reads the Administrator cache (copy the model across, or download as Administrator), and killing `ask.sh` locally does not stop `ask-app.ps1` on the box.
+- `ask-app.ps1` should wait for `chat-finished` (or a timeout) instead of sleeping a fixed time, and pre-warm the providers once before the questions.
+
+**Next run (2 of 3):** build the previous commit's installer (or fetch 5d3385a's artifacts if they still exist) and repeat the app launch timing and one Chicago question on the same box type, then this build again, so the registration time and the tool-less answer can be compared.
+
 ## Installer scope: perMachine (decided 2026-09-29)
 
 `bundle.windows.nsis.installMode` is `perMachine` (Program Files, HKLM uninstall entry, all-users Start
