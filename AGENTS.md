@@ -69,6 +69,14 @@ The goal is always: **don't make the model figure it out; tell it exactly what t
 
 See `build_sql_error_recovery_prompt()` in `system_prompt.rs` for the reference implementation.
 
+## Testing order (for agents)
+
+Test as low as possible: **local first, then EC2, then GitHub**, so few errors reach GitHub. Run
+`scripts/preflight.sh` (about 1 minute) before every push and do not push on red. Use the paid GPU box
+only for what needs real Windows or a GPU, and only after preflight passes. If a failure reaches a higher
+rung than needed, add a check to the lower rung. Details, costs and past escapes:
+[`docs/testing-ladder.md`](docs/testing-ladder.md); the same guidance is available as the `test-ladder` skill.
+
 ## GPU validation (for agents)
 
 The app is tested on a real Windows + NVIDIA GPU box that exists only for the length of a run.

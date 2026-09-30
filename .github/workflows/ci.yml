@@ -64,7 +64,9 @@ jobs:
         run: npm ci
 
       - name: Check the tauri crate and npm package versions match
-        run: node scripts/ci/check-tauri-versions.mjs
+        run: |
+          node --test scripts/ci/check-tauri-versions.test.mjs
+          node scripts/ci/check-tauri-versions.mjs
 
       - name: Type-check and build the frontend
         run: npm run build
@@ -112,7 +114,9 @@ jobs:
         run: npm ci
 
       - name: Check the tauri crate and npm package versions match
-        run: node scripts/ci/check-tauri-versions.mjs
+        run: |
+          node --test scripts/ci/check-tauri-versions.test.mjs
+          node scripts/ci/check-tauri-versions.mjs
 
       - name: Type-check and build the frontend
         run: npm run build
