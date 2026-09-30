@@ -192,7 +192,8 @@ jobs:
         run: |
           $files = @("target/release/plugable-chat.exe") +
             (Get-ChildItem target/release/bundle -Include *.exe, *.msi -Recurse -File | ForEach-Object { $_.FullName })
-          pwsh scripts/verify-windows-signatures.ps1 -Path $files
+          # In-process call: a child "pwsh script -Path a, b, c" splits the list into positional arguments.
+          ./scripts/verify-windows-signatures.ps1 -Path $files
 
       - name: Collect release files
         shell: pwsh

@@ -121,4 +121,4 @@ jobs:
       - name: Verify the signatures
         if: always()
         shell: pwsh
-        run: pwsh scripts/verify-windows-signatures.ps1 -Path smoke/hello.exe, smoke/hello.dll, smoke/hello.msi
+        run: ./scripts/verify-windows-signatures.ps1 -Path smoke/hello.exe, smoke/hello.dll, smoke/hello.msi

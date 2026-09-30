@@ -56,6 +56,10 @@ for p in sorted(glob.glob('.github/workflows/*.yml')):
     except Exception as e: print(p, e); bad = 1
 sys.exit(bad)
 PY
+run "verifier takes several files (argument binding)" pwsh -NoProfile -Command '
+  $out = (& ./scripts/verify-windows-signatures.ps1 -Path a.exe, b.dll, c.msi 2>&1 | Out-String)
+  if ($out -match "positional parameter") { Write-Host $out; exit 1 }
+  exit 0'
 optional actionlint "actionlint (workflow semantics)" actionlint
 optional zizmor "zizmor (workflow security)" zizmor --offline .github/workflows
 run "PowerShell scripts parse" pwsh -NoProfile -Command '
