@@ -15,7 +15,11 @@ token, client `.p12` and password stay with the user (ingested by brix-cli `inge
   `SM_CLIENT_CERT_PASSWORD`, `SM_KEYPAIR_ALIAS`. Required reviewers: `bernieplug` or `dnuzum`. Deployment branches: `main`
   and `v*` tags (the first smoke run failed because `main` was not allowed yet).
 - **Never approve your own signing run.** The person or agent that dispatched it must not approve; the auto-mode safety
-  check blocks it, and the two-person gate is the point.
+  check blocks it, and the two-person gate is the point. **Current state (2026-09-30): Required reviewers is switched OFF on
+  `release-signing`, by the user, to get the pipeline working. "Allow administrators to bypass configured protection rules"
+  is still ticked. Before the first real release turn Required reviewers back on (`bernieplug`, `dnuzum`) and untick the
+  bypass box; with the bypass ticked any repo admin can skip the gate.** A smoke job can get stuck in "waiting" if its gate was
+  created just before the setting changed: cancel the run and dispatch again.
 - Tag ruleset "Restrict v* release tags". `release.yml` (verify-tag -> build-windows in the environment -> build-linux with
   cosign/attestations -> publish) is an ask-first file; Windows job timeout is 180 min.
 
@@ -26,17 +30,24 @@ captures `smctl` output; treats `FAILED`/`Error :` as failure **even when smctl 
 `SIGN_ROUTE=simple|signtool`. Tests: `node --test scripts/sign-windows.test.mjs` (fake smctl, runs in CI and preflight).
 `scripts/verify-windows-signatures.ps1` is the release-time verifier.
 
-## What broke and why (2026-09-30)
-- Default `smctl sign` on Windows runs **`signtool` with the DigiCert KSP** (`/csp "DigiCert Signing Manager KSP"`). The DigiCert
-  action in `simple-signing-mode: true` installs only `smctl`: no KSP, no certificate sync, `Signtool: Mapped: No`, and
-  `signtool` is not on PATH on `windows-latest`. Result: `smctl` printed "signCommand command ... FAILED", **exited 0**, and
-  the file stayed unsigned. Credentials were fine (`smctl healthcheck`: Connected, Can sign: Yes, keypair ONLINE).
-- Two candidate routes, decided by the two-route smoke test (`signing-smoke-test.yml`, matrix `simple` / `signtool`, each
-  signs an exe, a DLL and an MSI with the release script, then verifies): **simple** = `smctl sign --simple` (no signtool, no
-  KSP, timestamp `timestamp.digicert.com`); **signtool** = action in normal mode plus `signtool` on PATH, `smksp_registrar`,
-  `smctl windows certsync`. Use one route everywhere so the release path equals the tested path. Because the MSI must be
-  kept, the winner must sign MSI too. **Result of the two-route run: not yet known** (run
-  36681616841 awaiting approval); update this file and `release.yml` once it is.
+## What broke and why (2026-09-30), and the decision
+- Default `smctl sign` on Windows runs **`signtool` with the DigiCert KSP**. The DigiCert action in `simple-signing-mode: true`
+  installs only `smctl` (no KSP, no certificate sync, `Signtool: Mapped: No`, and `signtool` is not on PATH on `windows-latest`),
+  so the first run printed "signCommand command ... FAILED", **exited 0**, and left the file unsigned. Credentials were fine
+  (`smctl healthcheck`: Connected, Can sign: Yes, keypair ONLINE).
+- **Two-route smoke test result (run 36768597470, green):** both routes sign an **exe, a DLL and an MSI**; the verifier shows
+  `CN="LEANCODE, INC."` (EV, Delaware, serial 7376809) with a DigiCert timestamp on all six.
+  - `simple` (`smctl sign --simple`): no signtool, no KSP, about 3 s for three files. **Chosen and the script default**;
+    `release.yml` also sets `SIGN_ROUTE: simple` on both signing steps.
+  - `signtool`: action in normal mode + `signtool` on PATH + `smksp_registrar register` + `smctl windows certsync`; kept as the
+    fallback route in the smoke matrix (`SIGN_ROUTE=signtool`).
+- Bugs in our own tooling found on the way (all fixed, each became a test or check): (1) `powershell -Command "<script>" <file>`
+  never gives the script `$args`: pass the path in `$env:SIGN_TARGET_FILE` and use `-EncodedCommand`; (2) a Windows PowerShell 5.1
+  child of a PowerShell 7 step inherits `PSModulePath` and cannot load `Microsoft.PowerShell.Security`: drop it from the
+  child's environment; (3) `pwsh script.ps1 -Path a, b, c` from a step splits the list into positional arguments
+  (`A positional parameter cannot be found`): call the verifier in-process (`./scripts/verify-windows-signatures.ps1 -Path ...`),
+  which `release.yml`'s final "verify every shipped file" step also needed; (4) building a test MSI with PowerShell 7 COM calls
+  fails with `DISP_E_TYPEMISMATCH`: use Windows PowerShell 5.1 (`scripts/ci/make-test-msi.ps1`, tested on a real box).
 
 ## Sequence to the first signed build
 1. `scripts/preflight.sh`, CI green on the exact commit, GPU validation of its installer ([gpu-validation](../gpu-validation/SKILL.md)).
