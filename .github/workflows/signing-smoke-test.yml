@@ -50,9 +50,10 @@ jobs:
           SM_KEYPAIR_ALIAS: ${{ secrets.SM_KEYPAIR_ALIAS }}
         run: node scripts/sign-windows.mjs smoke/hello.exe
 
-      # smctl can print "signCommand ... FAILED" and still exit 0, so show DigiCert's own view of
-      # the connection, the keypair the alias points to, and its log. Secrets are masked by Actions.
-      - name: Diagnose the signing setup
+      # The default smctl route on Windows needs signtool on PATH plus DigiCert's KSP driver, neither
+      # of which simple-signing-mode sets up (first run: 'exec: "signtool": executable not found', and
+      # smctl still exits 0). Try the signtool-free `--simple` route and report what Windows sees.
+      - name: Try simple signing (no signtool)
         if: always()
         shell: pwsh
         env:
@@ -61,22 +62,11 @@ jobs:
           SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
           SM_KEYPAIR_ALIAS: ${{ secrets.SM_KEYPAIR_ALIAS }}
         run: |
-          Write-Host "--- smctl healthcheck"
-          smctl healthcheck
-          Write-Host "--- smctl keypair ls"
-          smctl keypair ls
-          Write-Host "--- smctl sign --help"
-          smctl sign --help
-          Write-Host "--- signtool on PATH:"
-          Get-Command signtool -ErrorAction SilentlyContinue | Format-List Source
-          Write-Host "--- retry sign with exit code"
-          smctl sign --keypair-alias $env:SM_KEYPAIR_ALIAS --input smoke/hello.exe --verbose
-          Write-Host "exit code: $LASTEXITCODE"
-          Write-Host "--- smctl logs"
-          Get-ChildItem "$env:USERPROFILE\.signingmanager\logs" -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Host "== $($_.FullName)"
-            Get-Content $_.FullName -Tail 60
-          }
+          smctl sign --simple --keypair-alias $env:SM_KEYPAIR_ALIAS --input smoke/hello.exe --verbose
+          Write-Host "smctl exit code: $LASTEXITCODE"
+          $sig = Get-AuthenticodeSignature smoke/hello.exe
+          $sig | Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+          Get-Content "$env:USERPROFILE\.signingmanager\logs\smctl.log" -Tail 25
 
       - name: Remove the client certificate from the runner
         if: always()
