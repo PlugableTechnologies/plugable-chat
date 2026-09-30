@@ -29,6 +29,7 @@ optional() { # optional <tool> <label> <command...>
 # 1. Versions and dependencies that broke a Windows build only at its very last step.
 run "tauri crate and npm packages agree" node scripts/ci/check-tauri-versions.mjs
 run "version-check tests (LF and CRLF lockfiles)" node --test scripts/ci/check-tauri-versions.test.mjs
+run "release.yml build environment matches ci.yml" python3 scripts/ci/check-workflow-parity.py
 run "npm audit (0 vulnerabilities)" npm audit
 run "cargo lockfile is consistent" bash -c "cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml --no-deps >/dev/null"
 
