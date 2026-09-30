@@ -47,13 +47,26 @@ function ProcessOwner($name) {
 }
 # Launch inside the auto-logon desktop session (session 1) as the admin user, like the earlier lifecycle test.
 function LaunchInSession() {
-    schtasks /create /tn life-launch /tr "$Dir\plugable-chat.exe" /sc once /st 00:00 /ru Administrator /it /rl highest /f | Out-Null
+    # a .cmd at a path without spaces sidesteps schtasks /tr quoting for "C:\Program Files\..."
+    New-Item -ItemType Directory -Force C:\gpu | Out-Null
+    Set-Content C:\gpu\life-launch.cmd "@echo off`r`nstart `"`" `"$Dir\plugable-chat.exe`""
+    schtasks /create /tn life-launch /tr C:\gpu\life-launch.cmd /sc once /st 00:00 /ru Administrator /it /rl highest /f | Out-Null
     schtasks /run /tn life-launch | Out-Null
 }
 # Launch as a non-admin local user. There is no desktop for that user, so this runs as a batch logon
 # (session 0): it proves the exe starts and stays up under a limited token, not that a window renders.
+function GrantBatchLogon() {
+    $sid = (New-Object Security.Principal.NTAccount($StandardUser)).Translate([Security.Principal.SecurityIdentifier]).Value
+    $cfg = "$env:TEMP\life-rights.inf"; $db = "$env:TEMP\life-rights.sdb"
+    secedit /export /cfg $cfg /areas USER_RIGHTS | Out-Null
+    $text = Get-Content $cfg
+    $text = $text | ForEach-Object { if ($_ -match "^SeBatchLogonRight" -and $_ -notmatch $sid) { "$_,*$sid" } else { $_ } }
+    Set-Content $cfg $text
+    secedit /configure /db $db /cfg $cfg /areas USER_RIGHTS | Out-Null
+}
 function LaunchAsStandardUser() {
-    schtasks /create /tn life-launch-std /tr "$Dir\plugable-chat.exe" /sc once /st 00:00 /ru $StandardUser /rp $stdPassword /rl limited /f | Out-Null
+    GrantBatchLogon
+    schtasks /create /tn life-launch-std /tr C:\gpu\life-launch.cmd /sc once /st 00:00 /ru $StandardUser /rp $stdPassword /rl limited /f | Out-Null
     schtasks /run /tn life-launch-std | Out-Null
 }
 $needed = @("plugable-chat.exe", "uninstall.exe", "foundry-libs", "test-data\demo.db")
@@ -108,7 +121,7 @@ if ($perMachine) {
     Start-Sleep 25
     $owner = ProcessOwner "plugable-chat"
     Check "app running 25 s after launch as the standard user" ($null -ne (Get-Process plugable-chat -ErrorAction SilentlyContinue)) "(owner: $owner)"
-    Check "app process belongs to the standard user, not SYSTEM/Administrator" ($owner -like "*\$StandardUser") "(owner: $owner)"
+    Check "app process belongs to the standard user, not SYSTEM/Administrator" ([bool]($owner -like "*\$StandardUser")) "(owner: $owner)"
     Stop-Process -Name plugable-chat, msedgewebview2 -Force -ErrorAction SilentlyContinue
     Start-Sleep 3
 }
