@@ -3,6 +3,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  SIGNATURE_SCRIPT,
+  encodedSignatureScript,
   signAndVerify,
   signatureProblems,
   smctlArgs,
@@ -87,4 +89,14 @@ test('ordinary smctl output is not mistaken for a failure', () => {
   assert.equal(smctlOutputShowsFailure('Signing smoke/hello.exe\nDone'), false);
   assert.equal(smctlOutputShowsFailure('signCommand command for file a.exe FAILED'), true);
   assert.equal(smctlOutputShowsFailure('Error : \n boom'), true);
+});
+
+test('the signature script reads the path from the environment, never from $args', () => {
+  assert.ok(SIGNATURE_SCRIPT.includes('$env:SIGN_TARGET_FILE'));
+  assert.ok(!SIGNATURE_SCRIPT.includes('$args'));
+});
+
+test('the script is passed encoded, so quotes inside it cannot be mangled', () => {
+  const decoded = Buffer.from(encodedSignatureScript(), 'base64').toString('utf16le');
+  assert.equal(decoded, SIGNATURE_SCRIPT);
 });

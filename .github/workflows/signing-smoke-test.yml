@@ -101,7 +101,14 @@ jobs:
           SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
           SM_KEYPAIR_ALIAS: ${{ secrets.SM_KEYPAIR_ALIAS }}
           SIGN_ROUTE: ${{ matrix.route }}
-        run: node scripts/sign-windows.mjs smoke/hello.exe smoke/hello.dll smoke/hello.msi
+        run: |
+          # One file at a time so a single run shows which file types each route can sign.
+          $failed = @()
+          foreach ($file in "smoke/hello.exe", "smoke/hello.dll", "smoke/hello.msi") {
+            node scripts/sign-windows.mjs $file
+            if ($LASTEXITCODE -ne 0) { $failed += $file }
+          }
+          if ($failed.Count -gt 0) { Write-Host "NOT SIGNED on the ${env:SIGN_ROUTE} route: $($failed -join ', ')"; exit 1 }
 
       - name: Remove the client certificate from the runner
         if: always()
@@ -112,5 +119,6 @@ jobs:
           }
 
       - name: Verify the signatures
+        if: always()
         shell: pwsh
         run: pwsh scripts/verify-windows-signatures.ps1 -Path smoke/hello.exe, smoke/hello.dll, smoke/hello.msi

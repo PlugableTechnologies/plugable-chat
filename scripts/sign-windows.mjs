@@ -40,26 +40,35 @@ export function smctlOutputShowsFailure(output) {
   return SMCTL_FAILURE.test(output ?? '');
 }
 
+/**
+ * PowerShell script that prints the Authenticode signature of $env:SIGN_TARGET_FILE as JSON.
+ * The path travels in the environment: with `powershell -Command`, extra arguments are
+ * appended to the command text and never become $args, which made every check read "Unknown".
+ */
+export const SIGNATURE_SCRIPT =
+  '$s = Get-AuthenticodeSignature -LiteralPath $env:SIGN_TARGET_FILE; ' +
+  '[pscustomobject]@{ status = $s.Status.ToString(); ' +
+  'subject = if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { "" }; ' +
+  'timestamp = [bool]$s.TimeStamperCertificate } | ConvertTo-Json -Compress';
+
+/** The script as a PowerShell -EncodedCommand argument (UTF-16LE base64): immune to Windows quoting rules. */
+export const encodedSignatureScript = () => Buffer.from(SIGNATURE_SCRIPT, 'utf16le').toString('base64');
+
 /** Read the Authenticode signature Windows reports for a file. */
-export function getSignatureFromWindows(file) {
+export function getSignatureFromWindows(file, powershell = process.env.SIGN_POWERSHELL || 'powershell.exe') {
   const result = spawnSync(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      '$s = Get-AuthenticodeSignature -LiteralPath $args[0]; ' +
-        '[pscustomobject]@{ status = $s.Status.ToString(); ' +
-        'subject = if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { "" }; ' +
-        'timestamp = [bool]$s.TimeStamperCertificate } | ConvertTo-Json -Compress',
-      file,
-    ],
-    { encoding: 'utf8' },
+    powershell,
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedSignatureScript()],
+    { encoding: 'utf8', env: { ...process.env, SIGN_TARGET_FILE: file } },
   );
-  if (result.status !== 0) return { status: 'Unknown', subject: '', timestamp: false };
+  if (result.status !== 0) {
+    console.error(`[sign-windows] could not read the signature of ${file}: ${(result.stderr || '').trim()}`);
+    return { status: 'Unknown', subject: '', timestamp: false };
+  }
   try {
     return JSON.parse(result.stdout.trim());
   } catch {
+    console.error(`[sign-windows] unreadable signature output for ${file}: ${result.stdout}`);
     return { status: 'Unknown', subject: '', timestamp: false };
   }
 }
