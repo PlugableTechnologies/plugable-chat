@@ -7,7 +7,7 @@
 # After it returns the caller must REBOOT once: auto-logon only takes effect at
 # the next boot, and it is what creates the desktop session the screen capture
 # needs. The failsafe below survives that reboot.
-param([int]$DeadlineMinutes = 90)
+param([int]$DeadlineMinutes = 90, [switch]$SkipGpuDriver)   # -SkipGpuDriver: CPU-only box (installer tests)
 
 $ErrorActionPreference = "Stop"
 # Lesson: Invoke-WebRequest with the progress bar on is 50x slower (a 748 MB driver
@@ -53,7 +53,7 @@ Register-ScheduledTask -TaskName "gpu-failsafe" -Action $action -Trigger $trigge
 
 # 2. NVIDIA driver AWS publishes for G instances. Free, from AWS's public bucket.
 # Measured: 13 s download, 110 s install, no reboot needed for the T4 to appear.
-if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue) -and -not (Test-Path C:\Windows\System32\nvidia-smi.exe)) {
+if (-not $SkipGpuDriver -and -not (Get-Command nvidia-smi -ErrorAction SilentlyContinue) -and -not (Test-Path C:\Windows\System32\nvidia-smi.exe)) {
     Step "installing NVIDIA driver"
     $name = "596.86__grid_win10_win11_server2022_server2025_dch_64bit_international_aws_swl.exe"
     Get-File "https://ec2-windows-nvidia-drivers.s3.amazonaws.com/latest/$name" "$work\driver.exe"
