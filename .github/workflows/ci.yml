@@ -63,8 +63,14 @@ jobs:
       - name: Install JavaScript dependencies (locked)
         run: npm ci
 
+      - name: Check the tauri crate and npm package versions match
+        run: node scripts/ci/check-tauri-versions.mjs
+
       - name: Type-check and build the frontend
         run: npm run build
+
+      - name: Signing script tests (no Windows or DigiCert needed)
+        run: node --test scripts/sign-windows.test.mjs
 
       - name: Rust unit tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
@@ -104,6 +110,9 @@ jobs:
 
       - name: Install JavaScript dependencies (locked)
         run: npm ci
+
+      - name: Check the tauri crate and npm package versions match
+        run: node scripts/ci/check-tauri-versions.mjs
 
       - name: Type-check and build the frontend
         run: npm run build
