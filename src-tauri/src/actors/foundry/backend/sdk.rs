@@ -868,7 +868,12 @@ mod tests {
         // Windows; without this a GPU model fails to load ("requires the CUDAExecutionProvider").
         register_all_eps(&backend).await;
 
-        let cached = backend.list_cached().await;
+        let mut cached = backend.list_cached().await;
+        // Optional substring filter (e.g. `PLUGABLE_TEST_MODEL_FILTER=qwen3.5`) to re-run a subset.
+        if let Ok(filter) = std::env::var("PLUGABLE_TEST_MODEL_FILTER") {
+            let filter = filter.to_lowercase();
+            cached.retain(|m| m.model_id.to_lowercase().contains(&filter));
+        }
         assert!(!cached.is_empty(), "no cached models to test");
         eprintln!("[test] prompting {} cached model(s)", cached.len());
 
@@ -891,14 +896,16 @@ mod tests {
                 reasoning_effort: "medium".into(),
                 use_responses_api: false,
             };
+            let started = std::time::Instant::now();
             let outcome = backend.chat_stream(req, tx, cancel_rx).await;
+            let elapsed_secs = started.elapsed().as_secs_f32();
             let mut text = String::new();
             while let Ok(chunk) = rx.try_recv() {
                 text.push_str(&chunk);
             }
             let ok = outcome.error.is_none() && !text.trim().is_empty();
             eprintln!(
-                "[test]   {id}: {} (chars={}, err={:?})",
+                "[test]   {id}: {} (chars={}, elapsed={elapsed_secs:.0}s, err={:?})",
                 if ok { "OK" } else { "FAILED" },
                 text.trim().len(),
                 outcome.error.as_ref().map(|e| e.message())
