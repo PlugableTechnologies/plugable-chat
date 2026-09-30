@@ -148,13 +148,13 @@ jobs:
       # code and native libraries, which is what the GPU box needs to validate. The
       # optimized build is release.yml's job.
       - name: Build the unsigned installer (debug profile)
-        run: node node_modules/@tauri-apps/cli/tauri.js build --debug --bundles nsis
+        run: node node_modules/@tauri-apps/cli/tauri.js build --debug --bundles nsis,msi
 
       - name: Collect the installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path installer | Out-Null
-          Get-ChildItem target/debug/bundle/nsis -Filter *.exe | Copy-Item -Destination installer
+          Get-ChildItem target/debug/bundle -Include *.exe, *.msi -Recurse -File | Copy-Item -Destination installer
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

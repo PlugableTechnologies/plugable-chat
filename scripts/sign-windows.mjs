@@ -15,8 +15,8 @@
  *   SM_HOST, SM_API_KEY, SM_CLIENT_CERT_FILE, SM_CLIENT_CERT_PASSWORD
  *   and one of SM_KEYPAIR_ALIAS or SM_CODE_SIGNING_CERT_SHA1_HASH.
  * Optional:
- *   SIGN_ROUTE             "signtool" (default, smctl drives signtool + the DigiCert KSP) or
- *                          "simple" (smctl --simple: no signtool, no KSP).
+ *   SIGN_ROUTE             "simple" (default: smctl --simple, no signtool, no KSP; proven by the smoke test
+ *                          for exe, dll and msi) or "signtool" (smctl drives signtool + the DigiCert KSP).
  *   SIGN_EXPECTED_SUBJECT  text the signer subject must contain (default "LEANCODE, INC.").
  *
  * `smctl` prints "signCommand command ... FAILED" and still exits 0 when the signing tool is
@@ -169,7 +169,7 @@ function main() {
     ? ['--keypair-alias', keypairAlias]
     : ['--fingerprint', fingerprint];
 
-  const route = process.env.SIGN_ROUTE || 'signtool';
+  const route = process.env.SIGN_ROUTE || 'simple';
   if (!['signtool', 'simple'].includes(route)) fail(`SIGN_ROUTE must be signtool or simple, got '${route}'`);
   const expectedSubject = process.env.SIGN_EXPECTED_SUBJECT || DEFAULT_SUBJECT;
 
