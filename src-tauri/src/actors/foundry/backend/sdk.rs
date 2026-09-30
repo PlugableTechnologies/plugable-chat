@@ -31,8 +31,10 @@ use crate::protocol::{CachedModel, CatalogModel, CatalogModelRuntime, ChatMessag
 
 /// Key used by the version-scoped incompatible-models blocklist under the SDK runtime.
 /// Distinct from the CLI's `foundry --version` (e.g. `0.8.119`), so a model blocklisted on
-/// the old runtime is automatically re-evaluated here.
-pub const FOUNDRY_SDK_VERSION_KEY: &str = "sdk-1.2.0";
+/// the old runtime is automatically re-evaluated here. Keep in step with the `foundry-local-sdk`
+/// pin in Cargo.toml (`sdk_version_key_matches_cargo_pin` fails if they drift): changing the key
+/// is what makes a model blocklisted on an older SDK get a fresh chance.
+pub const FOUNDRY_SDK_VERSION_KEY: &str = "sdk-1.2.3";
 
 /// Process-global manager singleton (matches the SDK's own `create()` singleton contract).
 static MANAGER: OnceLock<&'static FoundryLocalManager> = OnceLock::new();
@@ -670,6 +672,17 @@ fn map_messages(messages: &[ChatMessage]) -> Vec<ChatCompletionRequestMessage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sdk_version_key_matches_cargo_pin() {
+        let cargo_toml = include_str!("../../../../Cargo.toml");
+        let pinned = cargo_toml
+            .lines()
+            .find(|l| l.trim_start().starts_with("foundry-local-sdk"))
+            .and_then(|l| l.split('"').nth(1))
+            .expect("foundry-local-sdk pin in Cargo.toml");
+        assert_eq!(FOUNDRY_SDK_VERSION_KEY, format!("sdk-{pinned}"));
+    }
+
     use super::*;
     use crate::protocol::ChatMessage;
 
