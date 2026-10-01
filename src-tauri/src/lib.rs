@@ -1895,7 +1895,10 @@ pub fn run() {
                 let refresh_model = cpu_embedding_model_arc.clone();
                 let pending_flag = schema_index_pending.clone();
                 tauri::async_runtime::spawn(async move {
-                    for _ in 0..240 {
+                    // The embedding model is created after GPU provider registration and the model
+                    // pre-warm, which took 150+ s on a fresh Windows box; two minutes was not enough
+                    // (the first prompt then ran with no tables: "CPU embedding model not initialized").
+                    for _ in 0..1200 {
                         if refresh_model.read().await.is_some() {
                             break;
                         }

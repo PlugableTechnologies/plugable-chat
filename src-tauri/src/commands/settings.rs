@@ -540,8 +540,9 @@ pub async fn get_launch_overrides(
     launch_config: State<'_, LaunchConfigState>,
 ) -> Result<LaunchOverridesPayload, String> {
     if launch_config.launch_overrides.initial_prompt.is_some() {
-        // Give the launch-time schema index up to five minutes so the first prompt sees the tables.
-        for _ in 0..1200 {
+        // Give the launch-time schema index up to ten and a half minutes (it waits for the embedding
+        // model, which starts after GPU provider registration) so the first prompt sees the tables.
+        for _ in 0..2520 {
             if !launch_config
                 .schema_index_pending
                 .load(std::sync::atomic::Ordering::SeqCst)
