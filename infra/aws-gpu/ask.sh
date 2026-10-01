@@ -24,6 +24,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 IID="$1"; MODEL="$2"; BUCKET="$3"; shift 3
 OUT="${OUT:-$HERE/ask-out}"; mkdir -p "$OUT"
 WAIT="${WAIT:-900}"
+# APP_DIR: where the app is installed (default C:\gpu\app; the MSI installs to C:\Program Files\plugable-chat)
+APPARG=""; [ -n "${APP_DIR:-}" ] && APPARG="-AppDir '$APP_DIR'"
 SHA="$(cd "$HERE" && git rev-parse HEAD)"
 RAW="https://raw.githubusercontent.com/PlugableTechnologies/plugable-chat/$SHA/infra/aws-gpu"
 
@@ -62,7 +64,7 @@ fi
 
 if [ "${NO_WARM:-0}" != "1" ]; then
   echo "--- warm-up launch (provider registration, model load)"
-  box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Warm -Model '$MODEL' -WaitSeconds $WAIT" $((WAIT + 120)) | tail -4
+  box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Warm -Model '$MODEL' $APPARG -WaitSeconds $WAIT" $((WAIT + 120)) | tail -4
 fi
 
 : > "$OUT/summary.txt"
@@ -71,7 +73,7 @@ for NAME in "${NAMES[@]}"; do
   QUESTION="$(python3 -c "import json;print(next(q['question'] for q in json.load(open('$HERE/chicago-questions.json')) if q['name']=='$NAME'))")"
   URL="$(python3 -c "import boto3;print(boto3.client('s3').generate_presigned_url('put_object',Params={'Bucket':'$BUCKET','Key':'ask-$IID-$NAME.png'},ExpiresIn=7200))")"
   echo "=== $NAME: $QUESTION"
-  RESULT="$(box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Question '$QUESTION' -Model '$MODEL' -PutUrl '$URL' -WaitSeconds $WAIT" $((WAIT + 120)) | tail -4)"
+  RESULT="$(box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Question '$QUESTION' -Model '$MODEL' -PutUrl '$URL' $APPARG -WaitSeconds $WAIT" $((WAIT + 120)) | tail -4)"
   echo "$RESULT"
   echo "$NAME: $(echo "$RESULT" | grep -o 'outcome=.*' | head -1)" >> "$OUT/summary.txt"
   echo "$RESULT" | grep -q 'outcome=chat-finished' || FAILED=$((FAILED + 1))
