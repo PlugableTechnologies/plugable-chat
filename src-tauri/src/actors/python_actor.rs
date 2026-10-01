@@ -7,9 +7,10 @@
 //! - Batch tool call model: execution pauses on tool_call(), host executes, resumes
 //! - Memory and output size limits for security
 //!
-//! The architecture uses a double-sandbox model:
-//! - Inner: RustPython with restricted Python environment
-//! - Outer: (Optional) WASM sandbox via Wasmtime for additional isolation
+//! The sandbox is RustPython linked in-process (`python_sandbox::execute`) with a restricted
+//! Python environment (import allowlist, blocked builtins). There is no outer WASM layer: the
+//! `python-sandbox` crate can be compiled for wasm32-wasip1, but nothing in the app loads that
+//! module (no wasmtime dependency), so release builds neither build nor ship it.
 
 use fastembed::TextEmbedding;
 use serde::{Deserialize, Serialize};
@@ -100,6 +101,9 @@ impl PythonSandboxActor {
     }
 
     pub async fn run(mut self) {
+        println!(
+            "[PythonActor] Python sandbox path: in-process RustPython (restricted imports/builtins); WASM outer layer: not used"
+        );
 
         loop {
             tokio::select! {
