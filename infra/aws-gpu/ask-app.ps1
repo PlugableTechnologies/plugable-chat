@@ -39,12 +39,17 @@ function Stop-AskProcesses {
 # Wait until $Pattern appears in the app's stdout at or after byte offset $From, or the deadline
 # passes. Returns the matching line, or $null on timeout. Also returns early if the app exited.
 function Wait-ForAppLog([string]$Pattern, [datetime]$Deadline, [int]$PollSeconds = 3) {
+    $began = Get-Date
+    $seen = $false
     while ((Get-Date) -lt $Deadline) {
         if (Test-Path $appOut) {
             $hit = Select-String -Path $appOut -Pattern $Pattern -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($hit) { return $hit.Line }
         }
-        if (-not (Get-Process plugable-chat -ErrorAction SilentlyContinue)) { return $null }
+        # The launch task starts the app a moment after we get here: "not running" only means the app
+        # exited once we have seen it running (or after a grace period), never at the very start.
+        if (Get-Process plugable-chat -ErrorAction SilentlyContinue) { $seen = $true }
+        elseif ($seen -or ((Get-Date) - $began).TotalSeconds -gt 45) { return $null }
         Start-Sleep $PollSeconds
     }
     return $null
