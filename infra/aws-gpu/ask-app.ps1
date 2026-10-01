@@ -73,7 +73,7 @@ $promptLine
 `$env:PLUGABLE_ENABLE_DEMO_DB = 'true'
 `$env:PLUGABLE_ALWAYS_ON_TABLES = 'embedded-demo::main.chicago_crimes'
 Remove-Item '$appOut', '$appErr' -ErrorAction SilentlyContinue
-Start-Process $AppDir\plugable-chat.exe -WorkingDirectory $AppDir -RedirectStandardOutput '$appOut' -RedirectStandardError '$appErr'
+Start-Process '$AppDir\plugable-chat.exe' -WorkingDirectory '$AppDir' -RedirectStandardOutput '$appOut' -RedirectStandardError '$appErr'
 "@
 Set-Content "$work\snap-ask.vbs" "CreateObject(`"WScript.Shell`").Run `"$work\ffmpeg.exe -y -hide_banner -f gdigrab -i desktop -frames:v 1 $work\ask.png`", 0, True"
 
