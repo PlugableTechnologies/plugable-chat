@@ -206,13 +206,16 @@ jobs:
             Remove-Item -Force $env:SM_CLIENT_CERT_FILE
           }
 
+      # target/release/plugable-chat.exe is not a shipped file: tauri patches and signs copies of
+      # it that go into the installers (rc4 failed here for that reason). Install both signed
+      # installers on the runner and check the installed exe and the installers themselves.
       - name: Verify every shipped file is signed by our certificate
         shell: pwsh
         run: |
-          $files = @("target/release/plugable-chat.exe") +
-            (Get-ChildItem target/release/bundle -Include *.exe, *.msi -Recurse -File | ForEach-Object { $_.FullName })
-          # In-process call: a child "pwsh script -Path a, b, c" splits the list into positional arguments.
-          ./scripts/verify-windows-signatures.ps1 -Path $files
+          $msi = Get-ChildItem target/release/bundle/msi -Filter *.msi -File | Select-Object -First 1
+          $nsis = Get-ChildItem target/release/bundle/nsis -Filter *-setup.exe -File | Select-Object -First 1
+          if (-not $msi -or -not $nsis) { throw "expected an MSI and an NSIS setup under target/release/bundle" }
+          ./scripts/ci/verify-installers.ps1 -Msi $msi.FullName -Nsis $nsis.FullName
 
       - name: Collect release files
         shell: pwsh
