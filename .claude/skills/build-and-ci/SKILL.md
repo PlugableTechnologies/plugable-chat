@@ -46,16 +46,25 @@ Ladder first: run `scripts/preflight.sh` before pushing ([test-ladder](../test-l
 `.github/workflows/release.yml`, `scripts/sign-windows.mjs`, `scripts/verify-windows-signatures.ps1`,
 `.github/CODEOWNERS`, `src-tauri/tauri*.conf.json`.
 
-## Release compile time (first optimized Windows builds, 2026-09-30)
-- The optimized release build had never finished on a hosted runner (fat LTO + one codegen unit: over 77 minutes, cold,
-  no cache in `release.yml` on purpose). Changes for the next tag: `lto = "thin"` + `codegen-units = 16` in the root
-  `Cargo.toml`, and the "no secrets" pre-compile step now runs **exactly what `tauri build` runs**
-  (`cargo build --release --bins --features tauri/custom-protocol`, found with `tauri build --verbose`). Before, the different
-  flags made tauri and its dependents compile a second time, with full optimization and with the signing credentials already
-  in the environment. `scripts/ci/check-workflow-parity.py` guards the flags; the compile step writes `--timings` and uploads
-  `cargo-timings-windows` so the next run shows where the time goes.
-- Not done (need a security decision or measurement): a read-only dependency cache built by trusted CI, lower dependency
-  `opt-level`, removing duplicate/unused crates (about 130 crates appear in two versions), larger runners (useless until the
-  single-threaded link stage is gone).
+## Release build (what actually happened, 2026-09-30 to 10-01)
+- **The release builds hung; they were never slow.** v0.1.0-rc1..rc3 each ran the full 180 minutes. `src-tauri/build.rs` starts
+  a nested `cargo build -p python-sandbox --target wasm32-wasip1 --release` when the gitignored `src-tauri/wasm/python-sandbox.wasm`
+  is missing (always on CI). In a release build the outer cargo holds `target/release/.cargo-lock` and the nested build needs it
+  for its own build scripts: a circular wait (orphan list: cargo -> build-script-build -> cargo, at 0% CPU). Debug CI uses
+  `target/debug`, so it never hung. Fix: `CARGO_TARGET_DIR` for the nested build is inside `OUT_DIR`. Reproduce locally by moving
+  the .wasm aside and running `cargo build --release --bins --features tauri/custom-protocol --manifest-path src-tauri/Cargo.toml`
+  (5 min 30 s on an 18-core Mac with the fix). Always run a fresh-checkout release build locally before tagging.
+- **Measured (rc4, 4-core runner):** Windows compile 42.8 min (wall), Linux job 67 min, Windows job ~63 min to the signed
+  installers. Critical path at the end is serial: `lance` 8 min -> `lancedb` 3.5 min -> the app crate 12 min, plus the app build
+  script 4 min (the sandbox build, which currently fails to compile against the current `libc`; see the sandbox task).
+- **`tauri build` runs `cargo build --bins --features tauri/custom-protocol`;** the "no secrets" pre-compile uses the same flags
+  so nothing third-party recompiles with credentials in the environment. `lto = "thin"` + `codegen-units = 16` in the root
+  `Cargo.toml`. The compile step writes `cargo --timings` and uploads `cargo-timings-windows`.
+- **Tauri patches and signs copies of the exe** (once per bundle type) that go into the installers and leaves
+  `target/release/plugable-chat.exe` unsigned. Verify what ships: `scripts/ci/verify-installers.ps1` installs the MSI and the
+  NSIS setup silently and checks the installed exe plus both installers.
+- **Every step of a tag-only workflow runs for the first time on a real tag** (cost: rc1 Linux packages, rc4 wrong verify target,
+  rc5 attestation permissions). Keep `release.yml` equal to what CI proves (`scripts/ci/check-workflow-parity.py`: apt packages,
+  Rust pin, protoc pin, pre-compile flags, attestation permissions) and read each untested step against its action's docs.
 - `tauri build` (or anything running `npm run build`) regenerates the tracked `src-tauri/icons`; `git restore src-tauri/icons`
   afterwards, and use `npx tsc && npx vite build` for local checks.
