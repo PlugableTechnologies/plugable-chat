@@ -30,6 +30,7 @@ optional() { # optional <tool> <label> <command...>
 run "tauri crate and npm packages agree" node scripts/ci/check-tauri-versions.mjs
 run "version-check tests (LF and CRLF lockfiles)" node --test scripts/ci/check-tauri-versions.test.mjs
 run "release.yml build environment matches ci.yml" python3 scripts/ci/check-workflow-parity.py
+run "build.rs gives its nested cargo build its own target dir (release deadlock)" bash -c 'grep -q "CARGO_TARGET_DIR" src-tauri/build.rs'
 run "npm audit (0 vulnerabilities)" npm audit
 run "cargo lockfile is consistent" bash -c "cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml --no-deps >/dev/null"
 

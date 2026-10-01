@@ -194,23 +194,32 @@ fn build_python_sandbox_wasm(manifest_path: &Path) {
     // Try to build for wasm32-wasip1 target
     println!("cargo:warning=Building python-sandbox for WASM...");
 
+    // Give the nested build its own target directory. Sharing the workspace one deadlocks in
+    // release builds: the outer `cargo build --release` holds the lock on target/release, and
+    // this nested build needs the same directory for its host build scripts, so it waits forever
+    // for a lock that is released only when this build script returns (a debug outer build uses
+    // target/debug, which is why debug CI never hung).
+    let wasm_target_dir = Path::new(&env::var("OUT_DIR").expect("OUT_DIR is set for build scripts"))
+        .join("python-sandbox-wasm-target");
+
     let status = Command::new("cargo")
         .args([
             "build",
+            "--locked",
             "-p",
             "python-sandbox",
             "--target",
             "wasm32-wasip1",
             "--release",
         ])
+        .env("CARGO_TARGET_DIR", &wasm_target_dir)
         .current_dir(manifest_path)
         .status();
 
     match status {
         Ok(s) if s.success() => {
             // Copy the built WASM to the wasm directory
-            let built_wasm = manifest_path
-                .join("target")
+            let built_wasm = wasm_target_dir
                 .join("wasm32-wasip1")
                 .join("release")
                 .join("python_sandbox.wasm");
