@@ -81,6 +81,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 180
     environment: release-signing
+    # Same as the Linux job: the provenance attestation needs an OIDC token and attestation write
+    # access (rc5 failed at "Attest build provenance" with: missing "id-token" permission).
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

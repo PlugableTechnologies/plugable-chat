@@ -47,6 +47,14 @@ if protoc(ci) != protoc(rel):
 if "--features tauri/custom-protocol" not in re.sub(r"\s+", " ", rel) or "--bins" not in rel:
     problems.append("release.yml's pre-compile step no longer matches `tauri build` (--bins --features tauri/custom-protocol)")
 
+# Every job that attests build provenance needs id-token and attestations write permission.
+for m in re.finditer(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", rel[rel.index("\njobs:"):], re.S | re.M):
+    job, body = m.group(1), m.group(2)
+    if "attest-build-provenance" in body:
+        for perm in ("id-token: write", "attestations: write"):
+            if perm not in body:
+                problems.append(f"release.yml job '{job}' attests provenance but lacks '{perm}'")
+
 if problems:
     print("\n".join(problems))
     sys.exit(1)
