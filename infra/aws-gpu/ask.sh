@@ -75,6 +75,7 @@ for NAME in "${NAMES[@]}"; do
   echo "=== $NAME: $QUESTION"
   RESULT="$(box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Question '$QUESTION' -Model '$MODEL' -PutUrl '$URL' $APPARG -WaitSeconds $WAIT" $((WAIT + 120)) | tail -4)"
   echo "$RESULT"
+  if echo "$RESULT" | grep -q 'InvalidInstanceId'; then echo "box is gone (SSM refused); stopping" >&2; FAILED=$((FAILED + 1)); break; fi
   echo "$NAME: $(echo "$RESULT" | grep -o 'outcome=.*' | head -1)" >> "$OUT/summary.txt"
   echo "$RESULT" | grep -q 'outcome=chat-finished' || FAILED=$((FAILED + 1))
   aws s3 cp "s3://$BUCKET/ask-$IID-$NAME.png" "$OUT/$NAME.png" --only-show-errors && echo "screenshot: $OUT/$NAME.png" || true
