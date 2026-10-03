@@ -350,3 +350,14 @@ before the warm-up, and `ask.sh` should stop on the first SSM failure instead of
 
 **Open:** SHA256SUMS lacks the Windows files; the publish job uploads cargo-timing HTML files; the default-model decision
 (qwen needs six of seven within 3 minutes, else Phi-4-mini) waits for a qwen measurement.
+
+### qwen3.5-4b through the signed rc7 install (2026-10-03, fresh A10G)
+
+Signed MSI lifecycle again 0 failed. First launch: warm-up ready in 144 s (GPU provider registration 61 s, pre-warm 7.3 s).
+**All 7 Chicago questions answered correctly** (227,299; THEFT 52,813 / BATTERY 41,130 / CRIMINAL DAMAGE 25,135; 36,070;
+Austin 11,358; 407; 18,608; July 22,561), each from a database query. Screenshot timestamps put the questions 1 to 4
+minutes apart (8:21 to 8:35 box time) including app launch, so the "within 3 minutes" criterion is probably met but was not
+timed per question; add a per-question duration to `ask-app.ps1` output. Quality issue seen: qwen's visible answer often
+begins with its own reasoning ("The user asked ... I should provide ...") and ends with long follow-up menus; Phi-4-mini
+answers were plainer. The earlier failure of the 2026-10-01 signed run was the guest failsafe (default deadline) terminating
+the box; run `extend.sh <id> 150` right after bootstrap.
