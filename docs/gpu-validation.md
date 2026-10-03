@@ -327,3 +327,26 @@ Windows builds are unchanged: same crate, same `winml` variant.
 **Still not verified.** Windows: CI must build the pinned crate and the A10G/T4 boxes still need the plan above
 (steps 2 to 4). Nothing on Windows has run 1.2.3 yet. Also not exercised: the packaged macOS app (the tauri
 bundle takes the dylibs from `foundry-libs/`, which the build now refreshes from 1.2.3).
+
+## Release v0.1.0-rc7 on a fresh A10G (2026-10-01)
+
+**Signed release build.** The tag run (36870139972) passed verify-tag, Windows build and signing, Linux build and
+signing, and publish. The Windows exe, setup.exe and MSI carry the LEANCODE, INC. EV signature with a DigiCert timestamp.
+
+**Signed MSI lifecycle: 21 of 21 checks passed** (`msi-lifecycle.ps1 -ExpectSigned`, run as SYSTEM): MSI and installed exe
+signed and timestamped; install under Program Files; HKLM registration; all-users shortcut; nothing in the SYSTEM profile;
+reinstall over a running copy; repair restores the exe and a native library; uninstall removes everything; reinstall.
+
+**First-launch timing of the installed, signed app on a fresh box:** warm-up ready in 147 s, GPU provider registration
+65 s, model pre-warm 7.8 s. Earlier debug-build installs took 153 to 383 s for registration, so that delay varies by box
+and is not fixed; it is still unexplained.
+
+**Chicago questions.** On the CI debug MSI (commit 13a0fd1) Phi-4-mini answered six of seven correctly with one tool call each
+(227,299; THEFT 52,813 / BATTERY 41,130 / CRIMINAL DAMAGE 25,135; 36,070; Austin 11,358; 407; 18,608); the month question
+was not captured. On the signed rc7 install the questions did **not** complete: the box had no Phi model cached (only qwen),
+and the box stopped answering SSM after the first question, so only a "model not downloaded, using startup model" warning
+was captured. qwen3.5-4b through the installed app is still unmeasured. The harness should download the requested model
+before the warm-up, and `ask.sh` should stop on the first SSM failure instead of looping through every question.
+
+**Open:** SHA256SUMS lacks the Windows files; the publish job uploads cargo-timing HTML files; the default-model decision
+(qwen needs six of seven within 3 minutes, else Phi-4-mini) waits for a qwen measurement.
