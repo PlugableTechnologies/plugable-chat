@@ -82,6 +82,14 @@ rung than needed, add a check to the lower rung. Details, costs and past escapes
 Operational playbooks (what we planned, built, learned) live in `.claude/skills/`: `test-ladder`, `build-and-ci`,
 `installer`, `gpu-validation`, `release-signing`, `models-and-tools`. Read the matching one before touching that area.
 
+## Download page and user guide (for agents)
+
+The top of `README.md`, `.github/release-notes-template.md` and `docs/user-guide.md` are what the public sees. Rules:
+every claim in them needs a matching result in `docs/gpu-validation.md` (otherwise mark it "not yet tested" or leave it
+out); the guide is UI-only (no command-line flags or terminal steps); screenshots come from real runs with no host names.
+`scripts/ci/check-download-page.mjs` (in `preflight.sh` and CI) fails when the file names there stop matching what the
+release produces. When a release is cut, re-check the status labels in the download table.
+
 ## GPU validation (for agents)
 
 The app is tested on a real Windows + NVIDIA GPU box that exists only for the length of a run.

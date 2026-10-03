@@ -71,6 +71,9 @@ jobs:
       - name: Check release.yml still matches the build environment CI proved
         run: python3 scripts/ci/check-workflow-parity.py
 
+      - name: Check the download page names the files the release produces
+        run: node scripts/ci/check-download-page.mjs
+
       - name: Type-check and build the frontend
         run: npm run build
 

@@ -406,7 +406,7 @@ export function DatabasesTab({
                                 <div className="text-sm text-gray-600 bg-green-50 rounded-lg p-3 border border-green-100">
                                     <p className="font-medium text-green-800 mb-1">Built-in Demo Database</p>
                                     <p className="text-xs text-green-700">
-                                        Chicago Crimes dataset (2025) with ~23,000 records. Uses the Google MCP Database Toolbox for SQLite access.
+                                        Chicago Crimes dataset (2025) with about 227,000 records. Uses the Google MCP Database Toolbox for SQLite access.
                                         Download the toolbox (or set the path to an existing binary below), enable this source, and click "Refresh" to cache the schema.
                                     </p>
                                 </div>

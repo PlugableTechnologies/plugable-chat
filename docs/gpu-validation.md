@@ -137,7 +137,7 @@ run (80 s) and its warm-up put the model on the GPU (VRAM 80 MiB to about 5 GB).
   falls back to Phi-4-mini (a second ~4 GB download). A one-token generation at warm-up would find this
   before the user does.
 - Re-measure `qwen3.5-4b` on the A10G through the app (with its reasoning-effort setting).
-- First-run provider download: the cancel command exists (`cancel_ep_registration`), the button does not.
+- First-run provider download: the cancel command exists (`cancel_ep_registration`) and the status bar has a Cancel button for it (`src/components/StatusBar.tsx`); the button has not been exercised on a real machine.
 - Undiagnosed ignored tests (A8), and porting the four `foundry`-CLI tests to the SDK.
 - The agent loop (a script that dispatches a run, reads the artifacts and iterates) is not built; agents
   can follow the runbook above and `AGENTS.md`.

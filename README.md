@@ -1,5 +1,50 @@
 # Plugable Chat
 
+A local-first chat app that runs AI models on your own computer and can answer questions about your data.
+
+## Download
+
+Open the [latest release](https://github.com/PlugableTechnologies/plugable-chat/releases) and pick your computer from the **Assets** list.
+
+| Your computer | Download this file | Status |
+|---|---|---|
+| Windows 10 or 11 (64-bit) | `plugable-chat_<version>_x64-setup.exe` | **Tested.** Signed by LEANCODE, INC. Install, update, repair and uninstall checked; chat checked on an NVIDIA A10G |
+| Windows, managed by IT | `plugable-chat_<version>_x64_en-US.msi` | **Tested**, same checks as the setup file |
+| Linux (any distribution) | `plugable-chat_<version>_amd64.AppImage` | Built and signed in CI; **not yet run-tested** |
+| Linux (Debian/Ubuntu, Fedora/RHEL) | `.deb` or `.rpm` | Built and signed in CI; **not yet run-tested** |
+| macOS | not available yet | Coming soon. To try it today, build it yourself (see [For developers](#for-developers)) |
+
+While every release is still a pre-release, GitHub's "latest" link does not point at it: open the
+[Releases page](https://github.com/PlugableTechnologies/plugable-chat/releases) and choose the newest entry.
+
+### What you need
+
+- **Windows:** an NVIDIA RTX graphics card of the Ampere generation or newer (RTX 30-series or later) with a current NVIDIA driver.
+  Tested on a data-center Ampere card (A10G); consumer RTX cards are expected to work but have not been tested. Older cards
+  (Tesla T4, RTX 20-series) are not supported.
+- About **6 GB** of free disk space and an **internet connection** the first time you start the app (graphics components of about
+  1.5 GB and an AI model of about 2.5 to 4 GB download then).
+- Administrator rights to install (the app installs for all users on the computer).
+
+### Is my download genuine?
+
+On Windows, right-click the downloaded file, choose **Properties**, open the **Digital Signatures** tab, and check that the
+signer is **LEANCODE, INC.** with a timestamp. Windows may still show a "Windows protected your PC" notice for a new publisher;
+click **More info**, confirm the publisher name, then **Run anyway**.
+
+<details>
+<summary>Advanced: checksums, Sigstore signatures and build attestations (command line)</summary>
+
+See [docs/release-signing.md](docs/release-signing.md#checking-a-download).
+</details>
+
+### Using the app
+
+The [user guide](docs/user-guide.md) walks through installing, the first start, choosing a model and asking questions about the
+built-in Chicago crimes demo database, using only the app's windows and buttons.
+
+## For developers
+
 A high-performance, local-first chat application built with Tauri v2, React, and Rust.
 
 ## Why Plugable Chat
