@@ -15,6 +15,7 @@ that is how the "Foundry must be installed" report was missed.
 | 5 | No NVIDIA driver / unsupported GPU | Windows host with no NVIDIA driver (or Intel/AMD only) | Card or status explains the GPU problem with the driver link; app does not look hung |
 | 6 | No internet at first launch | Disconnect network before first start | Download failure text mentions internet and disk space, not a CLI command |
 | 7 | Previously-installed Foundry Local + Plugable Chat (David's laptop) | Host with both already present | Same behaviour as case 1; bundled engine is used |
+| 8 | App died during startup last time | Launch the app, then kill it (`taskkill /F /IM plugable-chat.exe`) before a model name appears; launch again | Amber "did not finish starting last time" notice with the expected-case explanation; a normal close or a successful start never shows it |
 
 Pass criteria for every row: a human with no context can tell what is wrong and what to do from the screen alone.
 Rows 3, 4 and 6 can be run on macOS; rows 1, 2, 5 and 7 need Windows.
