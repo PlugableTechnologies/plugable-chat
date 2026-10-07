@@ -267,7 +267,7 @@ async function initializeModelsOnStartup<T extends ListenerSliceDeps>(
                 set({
                     operationStatus: {
                         type: 'downloading',
-                        message: `Auto-download failed. Use: foundry model load ${DEFAULT_MODEL_TO_DOWNLOAD}`,
+                        message: `Model download failed (${downloadError?.message ?? downloadError}). Check your internet connection and free disk space, then click the model dropdown to retry.`,
                         startTime: Date.now(),
                     },
                     currentModel: 'No models',

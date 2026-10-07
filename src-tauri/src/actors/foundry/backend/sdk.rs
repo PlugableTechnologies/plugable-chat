@@ -29,6 +29,21 @@ use super::{
 };
 use crate::protocol::{CachedModel, CatalogModel, CatalogModelRuntime, ChatMessage, ModelFamily};
 
+/// True only when WebGPU is the sole non-CPU execution provider. Windows hosts list WebGPU
+/// alongside CUDA/DirectML, and there the vision-model bug does not apply.
+fn webgpu_is_only_gpu_ep<'a>(names: impl Iterator<Item = &'a str>) -> bool {
+    let (mut webgpu, mut other_gpu) = (false, false);
+    for n in names {
+        let n = n.to_lowercase();
+        if n.contains("webgpu") {
+            webgpu = true;
+        } else if !n.contains("cpu") {
+            other_gpu = true;
+        }
+    }
+    webgpu && !other_gpu
+}
+
 /// Key used by the version-scoped incompatible-models blocklist under the SDK runtime.
 /// Distinct from the CLI's `foundry --version` (e.g. `0.8.119`), so a model blocklisted on
 /// the old runtime is automatically re-evaluated here. Keep in step with the `foundry-local-sdk`
@@ -363,7 +378,7 @@ impl FoundryBackend for SdkBackend {
             .manager
             .discover_eps()
             .ok()
-            .map(|eps| eps.iter().any(|e| e.name.to_lowercase().contains("webgpu")))
+            .map(|eps| webgpu_is_only_gpu_ep(eps.iter().map(|e| e.name.as_str())))
             .unwrap_or(false);
         match self.manager.catalog().get_models().await {
             Ok(models) => models
@@ -393,7 +408,7 @@ impl FoundryBackend for SdkBackend {
                     let incompatible =
                         gpu_ep_is_webgpu && device_type == "GPU" && task == "vision-language-chat";
                     let incompatible_reason = if incompatible {
-                        Some("May not run on this Mac — vision models can fail on the WebGPU runtime (upstream onnxruntime-genai bug)".to_string())
+                        Some("May not run on this device — vision models can fail on the WebGPU runtime (upstream onnxruntime-genai bug)".to_string())
                     } else {
                         None
                     };
@@ -710,6 +725,15 @@ fn map_messages(messages: &[ChatMessage]) -> Vec<ChatCompletionRequestMessage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn webgpu_warning_only_when_webgpu_is_the_only_gpu_ep() {
+        use super::webgpu_is_only_gpu_ep as f;
+        assert!(f(["CPUExecutionProvider", "WebGpuExecutionProvider"].into_iter()));
+        assert!(!f(["WebGpuExecutionProvider", "CUDAExecutionProvider"].into_iter()));
+        assert!(!f(["DmlExecutionProvider", "WebGpuExecutionProvider"].into_iter()));
+        assert!(!f(["CPUExecutionProvider"].into_iter()));
+    }
+
     #[test]
     fn sdk_version_key_matches_cargo_pin() {
         let cargo_toml = include_str!("../../../../Cargo.toml");

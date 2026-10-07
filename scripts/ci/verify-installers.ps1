@@ -26,6 +26,9 @@ $copyMsi = Join-Path $Work "from-msi\plugable-chat.exe"
 New-Item -ItemType Directory -Force -Path (Split-Path $copyMsi) | Out-Null
 Copy-Item $msiExe.FullName $copyMsi -Force
 $files += $copyMsi
+# The AI runtime must ship with the app; without it the app cannot start and users are told to reinstall.
+$msiCore = Get-ChildItem $msiExe.Directory.FullName -Filter "Microsoft.AI.Foundry.Local.Core.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $msiCore) { throw "the MSI install has no Microsoft.AI.Foundry.Local.Core.dll next to plugable-chat.exe" }
 $u = Start-Process msiexec.exe -ArgumentList "/x `"$($files[0])`" /qn /norestart" -Wait -PassThru
 Write-Host "MSI uninstall exit code $($u.ExitCode)"
 
@@ -36,6 +39,8 @@ if ($p.ExitCode -ne 0) { throw "NSIS install failed with exit code $($p.ExitCode
 $nsisExe = Join-Path $nsisDir "plugable-chat.exe"
 if (-not (Test-Path $nsisExe)) { throw "the NSIS installer installed no plugable-chat.exe in $nsisDir" }
 $files += $nsisExe
+$nsisCore = Get-ChildItem $nsisDir -Filter "Microsoft.AI.Foundry.Local.Core.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $nsisCore) { throw "the NSIS install has no Microsoft.AI.Foundry.Local.Core.dll in $nsisDir" }
 
 & $verifier -Path $files
 $code = $LASTEXITCODE

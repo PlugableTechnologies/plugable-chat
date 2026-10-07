@@ -22,6 +22,23 @@ pub const DEFAULT_MODEL: &str = "qwen3.5-4b";
 /// has something to fall back to. Downloaded on demand by the frontend's fallback handler.
 pub const DEFAULT_FALLBACK_MODEL: &str = "phi-4-mini-instruct";
 
+/// Where the Windows `winget`/MSIX installs of Foundry Local put `foundry.exe`, so a GUI-launched
+/// app finds it even when its inherited PATH lacks the alias directory. Pure so it is testable
+/// on any OS.
+pub fn windows_foundry_candidates(local_app_data: Option<&str>, program_files: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(l) = local_app_data {
+        out.push(format!("{l}\\Microsoft\\WindowsApps\\foundry.exe"));
+        out.push(format!("{l}\\Programs\\Microsoft\\FoundryLocal\\foundry.exe"));
+        out.push(format!("{l}\\Microsoft\\Foundry\\foundry.exe"));
+    }
+    if let Some(p) = program_files {
+        out.push(format!("{p}\\Microsoft\\FoundryLocal\\foundry.exe"));
+        out.push(format!("{p}\\Microsoft\\Foundry\\foundry.exe"));
+    }
+    out
+}
+
 /// Find the foundry CLI executable, checking PATH first then common installation locations.
 /// This provides a fallback for production builds where PATH may not include the foundry binary.
 pub fn find_foundry_binary() -> String {
@@ -69,6 +86,16 @@ pub fn find_foundry_binary() -> String {
         if std::path::Path::new(path).exists() {
             println!("FoundryActor: Found foundry at fallback location: {}", path);
             return path.to_string();
+        }
+    }
+
+    for path in windows_foundry_candidates(
+        std::env::var("LOCALAPPDATA").ok().as_deref(),
+        std::env::var("ProgramFiles").ok().as_deref(),
+    ) {
+        if cfg!(windows) && std::path::Path::new(&path).exists() {
+            println!("FoundryActor: Found foundry at Windows install location: {}", path);
+            return path;
         }
     }
 
@@ -160,6 +187,26 @@ pub struct FoundryModelsResponse {
     pub data: Vec<FoundryModel>,
 }
 
+/// Port from a loopback URL in a status line. Accepts http/https and 127.0.0.1, localhost or
+/// [::1], because the CLI's hostname wording differs between releases and platforms.
+fn parse_local_port(line: &str) -> Option<u16> {
+    for scheme in ["http://", "https://"] {
+        for host in ["127.0.0.1:", "localhost:", "[::1]:"] {
+            let needle = format!("{scheme}{host}");
+            if let Some(i) = line.find(&needle) {
+                let digits: String = line[i + needle.len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if let Ok(p) = digits.parse::<u16>() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Parse the output of `foundry service status`
 pub fn parse_foundry_service_status_output(output: &str) -> ServiceStatus {
     let mut port = None;
@@ -167,21 +214,9 @@ pub fn parse_foundry_service_status_output(output: &str) -> ServiceStatus {
     let mut valid_eps = Vec::new();
 
     for line in output.lines() {
-        // Parse port from URL: "http://127.0.0.1:54657" or "https://127.0.0.1:54657"
-        if let Some(start_idx) = line.find("http://127.0.0.1:") {
-            let rest = &line[start_idx + "http://127.0.0.1:".len()..];
-            let port_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(p) = port_str.parse::<u16>() {
-                port = Some(p);
-                println!("FoundryActor: Detected port {}", p);
-            }
-        } else if let Some(start_idx) = line.find("https://127.0.0.1:") {
-            let rest = &line[start_idx + "https://127.0.0.1:".len()..];
-            let port_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(p) = port_str.parse::<u16>() {
-                port = Some(p);
-                println!("FoundryActor: Detected port {} (https)", p);
-            }
+        if let Some(p) = parse_local_port(line) {
+            port = Some(p);
+            println!("FoundryActor: Detected port {}", p);
         }
 
         // Parse registered EPs: "registered the following EPs: EP1, EP2."
@@ -213,6 +248,41 @@ pub fn parse_foundry_service_status_output(output: &str) -> ServiceStatus {
         port,
         registered_eps,
         valid_eps,
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::parse_foundry_service_status_output as parse;
+
+    #[test]
+    fn status_parser_reads_port_from_any_loopback_spelling() {
+        assert_eq!(parse("running on http://127.0.0.1:54657/openai/status").port, Some(54657));
+        assert_eq!(parse("running on http://localhost:5273/").port, Some(5273));
+        assert_eq!(parse("https://[::1]:6000").port, Some(6000));
+        assert_eq!(parse("service is stopped").port, None);
+    }
+
+    #[test]
+    fn status_parser_reads_eps() {
+        let s = parse("registered the following EPs: CUDA, CPU.\nValid EPs: CUDA, CPU, WebGPU");
+        assert_eq!(s.registered_eps, vec!["CUDA", "CPU"]);
+        assert_eq!(s.valid_eps.len(), 3);
+    }
+
+    use super::windows_foundry_candidates as c;
+
+    #[test]
+    fn windows_candidates_cover_winget_alias_and_install_dirs() {
+        let v = c(Some("C:\\Users\\a\\AppData\\Local"), Some("C:\\Program Files"));
+        assert!(v.iter().any(|p| p.ends_with("Microsoft\\WindowsApps\\foundry.exe")));
+        assert!(v.iter().any(|p| p.ends_with("Programs\\Microsoft\\FoundryLocal\\foundry.exe")));
+        assert!(v.iter().any(|p| p.starts_with("C:\\Program Files\\Microsoft\\FoundryLocal")));
+    }
+
+    #[test]
+    fn no_env_means_no_candidates() {
+        assert!(c(None, None).is_empty());
     }
 }
 

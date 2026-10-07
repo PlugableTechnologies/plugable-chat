@@ -26,6 +26,7 @@ pub mod protocol;
 pub mod python_helpers;
 pub mod repetition_detector;
 pub mod settings;
+pub mod startup_failure;
 pub mod settings_state_machine;
 pub mod state_machine;
 pub mod system_prompt;

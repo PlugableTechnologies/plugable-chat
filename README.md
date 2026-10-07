@@ -26,6 +26,10 @@ While every release is still a pre-release, GitHub's "latest" link does not poin
   1.5 GB and an AI model of about 2.5 to 4 GB download then).
 - Administrator rights to install (the app installs for all users on the computer).
 
+**You do not need to install Foundry Local (or anything else from Microsoft) first.** Plugable Chat includes its own AI
+engine and downloads the model itself. If the app cannot start, it shows a message with the exact cause and links to what to
+install or update. See [Troubleshooting](#troubleshooting).
+
 ### Is my download genuine?
 
 On Windows, right-click the downloaded file, choose **Properties**, open the **Digital Signatures** tab, and check that the
@@ -229,6 +233,12 @@ This runs automatically during builds, so you only need to run it manually if yo
 ---
 
 ## Troubleshooting
+
+### "Plugable Chat can't start"
+This card means the built-in AI engine did not load. Follow the numbered steps on the card (they are specific to your computer),
+then use **Copy details for support** and send the text to support. Foundry Local does not need to be installed. The
+`winget install Microsoft.FoundryLocal` and `brew install ... foundrylocal` lines elsewhere in this file are for developers only.
+For how we test these cases, see [docs/clean-host-testing.md](docs/clean-host-testing.md).
 
 ### Diagnostic Mode
 

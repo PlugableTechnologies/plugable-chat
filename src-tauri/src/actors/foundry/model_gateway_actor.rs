@@ -93,6 +93,8 @@ pub struct ModelGatewayActor {
     ///
     /// Held in an `Arc` so background tasks (model warm-up) can use it without borrowing `self`.
     sdk: Option<std::sync::Arc<super::backend::sdk::SdkBackend>>,
+    /// Why the bundled runtime failed to load, kept so a later connection failure can report it.
+    sdk_init_error: Option<String>,
 }
 
 impl ModelGatewayActor {
@@ -116,6 +118,8 @@ impl ModelGatewayActor {
             .build()
             .expect("Failed to create HTTP client");
 
+        let (sdk, sdk_init_error) = Self::resolve_sdk_backend(&app_handle_for_backend);
+
         Self {
             foundry_msg_rx,
             port: None,
@@ -133,14 +137,17 @@ impl ModelGatewayActor {
             gpu_guard,
             startup_tx,
             foundry_version: None,
-            sdk: Self::resolve_sdk_backend(&app_handle_for_backend),
+            sdk,
+            sdk_init_error,
         }
     }
 
     /// Resolve the configured backend. Returns `Some(SdkBackend)` when the SDK backend is
     /// selected (env `PLUGABLE_FOUNDRY_BACKEND` overrides `AppSettings.foundry_backend`),
     /// reusing the existing `~/.foundry/cache`. Falls back to `None` (CLI/HTTP) on any error.
-    fn resolve_sdk_backend(app_handle: &AppHandle) -> Option<std::sync::Arc<super::backend::sdk::SdkBackend>> {
+    fn resolve_sdk_backend(
+        app_handle: &AppHandle,
+    ) -> (Option<std::sync::Arc<super::backend::sdk::SdkBackend>>, Option<String>) {
         let setting = app_handle
             .try_state::<SettingsState>()
             .map(|s| futures::executor::block_on(s.settings.read()).foundry_backend)
@@ -148,19 +155,24 @@ impl ModelGatewayActor {
         match crate::settings::FoundryBackendKind::resolve(setting) {
             crate::settings::FoundryBackendKind::CliHttp => {
                 println!("[FoundryActor] Backend: CLI + HTTP (legacy)");
-                None
+                (None, None)
             }
             crate::settings::FoundryBackendKind::Sdk => {
                 let cache = match dirs::home_dir() {
                     Some(h) => h.join(".foundry").join("cache"),
                     None => {
                         println!("[FoundryActor] SDK backend: no home dir; falling back to CLI");
-                        return None;
+                        return (None, Some("Could not find your home folder".to_string()));
                     }
                 };
                 // In packaged builds, point the SDK loader at the bundled native libs;
                 // `None` in dev lets the SDK use its compile-time OUT_DIR.
-                let library_dir = Self::foundry_library_dir(app_handle);
+                // `PLUGABLE_FOUNDRY_LIBRARY_DIR` forces the lookup (even to an empty folder) so the
+                // "runtime missing" failure can be reproduced on any machine; see docs/clean-host-testing.md.
+                let library_dir = match std::env::var_os("PLUGABLE_FOUNDRY_LIBRARY_DIR") {
+                    Some(d) => Some(PathBuf::from(d)),
+                    None => Self::foundry_library_dir(app_handle),
+                };
                 match super::backend::sdk::SdkBackend::new(&cache, library_dir.as_deref()) {
                     Ok(b) => {
                         match &library_dir {
@@ -172,11 +184,11 @@ impl ModelGatewayActor {
                                 "[FoundryActor] Backend: foundry-local-sdk 1.2.0 (dev runtime from OUT_DIR)"
                             ),
                         }
-                        Some(std::sync::Arc::new(b))
+                        (Some(std::sync::Arc::new(b)), None)
                     }
                     Err(e) => {
                         println!("[FoundryActor] SDK backend init failed ({e}); falling back to CLI");
-                        None
+                        (None, Some(e.to_string()))
                     }
                 }
             }
@@ -663,6 +675,14 @@ impl ModelGatewayActor {
         self.transition_model_state(ModelState::Error { message, last_model });
     }
 
+    /// Build the user-facing text for a catastrophic startup failure, logging it for support.
+    fn describe_startup_failure(&self, failure: &crate::startup_failure::StartupFailure) -> String {
+        let log_dir = crate::paths::get_config_dir().display().to_string();
+        let msg = crate::startup_failure::describe(failure, crate::startup_failure::Os::current(), &log_dir);
+        println!("[FoundryActor] Startup failure: {failure:?}");
+        msg
+    }
+
     /// Transition to ServiceUnavailable state
     fn transition_to_service_unavailable(&mut self, message: String) {
         self.transition_model_state(ModelState::ServiceUnavailable { message });
@@ -851,7 +871,14 @@ impl ModelGatewayActor {
                 "Warning: Failed to ensure Foundry service is running: {}",
                 e
             );
-            self.transition_to_service_unavailable(format!("Failed to start service: {}", e));
+            let failure = match &self.sdk_init_error {
+                Some(sdk_err) => crate::startup_failure::StartupFailure::RuntimeLoadFailed {
+                    error: format!("{sdk_err}; fallback also failed: {e}"),
+                },
+                None => crate::startup_failure::StartupFailure::ServiceStartFailed { error: e.to_string() },
+            };
+            let msg = self.describe_startup_failure(&failure);
+            self.transition_to_service_unavailable(msg);
         }
 
         // GPU providers must be registered before the catalog and model selection are read.
@@ -865,7 +892,11 @@ impl ModelGatewayActor {
         
         // If connection failed and we're still in Initializing, transition to ServiceUnavailable
         if !connected && matches!(self.model_state, ModelState::Initializing) {
-            self.transition_to_service_unavailable("Could not connect to Foundry service".to_string());
+            let failure = crate::startup_failure::StartupFailure::NotConnected {
+                runtime_error: self.sdk_init_error.clone(),
+            };
+            let msg = self.describe_startup_failure(&failure);
+            self.transition_to_service_unavailable(msg);
         }
 
         // Pre-warm the HTTP connection pool so first chat request doesn't pay connection cost
@@ -2664,6 +2695,10 @@ impl ModelGatewayActor {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             println!("Foundry service start command failed: {}", stderr);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("`foundry service start` exited with {}: {}", output.status, stderr.trim()),
+            ));
         }
         Ok(())
     }

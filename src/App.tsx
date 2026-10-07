@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReasoningEffort } from "./store/chat-store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
@@ -7,40 +7,77 @@ import { SettingsModal } from "./components/settings";
 import { useChatStore } from "./store/chat-store";
 import { useSettingsStore } from "./store/settings-store";
 import { AlertTriangle, X } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
-// Help message shown when no models are cached
+// Help message shown when no models are cached. Plugable Chat bundles its own Foundry runtime and
+// downloads the default model itself, so this must never tell the user to install Foundry Local.
 const NO_MODELS_HELP_MESSAGE = `## Welcome to Plugable Chat! 👋
 
-It looks like you don't have any AI models cached locally yet.
+No AI model is on this computer yet. Plugable Chat downloads one for you; there is nothing to install first.
 
-To get started, you'll need to load a model using the **Foundry CLI**:
+### What happens next
 
-### Quick Start
+1. The first model download starts automatically and can take several minutes.
+2. Progress appears in the status bar at the bottom of the window.
+3. When it finishes, the model name replaces **"No models"** in the header and you can start chatting.
 
-1. Open a terminal (Command Prompt on Windows, Terminal on Mac/Linux)
-2. Run the following command:
-   \`\`\`bash
-   foundry model load qwen3.5-4b
-   \`\`\`
-3. Wait for the download to complete (this may take a few minutes)
-4. Once finished, click the **"No models (click to refresh)"** dropdown in the header to reload
+### If the download does not start or fails
 
-### Popular Models to Try
+- Check that this computer is connected to the internet and that about 6 GB of disk space is free.
+- Click the **"No models (click to refresh)"** dropdown in the header to try again.
+- Open **Settings → Models** to pick a different model.
+- If it still fails, send us the text shown in the status bar so we can help.`;
 
-| Model | Description | Command |
-|-------|-------------|---------|
-| **qwen3.5-4b** | Default model | \`foundry model load qwen3.5-4b\` |
-| **phi-4-mini** | Compact and fast Phi-4 model (used if the default cannot run) | \`foundry model load phi-4-mini\` |
-| **phi-4** | Microsoft's capable Phi-4 model | \`foundry model load phi-4\` |
-| **qwen2.5-coder-0.5b** | Small coding-focused model | \`foundry model load qwen2.5-coder-0.5b\` |
+// Full-pane card for catastrophic failures (the AI engine cannot start). The backend writes the
+// whole message in plain language, so this only renders it, makes links clickable and lets the
+// user copy it for support.
+function StartupFailureCard() {
+  const { modelState, retryConnection } = useChatStore();
+  const [dismissedAt, setDismissedAt] = useState<number | null>(null);
+  const [copied, setCopied] = useState(false);
 
-### Need Help?
+  if (modelState.state !== 'service_unavailable' || !modelState.errorMessage) return null;
+  if (dismissedAt !== null && dismissedAt === modelState.timestamp) return null;
+  const text = modelState.errorMessage;
 
-If you're having trouble, make sure:
-- Microsoft Foundry Local is installed (visit [Microsoft AI Toolkit](https://github.com/microsoft/vscode-ai-toolkit) for installation)
-- The Foundry service is running (\`foundry service start\`)
+  const renderLine = (line: string, i: number) => {
+    const parts = line.split(/(https?:\/\/[^\s]+)/g);
+    return (
+      <p key={i} className="mb-2 break-words">
+        {parts.map((part, j) =>
+          /^https?:\/\//.test(part) ? (
+            <a key={j} href={part} className="text-blue-700 underline"
+               onClick={(e) => { e.preventDefault(); openUrl(part).catch(() => {}); }}>{part}</a>
+          ) : part
+        )}
+      </p>
+    );
+  };
 
-Once you've loaded a model, this chat will work normally! 🚀`;
+  const copy = async () => {
+    await navigator.clipboard.writeText(text).catch(() => {});
+    setCopied(true);
+  };
+
+  return (
+    <div className="startup-failure-card absolute inset-0 z-50 flex items-center justify-center bg-white/95 p-6">
+      <div className="max-w-2xl w-full max-h-full overflow-auto bg-red-50 border border-red-300 text-red-900 rounded-lg shadow-lg p-6">
+        <div className="flex items-center gap-3 mb-4">
+          <AlertTriangle className="text-red-600" size={24} />
+          <h2 className="text-lg font-semibold">Plugable Chat can&apos;t start</h2>
+        </div>
+        <div className="text-sm">{text.split('\n').filter((l) => l.trim()).map(renderLine)}</div>
+        <div className="flex gap-2 mt-4">
+          <button onClick={copy} className="px-3 py-1.5 rounded bg-red-600 text-white text-sm">
+            {copied ? 'Copied' : 'Copy details for support'}
+          </button>
+          <button onClick={() => retryConnection()} className="px-3 py-1.5 rounded border border-red-300 text-sm">Try again</button>
+          <button onClick={() => setDismissedAt(modelState.timestamp ?? 0)} className="px-3 py-1.5 rounded border border-red-300 text-sm">Dismiss</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ErrorBanner() {
   const { backendError, clearError } = useChatStore();
@@ -532,8 +569,9 @@ function App() {
           <div className="app-sidebar-container flex-[1] min-w-[260px] overflow-hidden" style={{ backgroundColor: '#e5e7eb', borderRadius: '12px' }}>
             <Sidebar className="h-full sidebar-panel" />
           </div>
-          <div className="chat-pane flex-[2] min-w-0 flex flex-col overflow-hidden h-full bg-white">
+          <div className="chat-pane relative flex-[2] min-w-0 flex flex-col overflow-hidden h-full bg-white">
             <ErrorBanner />
+            <StartupFailureCard />
             <ChatArea />
           </div>
         </div>
