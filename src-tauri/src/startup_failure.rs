@@ -103,8 +103,38 @@ pub fn describe(failure: &StartupFailure, os: Os, log_dir: &str) -> String {
     )
 }
 
+/// Text for the notice shown when the previous launch never finished starting.
+pub fn describe_unclean_previous_launch(os: Os, log_dir: &str, started_at: &str) -> String {
+    let mut steps = vec![
+        "If you closed Plugable Chat during its first start, this is expected: the first start downloads GPU components and a model and can take several minutes. Leave it open until a model name appears in the header.".to_string(),
+        "If the window disappeared on its own, open Plugable Chat again. It usually works the second time.".to_string(),
+    ];
+    if os == Os::Windows {
+        steps.push(format!(
+            "If it keeps happening, update your NVIDIA graphics driver, restart the computer, and try again: {NVIDIA_DRIVER_URL}"
+        ));
+    }
+    steps.push(format!(
+        "Still stuck? Send this whole message, plus the files in this folder, to support: {log_dir}"
+    ));
+    let numbered: Vec<String> = steps.iter().enumerate().map(|(i, s)| format!("{}. {}", i + 1, s)).collect();
+    format!(
+        "Plugable Chat did not finish starting the last time it ran.\n\nWhat to do:\n{}\n\nTechnical detail (for support): previous start began at {}; it never reported that startup finished.",
+        numbered.join("\n"),
+        started_at
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unclean_launch_notice_explains_expected_case_and_names_driver_on_windows() {
+        let m = super::describe_unclean_previous_launch(super::Os::Windows, "C:\\logs", "t1");
+        assert!(m.contains("closed Plugable Chat during its first start"));
+        assert!(m.contains(super::NVIDIA_DRIVER_URL) && m.contains("t1"));
+        assert!(!super::describe_unclean_previous_launch(super::Os::MacOs, "d", "t").contains(super::NVIDIA_DRIVER_URL));
+    }
+
     use super::*;
 
     #[test]

@@ -79,6 +79,24 @@ function StartupFailureCard() {
   );
 }
 
+// Shown once when the previous launch never finished starting (e.g. a native crash, which leaves no log).
+function PreviousLaunchNotice() {
+  const [text, setText] = useState<string | null>(null);
+  useEffect(() => {
+    invoke<string | null>("get_previous_launch_crash").then(setText).catch(() => {});
+  }, []);
+  if (!text) return null;
+  return (
+    <div className="absolute inset-x-4 top-4 z-40 max-h-[70%] overflow-auto bg-amber-50 border border-amber-300 text-amber-900 rounded-lg shadow-md p-4 text-sm">
+      <div className="flex justify-between items-start gap-3">
+        <h2 className="font-semibold mb-2">Plugable Chat did not finish starting last time</h2>
+        <button onClick={() => setText(null)} aria-label="Dismiss"><X size={16} /></button>
+      </div>
+      {text.split('\n').filter((l) => l.trim()).slice(1).map((l, i) => <p key={i} className="mb-2 break-words">{l}</p>)}
+    </div>
+  );
+}
+
 function ErrorBanner() {
   const { backendError, clearError } = useChatStore();
 
@@ -103,6 +121,14 @@ function ErrorBanner() {
 
 function App() {
   const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, fetchCachedModels, startSystemChat, chatMessages, hasFetchedCachedModels, loadModel, operationStatus, startupState, handshakeComplete } = useChatStore();
+  const launchState = useChatStore((s) => s.modelState.state);
+  // Startup counts as finished once the model is ready or a failure card is showing; until then a
+  // vanished window is reported at the next launch (see launch_marker.rs).
+  useEffect(() => {
+    if (launchState === 'ready' || launchState === 'service_unavailable' || launchState === 'error') {
+      invoke("mark_launch_ok").catch(() => {});
+    }
+  }, [launchState]);
   const effortOptions: ReasoningEffort[] = ['low', 'medium', 'high'];
   const hasShownHelpChat = useRef(false);
   console.log("App component rendering...");
@@ -572,6 +598,7 @@ function App() {
           <div className="chat-pane relative flex-[2] min-w-0 flex flex-col overflow-hidden h-full bg-white">
             <ErrorBanner />
             <StartupFailureCard />
+            <PreviousLaunchNotice />
             <ChatArea />
           </div>
         </div>

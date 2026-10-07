@@ -25,6 +25,7 @@ pub mod process_utils;
 pub mod protocol;
 pub mod python_helpers;
 pub mod repetition_detector;
+pub mod launch_marker;
 pub mod settings;
 pub mod startup_failure;
 pub mod settings_state_machine;
@@ -1779,6 +1780,7 @@ pub fn run() {
         }
         return;
     }
+    launch_marker::begin();
     let cli_args_for_setup = cli_args.clone();
     let launch_filter = parse_tool_filter(&cli_args);
 
@@ -2212,10 +2214,18 @@ pub fn run() {
             heartbeat_ping,
             // Startup coordination commands
             frontend_ready,
-            get_startup_snapshot
+            get_startup_snapshot,
+            get_previous_launch_crash,
+            mark_launch_ok
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // A normal exit (even mid-startup) is not a crash.
+            if matches!(event, tauri::RunEvent::Exit) {
+                launch_marker::clear();
+            }
+        });
 }
 
 #[cfg(test)]

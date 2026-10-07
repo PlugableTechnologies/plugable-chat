@@ -45,3 +45,19 @@ pub async fn get_startup_snapshot(handles: State<'_, ActorHandles>) -> Result<St
     
     rx.await.map_err(|_| "Startup coordinator died".to_string())
 }
+
+/// Notice text if the previous launch never finished starting (crash, kill, or closed mid-setup).
+#[tauri::command]
+pub fn get_previous_launch_crash() -> Option<String> {
+    crate::launch_marker::previous_launch_started_at().map(|at| {
+        let dir = crate::paths::get_config_dir().display().to_string();
+        crate::startup_failure::describe_unclean_previous_launch(crate::startup_failure::Os::current(), &dir, &at)
+    })
+}
+
+/// Frontend reports startup finished (model ready, or a failure card is showing), so the
+/// next launch must not report this one as unfinished.
+#[tauri::command]
+pub fn mark_launch_ok() {
+    crate::launch_marker::clear();
+}
