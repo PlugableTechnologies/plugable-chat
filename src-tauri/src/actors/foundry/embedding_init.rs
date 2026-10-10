@@ -45,6 +45,58 @@ pub fn retry_blocking<T, E: std::fmt::Debug>(
     }
 }
 
+/// Delete leftovers of an interrupted download (partial blobs, lock files, empty files) so a
+/// retry starts clean instead of tripping over them. Returns how many files were removed.
+pub fn clear_stale_download_files(root: &std::path::Path) -> usize {
+    fn walk(dir: &std::path::Path, removed: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            if meta.is_dir() {
+                walk(&path, removed);
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+            let stale = name.ends_with(".lock")
+                || name.ends_with(".part")
+                || name.ends_with(".incomplete")
+                || (meta.is_file() && meta.len() == 0);
+            if stale && std::fs::remove_file(&path).is_ok() {
+                *removed += 1;
+            }
+        }
+    }
+    let mut removed = 0;
+    walk(root, &mut removed);
+    removed
+}
+
+/// Turn the raw download/initialisation error into a message that names the likely cause, then
+/// keeps the original text for support. The raw text alone ("Failed to retrieve
+/// onnx/model.onnx") does not say whether the network, the disk or a proxy is at fault.
+pub fn describe_embedding_error(raw: &str) -> String {
+    let l = raw.to_ascii_lowercase();
+    let cause = if l.contains("os error 112") || l.contains("no space left") || l.contains("not enough space") || l.contains("disk full") {
+        "There is not enough free disk space to download the search model. Free some space and try again."
+    } else if l.contains("certificate") || l.contains("tls") || l.contains("ssl") {
+        "A security certificate problem blocked the download (a proxy or firewall may be inspecting traffic)."
+    } else if l.contains("proxy") {
+        "The configured proxy could not be reached. Check the HTTPS_PROXY setting or your network."
+    } else if l.contains("dns") || l.contains("failed to lookup") || l.contains("resolve") || l.contains("os error 11001") || l.contains("no such host") {
+        "Could not reach huggingface.co: the name did not resolve. Check your internet connection or firewall."
+    } else if l.contains("connection refused") || l.contains("os error 10061") || l.contains("timed out") || l.contains("os error 10060")
+        || l.contains("connection reset") || l.contains("network") || l.contains("unreachable") || l.contains("connect")
+    {
+        "Could not connect to huggingface.co to download the search model. Check your internet connection or firewall."
+    } else if l.contains("permission denied") || l.contains("access is denied") || l.contains("os error 5") || l.contains("read-only") {
+        "Plugable Chat could not write the search model to its data folder (access denied)."
+    } else {
+        "The search model could not be downloaded or loaded."
+    };
+    format!("{cause} Details: {raw}")
+}
+
 fn emit_progress(app: &AppHandle, message: &str, is_complete: bool, error: bool) {
     let mut payload = json!({ "message": message, "is_complete": is_complete });
     if error {
@@ -96,7 +148,11 @@ async fn init_inner(app: &AppHandle, shared: &SharedEmbeddingModel) -> Result<()
     let joined = tokio::task::spawn_blocking(move || {
         let _guard = SuppressCrashDialogGuard::new();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            retry_blocking(ATTEMPTS, BASE_DELAY, |_| {
+            retry_blocking(ATTEMPTS, BASE_DELAY, |attempt| {
+                if attempt > 0 {
+                    let n = clear_stale_download_files(&cache_path);
+                    println!("FoundryActor: cleared {n} stale download file(s) before retrying the embedding model");
+                }
                 let options = InitOptions::new(EmbeddingModel::BGEBaseENV15)
                     .with_cache_dir(cache_path.clone())
                     .with_show_download_progress(true);
@@ -123,7 +179,8 @@ async fn init_inner(app: &AppHandle, shared: &SharedEmbeddingModel) -> Result<()
         }
         Ok(Ok(Err(e))) => {
             println!("FoundryActor ERROR: Failed to load CPU embedding model: {e:?}");
-            format!("Failed to load CPU embedding model: {e}")
+            // `{e:#}` includes the whole cause chain, which is where the real reason lives.
+            format!("Failed to load CPU embedding model. {}", describe_embedding_error(&format!("{e:#}")))
         }
         Ok(Err(panic_payload)) => {
             let msg = panic_message(panic_payload.as_ref());
@@ -172,6 +229,34 @@ mod tests {
     fn one_attempt_never_sleeps() {
         let r: Result<(), &str> = retry_blocking(1, Duration::from_secs(60), |_| Err("x"));
         assert_eq!(r, Err("x"));
+    }
+
+    #[test]
+    fn errors_name_their_cause() {
+        let d = |s: &str| describe_embedding_error(s);
+        assert!(d("Failed to retrieve onnx/model.onnx: dns error: failed to lookup address").contains("did not resolve"));
+        assert!(d("request error: Connection refused (os error 10061)").contains("Could not connect"));
+        assert!(d("io error: There is not enough space on the disk. (os error 112)").contains("free disk space"));
+        assert!(d("Access is denied. (os error 5)").contains("access denied"));
+        assert!(d("invalid peer certificate: UnknownIssuer").contains("certificate"));
+        assert!(d("proxy connect failed").contains("proxy"));
+        // always keeps the raw text for support
+        assert!(d("something odd").ends_with("Details: something odd"));
+    }
+
+    #[test]
+    fn stale_download_files_are_removed_and_real_files_kept() {
+        let dir = std::env::temp_dir().join(format!("pc-stale-{}", std::process::id()));
+        let blobs = dir.join("models--x").join("blobs");
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::write(blobs.join("abc.lock"), b"x").unwrap();
+        std::fs::write(blobs.join("def.sync.part"), b"partial").unwrap();
+        std::fs::write(blobs.join("empty"), b"").unwrap();
+        std::fs::write(blobs.join("good"), b"model bytes").unwrap();
+        assert_eq!(clear_stale_download_files(&dir), 3);
+        assert!(blobs.join("good").exists());
+        assert!(!blobs.join("abc.lock").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

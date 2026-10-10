@@ -218,26 +218,29 @@ Register "baseline" "#1 #2" @("cpu") "fresh install, first run on a healthy host
     return @{ Failures = $f }
 }
 
-Register "readonly-nonadmin" "#1" @("cpu") "standard user, read-only install dir, cwd = install dir (a relative .fastembed_cache must not matter)" {
+Register "readonly-nonadmin" "#1" @("cpu") "read-only install dir, cwd = install dir (a relative .fastembed_cache must not matter)" {
     param($ctx)
     $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
-    $name = "faultstd"
-    $cred = New-TestUser $name
+    # A second Windows user cannot start WebView2 from a non-interactive CI session ("Access is
+    # denied"), so make the install dir unwritable for the running account with a deny ACE. That is
+    # exactly the condition the bug needs: nothing under Program Files can be created by the app.
+    $me = "$env:USERDOMAIN\$env:USERNAME"
+    icacls $InstallDir /deny "${me}:(OI)(CI)(WD,AD,DC)" | Out-Null
     try {
-        $acl = (icacls $InstallDir) -join "`n"
-        if ($acl -match 'BUILTIN\\Users:.*\((M|F)\)') { $f += "install dir is writable by standard users; the fault is not in place" }
+        $probe = Join-Path $InstallDir "write-probe.tmp"
+        $wrote = $true
+        try { Set-Content -LiteralPath $probe -Value x -ErrorAction Stop } catch { $wrote = $false }
+        if ($wrote) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue; $f += "install dir is still writable; the fault is not in place" }
         $before = Get-DirSnapshot $InstallDir
-        $run = Invoke-Smoke $ctx -Credential $cred -WorkingDirectory $InstallDir
+        $run = Invoke-Smoke $ctx -WorkingDirectory $InstallDir
         $f += Get-RunFailures $run
         $f += Assert-Terminal $run.Records
         $f += Assert-PhaseOk $run.Records "embedding"
-        $profileDir = Get-ChildItem (Join-Path $env:SystemDrive "Users") -Directory | Where-Object { $_.Name -like "$name*" } | Select-Object -First 1
-        $modelRoot = if ($profileDir) { Join-Path $profileDir.FullName "AppData\Local\plugable-chat" } else { "" }
-        if (-not $modelRoot -or (Get-EmbeddingFileCount $modelRoot) -lt 1) { $f += "no embedding model files under the standard user's profile" }
+        if ((Get-EmbeddingFileCount) -lt 1) { $f += "no embedding model files under the user's data directory" }
         $changes = Compare-DirSnapshot $before (Get-DirSnapshot $InstallDir)
         if ($changes.Count) { $f += "install dir changed while running: $(($changes | Select-Object -First 5) -join '; ')" }
     }
-    finally { Remove-TestUser $name }
+    finally { icacls $InstallDir /remove:d "$me" | Out-Null }
     return @{ Failures = $f }
 }
 
@@ -345,6 +348,10 @@ Register "unicode-username" "data-dir bugs" @("cpu") "local user with a space an
     $cred = New-TestUser $name
     try {
         $run = Invoke-Smoke $ctx -Credential $cred
+        $out = if (Test-Path -LiteralPath $run.OutFile) { Get-Content -LiteralPath $run.OutFile -Raw } else { "" }
+        if ($out -match "WebView2 error" -and $out -match "Access is denied") {
+            return @{ Skip = "WebView2 cannot start for a second user without an interactive desktop (CI session); run this scenario on the AWS box over RDP" }
+        }
         $f += Get-RunFailures $run
         $f += Assert-Terminal $run.Records
         $f += Assert-PhaseOk $run.Records "embedding"
@@ -398,7 +405,12 @@ Register "quarantined-dll" "rc9 can't-start card" @("cpu") "security software re
     $healed = Test-Path -LiteralPath $dll
     $ready = Get-LastPhase $run.Records "ready"
     if (-not $healed -and (Test-StatusOk $ready)) { $f += "reported ready with onnxruntime.dll missing and not repaired" }
-    if (-not $healed -and -not (Test-StatusOk $ready)) { $f += Assert-PhaseError $run.Records "error" "(?i)onnxruntime|dll|foundry-libs|reinstall|runtime" }
+    # The actionable text (the "can't start" card) may be on an earlier record than the final
+    # generic 'error' one, so look at every record's detail.
+    if (-not $healed -and -not (Test-StatusOk $ready)) {
+        $hit = @($run.Records | Where-Object { [string]$_.detail -match "(?i)engine files|onnxruntime|foundry-libs|reinstall|runtime" })
+        if ($hit.Count -eq 0) { $f += "no record gave actionable guidance for a missing onnxruntime.dll" }
+    }
     return @{ Failures = $f }
 }
 

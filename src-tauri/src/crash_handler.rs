@@ -78,7 +78,10 @@ pub fn install_crash_handler() {
 
         // Only show the dialog if not suppressed
         // (suppressed for expected panics like ORT initialization failures)
-        if !is_crash_dialog_suppressed() {
+        // An automated run (clean-host test, --smoke) has nobody to click the dialog; showing it
+        // would hang the run until the CI job times out instead of failing fast.
+        let automated = std::env::var_os("PLUGABLE_CHAT_TEST_STATE").is_some();
+        if !is_crash_dialog_suppressed() && !automated {
             let should_restart = show_crash_dialog(&crash_details, log_path.as_ref());
 
             if should_restart {
