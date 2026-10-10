@@ -163,22 +163,19 @@ Function PcVcRedistEnsure
       StrCpy $2 -1
     ${EndIf}
     !insertmacro PcLog "vcredist: installer exit code $2"
-    ${Switch} $2
-      ${Case} 0
-        StrCpy $4 "installed"
-        ${Break}
-      ${Case} 1638
-        ; "another version of this product is already installed": a newer runtime is present.
-        StrCpy $4 "newer-present"
-        ${Break}
-      ${Case2} 3010 1641
-        StrCpy $4 "installed-reboot"
-        StrCpy $3 1
-        ${Break}
-      ${Default}
-        StrCpy $4 "failed"
-        ${Break}
-    ${EndSwitch}
+    ; Plain If chain rather than ${Switch}/${Case2}: the LogicLib Case2 macro failed to compile.
+    ${If} $2 = 0
+      StrCpy $4 "installed"
+    ${ElseIf} $2 = 1638
+      ; "another version of this product is already installed": a newer runtime is present.
+      StrCpy $4 "newer-present"
+    ${ElseIf} $2 = 3010
+    ${OrIf} $2 = 1641
+      StrCpy $4 "installed-reboot"
+      StrCpy $3 1
+    ${Else}
+      StrCpy $4 "failed"
+    ${EndIf}
 
     ${If} $4 == "failed"
       !insertmacro PcLog "vcredist: FAILED with exit code $2 (see $TEMP\plugable-chat-vcredist.log); continuing, the app will show its own repair guidance"
