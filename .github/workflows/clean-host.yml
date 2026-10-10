@@ -17,7 +17,7 @@ on:
         default: ""
       old_release_tag:
         description: "Older release tag whose setup.exe is installed first for the upgrade-over-old scenario"
-        default: ""
+        default: "v0.1.0-rc9"
       expect_fail:
         description: "Expect every scenario to FAIL (run against rc9 to prove the tests reproduce the issues)"
         type: boolean
@@ -43,7 +43,7 @@ jobs:
       REPO: ${{ github.repository }}
       SCENARIOS: ${{ inputs.scenarios || 'cpu' }}
       INSTALLER_TAG: ${{ inputs.installer_release_tag }}
-      OLD_TAG: ${{ inputs.old_release_tag }}
+      OLD_TAG: ${{ inputs.old_release_tag || 'v0.1.0-rc9' }}
       EXPECT_FAIL: ${{ inputs.expect_fail }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,7 +71,7 @@ jobs:
           "INSTALLER=$($setup.FullName)" >> $env:GITHUB_ENV
 
       - name: Fetch the older release for the upgrade scenario
-        if: ${{ inputs.old_release_tag != '' }}
+        if: ${{ inputs.old_release_tag != '' || github.event_name == 'schedule' }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path old | Out-Null
