@@ -11,7 +11,10 @@ Full detail and the table of past escapes: [docs/testing-ladder.md](../../../doc
 1. Before every push run `scripts/preflight.sh` (about 1 minute). Fix everything it reports; do not push on red.
    If the change touches app behaviour, also run the app on this Mac against Foundry with the `PLUGABLE_*`
    environment variables and read the log (back up and restore the app's `config.json`).
-2. Only when preflight is green and the CI installer for the exact commit exists, use the EC2 box
+2. **Rung 2 is mandatory before any release tag**, not optional: always test Plugable Chat with a real NVIDIA GPU before
+   signing. Build and install testing (CI, `clean-host.yml`, `faults.ps1`) should run on the free GPU-less runners wherever
+   possible; the GPU box is for what needs a GPU, and is the last gate before a tag. When preflight is green and the CI
+   installer for the exact commit exists, use the EC2 box
    ([docs/gpu-validation.md](../../../docs/gpu-validation.md)): at most 3 GPU runs per task, always run
    `infra/aws-gpu/teardown.sh`, read the screenshots, never send signing credentials to the box.
 3. GitHub last. Do not push to `main` while a CI run you need is in flight. Signing runs need a reviewer other

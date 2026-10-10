@@ -9,6 +9,14 @@ Full runbook and lesson list: `docs/gpu-validation.md`; timings and cost: `docs/
 when to use this rung: [test-ladder](../test-ladder/SKILL.md).
 
 ## Rules
+- **Always test Plugable Chat on a GPU box before a release is signed or tagged.** Plugable Chat is a GPU app: GPU
+  provider registration, CUDA/WebGPU model loading, model answers and the installed app on NVIDIA hardware are what users
+  hit first, and no free runner can show them. The CPU-only checks (build, installer, `faults.ps1` clean-host matrix on
+  `windows-latest`) are the cheap pre-filter, and install and build testing should run without a GPU wherever it can;
+  they never replace the GPU run. Minimum before any `v*` tag: `installer-lifecycle.ps1`, the `gpu-baseline` scenario
+  (`infra/aws-gpu/run-matrix.sh`), and the Chicago questions via `ask.sh`, with the screenshots read. If the GPU run has not
+  been done for the commit being tagged, do not tag. (rc10 was tagged, signed and published on CPU-only results; the GPU run
+  was done afterwards. Do not repeat that order.)
 - Fresh Windows Server 2025 box per run from a stock AMI; **nothing kept or billed between runs**; no nightly tests.
 - **GPU generation: Ampere or newer only** (decision 2026-09-30). Default `INSTANCE_TYPE` is `g5.xlarge` (A10G, 24 GB,
   about $1.0 to 1.4/h). Turing (T4) and older are not test targets any more.

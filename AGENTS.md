@@ -92,6 +92,10 @@ release produces. When a release is cut, re-check the status labels in the downl
 
 ## GPU validation (for agents)
 
+**Always test Plugable Chat on a real NVIDIA GPU box before tagging a release.** Build and install testing run without a GPU
+where possible (CI, `clean-host.yml`); the GPU box is the final gate before any `v*` tag. Never tag first and GPU-test
+afterwards.
+
 The app is tested on a real Windows + NVIDIA GPU box that exists only for the length of a run.
 Read [`docs/gpu-validation.md`](docs/gpu-validation.md) first; it is the runbook, the record of what
 went wrong before, and the list of open items. Rules that matter when you run it:

@@ -8,6 +8,15 @@ description: How Windows/Linux release signing works for plugable-chat (DigiCert
 Operator guide: `docs/release-signing.md` (rotation, renewal, credentials). Never handle secrets yourself: the DigiCert API
 token, client `.p12` and password stay with the user (ingested by brix-cli `ingest_digicert_signing_secrets.py`).
 
+## Before you push a release tag
+All of these, in order; a tag starts signing and publishing immediately, so none can be done afterwards:
+1. `scripts/preflight.sh` and CI green on the exact commit (Linux and Windows).
+2. `clean-host.yml` green (CPU scenarios, free runners).
+3. **GPU box run green on the signed-to-be installer's commit** ([gpu-validation](../gpu-validation/SKILL.md)): always,
+   no exceptions; installer lifecycle, `gpu-baseline`, Chicago questions, screenshots read.
+4. Check `release-signing` environment protection (below): Required reviewers must be ON.
+5. Check the release notes and the download-page status labels still match the results in `docs/gpu-validation.md`.
+
 ## Setup facts
 - EV certificate for **LEANCODE, INC.**, keypair alias in secret `SM_KEYPAIR_ALIAS`, expires 2027-08-11 (org validation to
   2027-09-11; client certificate to 2027-09-28). One designated signer per certificate.

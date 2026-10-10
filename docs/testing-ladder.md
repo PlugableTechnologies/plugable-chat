@@ -31,6 +31,9 @@ winml providers.
 
 ## Rung 2: only what needs real Windows or a GPU
 
+This rung is **mandatory before any release tag**: always test Plugable Chat with a real NVIDIA GPU before signing. Do build
+and install testing without a GPU wherever possible (rung 3's CI and `clean-host.yml`), and use the GPU box for the rest.
+
 Start it only when rung 1 is green and the installer for the exact commit exists (CI artifacts
 `windows-unsigned-<sha>` and `gpu-tests-<sha>`). Follow [gpu-validation.md](gpu-validation.md): at most 3 GPU
 runs per task, always finish with `infra/aws-gpu/teardown.sh`, never leave a box up waiting for CI. Run the
@@ -64,4 +67,4 @@ needs a reviewer other than the person who started the run; the signing smoke te
 | v0.1.0-rc4 built and signed everything, then failed its last step: it verified `target/release/plugable-chat.exe`, but tauri signs patched copies of the exe that go into the installers and leaves that file unsigned. The signed MSI and NSIS setup both verified | GitHub release (after a 63-minute build) | rung 2: `scripts/ci/verify-installers.ps1` installs both installers silently and checks the installed exe; run on a Windows box against CI's unsigned installers (it found and checked all four files and failed them as NotSigned, as it should). Lesson: verify what ships (the installed app), not intermediate build outputs |
 | v0.1.0-rc5 verified all four shipped files as signed, then failed at "Attest build provenance": the Windows job lacked `id-token: write` and `attestations: write` (the Linux job had them) | GitHub release (after another 65-minute build) | rung 1: `scripts/ci/check-workflow-parity.py` fails when a job that attests provenance lacks either permission (verified against rc5's release.yml). Lesson: every step of a tag-only workflow runs for the first time on a real tag, so read each unexercised step against its action's documented requirements before tagging |
 | The signed rc6 MSI's first Chicago questions answered "I don't have access to real-time databases" (504-character prompt, no tables): launch-time schema indexing gave up after 120 s, but on a fresh box GPU provider registration alone took 153 s and the embedding model is only created after it ("CPU embedding model not initialized") | EC2 box, signed release build | the waits are now 10 minutes. The harness itself needed three fixes on its first real use (`APP_DIR` quoting for `C:\Program Files`, a race that reported a timeout at 0 s, `ask.sh` not passing the install path). Lesson: provider registration being 50x slower in the installed app than in the compiled tests (153 s vs 3 s) is still unexplained and sets the pace for every first launch |
-
+| rc10 was tagged, signed and published after CPU-only runs; the NVIDIA box was not used first, and an announcement overstated what was tested | release | process: GPU run is mandatory before any tag (`release-signing`, `gpu-validation`, `test-ladder` skills; `AGENTS.md`) |
