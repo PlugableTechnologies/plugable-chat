@@ -72,6 +72,22 @@ both registered in 45.5 s on a fresh box; 48 of 48 catalog models became GPU var
 a Phi-4-mini chat ran at 91% GPU and 9,685 MiB; the real app registered its own providers on first
 run (80 s) and its warm-up put the model on the GPU (VRAM 80 MiB to about 5 GB).
 
+## rc10 on an A10G (2026-10-10)
+
+Signed `v0.1.0-rc10` installer (Authenticode Valid, LEANCODE, INC.) on a g5.xlarge (NVIDIA A10G, driver 596.86,
+Windows Server 2025), fetched from the public release. **Run after the release was tagged and published, which is the wrong
+order**: the rule is now that a GPU run comes first (see the `release-signing` skill).
+
+| Check | Result |
+|---|---|
+| `installer-lifecycle.ps1` (as SYSTEM, perMachine) | 0 failed: fresh install, HKLM entry, no SYSTEM-profile files, all-users shortcut, launch as admin and as a standard user, upgrade over a running copy, repair, uninstall, reinstall |
+| clean-host `gpu-baseline`, `baseline`, `quarantined-dll`, `upgrade-over-old` | all pass (`upgrade-over-old` first failed on Windows PowerShell 5.1 because a single object has no `.Count`; fixed in `faults.ps1` and re-run green) |
+| Chicago questions through the installed app, `qwen3.5-4b-cuda-gpu:4`, no pre-synced model cache | 7 of 7 correct: 227,299; THEFT 52,813 / BATTERY 41,130 / CRIMINAL DAMAGE 25,135; 36,070 arrests; Austin 11,358; 407 homicides; 18,608 gun; July 22,561. GPU peak 56 to 78% utilization, 7.6 to 8.6 GB VRAM |
+
+This also closes the open item "re-measure `qwen3.5-4b` on the A10G through the app". Not covered: the T4 and other pre-Ampere
+GPUs (no longer test targets), the first-run experience on a machine without the VC++ runtime (the box already had it), and a
+second Windows user with a non-ASCII name (needs an interactive desktop).
+
 ## Lessons: the box
 
 1. **Turn the PowerShell progress bar off** (`$ProgressPreference = "SilentlyContinue"`) before any
@@ -136,7 +152,7 @@ run (80 s) and its warm-up put the model on the GPU (VRAM 80 MiB to about 5 GB).
 - **Proactive check of the default model.** On a T4 the first chat with `qwen3.5-4b` fails, then the app
   falls back to Phi-4-mini (a second ~4 GB download). A one-token generation at warm-up would find this
   before the user does.
-- Re-measure `qwen3.5-4b` on the A10G through the app (with its reasoning-effort setting).
+- ~~Re-measure `qwen3.5-4b` on the A10G through the app~~ done for rc10 (7 of 7 Chicago questions, see above).
 - First-run provider download: the cancel command exists (`cancel_ep_registration`) and the status bar has a Cancel button for it (`src/components/StatusBar.tsx`); the button has not been exercised on a real machine.
 - Undiagnosed ignored tests (A8), and porting the four `foundry`-CLI tests to the SDK.
 - The agent loop (a script that dispatches a run, reads the artifacts and iterates) is not built; agents

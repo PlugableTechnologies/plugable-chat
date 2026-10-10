@@ -49,5 +49,5 @@ when to use this rung: [test-ladder](../test-ladder/SKILL.md).
 ## Results so far (2026-09-29/30)
 Phi-4-mini (CUDA) answered 7/7 Chicago questions correctly on a T4 (build 5d3385a). qwen3.5-4b initially produced no
 result on an A10G because its XML tool calls were not parsed (fixed, see [models-and-tools](../models-and-tools/SKILL.md));
-**the A10G re-run on the fixed build has not been done yet.** SDK 1.2.3 T4 run: SDK tests pass; app first-run
+**the A10G re-run on the fixed build was done on 2026-10-10 (rc10): 7/7 Chicago questions correct on `qwen3.5-4b` (CUDA).** SDK 1.2.3 T4 run: SDK tests pass; app first-run
 registration slow; Chicago run incomplete (`docs/gpu-validation.md`).
