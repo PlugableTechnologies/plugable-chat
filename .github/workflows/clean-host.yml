@@ -1,0 +1,108 @@
+name: Clean host
+# Runs the fault-injection matrix (scripts/ci/faults.ps1) against an installer on a fresh
+# windows-latest runner: no cached models, no state from earlier runs. Nightly it tests the
+# newest unsigned installer that CI built on main; by hand you can point it at a released build
+# (installer_release_tag, with expect_fail to prove every row is RED on the old build) and give
+# an older release for the upgrade scenario. Scenarios that need an NVIDIA GPU or a Windows image
+# without VC++ run on the AWS box instead (docs/clean-host-testing.md, infra/aws-gpu/run-matrix.sh).
+# No secrets are used and nothing is signed or published.
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Comma-separated scenario names, or cpu / gpu / all (see scripts/ci/faults.ps1 -List)"
+        default: "cpu"
+      installer_release_tag:
+        description: "Test the setup.exe from this GitHub release tag instead of the latest main CI build (e.g. v0.1.0-rc9)"
+        default: ""
+      old_release_tag:
+        description: "Older release tag whose setup.exe is installed first for the upgrade-over-old scenario"
+        default: ""
+      expect_fail:
+        description: "Expect every scenario to FAIL (run against rc9 to prove the tests reproduce the issues)"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: clean-host-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  matrix:
+    name: Fault matrix (Windows, CPU)
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SCENARIOS: ${{ inputs.scenarios || 'cpu' }}
+      INSTALLER_TAG: ${{ inputs.installer_release_tag }}
+      OLD_TAG: ${{ inputs.old_release_tag }}
+      EXPECT_FAIL: ${{ inputs.expect_fail }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pure-logic tests for the harness
+        shell: pwsh
+        run: pwsh scripts/ci/clean-host.tests.ps1
+
+      - name: Fetch the installer under test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path installers | Out-Null
+          if ($env:INSTALLER_TAG) {
+            gh release download $env:INSTALLER_TAG --repo $env:REPO --pattern "*-setup.exe" --dir installers
+          } else {
+            $id = gh run list --repo $env:REPO --workflow ci.yml --branch main --status success --limit 1 --json databaseId --jq ".[0].databaseId"
+            if (-not $id) { throw "no successful CI run on main to take an installer from" }
+            Write-Host "using the installer from CI run $id"
+            gh run download $id --repo $env:REPO --pattern "windows-unsigned-*" --dir installers
+          }
+          $setup = Get-ChildItem installers -Recurse -Filter *.exe | Where-Object { $_.Name -match "setup" } | Select-Object -First 1
+          if (-not $setup) { throw "no *setup*.exe found under installers/" }
+          "INSTALLER=$($setup.FullName)" >> $env:GITHUB_ENV
+
+      - name: Fetch the older release for the upgrade scenario
+        if: ${{ inputs.old_release_tag != '' }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path old | Out-Null
+          gh release download $env:OLD_TAG --repo $env:REPO --pattern "*-setup.exe" --dir old
+          $old = Get-ChildItem old -Filter *.exe | Select-Object -First 1
+          "OLD_INSTALLER=$($old.FullName)" >> $env:GITHUB_ENV
+
+      - name: Run the matrix
+        shell: pwsh
+        run: |
+          $a = @{ Installer = $env:INSTALLER; Scenario = @($env:SCENARIOS -split ","); OutDir = (Join-Path $PWD "clean-host-out") }
+          if ($env:OLD_INSTALLER) { $a.OldInstaller = $env:OLD_INSTALLER }
+          if ($env:EXPECT_FAIL -eq "true") { $a.ExpectFail = $true }
+          ./scripts/ci/faults.ps1 @a
+
+      - name: Summarize
+        if: always()
+        shell: pwsh
+        run: |
+          $j = "clean-host-out/clean-host-junit.xml"
+          if (-not (Test-Path $j)) { "No JUnit file was produced." >> $env:GITHUB_STEP_SUMMARY; exit 0 }
+          $s = ([xml](Get-Content $j -Raw)).testsuites.testsuite
+          "### Clean-host matrix: $($s.tests) scenarios, $($s.failures) failed, $($s.skipped) skipped" >> $env:GITHUB_STEP_SUMMARY
+          foreach ($t in $s.testcase) {
+            $status = if ($t.failure) { "FAILED: $($t.failure.message)" } elseif ($t.skipped) { "skipped: $($t.skipped.message)" } else { "ok" }
+            "- $($t.name): $status" >> $env:GITHUB_STEP_SUMMARY
+          }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: clean-host-logs-${{ github.run_id }}
+          path: clean-host-out/**
+          if-no-files-found: warn

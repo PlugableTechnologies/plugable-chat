@@ -8,7 +8,6 @@
 //! - Model state machine transitions
 
 use crate::actors::startup_actor::StartupMsg;
-use crate::crash_handler::SuppressCrashDialogGuard;
 use crate::is_verbose_logging_enabled;
 use crate::process_utils::HideConsoleWindow;
 use crate::protocol::{
@@ -18,7 +17,7 @@ use crate::protocol::{
 use crate::app_state::{GpuResourceGuard, LaunchConfigState, LoggingPersistence, SettingsState};
 use crate::settings;
 use crate::settings::ChatFormatName;
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::TextEmbedding;
 
 // =============================================================================
 // GPU EMBEDDING DISABLED - The following ort imports are commented out.
@@ -53,6 +52,18 @@ use super::stream_handler::{extract_text_from_stream_chunk, StreamingToolCalls};
 
 /// Target embedding dimension (must match LanceDB schema)
 const EMBEDDING_DIM: usize = 768;
+
+/// Mirror the model state into the `PLUGABLE_CHAT_TEST_STATE` file. A load error is only
+/// reported (the actor may still fall back to another model); an unreachable service is final.
+fn record_model_state_for_tests(state: &ModelState) {
+    use crate::test_state::{record, status, Phase};
+    match state {
+        ModelState::Ready { model_id } => record(Phase::Ready, status::OK, model_id),
+        ModelState::ServiceUnavailable { message } => record(Phase::Error, status::FAILED, message),
+        ModelState::Error { message, .. } => record(Phase::Error, "reported", message),
+        _ => {}
+    }
+}
 
 // StreamingToolCalls, build_foundry_chat_request_body, convert_chat_messages_to_foundry_format,
 // extract_text_from_stream_chunk, find_foundry_binary, ServiceStatus, FoundryModel, FoundryModelsResponse,
@@ -175,6 +186,8 @@ impl ModelGatewayActor {
                 };
                 match super::backend::sdk::SdkBackend::new(&cache, library_dir.as_deref()) {
                     Ok(b) => {
+                        let b = std::sync::Arc::new(b);
+                        super::gpu_registration::remember_sdk(&b);
                         match &library_dir {
                             Some(d) => println!(
                                 "[FoundryActor] Backend: foundry-local-sdk 1.2.0 (bundled runtime @ {})",
@@ -184,7 +197,7 @@ impl ModelGatewayActor {
                                 "[FoundryActor] Backend: foundry-local-sdk 1.2.0 (dev runtime from OUT_DIR)"
                             ),
                         }
-                        (Some(std::sync::Arc::new(b)), None)
+                        (Some(b), None)
                     }
                     Err(e) => {
                         println!("[FoundryActor] SDK backend init failed ({e}); falling back to CLI");
@@ -635,6 +648,7 @@ impl ModelGatewayActor {
         if let Err(e) = self.app_handle.emit("model-state-changed", event_payload) {
             eprintln!("[ModelStateMachine] Failed to emit state change: {:?}", e);
         }
+        record_model_state_for_tests(&self.model_state);
         
         // Also report to startup coordinator
         self.report_to_startup_coordinator();
@@ -678,7 +692,14 @@ impl ModelGatewayActor {
     /// Build the user-facing text for a catastrophic startup failure, logging it for support.
     fn describe_startup_failure(&self, failure: &crate::startup_failure::StartupFailure) -> String {
         let log_dir = crate::paths::get_config_dir().display().to_string();
-        let msg = crate::startup_failure::describe(failure, crate::startup_failure::Os::current(), &log_dir);
+        // Probing runs `nvidia-smi`/`reg` once; this path only runs when startup has already failed.
+        let diagnostics = crate::gpu_diagnostics::snapshot_blocking();
+        let msg = crate::startup_failure::describe_with_diagnostics(
+            failure,
+            crate::startup_failure::Os::current(),
+            &log_dir,
+            &diagnostics,
+        );
         println!("[FoundryActor] Startup failure: {failure:?}");
         msg
     }
@@ -821,42 +842,20 @@ impl ModelGatewayActor {
     /// stops it. Failure or cancellation never blocks start-up: CPU models still work.
     async fn register_gpu_execution_providers(&self) {
         let Some(sdk) = self.sdk.clone() else {
+            crate::test_state::record(
+                crate::test_state::Phase::EpRegistration,
+                crate::test_state::status::SKIPPED,
+                "SDK backend not in use",
+            );
             return;
         };
-        let cancel = super::ep_registration_cancel_flag();
-        cancel.store(false, std::sync::atomic::Ordering::SeqCst);
-
-        let progress_handle = self.app_handle.clone();
-        let summary = sdk
-            .register_execution_providers(
-                move |ep, percent| {
-                    let _ = progress_handle.emit(
-                        "ep-registration-progress",
-                        json!({ "phase": "downloading", "ep": ep, "percent": percent }),
-                    );
-                },
-                cancel,
-            )
-            .await;
-
-        let message = if summary.cancelled {
-            "GPU acceleration setup cancelled; using CPU models.".to_string()
-        } else if summary.registered.is_empty() && summary.failed.is_empty() {
-            String::new()
-        } else if summary.failed.is_empty() {
-            format!("GPU acceleration ready ({}).", summary.registered.join(", "))
-        } else {
-            format!(
-                "GPU acceleration ready: {}; not available on this machine: {}.",
-                if summary.registered.is_empty() { "none".to_string() } else { summary.registered.join(", ") },
-                summary.failed.join(", ")
-            )
-        };
-        let _ = self.app_handle.emit(
-            "ep-registration-progress",
-            json!({ "phase": "done", "message": message, "registered": summary.registered,
-                    "failed": summary.failed, "seconds": summary.seconds }),
-        );
+        let summary = super::gpu_registration::run_registration(&sdk, &self.app_handle, 1).await;
+        // A failed first run used to leave the app on CPU models until restart. Transient
+        // causes (network) are retried in the background with backoff; permanent ones
+        // (driver, missing library) wait for the user, who gets a Retry button.
+        if super::gpu_registration::should_retry(&summary) {
+            super::gpu_registration::spawn_retry(self.app_handle.clone());
+        }
     }
 
     pub async fn run(mut self) {
@@ -922,77 +921,7 @@ impl ModelGatewayActor {
         
         // Initialize CPU embedding model in a separate task to avoid blocking the actor message loop
         tokio::spawn(async move {
-            let _ = app_handle_clone.emit("embedding-init-progress", json!({
-                "message": "Initializing CPU embedding model...",
-                "is_complete": false
-            }));
-
-            // Initialize CPU model (no GPU execution providers - pure CPU)
-            // Use catch_unwind to handle panics from ORT initialization (e.g., missing DLLs on Windows)
-            // Also suppress the crash dialog since this is an optional feature
-            let cpu_result = tokio::task::spawn_blocking(move || {
-                // Suppress crash dialog for ORT initialization - this is optional and we handle failures gracefully
-                let _guard = SuppressCrashDialogGuard::new();
-                
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut options = InitOptions::new(EmbeddingModel::BGEBaseENV15);
-                    options.show_download_progress = true;
-                    // Don't set any execution providers - defaults to CPU
-                    println!("FoundryActor: CPU model - using CPU only (no GPU EPs configured)");
-                    TextEmbedding::try_new(options)
-                }))
-            })
-            .await;
-
-            // Store CPU model result
-            // Handle triple-nested Result from: spawn_blocking -> catch_unwind -> try_new
-            match cpu_result {
-                Ok(Ok(Ok(model))) => {
-                    println!("FoundryActor: CPU embedding model loaded successfully");
-                    let mut guard = shared_cpu_model.write().await;
-                    *guard = Some(Arc::new(model));
-                    let _ = app_handle_clone.emit("embedding-init-progress", json!({
-                        "message": "CPU embedding model loaded (GPU model loads on-demand)",
-                        "is_complete": true
-                    }));
-                }
-                Ok(Ok(Err(e))) => {
-                    println!("FoundryActor ERROR: ❌ Failed to load CPU embedding model: {:?}", e);
-                    println!("FoundryActor: CPU embedding model load error details - check if the model file exists and is accessible");
-                    let _ = app_handle_clone.emit("embedding-init-progress", json!({
-                        "message": format!("Failed to load CPU embedding model: {}", e),
-                        "is_complete": true,
-                        "error": true
-                    }));
-                }
-                Ok(Err(panic_payload)) => {
-                    // ORT initialization panic - likely missing onnxruntime.dll on Windows
-                    let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "Unknown panic".to_string()
-                    };
-                    println!("FoundryActor ERROR: ❌ ONNX Runtime initialization panicked: {}", panic_msg);
-                    println!("FoundryActor: This usually means onnxruntime.dll is missing on Windows.");
-                    println!("FoundryActor: Embedding/search features will be unavailable.");
-                    let _ = app_handle_clone.emit("embedding-init-progress", json!({
-                        "message": format!("ONNX Runtime unavailable: {}. Embedding features disabled.", panic_msg),
-                        "is_complete": true,
-                        "error": true
-                    }));
-                }
-                Err(e) => {
-                    println!("FoundryActor ERROR: ❌ CPU embedding model init task failed: {:?}", e);
-                    println!("FoundryActor: This may indicate an out-of-memory condition or incompatible hardware");
-                    let _ = app_handle_clone.emit("embedding-init-progress", json!({
-                        "message": "CPU embedding model initialization task failed",
-                        "is_complete": true,
-                        "error": true
-                    }));
-                }
-            }
+            let _ = super::embedding_init::init_cpu_embedding_model(app_handle_clone, shared_cpu_model).await;
         });
 
         while let Some(msg) = self.foundry_msg_rx.recv().await {
@@ -1999,6 +1928,10 @@ impl ModelGatewayActor {
                     // Return the current model state machine state
                     let _ = respond_to.send(self.model_state.clone());
                 }
+                FoundryMsg::RefreshConnectionInfo { respond_to } => {
+                    let ok = self.update_connection_info().await;
+                    let _ = respond_to.send(ok);
+                }
                 FoundryMsg::Reload { respond_to } => {
                     println!("FoundryActor: Reloading foundry service...");
                     
@@ -2969,6 +2902,43 @@ impl ModelGatewayActor {
     /// Download a model from the Foundry catalog
     /// POST /openai/download with streaming progress
     async fn download_model_impl(
+        &self,
+        client: &reqwest::Client,
+        port: u16,
+        model_name: &str,
+    ) -> Result<(), String> {
+        // Tell the UI which model (and how big) before the first byte moves, so the header can
+        // show a real name instead of a generic "Downloading model...".
+        let (resolved_name, size_bytes) = match &self.sdk {
+            Some(sdk) => sdk.download_info(model_name).await,
+            None => (model_name.to_string(), None),
+        };
+        let _ = self.app_handle.emit(
+            "model-download-started",
+            serde_json::json!({ "model": resolved_name, "size_bytes": size_bytes }),
+        );
+        crate::test_state::record(
+            crate::test_state::Phase::ModelDownload,
+            crate::test_state::status::STARTED,
+            &resolved_name,
+        );
+        let result = self.download_model_inner(client, port, model_name).await;
+        match &result {
+            Ok(()) => crate::test_state::record(
+                crate::test_state::Phase::ModelDownload,
+                crate::test_state::status::OK,
+                &resolved_name,
+            ),
+            Err(e) => crate::test_state::record(
+                crate::test_state::Phase::ModelDownload,
+                crate::test_state::status::FAILED,
+                e,
+            ),
+        }
+        result
+    }
+
+    async fn download_model_inner(
         &self,
         client: &reqwest::Client,
         port: u16,

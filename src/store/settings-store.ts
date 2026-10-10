@@ -84,6 +84,8 @@ export interface AppSettings {
     always_on_mcp_tools: string[];
     always_on_tables: AlwaysOnTableConfig[];
     always_on_rag_paths: string[];
+    /** Set by the backend once the first-run welcome has been shown */
+    first_run_completed?: boolean;
 }
 
 // Always-on table configuration

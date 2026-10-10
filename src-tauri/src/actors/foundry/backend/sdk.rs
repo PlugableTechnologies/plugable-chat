@@ -105,6 +105,19 @@ impl SdkBackend {
         self.base_url.lock().ok().and_then(|g| g.clone())
     }
 
+    /// The concrete model that downloading `id` will fetch, and its size in bytes when the
+    /// catalog knows it. Falls back to `id` itself; never fails.
+    pub async fn download_info(&self, id: &str) -> (String, Option<u64>) {
+        let catalog = self.list_catalog().await;
+        match pick_catalog_entry(&catalog, id) {
+            Some(m) => (
+                m.name.clone(),
+                (m.file_size_mb > 0).then(|| m.file_size_mb * 1024 * 1024),
+            ),
+            None => (id.to_string(), None),
+        }
+    }
+
     /// Resolve a `Model` handle from a variant id (`qwen3.5-4b-cuda-gpu:4`), an alias, or a short
     /// name such as `qwen3.5-4b` or `phi-4-mini-instruct`.
     ///
@@ -145,6 +158,21 @@ impl SdkBackend {
     }
 }
 
+/// The catalog entry a short name, alias or variant id will download, with its size in bytes.
+/// Mirrors the choice `SdkBackend::model` makes so the size shown matches what is fetched.
+fn pick_catalog_entry<'a>(catalog: &'a [CatalogModel], id: &str) -> Option<&'a CatalogModel> {
+    let wanted = id.to_lowercase();
+    if let Some(exact) = catalog.iter().find(|m| m.name.to_lowercase() == wanted) {
+        return Some(exact);
+    }
+    let mut candidates: Vec<&CatalogModel> = catalog
+        .iter()
+        .filter(|m| m.name.to_lowercase().contains(&wanted) || m.alias.to_lowercase().contains(&wanted))
+        .collect();
+    candidates.sort_by_key(|m| variant_preference_key(m));
+    candidates.into_iter().next()
+}
+
 /// Sort key for choosing among variants of one model: lower is better.
 fn variant_preference_key(m: &CatalogModel) -> (bool, u8, u8, u64) {
     let ep = m.runtime.execution_provider.to_lowercase();
@@ -176,9 +204,20 @@ pub struct EpRegistrationSummary {
     pub registered: Vec<String>,
     /// Could not be registered.
     pub failed: Vec<String>,
+    /// Why each provider in `failed` (or discovery itself) failed, classified for the UI.
+    pub failures: Vec<crate::gpu_diagnostics::EpFailure>,
     /// The caller cancelled the download.
     pub cancelled: bool,
     pub seconds: f64,
+}
+
+/// A cancel request means the user stopped it, whatever text the runtime returned.
+fn ep_failure(ep: &str, message: &str, cancelled: bool) -> crate::gpu_diagnostics::EpFailure {
+    let mut failure = crate::gpu_diagnostics::make_failure(ep, message);
+    if cancelled {
+        failure.kind = crate::gpu_diagnostics::EpFailureKind::Cancelled;
+    }
+    failure
 }
 
 impl SdkBackend {
@@ -208,6 +247,12 @@ impl SdkBackend {
             Ok(eps) => eps,
             Err(e) => {
                 println!("[SdkBackend] discover_eps failed: {e}");
+                // Without discovery there is no provider name to blame, so the failure is
+                // recorded against the step itself; the UI still shows the cause and a retry.
+                summary
+                    .failures
+                    .push(crate::gpu_diagnostics::make_failure("discovery", &e.to_string()));
+                summary.seconds = started.elapsed().as_secs_f64();
                 return summary;
             }
         };
@@ -269,17 +314,32 @@ impl SdkBackend {
                 }
             }
         };
+        summary.cancelled = cancel.load(Ordering::SeqCst);
         match result {
             Ok(r) => {
                 summary.registered = r.registered_eps;
                 summary.failed = r.failed_eps;
+                let detail = if r.status.trim().is_empty() {
+                    "registration failed (no detail from the runtime)".to_string()
+                } else {
+                    r.status
+                };
+                summary.failures = summary
+                    .failed
+                    .iter()
+                    .map(|ep| ep_failure(ep, &detail, summary.cancelled))
+                    .collect();
             }
             Err(e) => {
                 println!("[SdkBackend] execution provider registration failed: {e}");
+                let detail = e.to_string();
+                summary.failures = missing
+                    .iter()
+                    .map(|ep| ep_failure(ep, &detail, summary.cancelled))
+                    .collect();
                 summary.failed = missing;
             }
         }
-        summary.cancelled = cancel.load(Ordering::SeqCst);
         summary.seconds = started.elapsed().as_secs_f64();
         println!("[SdkBackend] execution providers: {summary:?}");
         summary
@@ -732,6 +792,16 @@ mod tests {
         assert!(!f(["WebGpuExecutionProvider", "CUDAExecutionProvider"].into_iter()));
         assert!(!f(["DmlExecutionProvider", "WebGpuExecutionProvider"].into_iter()));
         assert!(!f(["CPUExecutionProvider"].into_iter()));
+    }
+
+    #[test]
+    fn download_info_picks_the_variant_the_download_will_use() {
+        let cpu = catalog_entry("qwen3.5-4b-cpu:1", "CPU", "CPUExecutionProvider", 3000, false);
+        let gpu = catalog_entry("qwen3.5-4b-cuda-gpu:4", "GPU", "CUDAExecutionProvider", 2500, false);
+        let catalog = vec![cpu, gpu];
+        assert_eq!(pick_catalog_entry(&catalog, "qwen3.5-4b").unwrap().name, "qwen3.5-4b-cuda-gpu:4");
+        assert_eq!(pick_catalog_entry(&catalog, "QWEN3.5-4B-CPU:1").unwrap().name, "qwen3.5-4b-cpu:1");
+        assert!(pick_catalog_entry(&catalog, "phi-4").is_none());
     }
 
     #[test]

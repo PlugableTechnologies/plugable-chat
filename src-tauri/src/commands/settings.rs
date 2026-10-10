@@ -56,11 +56,16 @@ pub async fn save_app_settings(
     let mut normalized = new_settings;
     normalized.tool_call_formats.normalize();
 
+    // Hold the write lock across the save so a concurrent `mark_first_run_complete` cannot
+    // interleave between the merge below and the write.
+    let mut guard = settings_state.settings.write().await;
+    // One-way flag: a client that sends a stale copy of the settings must not un-complete it.
+    normalized.first_run_completed = normalized.first_run_completed || guard.first_run_completed;
+
     // Save to file
     settings::save_settings(&normalized).await?;
 
     // Update in-memory state
-    let mut guard = settings_state.settings.write().await;
     *guard = normalized.clone();
 
     // Refresh the SettingsStateMachine (Tier 1)
@@ -74,6 +79,17 @@ pub async fn save_app_settings(
     }
 
     Ok(())
+}
+
+/// Record that first-run setup is finished so the welcome message is not shown again.
+#[tauri::command]
+pub async fn mark_first_run_complete(settings_state: State<'_, SettingsState>) -> Result<(), String> {
+    let mut guard = settings_state.settings.write().await;
+    if guard.first_run_completed {
+        return Ok(());
+    }
+    guard.first_run_completed = true;
+    settings::save_settings(&guard).await
 }
 
 /// Add a new MCP server configuration
@@ -519,8 +535,8 @@ pub async fn update_database_toolbox_config(
             &joined
         );
         return Err(format!(
-            "Schema refresh failed after saving database settings: {}. Fix the MCP database configuration here and try again.",
-            joined
+            "{}. Fix the MCP database configuration here and try again.",
+            crate::commands::database::schema_refresh_failure_message(&joined)
         ));
     }
 

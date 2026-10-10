@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-import { cancellingEpRegistrationStatus } from '../store/chat/ep-registration-status';
+import { listOperations, type OperationEntry } from '../store/chat/operations';
 import { useChatStore, OperationStatus, ModelStateData, getModelStateMessage, isModelStateBlocking, StartupStateType } from '../store/chat-store';
 
 // Format elapsed time helper
@@ -154,6 +154,77 @@ const getModelStateColors = (modelState: ModelStateData) => {
     }
 };
 
+function OperationRow({ op, onRetry, onDismiss, onCancel }: {
+    op: OperationEntry;
+    onRetry: () => void;
+    onDismiss: () => void;
+    onCancel: () => void;
+}) {
+    const [elapsed, setElapsed] = useState(0);
+    useEffect(() => {
+        if (op.state !== 'active') return;
+        const tick = () => setElapsed(Math.floor((Date.now() - op.startTime) / 1000));
+        tick();
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(id);
+    }, [op.state, op.startTime]);
+
+    const isError = op.state === 'error';
+    const isDone = op.state === 'done';
+    const tone = isError
+        ? { bg: 'bg-red-50', border: 'border-red-300', text: 'text-red-800', bar: 'bg-red-500' }
+        : isDone
+            ? { bg: 'bg-green-50', border: 'border-green-200', text: 'text-green-800', bar: 'bg-green-500' }
+            : { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-800', bar: 'bg-blue-500' };
+
+    return (
+        <div className={`operation-row operation-row-${op.key} flex items-center justify-between px-4 py-2 ${tone.bg} border-b ${tone.border}`} role={isError ? 'alert' : 'status'}>
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+                <span className={`flex-shrink-0 ${tone.text}`}>{isError ? '⚠️' : isDone ? '✅' : '⏳'}</span>
+                <div className="flex-1 min-w-0">
+                    <div className={`text-sm font-medium ${tone.text} ${isError ? '' : 'truncate'}`}>
+                        {op.message}
+                        {!isError && op.percent !== undefined && !isDone ? ` ${op.percent}%` : ''}
+                    </div>
+                    {op.state === 'active' && (
+                        <div className="mt-1 h-1.5 w-full rounded-full bg-black/10 overflow-hidden">
+                            <div
+                                className={`h-full ${tone.bar} transition-all ${op.percent === undefined ? 'animate-pulse w-full' : ''}`}
+                                style={op.percent === undefined ? undefined : { width: `${op.percent}%` }}
+                            />
+                        </div>
+                    )}
+                </div>
+                {op.state === 'active' && (
+                    <span className={`flex-shrink-0 text-xs ${tone.text} opacity-75 font-mono`}>{formatElapsedTime(elapsed)}</span>
+                )}
+            </div>
+            {op.state === 'active' && op.cancellable && (
+                <button
+                    disabled={op.cancelRequested}
+                    onClick={onCancel}
+                    className={`ep-registration-cancel-button flex-shrink-0 ml-3 px-3 py-1 rounded-md text-sm font-medium border ${tone.border} ${tone.text} hover:bg-black/5 disabled:opacity-50`}
+                >
+                    {op.cancelRequested ? 'Cancelling…' : 'Cancel'}
+                </button>
+            )}
+            {isError && op.retryable && (
+                <button
+                    onClick={onRetry}
+                    className="operation-retry-button flex-shrink-0 ml-3 px-3 py-1 rounded-md text-sm font-medium bg-red-600 text-white hover:bg-red-700"
+                >
+                    Retry
+                </button>
+            )}
+            {!op.state.startsWith('active') && (
+                <button onClick={onDismiss} className={`flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 ${tone.text}`} aria-label={`Dismiss ${op.label}`}>
+                    <X size={16} />
+                </button>
+            )}
+        </div>
+    );
+}
+
 export function StatusBar() {
     const { 
         operationStatus, 
@@ -166,7 +237,9 @@ export function StatusBar() {
         modelIncompatibleNotice,
         setModelIncompatibleNotice,
         loadModel,
-        setOperationStatus,
+        operations,
+        dispatchOperation,
+        retryOperation,
     } = useChatStore();
     const [switchingToAlternative, setSwitchingToAlternative] = useState(false);
     const [elapsed, setElapsed] = useState(0);
@@ -208,6 +281,7 @@ export function StatusBar() {
 
     const heartbeatActive = !!heartbeatWarningStart;
     const modelStuckActive = !!modelStuckWarning;
+    const operationRows = listOperations(operations);
     const colors = operationStatus ? getStatusBarColors(operationStatus) : null;
     const icon = operationStatus ? getOperationIcon(operationStatus) : null;
 
@@ -290,6 +364,23 @@ export function StatusBar() {
                 </div>
             )}
 
+            {operationRows.map((op) => (
+                <OperationRow
+                    key={op.key}
+                    op={op}
+                    onRetry={() => retryOperation(op.key)}
+                    onDismiss={() => dispatchOperation({ type: 'clear', key: op.key })}
+                    onCancel={async () => {
+                        dispatchOperation({ type: 'cancel-requested', key: op.key });
+                        try {
+                            await invoke('cancel_ep_registration');
+                        } catch (error) {
+                            console.warn('[StatusBar] cancel_ep_registration failed:', error);
+                        }
+                    }}
+                />
+            ))}
+
             {operationStatus && (
                 <div className={`status-bar flex items-center justify-between px-4 py-2 ${colors!.bg} border-b ${colors!.border} transition-all`}>
                     <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -348,24 +439,6 @@ export function StatusBar() {
                         )}
                     </div>
                     
-                    {/* Cancel button for cancellable operations (GPU provider download) */}
-                    {operationStatus.cancelAction === 'ep-registration' && !operationStatus.completed && (
-                        <button
-                            disabled={operationStatus.cancelRequested}
-                            onClick={async () => {
-                                setOperationStatus(cancellingEpRegistrationStatus(operationStatus));
-                                try {
-                                    await invoke('cancel_ep_registration');
-                                } catch (error) {
-                                    console.warn('[StatusBar] cancel_ep_registration failed:', error);
-                                }
-                            }}
-                            className={`ep-registration-cancel-button flex-shrink-0 ml-3 px-3 py-1 rounded-md text-sm font-medium border ${colors!.border} ${colors!.text} hover:bg-black/5 disabled:opacity-50 transition-colors`}
-                        >
-                            {operationStatus.cancelRequested ? 'Cancelling…' : 'Cancel'}
-                        </button>
-                    )}
-
                     {/* Dismiss button */}
                     <button
                         onClick={dismissStatusBar}

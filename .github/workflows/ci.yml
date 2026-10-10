@@ -80,6 +80,10 @@ jobs:
       - name: Signing script tests (no Windows or DigiCert needed)
         run: node --test scripts/sign-windows.test.mjs
 
+      - name: Clean-host harness logic tests (pin, hook consistency, state-file asserts, JUnit)
+        shell: pwsh
+        run: pwsh scripts/ci/clean-host.tests.ps1
+
       - name: Rust unit tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
@@ -155,6 +159,11 @@ jobs:
       # optimized build is release.yml's job.
       - name: Build the unsigned installer (debug profile)
         run: node node_modules/@tauri-apps/cli/tauri.js build --debug --bundles nsis,msi
+
+      # +crt-static (.cargo/config.toml): the exe must not need the VC++ runtime to start.
+      - name: Confirm the app exe links the C runtime statically
+        shell: pwsh
+        run: pwsh scripts/ci/assert-static-crt.ps1 -Exe target/debug/plugable-chat.exe
 
       - name: Collect the installer
         shell: pwsh

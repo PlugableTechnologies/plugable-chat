@@ -1,3 +1,4 @@
+import { stashStreamingOnLeave } from '../streaming-buffer';
 import type { StateCreator } from 'zustand';
 import { invoke } from '../../../lib/api';
 import type { ChatSummary, Message } from '../types';
@@ -111,9 +112,10 @@ export const createChatHistorySlice: StateCreator<
             const streamingChatId = state.streamingChatId;
             
             // If we're switching away from a streaming chat, save current messages to streamingMessages
-            if (streamingChatId && streamingChatId === currentChatId && id !== currentChatId) {
+            const stash = stashStreamingOnLeave(state, id);
+            if (stash) {
                 console.log(`[ChatStore] Switching away from streaming chat ${currentChatId?.slice(0, 8)}, saving messages`);
-                set({ streamingMessages: [...state.chatMessages] } as any);
+                set(stash as any);
             }
             
             // If we're switching to the streaming chat, restore messages from streamingMessages

@@ -15,7 +15,8 @@ use crate::settings::{
 use fastembed::TextEmbedding;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
 
 // NOTE: GPU EMBEDDING DISABLED - FoundryMsg import removed as GetGpuEmbeddingModel,
@@ -194,7 +195,162 @@ pub async fn check_table_name_conflicts(
     Ok(conflicts)
 }
 
+/// Why a schema refresh cannot start yet. Each variant has a fixed, distinct message so the
+/// user (and the clean-host tests) can tell the causes apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshBlocker {
+    EmbeddingNotReady,
+    ToolboxNotDownloaded,
+    ToolboxFailedToStart(String),
+    DemoDataMissing(String),
+}
+
+impl RefreshBlocker {
+    /// The cause alone, e.g. `embedding model not ready`.
+    pub fn reason(&self) -> String {
+        match self {
+            RefreshBlocker::EmbeddingNotReady => "embedding model not ready".to_string(),
+            RefreshBlocker::ToolboxNotDownloaded => "toolbox not downloaded".to_string(),
+            RefreshBlocker::ToolboxFailedToStart(stderr) => format!("toolbox failed to start: {}", stderr),
+            RefreshBlocker::DemoDataMissing(detail) => format!("demo database not found: {}", detail),
+        }
+    }
+
+    /// True when waiting (for a download or the embedding model) can clear it.
+    pub fn clears_by_waiting(&self) -> bool {
+        matches!(self, RefreshBlocker::EmbeddingNotReady | RefreshBlocker::ToolboxNotDownloaded)
+    }
+}
+
+/// Every refresh failure carries this prefix so the UI and logs can rely on it.
+pub const SCHEMA_REFRESH_FAILED_PREFIX: &str = "Schema refresh failed";
+
+pub fn schema_refresh_failure_message(reason: &str) -> String {
+    format!("{}: {}", SCHEMA_REFRESH_FAILED_PREFIX, reason)
+}
+
+/// Decide whether a toolbox start error means the binary is absent or the binary ran and failed.
+pub fn classify_toolbox_start_error(error: &str, toolbox_present: bool) -> RefreshBlocker {
+    if !toolbox_present
+        || error.contains(crate::toolbox_install::TOOLBOX_MISSING_MESSAGE)
+        || error.contains("No command specified")
+    {
+        RefreshBlocker::ToolboxNotDownloaded
+    } else {
+        RefreshBlocker::ToolboxFailedToStart(error.trim().to_string())
+    }
+}
+
+/// First missing prerequisite for refreshing `config`, if any. Order: the embedding model,
+/// the toolbox, then the demo data the toolbox serves.
+pub fn first_blocker(
+    embedding_ready: bool,
+    needs_toolbox: bool,
+    toolbox_present: bool,
+    demo_data_problem: Option<String>,
+) -> Option<RefreshBlocker> {
+    if !embedding_ready {
+        return Some(RefreshBlocker::EmbeddingNotReady);
+    }
+    if needs_toolbox && !toolbox_present {
+        return Some(RefreshBlocker::ToolboxNotDownloaded);
+    }
+    demo_data_problem.map(RefreshBlocker::DemoDataMissing)
+}
+
+async fn current_blocker(
+    embedding_state: &EmbeddingModelState,
+    config: &DatabaseToolboxConfig,
+) -> Option<RefreshBlocker> {
+    let embedding_ready = embedding_state.cpu_model.read().await.is_some();
+    let needs_toolbox = crate::toolbox_install::needs_app_managed_toolbox(config);
+    let toolbox_present = !needs_toolbox || crate::settings::find_toolbox_binary().is_some();
+    let demo_problem = if needs_toolbox {
+        crate::settings::demo_data_problem()
+    } else {
+        None
+    };
+    first_blocker(embedding_ready, needs_toolbox, toolbox_present, demo_problem)
+}
+
+/// Longest the automatic retry waits for the embedding model and toolbox (a first run
+/// downloads 1.5 GB of GPU components, two models and 216 MB of toolbox).
+const AUTO_RETRY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
+const AUTO_RETRY_POLL: Duration = Duration::from_secs(2);
+
+static AUTO_RETRY_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Wait until the missing prerequisites arrive, then refresh once more. One waiter at a time.
+fn schedule_auto_retry(app_handle: &AppHandle) {
+    if AUTO_RETRY_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let app = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let deadline = std::time::Instant::now() + AUTO_RETRY_MAX_WAIT;
+        let outcome = loop {
+            let settings_state = app.state::<SettingsState>();
+            let config = settings_state.settings.read().await.database_toolbox.clone();
+            drop(settings_state);
+            if !config.enabled || config.sources.iter().all(|s| !s.enabled) {
+                break None; // the user switched the sources off meanwhile
+            }
+            let embedding_state = app.state::<EmbeddingModelState>();
+            match current_blocker(&embedding_state, &config).await {
+                None => break Some(config),
+                Some(RefreshBlocker::ToolboxNotDownloaded)
+                    if !crate::toolbox_install::download_in_progress()
+                        && crate::toolbox_install::last_download_error().is_some() =>
+                {
+                    // The download already failed for good; waiting will not fix it.
+                    break None;
+                }
+                Some(b) if !b.clears_by_waiting() => break None,
+                Some(_) => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::time::sleep(AUTO_RETRY_POLL).await;
+        };
+        AUTO_RETRY_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let Some(config) = outcome else {
+            println!("[SchemaRefresh] Automatic retry abandoned (prerequisite did not arrive)");
+            return;
+        };
+        println!("[SchemaRefresh] Prerequisites ready; retrying the schema refresh");
+        let handles = app.state::<ActorHandles>();
+        let embedding_state = app.state::<EmbeddingModelState>();
+        let result = refresh_database_schemas_inner(&app, &handles, &embedding_state, &config, false).await;
+        let error = match result {
+            Ok(summary) if summary.errors.is_empty() => None,
+            Ok(summary) => Some(schema_refresh_failure_message(&summary.errors.join("; "))),
+            Err(e) => Some(e),
+        };
+        if let Some(message) = &error {
+            println!("[SchemaRefresh] Automatic retry failed: {message}");
+        }
+        let _ = app.emit(
+            "schema-refresh-progress",
+            SchemaRefreshProgress {
+                message: if error.is_none() { "Refresh complete".to_string() } else { "Refresh failed".to_string() },
+                source_name: "".to_string(),
+                current_table: None,
+                tables_done: 0,
+                tables_total: 0,
+                is_complete: true,
+                error,
+            },
+        );
+    });
+}
+
 /// Refresh database schemas for a given configuration
+///
+/// Missing prerequisites (embedding model, toolbox) fail with a distinct message each, all
+/// prefixed `Schema refresh failed: `, start the missing download, and schedule one automatic
+/// retry for when they arrive.
 ///
 /// NOTE: GPU EMBEDDING DISABLED - Always uses CPU embedding model.
 /// This simplifies the code and avoids GPU memory contention issues.
@@ -204,6 +360,16 @@ pub async fn refresh_database_schemas_for_config(
     handles: &State<'_, ActorHandles>,
     embedding_state: &State<'_, EmbeddingModelState>,
     toolbox_config: &DatabaseToolboxConfig,
+) -> Result<SchemaRefreshSummary, String> {
+    refresh_database_schemas_inner(app_handle, handles, embedding_state, toolbox_config, true).await
+}
+
+async fn refresh_database_schemas_inner(
+    app_handle: &AppHandle,
+    handles: &State<'_, ActorHandles>,
+    embedding_state: &State<'_, EmbeddingModelState>,
+    toolbox_config: &DatabaseToolboxConfig,
+    allow_auto_retry: bool,
 ) -> Result<SchemaRefreshSummary, String> {
     let sources: Vec<DatabaseSourceConfig> = toolbox_config
         .sources
@@ -238,14 +404,34 @@ pub async fn refresh_database_schemas_for_config(
         });
     }
 
+    // Enabling a source that needs the toolbox starts its download right away, so it runs
+    // alongside the embedding-model download instead of after it.
+    crate::toolbox_install::spawn_download_if_needed(app_handle, toolbox_config);
+
+    if let Some(blocker) = current_blocker(embedding_state, toolbox_config).await {
+        println!("[SchemaRefresh] Blocked: {}", blocker.reason());
+        if allow_auto_retry && blocker.clears_by_waiting() {
+            schedule_auto_retry(app_handle);
+        }
+        return Err(schema_refresh_failure_message(&blocker.reason()));
+    }
+
     // Always use CPU embedding model (GPU embedding is disabled)
     let model_guard = embedding_state.cpu_model.read().await;
-    let embedding_model = model_guard
-        .clone()
-        .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
+    let embedding_model = match model_guard.clone() {
+        Some(model) => model,
+        None => return Err(schema_refresh_failure_message(&RefreshBlocker::EmbeddingNotReady.reason())),
+    };
     drop(model_guard);
 
-    ensure_toolbox_running(&handles.database_toolbox_tx, toolbox_config).await?;
+    if let Err(start_error) = ensure_toolbox_running(&handles.database_toolbox_tx, toolbox_config).await {
+        let blocker = classify_toolbox_start_error(&start_error, crate::settings::find_toolbox_binary().is_some());
+        println!("[SchemaRefresh] Blocked: {}", blocker.reason());
+        if allow_auto_retry && blocker.clears_by_waiting() {
+            schedule_auto_retry(app_handle);
+        }
+        return Err(schema_refresh_failure_message(&blocker.reason()));
+    }
 
     let mut refreshed_sources = Vec::new();
     let mut errors = Vec::new();
@@ -1473,4 +1659,59 @@ pub async fn refresh_schema_cache_for_source(
         database_kind: source.kind,
         tables: tables_status,
     })
+}
+
+#[cfg(test)]
+mod refresh_blocker_tests {
+    use super::*;
+
+    #[test]
+    fn each_prerequisite_has_its_own_exact_message_under_one_prefix() {
+        assert_eq!(
+            schema_refresh_failure_message(&RefreshBlocker::EmbeddingNotReady.reason()),
+            "Schema refresh failed: embedding model not ready"
+        );
+        assert_eq!(
+            schema_refresh_failure_message(&RefreshBlocker::ToolboxNotDownloaded.reason()),
+            "Schema refresh failed: toolbox not downloaded"
+        );
+        assert_eq!(
+            schema_refresh_failure_message(&RefreshBlocker::ToolboxFailedToStart("boom on stderr".into()).reason()),
+            "Schema refresh failed: toolbox failed to start: boom on stderr"
+        );
+    }
+
+    #[test]
+    fn embedding_is_reported_before_the_toolbox_and_the_toolbox_before_demo_data() {
+        assert_eq!(first_blocker(false, true, false, Some("x".into())), Some(RefreshBlocker::EmbeddingNotReady));
+        assert_eq!(first_blocker(true, true, false, Some("x".into())), Some(RefreshBlocker::ToolboxNotDownloaded));
+        assert_eq!(first_blocker(true, true, true, Some("x".into())), Some(RefreshBlocker::DemoDataMissing("x".into())));
+        assert_eq!(first_blocker(true, true, true, None), None);
+    }
+
+    #[test]
+    fn a_toolbox_that_is_not_needed_never_blocks() {
+        assert_eq!(first_blocker(true, false, false, None), None);
+    }
+
+    #[test]
+    fn a_missing_binary_is_not_downloaded_but_a_running_binary_that_failed_is_a_start_failure() {
+        assert_eq!(classify_toolbox_start_error("anything", false), RefreshBlocker::ToolboxNotDownloaded);
+        assert_eq!(
+            classify_toolbox_start_error(crate::toolbox_install::TOOLBOX_MISSING_MESSAGE, true),
+            RefreshBlocker::ToolboxNotDownloaded
+        );
+        assert_eq!(
+            classify_toolbox_start_error("  Error: bad tools file\n", true),
+            RefreshBlocker::ToolboxFailedToStart("Error: bad tools file".into())
+        );
+    }
+
+    #[test]
+    fn only_download_and_embedding_blockers_clear_by_waiting() {
+        assert!(RefreshBlocker::EmbeddingNotReady.clears_by_waiting());
+        assert!(RefreshBlocker::ToolboxNotDownloaded.clears_by_waiting());
+        assert!(!RefreshBlocker::ToolboxFailedToStart("x".into()).clears_by_waiting());
+        assert!(!RefreshBlocker::DemoDataMissing("x".into()).clears_by_waiting());
+    }
 }

@@ -52,6 +52,13 @@ pub fn get_data_dir() -> PathBuf {
         .unwrap_or_else(|| fallback_base_dir().join("data"))
 }
 
+/// Get the directory for downloaded embedding model files.
+///
+/// Per-user and writable without elevation; never inside the install directory.
+pub fn get_embedding_cache_dir() -> PathBuf {
+    get_data_dir().join("models").join("fastembed")
+}
+
 /// Get the cache directory (for temporary/regenerable caches).
 ///
 /// - macOS: `~/Library/Caches/plugable-chat/`

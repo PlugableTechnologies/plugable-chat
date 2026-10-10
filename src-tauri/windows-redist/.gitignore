@@ -1,0 +1,5 @@
+# vc_redist.x64.exe is staged here by scripts/ci/fetch-vcredist.ps1 (build.rs runs it in CI).
+# It is Microsoft's file and is never committed; the pin in scripts/ci/vcredist.pin.json is.
+*
+!.gitignore
+!.gitkeep

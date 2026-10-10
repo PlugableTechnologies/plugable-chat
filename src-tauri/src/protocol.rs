@@ -946,9 +946,25 @@ pub enum VectorMsg {
         messages: String, // JSON string of full history
         // The actor will handle embedding generation internally via Foundry
         // or receive a pre-computed vector.
+        /// `None` keeps the stored vector, or stores a placeholder for a new chat; it is
+        /// replaced when the embedding model is ready (see `ListChatsMissingEmbedding`).
         embedding_vector: Option<Vec<f32>>,
-        pinned: bool,
+        /// `None` keeps the stored pin state.
+        pinned: Option<bool>,
+        /// `None` keeps the stored model.
         model: Option<String>,
+        /// Completed with whether the write succeeded (used where the caller must know the
+        /// chat is on disk, such as at window close).
+        done: Option<oneshot::Sender<bool>>,
+    },
+    /// Chats still holding a placeholder vector, as `(id, text to embed)`.
+    ListChatsMissingEmbedding {
+        respond_to: oneshot::Sender<Vec<(String, String)>>,
+    },
+    /// Store the real embedding for a chat saved earlier without one.
+    SetChatEmbedding {
+        id: String,
+        vector: Vec<f32>,
     },
     /// Search for similar chats
     SearchChatsByEmbedding {
@@ -1065,6 +1081,11 @@ pub enum FoundryMsg {
     /// Reload the foundry service
     Reload {
         respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Re-read port, execution providers and the model list without restarting the service
+    /// (used after a GPU provider registers late).
+    RefreshConnectionInfo {
+        respond_to: oneshot::Sender<bool>,
     },
     /// Get all models from the Foundry catalog (GET /foundry/list)
     GetCatalogModels {

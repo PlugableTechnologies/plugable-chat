@@ -3,6 +3,7 @@ import { useSettingsStore } from '../store/settings-store';
 import { useEffect, useState, useRef } from 'react';
 import { MoreHorizontal, Pin, Trash, Edit, MessageSquare, Plus, Search, Loader2, Settings } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { isChatRunning, stashStreamingOnLeave } from '../store/chat/streaming-buffer';
 
 type SidebarProps = {
     className?: string;
@@ -12,6 +13,7 @@ type SidebarProps = {
 type ChatItemProps = {
     chat: any;
     isActive: boolean;
+    isRunning: boolean;
     isEditing: boolean;
     isMenuOpen: boolean;
     editTitle: string;
@@ -29,6 +31,7 @@ type ChatItemProps = {
 function ChatItem({
     chat,
     isActive,
+    isRunning,
     isEditing,
     isMenuOpen,
     editTitle,
@@ -47,6 +50,12 @@ function ChatItem({
                 ${isActive ? 'bg-gray-200 text-gray-900 font-medium' : 'text-gray-700 hover:bg-gray-100'}
             `}
             onClick={() => !isEditing && onLoadChat(chat.id)}
+            onContextMenu={(e) => {
+                // App menu (Rename / Pin / Delete) instead of the webview's native one
+                e.preventDefault();
+                e.stopPropagation();
+                onMenuToggle(chat.id);
+            }}
         >
             <MessageSquare size={16} className={`shrink-0 ${isActive ? 'text-gray-900' : 'text-gray-500'}`} />
 
@@ -63,6 +72,10 @@ function ChatItem({
                 />
             ) : (
                 <span className="truncate flex-1">{chat.title || "Untitled Chat"}</span>
+            )}
+
+            {isRunning && (
+                <Loader2 size={12} className="chat-running-indicator shrink-0 animate-spin text-blue-500" aria-label="Response in progress" />
             )}
 
             {/* Menu Button and Dropdown - wrapped in ref for click-outside detection */}
@@ -128,7 +141,7 @@ function ChatItem({
 export function Sidebar({ className = "" }: SidebarProps) {
     const {
         history, fetchHistory, loadChat, deleteChat, renameChat, togglePin, currentChatId,
-        relevanceResults, isSearchingRelevance, chatInputValue
+        relevanceResults, isSearchingRelevance, chatInputValue, streamingChatId, assistantStreamingActive
     } = useChatStore();
 
     const [editingId, setEditingId] = useState<string | null>(null);
@@ -201,6 +214,9 @@ export function Sidebar({ className = "" }: SidebarProps) {
                         // Use setCurrentChatId(null) which clears all per-chat attachments:
                         // databases, tools, documents - matching ChatGPT/Claude behavior
                         const store = useChatStore.getState();
+                        // Keep the running chat's live messages reachable (same as loadChat)
+                        const stash = stashStreamingOnLeave(store, null);
+                        if (stash) useChatStore.setState(stash as any);
                         store.setCurrentChatId(null);
                         useChatStore.setState({
                             chatMessages: [],
@@ -226,6 +242,7 @@ export function Sidebar({ className = "" }: SidebarProps) {
                                     key={chat.id}
                                     chat={chat}
                                     isActive={chat.id === currentChatId}
+                                    isRunning={isChatRunning(chat.id, streamingChatId, assistantStreamingActive)}
                                     isEditing={editingId === chat.id}
                                     isMenuOpen={menuOpenId === chat.id}
                                     editTitle={editTitle}
@@ -263,6 +280,7 @@ export function Sidebar({ className = "" }: SidebarProps) {
                                     key={chat.id}
                                     chat={chat}
                                     isActive={chat.id === currentChatId}
+                                    isRunning={isChatRunning(chat.id, streamingChatId, assistantStreamingActive)}
                                     isEditing={editingId === chat.id}
                                     isMenuOpen={menuOpenId === chat.id}
                                     editTitle={editTitle}

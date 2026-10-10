@@ -133,6 +133,11 @@ pub struct CliArgs {
         value_parser = clap::builder::BoolishValueParser::new()
     )]
     pub enable_demo_db: Option<bool>,
+    /// Clean-host smoke test: start normally, wait until the app is ready or has failed, write
+    /// the outcome (see PLUGABLE_CHAT_TEST_STATE), and exit 0 on success or 1 on failure.
+    /// Gives up after 20 minutes; override with PLUGABLE_CHAT_SMOKE_TIMEOUT_SECS.
+    #[arg(long)]
+    pub smoke: bool,
     /// Run only the dev MCP test server (no app; blocks until exit)
     #[arg(
         long,

@@ -7,26 +7,9 @@ import { SettingsModal } from "./components/settings";
 import { useChatStore } from "./store/chat-store";
 import { useSettingsStore } from "./store/settings-store";
 import { AlertTriangle, X } from "lucide-react";
+import { formatBytes } from "./store/chat/operations";
+import { buildWelcomeMessage } from "./store/chat/welcome-message";
 import { openUrl } from "@tauri-apps/plugin-opener";
-
-// Help message shown when no models are cached. Plugable Chat bundles its own Foundry runtime and
-// downloads the default model itself, so this must never tell the user to install Foundry Local.
-const NO_MODELS_HELP_MESSAGE = `## Welcome to Plugable Chat! 👋
-
-No AI model is on this computer yet. Plugable Chat downloads one for you; there is nothing to install first.
-
-### What happens next
-
-1. The first model download starts automatically and can take several minutes.
-2. Progress appears in the status bar at the bottom of the window.
-3. When it finishes, the model name replaces **"No models"** in the header and you can start chatting.
-
-### If the download does not start or fails
-
-- Check that this computer is connected to the internet and that about 6 GB of disk space is free.
-- Click the **"No models (click to refresh)"** dropdown in the header to try again.
-- Open **Settings → Models** to pick a different model.
-- If it still fails, send us the text shown in the status bar so we can help.`;
 
 // Full-pane card for catastrophic failures (the AI engine cannot start). The backend writes the
 // whole message in plain language, so this only renders it, makes links clickable and lets the
@@ -120,7 +103,7 @@ function ErrorBanner() {
 
 
 function App() {
-  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, fetchCachedModels, startSystemChat, chatMessages, hasFetchedCachedModels, loadModel, operationStatus, startupState, handshakeComplete } = useChatStore();
+  const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, fetchCachedModels, startSystemChat, chatMessages, hasFetchedCachedModels, loadModel, operationStatus, startupState, handshakeComplete, operations, downloadingModelName, downloadingModelSizeBytes } = useChatStore();
   const launchState = useChatStore((s) => s.modelState.state);
   // Startup counts as finished once the model is ready or a failure card is showing; until then a
   // vanished window is reported at the next launch (see launch_marker.rs).
@@ -152,8 +135,22 @@ function App() {
     const shouldShowHelp = currentModel === 'No models' || currentModel === 'Downloading...';
     if (!isConnecting && hasFetchedCachedModels && shouldShowHelp && !hasShownHelpChat.current && chatMessages.length === 0) {
       hasShownHelpChat.current = true;
-      console.log('[App] No cached models found after startup complete. Showing help chat.');
-      startSystemChat(NO_MODELS_HELP_MESSAGE, 'Getting Started');
+      // The backend flag survives restarts; the ref only stops a double fire within this session.
+      invoke<{ first_run_completed?: boolean }>('get_settings')
+        .then((settings) => {
+          if (settings?.first_run_completed) return;
+          const st = useChatStore.getState();
+          startSystemChat(buildWelcomeMessage({
+            modelName: st.downloadingModelName,
+            modelSizeBytes: st.downloadingModelSizeBytes,
+            operations: st.operations,
+          }), 'Getting Started');
+          invoke('mark_first_run_complete').catch((e) => console.warn('[App] mark_first_run_complete failed', e));
+        })
+        .catch((e) => {
+          hasShownHelpChat.current = false;
+          console.warn('[App] get_settings failed; will retry welcome check', e);
+        });
     }
   }, [isConnecting, hasFetchedCachedModels, currentModel, startSystemChat, chatMessages.length]);
   
@@ -514,14 +511,18 @@ function App() {
               <button 
                 onClick={handleRefreshModels}
                 className="app-model-refresh text-amber-600 hover:text-amber-800 text-[11px] font-semibold underline underline-offset-2 transition-colors"
-                title="No models found. Click to check for newly loaded models."
+                title={operations['model-download']?.state === 'error'
+                  ? 'The model download failed. See the red row at the top for details and Retry.'
+                  : 'No chat model is installed. Click to check again.'}
               >
-                No models (click to refresh)
+                {operations['model-download']?.state === 'error' ? 'Download failed (see status)' : 'No model installed (click to check)'}
               </button>
             ) : currentModel === 'Downloading...' ? (
               <span className="app-model-downloading text-blue-600 flex items-center gap-1.5 text-[11px] font-semibold">
                 <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></span>
-                Downloading model...
+                {downloadingModelName
+                  ? `Downloading ${downloadingModelName}${downloadingModelSizeBytes ? ` (${formatBytes(downloadingModelSizeBytes)})` : ''}${operations['model-download']?.percent !== undefined ? ` ${operations['model-download']!.percent}%` : ''}`
+                  : 'Preparing model download...'}
               </span>
             ) : cachedModels.length > 0 ? (
               <div className="app-model-selector flex items-center gap-1.5">

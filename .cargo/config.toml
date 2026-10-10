@@ -23,3 +23,18 @@ mcp-test = [
 
 
 
+
+# Link the C runtime into plugable-chat.exe so the app itself starts on a host that has no
+# Visual C++ runtime installed and can show its own "can't start" guidance. (The bundled native
+# libraries, onnxruntime and the Foundry core, still need the runtime; the installer hook
+# installs it.) Lives here, not in src-tauri/.cargo, because cargo reads config from the
+# directory it is RUN in: release.yml compiles from the repo root, and a src-tauri-only file
+# would be skipped there, giving two differently-flagged builds.
+#
+# RISK: fastembed pulls ort 2.0.0-rc.9, whose prebuilt static ONNX Runtime library may be built
+# against the DYNAMIC runtime (/MD). If the Windows link step fails with LNK2038 "mismatch
+# detected for 'RuntimeLibrary'", delete this table (or switch fastembed to ort-load-dynamic).
+# scripts/ci/assert-static-crt.ps1 checks the built exe has no vcruntime140/msvcp140 import.
+# Note: a RUSTFLAGS environment variable replaces this setting entirely.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

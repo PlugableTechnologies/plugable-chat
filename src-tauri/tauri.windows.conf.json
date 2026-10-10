@@ -2,7 +2,8 @@
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "bundle": {
     "resources": {
-      "foundry-libs/*": "foundry-libs/"
+      "foundry-libs/*": "foundry-libs/",
+      "windows-redist/*": "redist/"
     }
   }
 }

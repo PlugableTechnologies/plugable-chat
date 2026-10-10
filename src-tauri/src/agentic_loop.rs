@@ -749,6 +749,15 @@ pub async fn run_agentic_loop(
         let iteration_start = std::time::Instant::now();
         let _ = std::io::stdout().flush();
 
+        // Keep the window-close flush current: it saves this snapshot if the app is closed
+        // while this turn is still running.
+        crate::chat_persistence::track_inflight(
+            &config.chat_id,
+            &config.title,
+            &config.model_name,
+            &full_history,
+        );
+
         // Log materialized tools from previous iteration
         if loop_iteration_index > 0 {
             let registry = handles.tool_registry.read().await;
@@ -1448,16 +1457,10 @@ pub async fn run_agentic_loop(
         },
     );
 
-    // Save chat to vector store
-    save_chat_to_vector_store(
-        &handles.vector_tx,
-        &config.chat_id,
-        &config.title,
-        &config.original_message,
-        &final_response,
-        &handles.embedding_model,
-    )
-    .await;
+    // Save the full conversation (messages and model) so it reopens after a restart. The
+    // embedding is best-effort: without it the chat is stored with a placeholder vector and
+    // filled in once the embedding model is ready.
+    save_finished_chat(&handles, &config, &full_history, &final_response).await;
 
     // Emit chat-saved event for frontend
     let _ = app_handle.emit("chat-saved", &config.chat_id);
@@ -1483,42 +1486,31 @@ pub async fn run_agentic_loop(
     }
 }
 
-/// Save the chat to the vector store for semantic search.
-async fn save_chat_to_vector_store(
-    vector_tx: &mpsc::Sender<VectorMsg>,
-    chat_id: &str,
-    title: &str,
-    user_message: &str,
-    assistant_response: &str,
-    embedding_model: &Arc<RwLock<Option<Arc<TextEmbedding>>>>,
+/// Persist the finished (or cancelled) turn: whole transcript, model, and an embedding when
+/// the embedder is available.
+async fn save_finished_chat(
+    handles: &AgenticLoopHandles,
+    config: &AgenticLoopConfig,
+    full_history: &[ChatMessage],
+    final_response: &str,
 ) {
-    // Combine for embedding
-    let content = format!("User: {}\n\nAssistant: {}", user_message, assistant_response);
-
-    // Get embedding
-    let model_guard = embedding_model.read().await;
-    let embedding = if let Some(model) = model_guard.as_ref() {
-        match model.embed(vec![content.clone()], None) {
-            Ok(embeddings) if !embeddings.is_empty() => Some(embeddings[0].clone()),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    drop(model_guard);
-
-    // Save to vector store
-    let _ = vector_tx
-        .send(VectorMsg::UpsertChatRecord {
-            id: chat_id.to_string(),
-            title: title.to_string(),
-            content,
-            messages: String::new(), // Full history would be serialized here
-            embedding_vector: embedding,
-            pinned: false,
-            model: None,
-        })
-        .await;
+    let history = crate::chat_persistence::with_final_assistant_reply(full_history, final_response);
+    let embedding =
+        crate::chat_persistence::embed_text(&handles.embedding_model, crate::chat_persistence::search_content(&history))
+            .await;
+    let saved = crate::chat_persistence::save_chat(
+        &handles.vector_tx,
+        &config.chat_id,
+        &config.title,
+        &history,
+        &config.model_name,
+        embedding,
+    )
+    .await;
+    if !saved {
+        println!("[AgenticLoop] WARNING: chat {} could not be saved", config.chat_id);
+    }
+    crate::chat_persistence::untrack_inflight(&config.chat_id);
 }
 
 #[cfg(test)]

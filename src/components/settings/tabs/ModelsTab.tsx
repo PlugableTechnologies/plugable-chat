@@ -4,6 +4,7 @@ import { invoke, type FoundryCatalogModel, type FoundryServiceStatus } from '../
 import { useChatStore } from '../../../store/chat-store';
 import { FoundryModelCard } from '../cards/FoundryModelCard';
 import type { ModelDeviceFilter } from '../types';
+import { describeGpuDiagnostics, effectiveDeviceFilter, type GpuDiagnostics } from '../../../store/chat/gpu-diagnostics';
 
 export function ModelsTab() {
     const [catalogModels, setCatalogModels] = useState<FoundryCatalogModel[]>([]);
@@ -16,28 +17,26 @@ export function ModelsTab() {
     const [downloadProgress, setDownloadProgress] = useState<{ file: string; progress: number } | null>(null);
     const [error, setError] = useState<string | null>(null);
 
-    const { operationStatus, setOperationStatus } = useChatStore();
+    const [gpuDiagnostics, setGpuDiagnostics] = useState<GpuDiagnostics | null>(null);
+    const [retryingGpu, setRetryingGpu] = useState(false);
+
+    const { operations, dispatchOperation } = useChatStore();
+    const modelDownloadOp = operations['model-download'];
 
     // Fetch all data on mount
     useEffect(() => {
         fetchAllData();
     }, []);
 
-    // Track download progress from operationStatus
+    // Track download progress from the keyed model-download operation
     useEffect(() => {
-        if (operationStatus?.type === 'downloading') {
+        if (modelDownloadOp?.state === 'active') {
             setDownloadProgress({
-                file: operationStatus.currentFile || '',
-                progress: operationStatus.progress || 0,
+                file: modelDownloadOp.file || '',
+                progress: modelDownloadOp.percent || 0,
             });
-            if (operationStatus.completed) {
-                setDownloadingModel(null);
-                setDownloadProgress(null);
-                // Refresh cached models after download
-                fetchCachedModels();
-            }
         }
-    }, [operationStatus]);
+    }, [modelDownloadOp]);
 
     const fetchAllData = async () => {
         setIsLoading(true);
@@ -95,36 +94,20 @@ export function ModelsTab() {
     const handleDownload = async (model: FoundryCatalogModel) => {
         setDownloadingModel(model.name);
         setDownloadProgress({ file: 'Starting...', progress: 0 });
-        // Set operation status so the chat-store listener tracks progress
-        setOperationStatus({
-            type: 'downloading',
-            message: `Downloading ${model.alias || model.name}...`,
-            progress: 0,
-            currentFile: 'Starting...',
-            startTime: Date.now(),
-        });
+        dispatchOperation({ type: 'progress', key: 'model-download', message: `Downloading ${model.alias || model.name}`, percent: 0 });
         try {
             await invoke('download_model', { modelName: model.name });
             await fetchCachedModels();
-            setOperationStatus({
-                type: 'downloading',
-                message: `${model.alias || model.name} downloaded successfully`,
-                completed: true,
-                startTime: Date.now(),
-            });
+            dispatchOperation({ type: 'done', key: 'model-download', message: `${model.alias || model.name} downloaded successfully` });
         } catch (err) {
             console.error('Download failed:', err);
             const errorMessage = `Failed to download ${model.alias || model.name}:\n\n${err}`;
             alert(errorMessage);
             setError(`Download failed: ${err}`);
-            setOperationStatus(null);
+            dispatchOperation({ type: 'error', key: 'model-download', message: `Failed to download ${model.alias || model.name}: ${err}` });
         } finally {
             setDownloadingModel(null);
             setDownloadProgress(null);
-            // Clear operation status after a delay
-            setTimeout(() => {
-                setOperationStatus(null);
-            }, 3000);
         }
     };
 
@@ -164,10 +147,39 @@ export function ModelsTab() {
 
     // Filter and sort models. Models with a compatibility warning are still listed and
     // installable (the card shows a "May not run here" badge) — we don't hide them.
+    const deviceCounts: Record<string, number> = {};
+    for (const m of catalogModels) {
+        const d = m.runtime?.deviceType ?? 'unknown';
+        deviceCounts[d] = (deviceCounts[d] ?? 0) + 1;
+    }
+    const { filter: activeFilter, fellBack: cpuFallback } = effectiveDeviceFilter(deviceFilter, deviceCounts);
+    const gpuEmpty = deviceFilter === 'GPU' && !(deviceCounts.GPU ?? 0);
+
+    // Ask the backend why GPU acceleration is unavailable when the GPU list is empty.
+    useEffect(() => {
+        if (isLoading || !gpuEmpty) return;
+        invoke<GpuDiagnostics>('get_gpu_diagnostics')
+            .then(setGpuDiagnostics)
+            .catch((e) => console.warn('get_gpu_diagnostics failed', e));
+    }, [isLoading, gpuEmpty]);
+
+    const handleRetryGpu = async () => {
+        setRetryingGpu(true);
+        try {
+            await invoke('retry_gpu_registration');
+            await fetchAllData();
+            setGpuDiagnostics(await invoke<GpuDiagnostics>('get_gpu_diagnostics'));
+        } catch (e) {
+            setError(`GPU retry failed: ${e}`);
+        } finally {
+            setRetryingGpu(false);
+        }
+    };
+
     const filteredModels = catalogModels
         .filter((model) => {
-            if (deviceFilter === 'Auto') return true;
-            return model.runtime?.deviceType === deviceFilter;
+            if (activeFilter === 'Auto') return true;
+            return model.runtime?.deviceType === activeFilter;
         })
         .sort((a, b) => {
             // Sort: 1. Tools support first, 2. By size ascending (smaller first)
@@ -267,6 +279,26 @@ export function ModelsTab() {
                     </div>
                 )}
 
+                {/* GPU unavailable: explain why, offer retry */}
+                {!isLoading && gpuEmpty && (
+                    <div className="gpu-diagnostics mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-900" role="alert">
+                        <p className="font-medium">No GPU models are available.</p>
+                        {describeGpuDiagnostics(gpuDiagnostics).map((line) => (
+                            <p key={line} className="mt-1">{line}</p>
+                        ))}
+                        {cpuFallback && (
+                            <p className="mt-1">Showing CPU models instead. They run on any computer but more slowly.</p>
+                        )}
+                        <button
+                            onClick={handleRetryGpu}
+                            disabled={retryingGpu}
+                            className="gpu-retry-button mt-2 px-3 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+                        >
+                            {retryingGpu ? 'Retrying…' : 'Retry GPU setup'}
+                        </button>
+                    </div>
+                )}
+
                 {/* Model Cards Grid */}
                 {!isLoading && (
                     <div className="model-card-grid grid grid-cols-1 gap-4">
@@ -290,7 +322,7 @@ export function ModelsTab() {
                 {!isLoading && filteredModels.length === 0 && (
                     <div className="text-center py-12 text-gray-500">
                         <Cpu size={48} className="mx-auto mb-4 text-gray-300" />
-                        <p>No models found for {deviceFilter} device type.</p>
+                        <p>No models found for {activeFilter} device type.</p>
                         <p className="text-sm mt-2">Try selecting a different device filter.</p>
                     </div>
                 )}

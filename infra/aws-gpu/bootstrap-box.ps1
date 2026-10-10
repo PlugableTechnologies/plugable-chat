@@ -116,4 +116,11 @@ Set-ItemProperty $k DefaultPassword $pw
 powercfg /change monitor-timeout-ac 0
 powercfg /change standby-timeout-ac 0
 
+# 7. Report, never install, the VC++ runtime. The "no-vcredist" scenario in scripts/ci/faults.ps1
+# needs a host where it is ABSENT so the installer hook has something to heal; installing it here
+# (or any tool that bundles it) would hide the bug. NVIDIA's driver installer may register it, so
+# on a -SkipGpuDriver box this normally reads "absent".
+$vc = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" -ErrorAction SilentlyContinue
+Step ("VC++ 2015-2022 x64 runtime: " + $(if ($vc -and $vc.Installed -eq 1) { "PRESENT (Bld $($vc.Bld)); no-vcredist needs -VcRedist to remove it" } else { "absent (good for the no-vcredist scenario)" }))
+
 Step "bootstrap complete; REBOOT NOW for auto-logon to take effect"

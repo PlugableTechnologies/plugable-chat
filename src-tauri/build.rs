@@ -58,6 +58,9 @@ fn main() {
     // so packaged releases run on machines without the cargo target dir present.
     copy_foundry_native_libs(manifest_path);
 
+    // Stage the Microsoft VC++ redistributable that the Windows installer hook runs.
+    stage_vcredist(manifest_path, project_root);
+
     // Windows unit-test programs have no application manifest, so the loader binds them to
     // the old comctl32.dll v5.82. rfd imports TaskDialogIndirect, which only v6 exports, and
     // the program dies at start-up (STATUS_ENTRYPOINT_NOT_FOUND) before running a test.
@@ -497,6 +500,70 @@ fn copy_foundry_native_libs(manifest_path: &Path) {
             Ok(_) => println!("cargo:warning=Bundled foundry native lib: {name}"),
             Err(e) => println!("cargo:warning=Failed to copy {name}: {e}"),
         }
+    }
+}
+
+/// Stage `windows-redist/vc_redist.x64.exe` (bundled as `redist/` by tauri.windows.conf.json and
+/// run by `windows/hooks.nsh`). Done here, in the no-credentials compile step, so the download
+/// and its hash/signature checks (scripts/ci/fetch-vcredist.ps1) happen before any signing secret
+/// is in the environment. Local builds only stage when asked (PLUGABLE_STAGE_VCREDIST=1) so a
+/// developer build never needs the network; PLUGABLE_REQUIRE_VCREDIST=1 or a tag build
+/// (GITHUB_REF=refs/tags/...) turns a staging failure into a build failure, because a release
+/// without the runtime is the bug this exists to prevent.
+fn stage_vcredist(manifest_path: &Path, project_root: &Path) {
+    if !cfg!(windows) {
+        return;
+    }
+    println!("cargo:rerun-if-changed=../scripts/ci/vcredist.pin.json");
+    println!("cargo:rerun-if-changed=../scripts/ci/fetch-vcredist.ps1");
+    println!("cargo:rerun-if-env-changed=PLUGABLE_STAGE_VCREDIST");
+    println!("cargo:rerun-if-env-changed=PLUGABLE_REQUIRE_VCREDIST");
+    println!("cargo:rerun-if-env-changed=PLUGABLE_SKIP_VCREDIST");
+
+    let dir = manifest_path.join("windows-redist");
+    let _ = fs::create_dir_all(&dir); // the resource glob needs the directory to exist
+    if env::var_os("PLUGABLE_SKIP_VCREDIST").is_some() {
+        return;
+    }
+    let on_ci = env::var_os("CI").is_some();
+    let asked = env::var("PLUGABLE_STAGE_VCREDIST").map(|v| v == "1").unwrap_or(false);
+    let required = env::var("PLUGABLE_REQUIRE_VCREDIST").map(|v| v == "1").unwrap_or(false)
+        || env::var("GITHUB_REF").map(|r| r.starts_with("refs/tags/")).unwrap_or(false);
+    let staged = dir.join("vc_redist.x64.exe");
+    if !(on_ci || asked) {
+        if !staged.exists() {
+            println!(
+                "cargo:warning=vc_redist.x64.exe not staged (local build). The installer will not \
+                 carry the VC++ runtime; set PLUGABLE_STAGE_VCREDIST=1 to stage it."
+            );
+        }
+        return;
+    }
+
+    let script = project_root.join("scripts").join("ci").join("fetch-vcredist.ps1");
+    let mut ok = false;
+    for shell in ["pwsh", "powershell"] {
+        let status = Command::new(shell)
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .arg("-OutDir")
+            .arg(&dir)
+            .status();
+        match status {
+            Ok(s) => {
+                ok = s.success();
+                break;
+            }
+            Err(_) => continue, // this shell is not installed; try the next one
+        }
+    }
+    if !ok || !staged.exists() {
+        let msg = "could not stage vc_redist.x64.exe (see scripts/ci/fetch-vcredist.ps1; \
+                   the pin in scripts/ci/vcredist.pin.json may still be a TODO)";
+        if required {
+            panic!("{msg}");
+        }
+        println!("cargo:warning={msg}; the installer will not carry the VC++ runtime");
     }
 }
 

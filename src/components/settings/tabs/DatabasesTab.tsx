@@ -5,6 +5,8 @@ import { invoke, listen } from '../../../lib/api';
 import { SettingsTagInput } from '../common/SettingsTagInput';
 import { SettingsEnvVarInput } from '../common/SettingsEnvVarInput';
 import { SchemaRefreshStatusBar } from '../preview/SchemaRefreshStatusBar';
+import { useChatStore } from '../../../store/chat-store';
+import { describeDatabaseError } from '../../../store/chat/operations';
 import type { SchemaRefreshProgress, SchemaRefreshStatus, SchemaRefreshError, SchemaRefreshResult } from '../types';
 
 interface ToolboxInstallStatus {
@@ -49,6 +51,8 @@ export function DatabasesTab({
     const [toolboxInstalling, setToolboxInstalling] = useState(false);
     const [toolboxInstallError, setToolboxInstallError] = useState<string | null>(null);
 
+    const toolboxOp = useChatStore((st) => st.operations['toolbox-download']);
+    const embeddingOp = useChatStore((st) => st.operations['embedding']);
     const loadToolboxInstallStatus = useCallback(async () => {
         try {
             setToolboxInstallStatus(await invoke<ToolboxInstallStatus>('get_toolbox_install_status'));
@@ -56,6 +60,11 @@ export function DatabasesTab({
             console.error('Failed to read toolbox install status:', err);
         }
     }, []);
+
+    // The backend auto-downloads the toolbox when a source is enabled; refresh once it lands.
+    useEffect(() => {
+        if (toolboxOp?.state === 'done') loadToolboxInstallStatus();
+    }, [toolboxOp?.state, loadToolboxInstallStatus]);
 
     useEffect(() => {
         loadToolboxInstallStatus();
@@ -371,7 +380,17 @@ export function DatabasesTab({
                                 <AlertCircle className="text-red-500 flex-shrink-0 mt-0.5" size={14} />
                                 <div className="flex-1 min-w-0">
                                     <div className="font-medium text-red-800 text-xs">Schema refresh failed</div>
-                                    <p className="text-xs text-red-700 break-words">{sourceErrors[source.id].error}</p>
+                                    <p className="text-xs text-red-700 break-words">{describeDatabaseError(sourceErrors[source.id].error)}</p>
+                                    {describeDatabaseError(sourceErrors[source.id].error) !== sourceErrors[source.id].error && (
+                                        <p className="text-[10px] text-red-600 mt-1 break-words">{sourceErrors[source.id].error}</p>
+                                    )}
+                                    <button
+                                        onClick={() => handleRefreshSchemas(source.id)}
+                                        disabled={refreshingSources[source.id]}
+                                        className="mt-1.5 inline-flex items-center gap-1 rounded bg-red-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                                    >
+                                        <RefreshCw size={10} /> Retry refresh
+                                    </button>
                                     {sourceErrors[source.id].details && (
                                         <p className="text-[10px] text-red-600 mt-1 break-words">{sourceErrors[source.id].details}</p>
                                     )}
@@ -410,6 +429,25 @@ export function DatabasesTab({
                                         Download the toolbox (or set the path to an existing binary below), enable this source, and click "Refresh" to cache the schema.
                                     </p>
                                 </div>
+                                {toolboxOp?.state === 'active' && (
+                                    <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+                                        <p>Downloading the database toolbox{toolboxOp.percent !== undefined ? ` (${toolboxOp.percent}%)` : ''}{toolboxOp.file ? `: ${toolboxOp.file}` : ''}</p>
+                                        <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-black/10">
+                                            <div className="h-full bg-blue-500 transition-all" style={{ width: `${toolboxOp.percent ?? 0}%` }} />
+                                        </div>
+                                    </div>
+                                )}
+                                {toolboxOp?.state === 'error' && (
+                                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800" role="alert">
+                                        <p className="break-words">Toolbox download failed: {toolboxOp.message}</p>
+                                        <p className="mt-1">Use the download button below to try again.</p>
+                                    </div>
+                                )}
+                                {embeddingOp?.state === 'error' && (
+                                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800" role="alert">
+                                        Schema refresh needs the embedding model, which failed to load. Use Retry in the status bar at the top of the window.
+                                    </div>
+                                )}
                                 {toolboxInstallStatus && !toolboxInstallStatus.toolbox_path && !source.command?.trim() && (
                                     <div className="demo-toolbox-install rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 space-y-2">
                                         <p>

@@ -125,46 +125,9 @@ impl EmbeddedSqliteActor {
         println!("[EmbeddedSqliteActor] Stopped");
     }
 
-    /// Find the test-data directory by probing from current dir and parents
+    /// Find the test-data directory (shared lookup: the folder shipped next to the app wins)
     fn find_test_data_dir() -> Option<PathBuf> {
-        // Try current directory first
-        let mut dir = std::env::current_dir().ok()?;
-
-        for _ in 0..5 {
-            let test_data = dir.join("test-data");
-            if test_data.exists() && test_data.is_dir() {
-                return Some(test_data);
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-
-        // Also check relative to executable
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                // Check exe_dir/../../test-data (typical for development)
-                let dev_path = exe_dir.join("../../test-data");
-                if dev_path.exists() {
-                    return Some(dev_path.canonicalize().ok()?);
-                }
-                // Check macOS bundle Resources folder: Contents/MacOS/../Resources/test-data
-                #[cfg(target_os = "macos")]
-                {
-                    let resources_path = exe_dir.join("../Resources/test-data");
-                    if resources_path.exists() {
-                        return resources_path.canonicalize().ok().or(Some(resources_path));
-                    }
-                }
-                // Check exe_dir/test-data (for bundled apps on Windows/Linux)
-                let bundled_path = exe_dir.join("test-data");
-                if bundled_path.exists() {
-                    return Some(bundled_path);
-                }
-            }
-        }
-
-        None
+        crate::settings::find_test_data_dir()
     }
 
     /// Ensure the database is initialized

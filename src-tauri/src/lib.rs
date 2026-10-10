@@ -14,9 +14,11 @@ pub mod agentic_loop;
 pub mod agentic_state;
 pub mod app_state;
 pub mod auto_discovery;
+pub mod chat_persistence;
 pub mod cli;
 pub mod crash_handler;
 pub mod demo_schema;
+pub mod gpu_diagnostics;
 pub mod message_builders;
 pub mod mid_turn_state;
 pub mod model_profiles;
@@ -27,7 +29,9 @@ pub mod python_helpers;
 pub mod repetition_detector;
 pub mod launch_marker;
 pub mod settings;
+pub mod smoke;
 pub mod startup_failure;
+pub mod test_state;
 pub mod settings_state_machine;
 pub mod state_machine;
 pub mod system_prompt;
@@ -1425,6 +1429,27 @@ async fn chat(
 
     let turn_progress = turn_tracker.progress.clone();
 
+    // Save the conversation as it stands (including this user message) before generation
+    // starts, so a crash or a closed window mid-answer cannot lose it. No embedding here:
+    // the completion save adds one. The actor handles writes in order, so this cannot land
+    // after that save.
+    crate::chat_persistence::track_inflight(&chat_id, &title, &agentic_config.model_name, &full_history);
+    if handles
+        .vector_tx
+        .send(crate::chat_persistence::build_upsert(
+            &chat_id,
+            &title,
+            &full_history,
+            &agentic_config.model_name,
+            None,
+            None,
+        ))
+        .await
+        .is_err()
+    {
+        println!("[Chat] WARNING: could not queue the save of chat {}", chat_id);
+    }
+
     // Spawn the agentic loop task with state machine (single source of truth)
     tauri::async_runtime::spawn(async move {
         run_agentic_loop(
@@ -1925,6 +1950,9 @@ pub fn run() {
                     pending_flag.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
             }
+            if cli_args_for_setup.smoke {
+                smoke::spawn(app.handle().clone());
+            }
             if launch_filter.allow_all() {
                 println!("[Launch] Tool filter: all tools allowed");
             } else {
@@ -2016,6 +2044,7 @@ pub fn run() {
             });
 
             let app_handle = app.handle();
+            let vector_error_app = app_handle.clone();
             // Spawn Vector Actor
             tauri::async_runtime::spawn(async move {
                 // Get writable data directory with fallback chain
@@ -2031,7 +2060,11 @@ pub fn run() {
                     }
                 }
 
-                let actor = ChatVectorStoreActor::new(vector_rx, &writable.path.to_string_lossy()).await;
+                let report: actors::vector_actor::StorageErrorReporter = Arc::new(move |message: String| {
+                    test_state::record(test_state::Phase::Error, "reported", &message);
+                    let _ = vector_error_app.emit("chat-storage-error", serde_json::json!({ "message": message }));
+                });
+                let actor = ChatVectorStoreActor::new(vector_rx, &writable.path.to_string_lossy(), report).await;
                 actor.run().await;
             });
 
@@ -2211,6 +2244,10 @@ pub fn run() {
             get_launch_overrides,
             get_launch_model_problem,
             cancel_ep_registration,
+            get_gpu_diagnostics,
+            retry_gpu_registration,
+            retry_embedding_init,
+            mark_first_run_complete,
             heartbeat_ping,
             // Startup coordination commands
             frontend_ready,
@@ -2220,7 +2257,23 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
+            // Closing the window mid-answer must not lose the conversation: save every running
+            // chat before the process ends.
+            let closing = matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. }
+                    | tauri::RunEvent::WindowEvent { event: tauri::WindowEvent::CloseRequested { .. }, .. }
+            );
+            if closing {
+                if let Some(handles) = app.try_state::<ActorHandles>() {
+                    let vector_tx = handles.vector_tx.clone();
+                    tauri::async_runtime::block_on(chat_persistence::flush_inflight(
+                        &vector_tx,
+                        chat_persistence::FLUSH_TIMEOUT,
+                    ));
+                }
+            }
             // A normal exit (even mid-startup) is not a crash.
             if matches!(event, tauri::RunEvent::Exit) {
                 launch_marker::clear();

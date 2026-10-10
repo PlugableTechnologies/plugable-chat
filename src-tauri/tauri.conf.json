@@ -40,7 +40,8 @@
       "nsis": {
         "installMode": "perMachine",
         "compression": "lzma",
-        "minimumWebview2Version": "110.0.1587.0"
+        "minimumWebview2Version": "110.0.1587.0",
+        "installerHooks": "windows/hooks.nsh"
       }
     }
   }

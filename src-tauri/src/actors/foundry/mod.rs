@@ -7,6 +7,8 @@
 //! - Service lifecycle management
 
 mod backend;
+pub mod embedding_init;
+pub mod gpu_registration;
 mod model_gateway_actor;
 mod request_builder;
 mod service_manager;

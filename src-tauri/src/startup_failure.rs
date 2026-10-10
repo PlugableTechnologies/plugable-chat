@@ -103,6 +103,21 @@ pub fn describe(failure: &StartupFailure, os: Os, log_dir: &str) -> String {
     )
 }
 
+/// `describe` plus the GPU/runtime facts support needs, so one copied message is enough to
+/// diagnose a missing driver or Visual C++ runtime without a second round trip.
+pub fn describe_with_diagnostics(
+    failure: &StartupFailure,
+    os: Os,
+    log_dir: &str,
+    diagnostics: &crate::gpu_diagnostics::GpuDiagnostics,
+) -> String {
+    format!(
+        "{}\n\n{}",
+        describe(failure, os, log_dir),
+        crate::gpu_diagnostics::format_summary(diagnostics)
+    )
+}
+
 /// Text for the notice shown when the previous launch never finished starting.
 pub fn describe_unclean_previous_launch(os: Os, log_dir: &str, started_at: &str) -> String {
     let mut steps = vec![
@@ -147,6 +162,25 @@ mod tests {
         assert!(m.contains(RELEASES_URL) && m.contains(VC_REDIST_URL));
         assert!(m.contains("os error 126") && m.contains("C:\\logs"));
         assert!(!m.contains("Mac"));
+    }
+
+    #[test]
+    fn diagnostics_are_appended_after_the_technical_detail() {
+        let d = crate::gpu_diagnostics::GpuDiagnostics {
+            driver_version: Some("551.61".into()),
+            vcpp_installed: Some(false),
+            ..Default::default()
+        };
+        let m = describe_with_diagnostics(
+            &StartupFailure::RuntimeLoadFailed { error: "os error 126".into() },
+            Os::Windows,
+            "C:\\logs",
+            &d,
+        );
+        let detail_at = m.find("Technical detail").unwrap();
+        let diag_at = m.find("GPU diagnostics:").unwrap();
+        assert!(detail_at < diag_at);
+        assert!(m.contains("551.61") && m.contains("NOT FOUND"));
     }
 
     #[test]

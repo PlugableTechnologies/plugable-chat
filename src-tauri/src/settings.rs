@@ -745,6 +745,12 @@ pub struct AppSettings {
     #[serde(default)]
     pub always_on_rag_paths: Vec<String>,
 
+    /// Set once the first-run setup (GPU components, embedding model, chat model) has finished
+    /// and the user has seen the welcome message, so it is not shown again. Never reset to
+    /// false by a settings save (see `save_app_settings`).
+    #[serde(default)]
+    pub first_run_completed: bool,
+
     // NOTE: native_tool_calling_enabled has been removed.
     // Native tool calling is now controlled via tool_call_formats (Native format).
     // Old configs with this field will be migrated on load.
@@ -964,6 +970,7 @@ impl Default for AppSettings {
             always_on_mcp_tools: Vec::new(),
             always_on_tables: Vec::new(),
             always_on_rag_paths: Vec::new(),
+            first_run_completed: false,
         }
     }
 }
@@ -971,47 +978,78 @@ impl Default for AppSettings {
 /// Source ID for the embedded demo database
 pub const EMBEDDED_DEMO_SOURCE_ID: &str = "embedded-demo";
 
-/// Find the test-data directory by searching from current dir and parents
+/// Where the demo's `test-data` folder may be, best first.
+///
+/// The folder the installer put next to the app wins: a working directory can be anywhere
+/// (Program Files, a shell the user opened) and must never shadow the shipped copy. Source-tree
+/// locations come last, for development runs.
+pub fn test_data_candidates(exe_dir: Option<&std::path::Path>, cwd: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Some(exe_dir) = exe_dir {
+        out.push(exe_dir.join("test-data"));
+        out.push(exe_dir.join("resources").join("test-data"));
+        // macOS bundle: Contents/MacOS/../Resources/test-data
+        out.push(exe_dir.join("..").join("Resources").join("test-data"));
+        // Linux packages: /usr/lib/<app>/ next to /usr/bin/<app>
+        out.push(exe_dir.join("..").join("lib").join("plugable-chat").join("test-data"));
+        // target/debug -> repo root
+        out.push(exe_dir.join("..").join("..").join("test-data"));
+        out.push(exe_dir.join("..").join("..").join("..").join("test-data"));
+    }
+    if let Some(cwd) = cwd {
+        let mut dir = cwd.to_path_buf();
+        for _ in 0..5 {
+            out.push(dir.join("test-data"));
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// First candidate that holds `demo.db`; otherwise the searched list, for the error message.
+pub fn resolve_test_data_dir(candidates: &[std::path::PathBuf]) -> Result<std::path::PathBuf, Vec<std::path::PathBuf>> {
+    candidates
+        .iter()
+        .find(|dir| dir.join("demo.db").is_file())
+        .map(|dir| dir.canonicalize().unwrap_or_else(|_| dir.clone()))
+        .ok_or_else(|| candidates.to_vec())
+}
+
+/// Plain-language description of a failed search, naming every place looked.
+pub fn describe_missing_test_data(searched: &[std::path::PathBuf]) -> String {
+    let places: Vec<String> = searched.iter().map(|p| p.display().to_string()).collect();
+    format!(
+        "demo.db was not found in the test-data folder next to the app. Reinstall Plugable Chat. Looked in: {}",
+        places.join("; ")
+    )
+}
+
+/// Find the demo's `test-data` directory (the one holding `demo.db`), logging loudly when it
+/// cannot be found.
 pub fn find_test_data_dir() -> Option<std::path::PathBuf> {
-    // Try current directory first
-    let mut dir = std::env::current_dir().ok()?;
-
-    for _ in 0..5 {
-        let test_data = dir.join("test-data");
-        if test_data.exists() && test_data.is_dir() {
-            // Return canonical path to avoid relative path issues
-            return test_data.canonicalize().ok().or(Some(test_data));
-        }
-        if !dir.pop() {
-            break;
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let cwd = std::env::current_dir().ok();
+    let candidates = test_data_candidates(exe_dir.as_deref(), cwd.as_deref());
+    match resolve_test_data_dir(&candidates) {
+        Ok(dir) => Some(dir),
+        Err(searched) => {
+            eprintln!("[DemoDatabase] ERROR: {}", describe_missing_test_data(&searched));
+            None
         }
     }
+}
 
-    // Also check relative to executable
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            // Check exe_dir/../../test-data (typical for development)
-            let dev_path = exe_dir.join("../../test-data");
-            if dev_path.exists() {
-                return dev_path.canonicalize().ok();
-            }
-            // Check macOS bundle Resources folder: Contents/MacOS/../Resources/test-data
-            #[cfg(target_os = "macos")]
-            {
-                let resources_path = exe_dir.join("../Resources/test-data");
-                if resources_path.exists() {
-                    return resources_path.canonicalize().ok().or(Some(resources_path));
-                }
-            }
-            // Check exe_dir/test-data (for bundled apps on Windows/Linux)
-            let bundled_path = exe_dir.join("test-data");
-            if bundled_path.exists() {
-                return bundled_path.canonicalize().ok().or(Some(bundled_path));
-            }
-        }
-    }
-
-    None
+/// `Some(explanation)` when the demo database cannot be located; surfaced to the user when
+/// the demo source is enabled instead of silently using stale settings.
+pub fn demo_data_problem() -> Option<String> {
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let cwd = std::env::current_dir().ok();
+    let candidates = test_data_candidates(exe_dir.as_deref(), cwd.as_deref());
+    resolve_test_data_dir(&candidates)
+        .err()
+        .map(|searched| describe_missing_test_data(&searched))
 }
 
 /// Find the MCP Database Toolbox binary by searching PATH and common installation locations.
@@ -1514,5 +1552,76 @@ mod tests {
         } else {
             fs::remove_file(&config_path).await.unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod demo_data_lookup_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn make_data_dir(root: &std::path::Path, rel: &str) -> PathBuf {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("demo.db"), b"x").unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_folder_next_to_the_app_beats_the_working_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let shipped = make_data_dir(root.path(), "app/test-data");
+        let _cwd_copy = make_data_dir(root.path(), "elsewhere/test-data");
+        let candidates = test_data_candidates(
+            Some(&root.path().join("app")),
+            Some(&root.path().join("elsewhere")),
+        );
+        let found = resolve_test_data_dir(&candidates).unwrap();
+        assert_eq!(found, shipped.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resources_subfolder_and_macos_bundle_layouts_are_found() {
+        let root = tempfile::tempdir().unwrap();
+        let res = make_data_dir(root.path(), "app/resources/test-data");
+        let c = test_data_candidates(Some(&root.path().join("app")), None);
+        assert_eq!(resolve_test_data_dir(&c).unwrap(), res.canonicalize().unwrap());
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("Contents/MacOS")).unwrap();
+        let mac = make_data_dir(root.path(), "Contents/Resources/test-data");
+        let c = test_data_candidates(Some(&root.path().join("Contents/MacOS")), None);
+        assert_eq!(resolve_test_data_dir(&c).unwrap(), mac.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn a_folder_without_demo_db_is_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("app/test-data")).unwrap();
+        let good = make_data_dir(root.path(), "app/resources/test-data");
+        let c = test_data_candidates(Some(&root.path().join("app")), None);
+        assert_eq!(resolve_test_data_dir(&c).unwrap(), good.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn missing_data_fails_with_every_searched_path_named() {
+        let root = tempfile::tempdir().unwrap();
+        let c = test_data_candidates(Some(&root.path().join("app")), Some(&root.path().join("cwd")));
+        let searched = resolve_test_data_dir(&c).unwrap_err();
+        let msg = describe_missing_test_data(&searched);
+        assert!(msg.contains("demo.db was not found") && msg.contains("Reinstall"));
+        assert!(msg.contains(&root.path().join("app").join("test-data").display().to_string()));
+        assert!(msg.contains(&root.path().join("cwd").join("test-data").display().to_string()));
+    }
+
+    #[test]
+    fn first_run_flag_defaults_to_false_for_existing_config_files() {
+        let old_config = r#"{"selected_model": null}"#;
+        let s: AppSettings = serde_json::from_str(old_config).unwrap();
+        assert!(!s.first_run_completed);
+        let mut done = s.clone();
+        done.first_run_completed = true;
+        let round: AppSettings = serde_json::from_str(&serde_json::to_string(&done).unwrap()).unwrap();
+        assert!(round.first_run_completed);
     }
 }

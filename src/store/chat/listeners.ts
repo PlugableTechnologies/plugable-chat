@@ -1,3 +1,5 @@
+import { appendTokenToBuffer } from './streaming-buffer';
+import { embeddingEventToAction, epEventToAction, formatBytes } from './operations';
 import type { StateCreator } from 'zustand';
 import { invoke, listen } from '../../lib/api';
 import { 
@@ -15,7 +17,7 @@ import type {
 } from './types';
 import type { ModelIncompatibleNotice } from './slices/operation-status-slice';
 import { parseFoundryModelStateEvent } from './helpers';
-import { nextOperationStatusForEpRegistration, type EpRegistrationProgressEvent } from './ep-registration-status';
+import type { EpRegistrationProgressEvent } from './ep-registration-status';
 import { DEFAULT_MODEL_TO_DOWNLOAD } from './constants';
 
 // Helper to log to backend terminal for debugging
@@ -53,6 +55,8 @@ let unlistenModelFallback: (() => void) | undefined;
 let unlistenEmbeddingInit: (() => void) | undefined;
 let unlistenChatStreamStatus: (() => void) | undefined;
 let unlistenEpRegistration: (() => void) | undefined;
+let unlistenDownloadStarted: (() => void) | undefined;
+let unlistenToolboxDownload: (() => void) | undefined;
 let unlistenAvailableModelsChanged: (() => void) | undefined;
 let unlistenModelStateChanged: (() => void) | undefined;
 let unlistenStartupProgress: (() => void) | undefined;
@@ -74,6 +78,8 @@ interface ListenerSliceDeps {
     
     // Operation status
     operationStatus: OperationStatus | null;
+    dispatchOperation: (action: import('./operations').OperationAction) => void;
+    operations: import('./operations').OperationsMap;
     setModelIncompatibleNotice: (notice: ModelIncompatibleNotice | null) => void;
     
     // Model state
@@ -225,20 +231,13 @@ async function initializeModelsOnStartup<T extends ListenerSliceDeps>(
             // No models available - attempt auto-download
             console.log('[ChatStore] No cached models found. Attempting auto-download of:', DEFAULT_MODEL_TO_DOWNLOAD);
             
-            set({
-                operationStatus: {
-                    type: 'downloading',
-                    message: `Downloading ${DEFAULT_MODEL_TO_DOWNLOAD}...`,
-                    progress: 0,
-                    startTime: Date.now(),
-                },
-                statusBarDismissed: false,
-                currentModel: 'Downloading...',
-            } as any);
+            get().dispatchOperation({ type: 'progress', key: 'model-download', message: `Downloading ${DEFAULT_MODEL_TO_DOWNLOAD}`, percent: 0 });
+            set({ currentModel: 'Downloading...' } as any);
             
             try {
                 await invoke('download_model', { modelName: DEFAULT_MODEL_TO_DOWNLOAD });
                 console.log('[ChatStore] Default model download complete');
+                get().dispatchOperation({ type: 'done', key: 'model-download', message: `${DEFAULT_MODEL_TO_DOWNLOAD} downloaded` });
                 
                 // Refresh models after download
                 await get().fetchCachedModels();
@@ -257,27 +256,16 @@ async function initializeModelsOnStartup<T extends ListenerSliceDeps>(
                     console.warn(`[ChatStore] Could not find ${DEFAULT_MODEL_TO_DOWNLOAD} after download, unexpected state`);
                     set({ currentModel: 'No models' } as any);
                 } else {
-                    set({
-                        operationStatus: null,
-                        currentModel: 'No models',
-                    } as any);
+                    set({ currentModel: 'No models' } as any);
                 }
             } catch (downloadError: any) {
                 console.error('[ChatStore] Failed to download default model:', downloadError);
-                set({
-                    operationStatus: {
-                        type: 'downloading',
-                        message: `Model download failed (${downloadError?.message ?? downloadError}). Check your internet connection and free disk space, then click the model dropdown to retry.`,
-                        startTime: Date.now(),
-                    },
-                    currentModel: 'No models',
-                } as any);
-                setTimeout(() => {
-                    const currentState = get();
-                    if (currentState.operationStatus?.message?.includes('Auto-download failed')) {
-                        set({ operationStatus: null } as any);
-                    }
-                }, 10000);
+                get().dispatchOperation({
+                    type: 'error',
+                    key: 'model-download',
+                    message: `Model download failed (${downloadError?.message ?? downloadError}). Check your internet connection and free disk space, then retry.`,
+                });
+                set({ currentModel: 'No models' } as any);
             }
         } else {
             console.log('[ChatStore] Found', cachedModels.length, 'cached models. Getting current model from backend...');
@@ -402,16 +390,11 @@ export const createListenerSlice: StateCreator<
                     
                     if (isStreamingToOtherChat) {
                         // Append token to streamingMessages instead of current messages
-                        const lastMsg = state.streamingMessages[state.streamingMessages.length - 1];
-                        if (lastMsg && lastMsg.role === 'assistant') {
-                            const newStreamingMessages = [...state.streamingMessages];
-                            newStreamingMessages[newStreamingMessages.length - 1] = {
-                                ...lastMsg,
-                                content: lastMsg.content + event.payload
-                            };
-                            return { streamingMessages: newStreamingMessages, lastStreamActivityTs: now, operationStatus: newOperationStatus } as any;
-                        }
-                        return { ...state, lastStreamActivityTs: now, operationStatus: newOperationStatus };
+                        return {
+                            streamingMessages: appendTokenToBuffer(state.streamingMessages, event.payload, now),
+                            lastStreamActivityTs: now,
+                            operationStatus: newOperationStatus,
+                        } as any;
                     }
                     
                     // Normal case: streaming to current chat
@@ -502,14 +485,8 @@ export const createListenerSlice: StateCreator<
 
             // First-run download of GPU execution providers (about 1.5 GB, several minutes)
             const epRegistrationListener = await listen<EpRegistrationProgressEvent>('ep-registration-progress', (event) => {
-                const eventTime = Date.now();
-                set((state) => {
-                    const nextStatus = nextOperationStatusForEpRegistration(state.operationStatus, event.payload, eventTime);
-                    if (nextStatus === state.operationStatus) {
-                        return state;
-                    }
-                    return { operationStatus: nextStatus, statusBarDismissed: false } as any;
-                });
+                const action = epEventToAction(event.payload);
+                if (action) get().dispatchOperation(action);
             });
 
             // Chat stream status listener
@@ -606,14 +583,33 @@ export const createListenerSlice: StateCreator<
             
             // Model download progress listener
             const downloadProgressListener = await listen<{ file: string; progress: number }>('model-download-progress', (event) => {
-                console.log(`[ChatStore] Download progress: ${event.payload.file} - ${event.payload.progress}%`);
-                set((state) => ({
-                    operationStatus: state.operationStatus?.type === 'downloading' ? {
-                        ...state.operationStatus,
-                        currentFile: event.payload.file,
-                        progress: event.payload.progress,
-                    } : state.operationStatus,
-                } as any));
+                const model = get().operations['model-download'];
+                get().dispatchOperation({
+                    type: 'progress',
+                    key: 'model-download',
+                    message: model?.message,
+                    percent: event.payload.progress,
+                    file: event.payload.file,
+                });
+            });
+
+            // Backend announces which model it resolved before the download starts
+            const downloadStartedListener = await listen<{ model: string; size_bytes?: number }>('model-download-started', (event) => {
+                const { model, size_bytes } = event.payload;
+                const size = size_bytes ? ` (${formatBytes(size_bytes)})` : '';
+                get().dispatchOperation({ type: 'progress', key: 'model-download', message: `Downloading ${model}${size}`, percent: 0 });
+                set({ downloadingModelName: model, downloadingModelSizeBytes: size_bytes ?? null } as any);
+            });
+
+            // Toolbox auto-download (database sources)
+            const toolboxDownloadListener = await listen<{ percent: number; file?: string }>('toolbox-download-progress', (event) => {
+                get().dispatchOperation({
+                    type: event.payload.percent >= 100 ? 'done' : 'progress',
+                    key: 'toolbox-download',
+                    message: 'Downloading database toolbox',
+                    percent: event.payload.percent,
+                    file: event.payload.file,
+                });
             });
             
             // Model load complete listener
@@ -746,26 +742,10 @@ export const createListenerSlice: StateCreator<
 
             // Embedding model init progress listener
             const embeddingInitListener = await listen<{ message: string; is_complete: boolean; error?: boolean }>('embedding-init-progress', (event) => {
-                const { message, is_complete, error } = event.payload;
+                const { message, is_complete } = event.payload;
                 console.log(`[ChatStore] Embedding init: ${message} (complete=${is_complete})`);
                 
-                set((state) => ({
-                    operationStatus: {
-                        type: 'loading',
-                        message,
-                        completed: is_complete,
-                        startTime: state.operationStatus?.startTime || Date.now(),
-                    }
-                } as any));
-
-                if (is_complete) {
-                    setTimeout(() => {
-                        const state = get();
-                        if (state.operationStatus?.completed && (state.operationStatus?.message?.includes('Embedding model') || error)) {
-                            set({ operationStatus: null } as any);
-                        }
-                    }, error ? 10000 : 3000);
-                }
+                get().dispatchOperation(embeddingEventToAction(event.payload));
             });
 
             const modelSelectedListener = await listen<string>('model-selected', (event) => {
@@ -1276,6 +1256,8 @@ export const createListenerSlice: StateCreator<
                 toolLoopFinishedListener();
                 systemPromptListener();
                 downloadProgressListener();
+                downloadStartedListener();
+                toolboxDownloadListener();
                 loadCompleteListener();
                 ragProgressListener();
                 serviceStopStartedListener();
@@ -1302,6 +1284,8 @@ export const createListenerSlice: StateCreator<
             unlistenChatWarning = chatWarningListener;
             unlistenChatStreamStatus = chatStreamStatusListener;
             unlistenEpRegistration = epRegistrationListener;
+            unlistenDownloadStarted = downloadStartedListener;
+            unlistenToolboxDownload = toolboxDownloadListener;
             unlistenModelSelected = modelSelectedListener;
             unlistenModelStateChanged = modelStateChangedListener;
             unlistenToolBlocked = toolBlockedListener;
@@ -1377,6 +1361,8 @@ export const createListenerSlice: StateCreator<
         if (unlistenServiceRestartComplete) { unlistenServiceRestartComplete(); unlistenServiceRestartComplete = undefined; }
         if (unlistenChatStreamStatus) { unlistenChatStreamStatus(); unlistenChatStreamStatus = undefined; }
         if (unlistenEpRegistration) { unlistenEpRegistration(); unlistenEpRegistration = undefined; }
+        if (unlistenDownloadStarted) { unlistenDownloadStarted(); unlistenDownloadStarted = undefined; }
+        if (unlistenToolboxDownload) { unlistenToolboxDownload(); unlistenToolboxDownload = undefined; }
         if (unlistenAvailableModelsChanged) { unlistenAvailableModelsChanged(); unlistenAvailableModelsChanged = undefined; }
         if (unlistenStartupProgress) { unlistenStartupProgress(); unlistenStartupProgress = undefined; }
         
