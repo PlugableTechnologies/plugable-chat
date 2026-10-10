@@ -266,7 +266,13 @@ Register "proxy-dead" "#1 #4" @("cpu") "HTTPS_PROXY points at a closed port: err
     $f += Get-RunFailures $run
     $f += Assert-Terminal $run.Records
     $f += Assert-EmbeddingTruthful $run.Records (Get-EmbeddingFileCount)
-    $f += Assert-PhaseError $run.Records "embedding" "(?i)proxy|connect|refused|network|unreachable"
+    # With every outbound request refused the AI engine cannot fetch its catalog, so startup ends
+    # on the "can't start" card before the embedding step; either record may carry the cause.
+    # What matters: the text points at the network/proxy and never tells the user to reinstall.
+    $net = @($run.Records | Where-Object { [string]$_.detail -match "(?i)could not reach the internet|proxy|refused|network|unreachable|huggingface" })
+    if ($net.Count -eq 0) { $f += "no record names the network/proxy as the cause" }
+    $bad = @($run.Records | Where-Object { [string]$_.detail -match "Reinstall the latest" })
+    if ($bad.Count -gt 0) { $f += "a network failure was answered with reinstall advice" }
     return @{ Failures = $f }
 }
 
