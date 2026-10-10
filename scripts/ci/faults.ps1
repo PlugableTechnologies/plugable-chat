@@ -435,7 +435,9 @@ Register "upgrade-over-old" "stale files, resources" @("cpu") "install an older 
     if ($code -ne 0) { $f += "upgrade installer exited with code $code" }
     if (Test-Path -LiteralPath $stale) { $f += "stale file survived the upgrade: foundry-libs\stale-sentinel.dll" }
     if (-not (Test-Path -LiteralPath $userFile)) { $f += "user data was deleted by the upgrade" }
-    if ((Get-UninstallEntries).Count -ne 1) { $f += "expected exactly one uninstall entry, found $((Get-UninstallEntries).Count)" }
+    # @(): Windows PowerShell 5.1 (the GPU box) gives a single object no .Count; PowerShell 7 (CI) does
+    $entries = @(Get-UninstallEntries)
+    if ($entries.Count -ne 1) { $f += "expected exactly one uninstall entry, found $($entries.Count)" }
     if (-not (Get-HookRegistry)) { $f += "installer hook registry key missing after upgrade" }
     $run = Invoke-Smoke $ctx
     $f += Get-RunFailures $run
