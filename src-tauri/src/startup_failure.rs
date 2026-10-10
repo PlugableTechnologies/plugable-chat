@@ -44,6 +44,30 @@ fn looks_like_missing_library(error: &str) -> bool {
         .any(|k| e.contains(k))
 }
 
+/// True when the error text shows the runtime could not reach the network (catalog download,
+/// proxy, DNS, firewall). Checked before the missing-library test: a stack trace from a network
+/// failure can mention a `.dll`, and "reinstall" is the wrong advice for a blocked connection.
+fn looks_like_network_failure(error: &str) -> bool {
+    let e = error.to_lowercase();
+    [
+        "httprequestexception",
+        "actively refused",
+        "os error 10061",
+        "os error 10060",
+        "os error 11001",
+        "catalog request failed",
+        "no connection could be made",
+        "name or service not known",
+        "no such host is known",
+        "proxy",
+        "network is unreachable",
+        "ssl",
+        "certificate",
+    ]
+    .iter()
+    .any(|k| e.contains(k))
+}
+
 pub fn describe(failure: &StartupFailure, os: Os, log_dir: &str) -> String {
     let (headline, detail) = match failure {
         StartupFailure::RuntimeLoadFailed { error } => (
@@ -66,7 +90,15 @@ pub fn describe(failure: &StartupFailure, os: Os, log_dir: &str) -> String {
 
     let mut steps: Vec<String> = Vec::new();
     steps.push("Close Plugable Chat completely and open it again.".to_string());
-    if os == Os::Windows {
+    if looks_like_network_failure(&detail) {
+        // Network first: reinstalling or updating a driver cannot fix a blocked connection.
+        steps.push(
+            "Plugable Chat could not reach the internet to download its AI components. Check your internet connection, then open Plugable Chat again.".to_string(),
+        );
+        steps.push(
+            "On a work network, a proxy or firewall may be blocking it. Ask your IT team to allow Microsoft's model catalog and huggingface.co, or set the HTTPS_PROXY setting if your network uses a proxy.".to_string(),
+        );
+    } else if os == Os::Windows {
         if looks_like_missing_library(&detail) {
             steps.push(format!(
                 "The AI engine files may be missing or blocked. Reinstall the latest Plugable Chat from {RELEASES_URL} (you do not need to uninstall first). If antivirus software is installed, check that it did not quarantine files in the Plugable Chat folder."
@@ -142,6 +174,19 @@ pub fn describe_unclean_previous_launch(os: Os, log_dir: &str, started_at: &str)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_blocked_network_gets_network_advice_not_reinstall_or_driver_advice() {
+        let f = StartupFailure::NotConnected {
+            runtime_error: Some("SDK create failed: RegionFallbackException: Catalog request failed across 7 region(s) ---> System.Net.Http.HttpRequestException: No connection could be made because the target machine actively refused it. (127.0.0.1:9) at Foo.dll".to_string()),
+        };
+        let text = describe(&f, Os::Windows, "C:\\logs");
+        assert!(text.contains("could not reach the internet"), "{text}");
+        assert!(text.contains("huggingface.co"), "{text}");
+        assert!(!text.contains("Reinstall the latest"), "{text}");
+        assert!(!text.contains("NVIDIA graphics driver"), "{text}");
+        assert!(text.contains("Technical detail"), "{text}");
+    }
+
     #[test]
     fn unclean_launch_notice_explains_expected_case_and_names_driver_on_windows() {
         let m = super::describe_unclean_previous_launch(super::Os::Windows, "C:\\logs", "t1");
