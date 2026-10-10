@@ -160,7 +160,7 @@ jobs:
       - name: Build the unsigned installer (debug profile)
         run: node node_modules/@tauri-apps/cli/tauri.js build --debug --bundles nsis,msi
 
-      # +crt-static (.cargo/config.toml): the exe must not need the VC++ runtime to start.
+      # +crt-static (.cargo/config.toml): the exe must not import the dynamic C runtime (msvcp140 is expected; see the script).
       - name: Confirm the app exe links the C runtime statically
         shell: pwsh
         run: pwsh scripts/ci/assert-static-crt.ps1 -Exe target/debug/plugable-chat.exe
