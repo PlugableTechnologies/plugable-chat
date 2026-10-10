@@ -1,8 +1,8 @@
 {
-  "_comment": "Pin for the Microsoft VC++ 2015-2022 x64 Redistributable bundled into the Windows installer. sha256 is deliberately unset: scripts/ci/fetch-vcredist.ps1 refuses to stage anything until a person has reviewed a download and run it once with -UpdatePin, then committed this file. Caveat: the aka.ms URL always serves Microsoft's NEWEST build, so the pin goes stale whenever Microsoft ships one; for a stable pin, host the reviewed file in a location we control and set url to it.",
+  "_comment": "Pin for the Microsoft VC++ 2015-2022 x64 Redistributable bundled into the Windows installer. Recorded 2026-10-10 by the 'Pin VC++ redistributable' workflow (run 38065191484): the download was validly Authenticode-signed by Microsoft Corporation. Caveat: the aka.ms URL always serves Microsoft's NEWEST build, so release builds fail (safely) whenever Microsoft ships a newer one; re-run that workflow, review, and commit. For a stable pin, host the reviewed file in a location we control and set url to it.",
   "url": "https://aka.ms/vs/17/release/vc_redist.x64.exe",
-  "sha256": "TODO-PIN-AFTER-REVIEW",
-  "version": "TODO-SET-BY-UPDATEPIN",
+  "sha256": "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b",
+  "version": "14.44.35211.0",
   "minBld": 33135,
   "signerContains": "Microsoft Corporation"
 }
