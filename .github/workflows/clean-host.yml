@@ -34,14 +34,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  plan:
+    name: Plan scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      scenarios: ${{ steps.p.outputs.scenarios }}
+    steps:
+      - id: p
+        env:
+          INPUT_SCENARIOS: ${{ inputs.scenarios }}
+        run: |
+          # One job (a fresh runner) per scenario: a scenario that wedges or kills its runner
+          # cannot take the others down or leave state behind, and each uploads its own logs.
+          # unicode-username, proxy-tls-intercept and no-vcredist always skip on a hosted runner
+          # (no interactive second user, no mitmproxy, no redistributable pin), so they only run
+          # when named explicitly or on the AWS box.
+          default='["baseline","readonly-nonadmin","offline-hosts-block","proxy-dead","driver-absent","kill-mid-download","low-disk","quarantined-dll","upgrade-over-old"]'
+          if [ -z "$INPUT_SCENARIOS" ] || [ "$INPUT_SCENARIOS" = "cpu" ]; then
+            echo "scenarios=$default" >> "$GITHUB_OUTPUT"
+          else
+            echo "scenarios=$(printf '%s' "$INPUT_SCENARIOS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";""))')" >> "$GITHUB_OUTPUT"
+          fi
+
   matrix:
-    name: Fault matrix (Windows, CPU)
+    name: ${{ matrix.scenario }}
+    needs: plan
     runs-on: windows-latest
-    timeout-minutes: 150
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJSON(needs.plan.outputs.scenarios) }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      SCENARIOS: ${{ inputs.scenarios || 'cpu' }}
+      SCENARIOS: ${{ matrix.scenario }}
       INSTALLER_TAG: ${{ inputs.installer_release_tag }}
       OLD_TAG: ${{ inputs.old_release_tag || 'v0.1.0-rc9' }}
       EXPECT_FAIL: ${{ inputs.expect_fail }}
@@ -103,6 +131,6 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: clean-host-logs-${{ github.run_id }}
+          name: clean-host-logs-${{ github.run_id }}-${{ matrix.scenario }}
           path: clean-host-out/**
           if-no-files-found: warn
