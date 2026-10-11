@@ -88,6 +88,30 @@ This also closes the open item "re-measure `qwen3.5-4b` on the A10G through the 
 GPUs (no longer test targets), the first-run experience on a machine without the VC++ runtime (the box already had it), and a
 second Windows user with a non-ASCII name (needs an interactive desktop).
 
+
+## rc11 on an A10G (2026-10-11)
+
+Commit `0a9973a` (the commit tagged `v0.1.0-rc11`), the CI-built unsigned installer (`windows-unsigned-0a9973a`, perMachine NSIS), g5.xlarge
+(NVIDIA A10G, driver 596.86, Windows Server 2025). **Run before the tag**, as the rule requires. Box and per-run bucket torn down
+afterwards (`teardown.sh`: nothing left).
+
+| Check | Result |
+|---|---|
+| `installer-lifecycle.ps1` (as SYSTEM, perMachine) | 30 of 30 PASS |
+| clean-host `gpu-baseline`, `baseline`, `quarantined-dll`, `upgrade-over-old` (against the rc10 setup.exe) | 4 of 4 as expected |
+| Chicago questions through the installed app, `qwen3.5-4b-cuda-gpu:4` | 7 of 7 correct, screenshots read: 227,299; THEFT 52,813 / BATTERY 41,130 / CRIMINAL DAMAGE 25,135; 36,070 arrests; Austin 11,358; 407 homicides; 18,608 gun; July 22,561 |
+| clean-host CPU scenarios on `windows-latest` (workflow dispatch) | 10 of 10 pass |
+
+Notes for the next run:
+- `gpu-baseline` failed the first time (`phase 'model-download' never reported`) because the Chicago run had already cached the model on that box. The app was
+  healthy (CUDA, WebGPU and TensorRT-RTX registered, model ready, smoke passed). Clear `C:\Users\Administrator\.foundry` and the app's profile folders
+  before `gpu-baseline`, or run it before the Chicago questions; it then passed in 103 s.
+- `ask.sh` printed exit 1 on a correct run: two new `schtasks` "/ST is earlier than current time" warning lines push the `outcome=` line out of its `tail -4`.
+  The screenshots are the evidence; fix the script to search the whole output.
+- GPU provider registration took about 6 minutes in the interactive profile on the first launch (range seen so far: 10 s to 681 s).
+- This release adds unattended-run flags (`--reply-file`, `--prompts-file`, `--chat-home`, `--ephemeral`, `--hidden`) used by test harnesses; none changes the
+  installed app's normal behaviour, and the Chicago results above are from the same build.
+
 ## Lessons: the box
 
 1. **Turn the PowerShell progress bar off** (`$ProgressPreference = "SilentlyContinue"`) before any
