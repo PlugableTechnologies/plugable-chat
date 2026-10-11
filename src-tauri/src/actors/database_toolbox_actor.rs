@@ -340,6 +340,7 @@ impl DatabaseToolboxActor {
             defer_tools: source.defer_tools,
             python_name: None,
             is_database_source: true,
+            request_timeout_secs: None,
         }
     }
 

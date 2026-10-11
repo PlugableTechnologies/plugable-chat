@@ -41,6 +41,7 @@ pub mod tool_execution;
 pub mod tool_parsing;
 pub mod tool_capability;
 pub mod tool_registry;
+pub mod turn_record;
 pub mod tools;
 pub mod commands;
 
@@ -1781,7 +1782,22 @@ pub fn run() {
     }
 
     let cli_args = CliArgs::try_parse().unwrap_or_else(|e| {
+        // --help and --version are answers, not mistakes: print them and stop instead of opening the app.
+        if matches!(e.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion) {
+            e.exit();
+        }
         println!("[Launch] CLI parse warning: {}", e);
+        // An unattended reply run must not silently fall back to defaults: it would run something
+        // other than what was asked for and the harness would never know. Say so in the reply file.
+        let raw_args: Vec<String> = std::env::args().collect();
+        if let Some(path) = turn_record::reply_file_hint(&raw_args, std::env::var(turn_record::REPLY_FILE_ENV_VAR).ok().as_deref()) {
+            turn_record::configure(Some(path), 1, false);
+            let _ = turn_record::record_turn(turn_record::TurnRecord::run_failure(
+                turn_record::TurnOutcome::StartupError,
+                &format!("command-line arguments were not understood: {e}"),
+            ));
+            std::process::exit(turn_record::TurnOutcome::StartupError.exit_code());
+        }
         // Fall back to defaults (no overrides) if parsing fails
         CliArgs::parse_from(["plugable-chat"])
     });
@@ -1805,6 +1821,10 @@ pub fn run() {
         }
         return;
     }
+    // Everything below resolves its directories through paths.rs, so the override must be in place first.
+    if let Some(home) = cli_args.chat_home.as_deref().filter(|h| !h.is_empty()) {
+        std::env::set_var(paths::HOME_OVERRIDE_ENV_VAR, home);
+    }
     launch_marker::begin();
     let cli_args_for_setup = cli_args.clone();
     let launch_filter = parse_tool_filter(&cli_args);
@@ -1812,6 +1832,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            if cli_args_for_setup.hidden {
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(e) = window.hide() {
+                        eprintln!("[Launch] Failed to hide the main window: {}", e);
+                    }
+                }
+            }
             // Set window title with version number
             if let Some(window) = app.get_webview_window("main") {
                 let git_count = option_env!("PLUGABLE_CHAT_GIT_COUNT")
@@ -1882,6 +1909,24 @@ pub fn run() {
             let mut app_settings =
                 tauri::async_runtime::block_on(async { settings::load_settings().await });
             let launch_overrides = apply_cli_overrides(&cli_args_for_setup, &mut app_settings);
+            if cli_args_for_setup.ephemeral {
+                settings::set_ephemeral(true);
+                println!("[Launch] Ephemeral: settings will not be written to the saved config file");
+            }
+            // Turn records for unattended runs (--reply-file): one record per prompt this launch will run.
+            let reply_prompt_count = launch_overrides.initial_prompt.iter().count() + launch_overrides.queued_prompts.len();
+            if cli_args_for_setup.reply_file.is_some() && reply_prompt_count == 0 {
+                println!("[Launch] --reply-file was given but there is no prompt to run (--initial-prompt or --prompts-file)");
+            }
+            turn_record::configure(
+                cli_args_for_setup.reply_file.clone().map(std::path::PathBuf::from),
+                reply_prompt_count,
+                cli_args_for_setup.exit_after_reply,
+            );
+            turn_record::spawn_watchdog(
+                app.handle().clone(),
+                cli_args_for_setup.reply_timeout_secs.map(std::time::Duration::from_secs).unwrap_or_else(turn_record::reply_timeout),
+            );
             println!(
                 "Settings loaded: {} MCP servers configured",
                 app_settings.mcp_servers.len()

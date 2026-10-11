@@ -64,6 +64,9 @@ pub struct McpTool {
 pub struct McpToolResult {
     #[serde(default)]
     pub content: Vec<McpContent>,
+    /// Machine-readable result some servers send next to (or instead of) the text content.
+    #[serde(rename = "structuredContent", default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
     #[serde(rename = "isError", default)]
     pub is_error: bool,
 }
@@ -78,6 +81,32 @@ pub struct McpContent {
     pub data: Option<String>,
     #[serde(rename = "mimeType", default)]
     pub mime_type: Option<String>,
+}
+
+/// Seconds to wait for one request when a server does not say otherwise.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// The per-request timeout for a server: its own `request_timeout_secs`, else the default.
+pub fn request_timeout_for(config: &McpServerConfig) -> Duration {
+    Duration::from_secs(config.request_timeout_secs.filter(|s| *s > 0).unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS))
+}
+
+/// A line from the server that is a request or notification (it has a `method`), not a response.
+#[derive(Debug, PartialEq)]
+pub struct ServerOriginatedMessage {
+    pub method: String,
+    /// What to send back, if the message needs an answer we can give (a `ping`).
+    pub reply: Option<String>,
+}
+
+pub fn server_originated_request(line: &str) -> Option<ServerOriginatedMessage> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let method = value.get("method")?.as_str()?.to_string();
+    let reply = match (method.as_str(), value.get("id")) {
+        ("ping", Some(id)) => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} }).to_string()),
+        _ => None,
+    };
+    Some(ServerOriginatedMessage { method, reply })
 }
 
 /// Connected MCP server state
@@ -123,8 +152,8 @@ impl McpServerConnection {
             .map_err(|e| format!("Failed to flush request: {}", e))?;
 
         // Read response with timeout, ensuring we match on the request id
-        let read_result =
-            tokio::time::timeout(Duration::from_secs(30), self.read_response(id)).await;
+        let request_timeout = request_timeout_for(&self.config);
+        let read_result = tokio::time::timeout(request_timeout, self.read_response(id)).await;
 
         match read_result {
             Ok(Ok(response)) => {
@@ -137,7 +166,11 @@ impl McpServerConnection {
                 }
             }
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(format!("Request timed out waiting for id {}", id)),
+            Err(_) => Err(format!(
+                "Request timed out after {}s waiting for id {} (raise request_timeout_secs for this server)",
+                request_timeout.as_secs(),
+                id
+            )),
         }
     }
 
@@ -152,6 +185,18 @@ impl McpServerConnection {
                     }
 
                     println!("McpHostActor: Received: {}", trimmed);
+
+                    // A message with a method is the server talking to us (a notification, or a
+                    // request such as ping), never the response we are waiting for. Answer a ping
+                    // so a server that checks on us does not give up; ignore the rest.
+                    if let Some(request) = server_originated_request(trimmed) {
+                        if let Some(reply) = request.reply {
+                            let _ = self.stdin.write_all(format!("{}\n", reply).as_bytes()).await;
+                            let _ = self.stdin.flush().await;
+                        }
+                        println!("McpHostActor: Skipping server message '{}'", request.method);
+                        continue;
+                    }
 
                     // Try to parse as JSON-RPC response
                     match serde_json::from_str::<JsonRpcResponse>(trimmed) {
@@ -1056,5 +1101,128 @@ impl McpToolRouterActor {
         }
 
         Ok(tools)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_timeout(secs: Option<u64>) -> McpServerConfig {
+        let mut config = McpServerConfig::new("s".to_string(), "s".to_string());
+        config.request_timeout_secs = secs;
+        config
+    }
+
+    #[test]
+    fn a_server_waits_thirty_seconds_unless_it_sets_its_own_timeout() {
+        assert_eq!(request_timeout_for(&config_with_timeout(None)).as_secs(), DEFAULT_REQUEST_TIMEOUT_SECS);
+        assert_eq!(request_timeout_for(&config_with_timeout(Some(900))).as_secs(), 900);
+        assert_eq!(request_timeout_for(&config_with_timeout(Some(0))).as_secs(), DEFAULT_REQUEST_TIMEOUT_SECS, "zero means unset");
+    }
+
+    #[test]
+    fn a_saved_config_without_the_timeout_still_loads_and_does_not_write_one_back() {
+        let old: McpServerConfig = serde_json::from_str(r#"{"id":"a","name":"a","enabled":true,"command":"x"}"#).unwrap();
+        assert_eq!(old.request_timeout_secs, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("request_timeout_secs"));
+        let set: McpServerConfig = serde_json::from_str(r#"{"id":"a","name":"a","enabled":true,"request_timeout_secs":900}"#).unwrap();
+        assert_eq!(set.request_timeout_secs, Some(900));
+    }
+
+    #[test]
+    fn a_ping_from_the_server_is_answered_and_other_server_messages_are_just_skipped() {
+        let ping = server_originated_request(r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#).unwrap();
+        let reply: Value = serde_json::from_str(&ping.reply.unwrap()).unwrap();
+        assert_eq!((reply["id"].as_u64(), &reply["result"]), (Some(7), &json!({})));
+        let note = server_originated_request(r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{}}"#).unwrap();
+        assert_eq!((note.method.as_str(), note.reply), ("notifications/progress", None));
+        let roots = server_originated_request(r#"{"jsonrpc":"2.0","id":3,"method":"roots/list"}"#).unwrap();
+        assert_eq!(roots.reply, None, "a request we cannot serve is skipped, not mistaken for a response");
+        assert_eq!(server_originated_request(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#), None);
+        assert_eq!(server_originated_request("not json at all"), None);
+    }
+
+    #[test]
+    fn structured_content_is_read_and_stands_in_for_text_when_there_is_none() {
+        let both: McpToolResult = serde_json::from_value(json!({
+            "content": [{"type": "text", "text": "6,992 orders"}],
+            "structuredContent": {"orders": 6992}
+        })).unwrap();
+        assert_eq!(crate::tool_execution::mcp_result_text(&both), "6,992 orders", "text wins when there is text");
+        let only: McpToolResult = serde_json::from_value(json!({"structuredContent": {"orders": 6992}})).unwrap();
+        assert_eq!(crate::tool_execution::mcp_result_text(&only), r#"{"orders":6992}"#);
+        let neither: McpToolResult = serde_json::from_value(json!({"content": []})).unwrap();
+        assert_eq!(crate::tool_execution::mcp_result_text(&neither), "");
+    }
+
+    /// A scripted stdio MCP server in Python. Tools: `slow` (sleeps `seconds`), `structured`
+    /// (structuredContent only), `noisy` (launcher noise, a ping and a notification before the answer).
+    #[cfg(unix)]
+    const SCRIPTED_SERVER: &str = r#"
+import json, sys, time
+print("launcher banner that is not JSON", flush=True)
+for line in sys.stdin:
+    msg = json.loads(line)
+    method, mid = msg.get("method"), msg.get("id")
+    if mid is None:
+        continue
+    if method == "initialize":
+        result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "t", "version": "0"}}
+    elif method == "tools/list":
+        result = {"tools": [{"name": n, "description": n, "inputSchema": {"type": "object"}} for n in ("slow", "structured", "noisy")]}
+    elif method == "tools/call":
+        name, args = msg["params"]["name"], msg["params"].get("arguments", {})
+        if name == "slow":
+            time.sleep(args.get("seconds", 0))
+            result = {"content": [{"type": "text", "text": "done"}]}
+        elif name == "structured":
+            result = {"content": [], "structuredContent": {"orders": 6992}}
+        else:
+            print("more launcher noise", flush=True)
+            print(json.dumps({"jsonrpc": "2.0", "method": "notifications/message", "params": {}}), flush=True)
+            print(json.dumps({"jsonrpc": "2.0", "id": 900, "method": "ping"}), flush=True)
+            result = {"content": [{"type": "text", "text": "answered"}]}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": result}), flush=True)
+"#;
+
+    #[cfg(unix)]
+    async fn connect_scripted_server(timeout_secs: Option<u64>) -> Option<McpToolRouterActor> {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("python3 is not available; skipping the scripted-server test");
+            return None;
+        }
+        let (_tx, rx) = mpsc::channel(1);
+        let actor = McpToolRouterActor::new(rx);
+        let mut config = McpServerConfig::new("scripted".to_string(), "scripted".to_string());
+        config.enabled = true;
+        config.command = Some("python3".to_string());
+        config.args = vec!["-u".to_string(), "-c".to_string(), SCRIPTED_SERVER.to_string()];
+        config.request_timeout_secs = timeout_secs;
+        actor.connect_stdio_server(config).await.expect("the scripted server connects");
+        Some(actor)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_slow_tool_call_times_out_at_the_servers_own_limit_and_succeeds_under_a_longer_one() {
+        let Some(short) = connect_scripted_server(Some(1)).await else { return };
+        let err = short.execute_tool("scripted", "slow", json!({"seconds": 3})).await.unwrap_err();
+        assert!(err.contains("timed out after 1s"), "{err}");
+        let Some(long) = connect_scripted_server(Some(10)).await else { return };
+        let ok = long.execute_tool("scripted", "slow", json!({"seconds": 2})).await.unwrap();
+        assert_eq!(crate::tool_execution::mcp_result_text(&ok), "done");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn structured_only_results_and_noisy_servers_work_end_to_end() {
+        let Some(actor) = connect_scripted_server(Some(10)).await else { return };
+        let structured = actor.execute_tool("scripted", "structured", json!({})).await.unwrap();
+        assert_eq!(crate::tool_execution::mcp_result_text(&structured), r#"{"orders":6992}"#);
+        let noisy = actor.execute_tool("scripted", "noisy", json!({})).await.unwrap();
+        assert_eq!(crate::tool_execution::mcp_result_text(&noisy), "answered");
     }
 }

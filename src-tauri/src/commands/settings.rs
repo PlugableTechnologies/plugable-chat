@@ -571,6 +571,7 @@ pub async fn get_launch_overrides(
     Ok(LaunchOverridesPayload {
         model: launch_config.launch_overrides.model.clone(),
         initial_prompt: launch_config.launch_overrides.initial_prompt.clone(),
+        queued_prompts: launch_config.launch_overrides.queued_prompts.clone(),
     })
 }
 
@@ -590,4 +591,5 @@ pub fn get_launch_model_problem(launch_config: State<'_, LaunchConfigState>) -> 
 pub struct LaunchOverridesPayload {
     pub model: Option<String>,
     pub initial_prompt: Option<String>,
+    pub queued_prompts: Vec<String>,
 }

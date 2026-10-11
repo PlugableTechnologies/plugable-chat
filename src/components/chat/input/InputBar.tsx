@@ -89,6 +89,7 @@ export const InputBar = ({
                     </button>
                 )}
                 <textarea
+                    data-testid="chat-input-textarea"
                     ref={textareaRef}
                     className={`chat-input-textarea flex-1 bg-transparent text-gray-700 resize-none focus:outline-none focus:ring-0 focus:border-none max-h-[200px] overflow-y-auto placeholder:text-gray-400 font-normal text-[15px] leading-6 border-none py-1 ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                     rows={1}
@@ -104,6 +105,7 @@ export const InputBar = ({
                         onClick={handleStop}
                         className="h-9 w-9 flex items-center justify-center rounded-full text-base transition bg-red-500 text-white hover:bg-red-600 shrink-0"
                         aria-label="Stop generation"
+                        data-testid="chat-stop-button"
                     >
                         ■
                     </button>
@@ -113,6 +115,7 @@ export const InputBar = ({
                         className={`h-9 w-9 flex items-center justify-center rounded-full text-xl transition shrink-0 ${!isDisabled && input.trim() ? 'bg-gray-900 text-white hover:bg-gray-800' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}
                         disabled={isDisabled || !input.trim()}
                         aria-label="Send message"
+                        data-testid="chat-send-button"
                     >
                         ↩
                     </button>

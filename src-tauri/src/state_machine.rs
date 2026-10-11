@@ -130,10 +130,20 @@ impl AgenticStateMachine {
         }
         
         // Determine initial state based on operational mode
-        let initial_state = Self::compute_initial_state_from_mode(
+        let mut initial_state = Self::compute_initial_state_from_mode(
             settings_sm.operational_mode(),
             &enabled_capabilities,
         );
+
+        // Tools that are active (not deferred) can be called at once. When MCP tools are the only
+        // capability the turn starts in Tool Orchestration, which allows just `tool_search` and the
+        // tools already materialized, so without this a server whose tools are not deferred would
+        // have every call blocked until the model searched for tools it was already given.
+        if let AgenticState::ToolOrchestration { materialized_tools } = &mut initial_state {
+            if materialized_tools.is_empty() {
+                *materialized_tools = Self::active_tool_names(&prompt_context.mcp_context);
+            }
+        }
         
         Self {
             settings_sm: settings_sm.clone(),
@@ -156,6 +166,15 @@ impl AgenticStateMachine {
             auto_tool_search: None,
             auto_schema_search: None,
         }
+    }
+
+    /// Names of the MCP tools that are active (not deferred) and so can be called without a search.
+    fn active_tool_names(mcp_context: &McpToolContext) -> Vec<String> {
+        mcp_context
+            .active_tools
+            .iter()
+            .flat_map(|(_, tools)| tools.iter().map(|t| t.name.clone()))
+            .collect()
     }
 
     /// Compute initial state from OperationalMode.
@@ -311,7 +330,7 @@ impl AgenticStateMachine {
                     }
                 } else if self.enabled_capabilities.contains(&Capability::McpTools) {
                     AgenticState::ToolOrchestration {
-                        materialized_tools: Vec::new(),
+                        materialized_tools: Self::active_tool_names(&self.mcp_context),
                     }
                 } else {
                     AgenticState::Conversational
@@ -652,7 +671,7 @@ impl AgenticStateMachine {
             OperationalMode::ToolMode { .. } => {
                 if !matches!(self.current_state, AgenticState::ToolOrchestration { .. }) {
                     self.transition_to(AgenticState::ToolOrchestration {
-                        materialized_tools: Vec::new(),
+                        materialized_tools: Self::active_tool_names(&self.mcp_context),
                     });
                 }
             }
@@ -1387,6 +1406,45 @@ mod tests {
                 has_attachments: false,
             },
         )
+    }
+
+    #[test]
+    fn a_server_whose_tools_are_not_deferred_can_be_called_when_mcp_tools_are_the_only_capability() {
+        use crate::agentic_state::{McpToolContext, McpToolInfo, PromptContext};
+        let mut settings = AppSettings::default();
+        settings.always_on_builtin_tools = vec![];
+        for server in settings.mcp_servers.iter_mut() {
+            server.enabled = false;
+        }
+        let mut server = crate::settings::McpServerConfig::new("plugableiq".to_string(), "plugableiq".to_string());
+        server.enabled = true;
+        server.defer_tools = false;
+        settings.mcp_servers.push(server);
+        let settings_sm = SettingsStateMachine::from_settings(&settings, &ToolLaunchFilter::default());
+        let tool = |name: &str| McpToolInfo { name: name.to_string(), description: None, parameters_schema: None, input_examples: None };
+        let machine = AgenticStateMachine::new_from_settings_sm(
+            &settings_sm,
+            PromptContext {
+                base_prompt: "p".to_string(),
+                mcp_context: McpToolContext { active_tools: vec![("plugableiq".to_string(), vec![tool("ask"), tool("review")])], ..Default::default() },
+                attached_tables: Vec::new(),
+                attached_tools: Vec::new(),
+                attached_tabular_files: Vec::new(),
+                tabular_column_info: Vec::new(),
+                tool_call_format: ToolCallFormatName::Hermes,
+                model_tool_format: None,
+                custom_tool_prompts: HashMap::new(),
+                python_primary: false,
+                has_attachments: false,
+            },
+        );
+        let mut machine = machine;
+        assert!(machine.is_tool_allowed("ask") && machine.is_tool_allowed("review"), "active tools are callable at once");
+        // The chat then recomputes the initial state from what discovery found; with nothing found the tools must stay callable.
+        machine.compute_initial_state(0.0, 0.0, Vec::new(), Vec::new());
+        assert!(machine.is_tool_allowed("ask"), "still callable after the initial state is recomputed");
+        assert!(machine.is_tool_allowed("tool_search"));
+        assert!(!machine.is_tool_allowed("some_other_tool"), "only the tools it was given");
     }
 
     #[test]

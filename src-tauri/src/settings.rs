@@ -585,6 +585,10 @@ pub struct McpServerConfig {
     /// should NOT be exposed directly as MCP tools in the system prompt.
     #[serde(default)]
     pub is_database_source: bool,
+    /// How long to wait for this server to answer one request (initialize, tools/list, tools/call),
+    /// in seconds. Unset means the default (30). Raise it for servers whose tools run for minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
 }
 
 fn default_defer_tools() -> bool {
@@ -605,6 +609,7 @@ impl McpServerConfig {
             defer_tools: true,
             python_name: None,
             is_database_source: false,
+            request_timeout_secs: None,
         }
     }
 
@@ -851,6 +856,7 @@ impl AppSettings {
             defer_tools: source.defer_tools,
             python_name: None,
             is_database_source: true,
+            request_timeout_secs: None,
         }
     }
 
@@ -913,6 +919,7 @@ pub fn default_mcp_test_server() -> McpServerConfig {
             defer_tools: false,       // Expose tools immediately for quick testing
             python_name: None,
             is_database_source: false,
+            request_timeout_secs: None,
         }
     } else {
         // Fall back to cargo run if binary not found
@@ -936,6 +943,7 @@ pub fn default_mcp_test_server() -> McpServerConfig {
             defer_tools: false,       // Expose tools immediately for quick testing
             python_name: None,
             is_database_source: false,
+            request_timeout_secs: None,
         }
     };
     enforce_python_name(&mut base);
@@ -1411,9 +1419,29 @@ pub async fn load_settings() -> AppSettings {
     settings
 }
 
+static SETTINGS_EPHEMERAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `--ephemeral`: this launch never writes the saved config file (launch overrides would otherwise
+/// be saved along with the rest of the in-memory settings the first time anything saves).
+pub fn set_ephemeral(ephemeral: bool) {
+    SETTINGS_EPHEMERAL.store(ephemeral, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn is_ephemeral() -> bool {
+    SETTINGS_EPHEMERAL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Save settings to the config file
 pub async fn save_settings(settings: &AppSettings) -> Result<(), String> {
-    let config_path = get_settings_path();
+    save_settings_to(&get_settings_path(), settings, is_ephemeral()).await
+}
+
+/// Write `settings` to `config_path` unless this launch is ephemeral.
+pub async fn save_settings_to(config_path: &std::path::Path, settings: &AppSettings, ephemeral: bool) -> Result<(), String> {
+    if ephemeral {
+        println!("Settings not saved (ephemeral launch)");
+        return Ok(());
+    }
 
     // Ensure the directory exists
     if let Some(parent) = config_path.parent() {
@@ -1425,7 +1453,7 @@ pub async fn save_settings(settings: &AppSettings) -> Result<(), String> {
     let contents = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-    fs::write(&config_path, contents)
+    fs::write(config_path, contents)
         .await
         .map_err(|e| format!("Failed to write config file: {}", e))?;
 
@@ -1436,6 +1464,18 @@ pub async fn save_settings(settings: &AppSettings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_ephemeral_launch_writes_nothing_and_a_normal_one_does() {
+        let dir = std::env::temp_dir().join(format!("plugable-ephemeral-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("config.json");
+        save_settings_to(&path, &AppSettings::default(), true).await.unwrap();
+        assert!(!path.exists(), "an ephemeral launch must not create the config file");
+        save_settings_to(&path, &AppSettings::default(), false).await.unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_default_settings() {
@@ -1488,6 +1528,7 @@ mod tests {
             defer_tools: true,
             python_name: Some("test_server".to_string()),
             is_database_source: false,
+            request_timeout_secs: None,
         });
 
         let json = serde_json::to_string(&settings).unwrap();

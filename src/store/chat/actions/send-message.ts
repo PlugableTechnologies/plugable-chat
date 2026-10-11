@@ -6,6 +6,7 @@ import {
     deriveChatTitleFromPrompt, 
     deriveChatPreviewFromMessage 
 } from '../helpers';
+import { takeNextLaunchPrompt } from '../launch-queue';
 
 // Dependencies from other slices
 interface SendMessageSliceDeps {
@@ -31,6 +32,7 @@ interface SendMessageSliceDeps {
     
     // Launch overrides
     launchInitialPrompt: string | null;
+    launchQueuedPrompts: string[];
     launchPromptApplied: boolean;
     
     // Operation status
@@ -40,6 +42,9 @@ interface SendMessageSliceDeps {
 export interface SendMessageSlice {
     // Send the initial prompt from CLI
     sendLaunchPrompt: () => Promise<void>;
+
+    // Start the next --prompts-file prompt in a fresh chat (called when a chat finishes)
+    advanceLaunchPromptQueue: () => Promise<void>;
     
     // Start a system-initiated chat (for help messages)
     startSystemChat: (assistantMessage: string, title?: string) => void;
@@ -146,6 +151,27 @@ export const createSendMessageSlice: StateCreator<
         } finally {
             set({ launchPromptApplied: true } as any);
         }
+    },
+
+    advanceLaunchPromptQueue: async () => {
+        const state = get();
+        if (state.launchQueuedPrompts.length === 0 || !state.launchPromptApplied) {
+            return;
+        }
+        const { nextLaunchPrompt, remainingLaunchPrompts } = takeNextLaunchPrompt(state.launchQueuedPrompts);
+        if (!nextLaunchPrompt) {
+            set({ launchQueuedPrompts: [] } as any);
+            return;
+        }
+        // A fresh chat for each prompt: sendLaunchPrompt only runs on an empty conversation.
+        set({
+            launchQueuedPrompts: remainingLaunchPrompts,
+            launchInitialPrompt: nextLaunchPrompt,
+            launchPromptApplied: false,
+            chatMessages: [],
+            currentChatId: null,
+        } as any);
+        await get().sendLaunchPrompt();
     },
 
     startSystemChat: (assistantMessage: string, title?: string) => {

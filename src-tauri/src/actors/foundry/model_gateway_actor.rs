@@ -2285,6 +2285,8 @@ impl ModelGatewayActor {
                         "launch-model-override-failed",
                         json!({ "requested": launch_override_model, "message": problem }),
                     );
+                    // An unattended reply run would otherwise wait forever for a prompt that will not run.
+                    crate::turn_record::fail_run(&self.app_handle, crate::turn_record::TurnOutcome::LaunchModelError, problem);
                 }
 
                 let selected = if let Some((model, source)) = selection.selected_model {

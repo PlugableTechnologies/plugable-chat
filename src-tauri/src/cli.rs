@@ -82,6 +82,10 @@ pub struct CliArgs {
     /// Replace MCP server list with JSON configs (inline JSON or @path/to/json)
     #[arg(long = "mcp-server", value_name = "JSON_OR_@FILE", env = "PLUGABLE_MCP_SERVERS", value_delimiter = None)]
     pub mcp_servers: Vec<String>,
+    /// How long to wait for an MCP server to answer one request, in seconds, for every server
+    /// that does not set its own request_timeout_secs (default 30).
+    #[arg(long, value_name = "SECONDS", env = "PLUGABLE_MCP_TIMEOUT_SECS")]
+    pub mcp_timeout_secs: Option<u64>,
     /// Optional allowlist of tools to expose on launch.
     /// Built-ins: python_execution, tool_search
     /// MCP tools: server_id::tool_name
@@ -138,6 +142,32 @@ pub struct CliArgs {
     /// Gives up after 20 minutes; override with PLUGABLE_CHAT_SMOKE_TIMEOUT_SECS.
     #[arg(long)]
     pub smoke: bool,
+    /// Append one JSON line per finished chat turn (question, reply, outcome, tool-call trace) to
+    /// this file, for automated tests. See turn_record.rs for the record format and exit codes.
+    #[arg(long, value_name = "PATH", env = "PLUGABLE_REPLY_FILE")]
+    pub reply_file: Option<String>,
+    /// Exit once every launch prompt has a record in --reply-file (0 ok, 1 turn failed,
+    /// 2 launch model unusable, 3 startup failed, 4 timed out). Needs --reply-file.
+    #[arg(long, env = "PLUGABLE_EXIT_AFTER_REPLY")]
+    pub exit_after_reply: bool,
+    /// Give up on a --reply-file run after this many seconds (default 1800) and record a timeout.
+    #[arg(long, value_name = "SECONDS", env = "PLUGABLE_REPLY_TIMEOUT_SECS")]
+    pub reply_timeout_secs: Option<u64>,
+    /// Run several prompts in one launch, each in a fresh chat after the previous one finishes.
+    /// A JSON array of strings in this file (optionally written @path). They follow --initial-prompt.
+    #[arg(long, value_name = "PATH", env = "PLUGABLE_PROMPTS_FILE")]
+    pub prompts_file: Option<String>,
+    /// Start with the main window hidden (for unattended runs).
+    #[arg(long, env = "PLUGABLE_HIDDEN")]
+    pub hidden: bool,
+    /// Keep config, data (chat history) and cache under this directory instead of the platform
+    /// locations, so a test run cannot touch the user's own. Downloaded models are still found.
+    #[arg(long, value_name = "DIR", env = "PLUGABLE_CHAT_HOME")]
+    pub chat_home: Option<String>,
+    /// Never write settings to the saved config file during this launch, so a test run cannot
+    /// change the user's configuration.
+    #[arg(long, env = "PLUGABLE_EPHEMERAL")]
+    pub ephemeral: bool,
     /// Run only the dev MCP test server (no app; blocks until exit)
     #[arg(
         long,
@@ -190,6 +220,12 @@ pub struct CliArgs {
         action = clap::ArgAction::Set
     )]
     pub mcp_test_print_prompt: bool,
+}
+
+/// Parse the contents of a `--prompts-file`: a JSON array of non-empty strings.
+pub fn parse_prompts_json(text: &str) -> Result<Vec<String>, String> {
+    let prompts: Vec<String> = serde_json::from_str(text).map_err(|e| format!("expected a JSON array of strings: {e}"))?;
+    Ok(prompts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
 }
 
 /// Read a value that may be either a literal string or a @path reference to a file
@@ -415,6 +451,12 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
         }
     }
 
+    if let Some(timeout) = args.mcp_timeout_secs {
+        for server in settings.mcp_servers.iter_mut().filter(|s| s.request_timeout_secs.is_none()) {
+            server.request_timeout_secs = Some(timeout);
+        }
+    }
+
     // Always-on configuration overrides
     if let Some(builtins) = &args.always_on_builtins {
         settings.always_on_builtin_tools = builtins.clone();
@@ -460,6 +502,21 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
             }
         },
         None => None,
+    };
+
+    // Further prompts for the same launch, run one after another in fresh chats
+    let queued_prompts = match &args.prompts_file {
+        Some(raw) => {
+            let path = raw.strip_prefix('@').unwrap_or(raw);
+            match fs::read_to_string(Path::new(path)).map_err(|e| e.to_string()).and_then(|t| parse_prompts_json(&t)) {
+                Ok(prompts) => prompts,
+                Err(e) => {
+                    println!("[Launch] Failed to read --prompts-file {}: {}", path, e);
+                    Vec::new()
+                }
+            }
+        }
+        None => Vec::new(),
     };
 
     // Enable default dev MCP test server when requested
@@ -533,9 +590,100 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
         println!("[Launch] Tabular data files attached via --table-file: {:?}", table_files);
     }
 
+    // With no --initial-prompt, the first prompt of --prompts-file starts the run.
+    let mut initial_prompt = launch_prompt.or(enable_mcp_prompt);
+    let mut queued_prompts = queued_prompts;
+    if initial_prompt.is_none() && !queued_prompts.is_empty() {
+        initial_prompt = Some(queued_prompts.remove(0));
+    }
+
     LaunchOverrides {
         model: launch_model,
-        initial_prompt: launch_prompt.or(enable_mcp_prompt),
+        initial_prompt,
+        queued_prompts,
         table_files,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> CliArgs {
+        let mut full = vec!["plugable-chat"];
+        full.extend_from_slice(args);
+        CliArgs::try_parse_from(full).expect("arguments parse")
+    }
+
+    fn temp_file(name: &str, contents: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("plugable-cli-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("input.json");
+        std::fs::write(&path, contents).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn the_unattended_run_flags_parse() {
+        let args = parse(&[
+            "--reply-file", "/t/r.jsonl", "--exit-after-reply", "--reply-timeout-secs", "90", "--prompts-file", "/t/p.json",
+            "--hidden", "--ephemeral", "--chat-home", "/t/home", "--mcp-timeout-secs", "900",
+        ]);
+        assert_eq!(args.reply_file.as_deref(), Some("/t/r.jsonl"));
+        assert!(args.exit_after_reply && args.hidden && args.ephemeral);
+        assert_eq!(args.reply_timeout_secs, Some(90));
+        assert_eq!(args.prompts_file.as_deref(), Some("/t/p.json"));
+        assert_eq!(args.chat_home.as_deref(), Some("/t/home"));
+        assert_eq!(args.mcp_timeout_secs, Some(900));
+    }
+
+    #[test]
+    fn the_unattended_run_flags_are_off_by_default() {
+        let args = parse(&[]);
+        assert!(args.reply_file.is_none() && !args.exit_after_reply && !args.hidden && !args.ephemeral);
+    }
+
+    #[test]
+    fn help_is_reported_as_help_so_the_launcher_can_print_it_instead_of_opening_the_app() {
+        let err = CliArgs::try_parse_from(["plugable-chat", "--help"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(err.to_string().contains("--reply-file"), "the help lists the unattended-run flags");
+    }
+
+    #[test]
+    fn an_unknown_flag_does_not_parse_so_the_launcher_can_report_it() {
+        assert!(CliArgs::try_parse_from(["plugable-chat", "--no-such-flag"]).is_err());
+    }
+
+    #[test]
+    fn a_prompts_file_is_a_json_array_of_strings_with_blanks_dropped() {
+        assert_eq!(parse_prompts_json(r#"[" a ", "", "b"]"#).unwrap(), vec!["a".to_string(), "b".to_string()]);
+        assert!(parse_prompts_json(r#"{"a": 1}"#).is_err());
+        assert!(parse_prompts_json("not json").is_err());
+    }
+
+    #[test]
+    fn further_prompts_follow_the_initial_one_and_a_missing_file_adds_none() {
+        let path = temp_file("prompts", r#"["second", "third"]"#);
+        let mut settings = AppSettings::default();
+        let overrides = apply_cli_overrides(&parse(&["--initial-prompt", "first", "--prompts-file", &path]), &mut settings);
+        assert_eq!(overrides.initial_prompt.as_deref(), Some("first"));
+        assert_eq!(overrides.queued_prompts, vec!["second".to_string(), "third".to_string()]);
+        let with_at = apply_cli_overrides(&parse(&["--prompts-file", &format!("@{path}")]), &mut AppSettings::default());
+        assert_eq!(with_at.initial_prompt.as_deref(), Some("second"), "with no --initial-prompt the file's first prompt starts the run");
+        assert_eq!(with_at.queued_prompts, vec!["third".to_string()], "a leading @ is accepted like the other file arguments");
+        let missing = apply_cli_overrides(&parse(&["--prompts-file", "/no/such/file.json"]), &mut AppSettings::default());
+        assert!(missing.queued_prompts.is_empty());
+    }
+
+    #[test]
+    fn the_mcp_timeout_applies_to_servers_that_do_not_set_their_own() {
+        let own = temp_file("own", r#"{"id":"own","name":"own","enabled":true,"command":"x","request_timeout_secs":45}"#);
+        let plain = temp_file("plain", r#"{"id":"plain","name":"plain","enabled":true,"command":"x"}"#);
+        let mut settings = AppSettings::default();
+        apply_cli_overrides(&parse(&["--mcp-server", &format!("@{own}"), "--mcp-server", &format!("@{plain}"), "--mcp-timeout-secs", "900"]), &mut settings);
+        let timeout = |id: &str| settings.mcp_servers.iter().find(|s| s.id == id).and_then(|s| s.request_timeout_secs);
+        assert_eq!(timeout("own"), Some(45));
+        assert_eq!(timeout("plain"), Some(900));
     }
 }

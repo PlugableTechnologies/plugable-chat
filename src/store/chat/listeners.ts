@@ -115,6 +115,7 @@ interface ListenerSliceDeps {
     launchInitialPrompt: string | null;
     launchPromptApplied: boolean;
     sendLaunchPrompt: () => Promise<void>;
+    advanceLaunchPromptQueue: () => Promise<void>;
     clearPendingSummary: (id: string) => void;
 }
 
@@ -436,6 +437,8 @@ export const createListenerSlice: StateCreator<
                     operationStatus: null,
                     lastStreamActivityTs: Date.now(),
                 } as any);
+                // A launch with --prompts-file runs its next prompt in a fresh chat; otherwise the queue is empty and this does nothing.
+                get().advanceLaunchPromptQueue().catch((e: unknown) => console.error('[ChatStore] Failed to start the next launch prompt:', e));
             });
 
             // Chat error listener - fatal errors during chat

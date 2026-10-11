@@ -58,6 +58,7 @@ export interface ModelSlice {
     launchOverridesLoaded: boolean;
     launchModelOverride: string | null;
     launchInitialPrompt: string | null;
+    launchQueuedPrompts: string[];
     launchPromptApplied: boolean;
     markLaunchPromptApplied: () => void;
     loadLaunchOverrides: () => Promise<void>;
@@ -361,16 +362,18 @@ export const createModelSlice: StateCreator<
     launchOverridesLoaded: false,
     launchModelOverride: null,
     launchInitialPrompt: null,
+    launchQueuedPrompts: [],
     launchPromptApplied: false,
     markLaunchPromptApplied: () => set({ launchPromptApplied: true }),
     loadLaunchOverrides: async () => {
         if (get().launchOverridesLoaded) return;
         try {
-            const payload = await invoke<{ model?: string | null; initial_prompt?: string | null }>('get_launch_overrides');
+            const payload = await invoke<{ model?: string | null; initial_prompt?: string | null; queued_prompts?: string[] | null }>('get_launch_overrides');
             set({
                 launchOverridesLoaded: true,
                 launchModelOverride: payload?.model ?? null,
                 launchInitialPrompt: payload?.initial_prompt ?? null,
+                launchQueuedPrompts: payload?.queued_prompts ?? [],
             });
             console.log('[ChatStore] Launch overrides loaded:', payload);
         } catch (e: any) {

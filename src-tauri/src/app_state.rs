@@ -186,6 +186,8 @@ impl Default for HeartbeatState {
 pub struct LaunchOverrides {
     pub model: Option<String>,
     pub initial_prompt: Option<String>,
+    /// Prompts that follow the initial one, each in a fresh chat (from --prompts-file)
+    pub queued_prompts: Vec<String>,
     /// Tabular data files to attach for Python analysis (from --table-file)
     pub table_files: Vec<String>,
 }

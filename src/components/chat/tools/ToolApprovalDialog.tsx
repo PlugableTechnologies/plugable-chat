@@ -14,7 +14,7 @@ export const ToolApprovalDialog = ({
     onReject
 }: ToolApprovalDialogProps) => {
     return (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 my-4">
+        <div data-testid="tool-approval-dialog" className="bg-amber-50 border border-amber-200 rounded-xl p-4 my-4">
             <div className="flex items-start gap-3">
                 <span className="text-xl">⚠️</span>
                 <div className="flex-1">
@@ -45,12 +45,14 @@ export const ToolApprovalDialog = ({
                     </div>
                     <div className="flex gap-3">
                         <button
+                            data-testid="tool-approve-button"
                             onClick={onApprove}
                             className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition-colors"
                         >
                             ✓ Approve
                         </button>
                         <button
+                            data-testid="tool-reject-button"
                             onClick={onReject}
                             className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-300 transition-colors"
                         >

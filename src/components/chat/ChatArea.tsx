@@ -479,7 +479,7 @@ export function ChatArea() {
     };
 
     return (
-        <div id="chat-area" className="chat-area h-full w-full flex flex-col text-gray-800 font-sans relative overflow-hidden">
+        <div id="chat-area" data-testid="chat-area" data-state={assistantStreamingActive ? 'streaming' : 'idle'} className="chat-area h-full w-full flex flex-col text-gray-800 font-sans relative overflow-hidden">
             {/* Status Bar for model operations */}
             <StatusBar />
 
@@ -515,6 +515,8 @@ export function ChatArea() {
                             return (
                                 <div key={m.id} className={`chat-message-row flex w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                     <div
+                                        data-testid={`chat-bubble-${m.role}`}
+                                        data-message-id={m.id}
                                         className={`
                                     chat-bubble relative w-full max-w-none rounded-2xl px-5 py-3.5 text-[15px] leading-7
                                     ${m.role === 'user'

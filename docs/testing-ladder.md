@@ -29,6 +29,34 @@ environment variables the box uses (`PLUGABLE_MODEL`, `PLUGABLE_INITIAL_PROMPT`,
 first and restore it afterwards. The Mac cannot show Windows-only code paths, NSIS bundling, CUDA or the
 winml providers.
 
+### Unattended runs (rung 1b, scripted)
+
+A harness can run the app, ask questions and read back what it did, without screenshots. All of these are
+command-line flags with an environment twin (`--reply-file` / `PLUGABLE_REPLY_FILE`, and so on). They are for
+testing; the public README and user guide do not mention them.
+
+| Flag | What it does |
+|---|---|
+| `--initial-prompt`, `--prompts-file <json>` | The first prompt, then more prompts (a JSON array of strings), each in a fresh chat once the previous one finished. With no `--initial-prompt` the file's first prompt starts the run. One launch pays for one model load, however many questions. |
+| `--reply-file <path>` | Appends one JSON line per finished turn: `prompt_index`, `question`, `reply`, `outcome` (`ok`, `error`, `cancelled`, `max_iterations`, `approval_timeout`, `launch_model_error`, `startup_error`, `timeout`), `detail`, `model`, `chat_id`, `duration_ms`, and `tool_calls` (server, tool, arguments, a short `result_summary`, `result_chars`, `is_error`, `duration_ms`). Anything that stops the run before a turn can finish also writes a record, so a missing line never has to be guessed at. |
+| `--exit-after-reply` | Exit once every prompt has a record. Exit code 0 all `ok`, 1 a turn failed, 2 the `--model` could not be used, 3 startup failed or the arguments were not understood, 4 timed out. |
+| `--reply-timeout-secs <n>` | Overall limit for a reply run (default 1800). |
+| `--mcp-server <json or @file>` | Replace the MCP server list. Set `auto_approve_tools: true` (otherwise a call waits up to 5 minutes for a click) and `defer_tools: false`; set `request_timeout_secs` for servers whose tools run longer than 30 s. `--mcp-timeout-secs <n>` sets it for every server that does not set its own. |
+| `--tools <server_id>`, `--tool-search false` | Expose only that server's tools directly, so a small model does not have to search for them. |
+| `--chat-home <dir>` | Keep config, chat history and cache under this directory instead of the platform locations. Downloaded Foundry models are still found. |
+| `--ephemeral` | Never write the saved config file. Use it with `--chat-home` so a test run leaves nothing behind. |
+| `--hidden` | Start with the window hidden. The page still runs, but check that a hidden webview keeps its timers on your OS before relying on it. |
+
+Example (Mac):
+
+```bash
+PLUGABLE_CHAT_HOME=/tmp/pc-home plugable-chat --ephemeral --hidden \
+  --mcp-server @/tmp/server.json --tools myserver --tool-search false \
+  --prompts-file /tmp/questions.json --reply-file /tmp/replies.jsonl --exit-after-reply
+```
+
+A bad flag with `--reply-file` set is fatal (a `startup_error` record, exit 3) instead of silently running with defaults.
+
 ## Rung 2: only what needs real Windows or a GPU
 
 This rung is **mandatory before any release tag**: always test Plugable Chat with a real NVIDIA GPU before signing. Do build

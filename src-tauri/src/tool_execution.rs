@@ -40,20 +40,31 @@ pub async fn dispatch_tool_call_to_executor(
 
     let result = rx.await.map_err(|_| "MCP Host actor died".to_string())??;
 
-    // Convert the result to a string
-    let result_text = result
-        .content
-        .iter()
-        .filter_map(|c| c.text.as_ref())
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let result_text = mcp_result_text(&result);
 
     if result.is_error {
         Err(result_text)
     } else {
         Ok(result_text)
     }
+}
+
+/// The text a tool result gives the model: its text content, or, when it has none, its
+/// `structuredContent` as JSON (some servers send only that).
+pub fn mcp_result_text(result: &crate::actors::mcp_host_actor::McpToolResult) -> String {
+    let text = result
+        .content
+        .iter()
+        .filter_map(|c| c.text.as_ref())
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        if let Some(structured) = &result.structured_content {
+            return structured.to_string();
+        }
+    }
+    text
 }
 
 /// Try to resolve an unknown server ID by finding which server has the given tool.

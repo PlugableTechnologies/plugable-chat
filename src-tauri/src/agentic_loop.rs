@@ -715,6 +715,13 @@ pub async fn run_agentic_loop(
     let mut had_tool_calls = false;
     let mut final_response = String::new();
 
+    // What a reply file (--reply-file) records about this turn
+    let turn_started_at = std::time::Instant::now();
+    let turn_question: Option<String> = full_history.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone());
+    let mut turn_outcome = crate::turn_record::TurnOutcome::Ok;
+    let mut turn_detail = String::new();
+    let mut tool_trace: Vec<crate::turn_record::ToolTraceEntry> = Vec::new();
+
     // Track repeated errors to detect when model is stuck
     let mut last_error_signature: Option<String> = None;
     let mut tools_disabled_due_to_repeated_error = false;
@@ -814,6 +821,8 @@ pub async fn run_agentic_loop(
 
         if handles.foundry_tx.send(chat_request).await.is_err() {
             println!("[AgenticLoop] ERROR: Failed to send to Foundry");
+            turn_outcome = crate::turn_record::TurnOutcome::Error;
+            turn_detail = "Failed to send to model gateway".to_string();
             let _ = app_handle.emit(
                 "chat-error",
                 serde_json::json!({ "error": "Failed to send to model gateway" }),
@@ -841,6 +850,8 @@ pub async fn run_agentic_loop(
                     if *iter_cancel_check.borrow() {
                         if *cancel_rx.borrow() {
                             println!("[AgenticLoop] User cancellation received!");
+                            turn_outcome = crate::turn_record::TurnOutcome::Cancelled;
+                            turn_detail = "cancelled by the user".to_string();
                         } else {
                             println!("[AgenticLoop] Internal early-stop cancellation triggered.");
                             // Note: early_stopped_for_tool not set here since we break immediately
@@ -973,6 +984,8 @@ pub async fn run_agentic_loop(
                 MAX_LOOP_ITERATIONS
             );
             final_response = model_response_text.clone();
+            turn_outcome = crate::turn_record::TurnOutcome::MaxIterations;
+            turn_detail = format!("stopped after {} iterations (safety limit)", MAX_LOOP_ITERATIONS);
 
             // Emit warning
             let _ = app_handle.emit(
@@ -1148,6 +1161,8 @@ pub async fn run_agentic_loop(
                     }
                     Ok(Ok(ToolApprovalDecision::Rejected)) => {
                         println!("[AgenticLoop] Tool call rejected by user");
+                        turn_outcome = crate::turn_record::TurnOutcome::Cancelled;
+                        turn_detail = format!("tool call {}::{} was rejected", resolved_tool_call.server, resolved_tool_call.tool);
                         continue;
                     }
                     Ok(Err(_)) => {
@@ -1156,6 +1171,8 @@ pub async fn run_agentic_loop(
                     }
                     Err(_) => {
                         println!("[AgenticLoop] Approval timed out");
+                        turn_outcome = crate::turn_record::TurnOutcome::ApprovalTimeout;
+                        turn_detail = format!("approval for {}::{} timed out (set auto_approve_tools for unattended runs)", resolved_tool_call.server, resolved_tool_call.tool);
                         // Remove from pending
                         let mut approvals = handles.pending_approvals.write().await;
                         approvals.remove(&approval_key);
@@ -1248,6 +1265,15 @@ pub async fn run_agentic_loop(
             // Stop heartbeat
             let _ = heartbeat_stop_tx.send(());
 
+            tool_trace.push(crate::turn_record::ToolTraceEntry::new(
+                &resolved_tool_call.server,
+                &resolved_tool_call.tool,
+                resolved_tool_call.arguments.clone(),
+                &result_text,
+                is_error,
+                heartbeat_start.elapsed(),
+            ));
+
             // Emit result
             let _ = app_handle.emit(
                 "tool-result",
@@ -1339,6 +1365,10 @@ pub async fn run_agentic_loop(
 
         if !executed_any {
             println!("[AgenticLoop] No tools executed (all require approval), stopping loop");
+            if turn_outcome == crate::turn_record::TurnOutcome::Ok {
+                turn_outcome = crate::turn_record::TurnOutcome::Error;
+                turn_detail = "no tool could run (every call was blocked or needs approval)".to_string();
+            }
             break;
         }
 
@@ -1476,6 +1506,30 @@ pub async fn run_agentic_loop(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
+    }
+
+    // Reply file (--reply-file): the record is written before the frontend is told the chat finished,
+    // so a harness that waits for the app to exit or for the record never sees a half-finished turn.
+    if crate::turn_record::is_enabled() {
+        if turn_outcome == crate::turn_record::TurnOutcome::Ok && final_response.trim().is_empty() {
+            turn_outcome = crate::turn_record::TurnOutcome::Error;
+            turn_detail = "the model returned no reply".to_string();
+        }
+        let exit_code = crate::turn_record::record_turn(crate::turn_record::TurnRecord {
+            prompt_index: 0,
+            question: turn_question,
+            reply: final_response.clone(),
+            outcome: turn_outcome,
+            detail: turn_detail,
+            model: Some(config.model_name.clone()),
+            chat_id: Some(config.chat_id.clone()),
+            duration_ms: turn_started_at.elapsed().as_millis() as u64,
+            tool_calls: tool_trace,
+        });
+        if let Some(code) = exit_code {
+            println!("[AgenticLoop] Reply run complete, exiting with code {}", code);
+            crate::turn_record::exit_app(&app_handle, code);
+        }
     }
 
     // Signal chat completion to frontend

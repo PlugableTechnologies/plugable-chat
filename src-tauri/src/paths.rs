@@ -19,6 +19,28 @@ use uuid::Uuid;
 /// Application name used in directory paths
 const APP_NAME: &str = "plugable-chat";
 
+/// When set, config, data and cache all live under this directory instead of the platform
+/// locations (`<home>/config`, `<home>/data`, `<home>/cache`). For automated runs that must not
+/// touch the user's real settings or chat history. The Foundry model cache is not moved, so
+/// downloaded models are still found.
+pub const HOME_OVERRIDE_ENV_VAR: &str = "PLUGABLE_CHAT_HOME";
+
+fn home_override() -> Option<PathBuf> {
+    std::env::var_os(HOME_OVERRIDE_ENV_VAR).filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+pub fn config_dir_under(home: &std::path::Path) -> PathBuf {
+    home.join("config")
+}
+
+pub fn data_dir_under(home: &std::path::Path) -> PathBuf {
+    home.join("data")
+}
+
+pub fn cache_dir_under(home: &std::path::Path) -> PathBuf {
+    home.join("cache")
+}
+
 /// Result of attempting to get a writable directory
 #[derive(Debug, Clone)]
 pub struct WritableDir {
@@ -36,6 +58,9 @@ pub struct WritableDir {
 /// - macOS: `~/Library/Application Support/plugable-chat/`
 /// - Windows: `%APPDATA%\plugable-chat\`
 pub fn get_config_dir() -> PathBuf {
+    if let Some(home) = home_override() {
+        return config_dir_under(&home);
+    }
     dirs::config_dir()
         .map(|p| p.join(APP_NAME))
         .unwrap_or_else(|| fallback_base_dir().join("config"))
@@ -47,6 +72,9 @@ pub fn get_config_dir() -> PathBuf {
 /// - macOS: `~/Library/Application Support/plugable-chat/data/`
 /// - Windows: `%LOCALAPPDATA%\plugable-chat\data\`
 pub fn get_data_dir() -> PathBuf {
+    if let Some(home) = home_override() {
+        return data_dir_under(&home);
+    }
     dirs::data_local_dir()
         .map(|p| p.join(APP_NAME).join("data"))
         .unwrap_or_else(|| fallback_base_dir().join("data"))
@@ -64,6 +92,9 @@ pub fn get_embedding_cache_dir() -> PathBuf {
 /// - macOS: `~/Library/Caches/plugable-chat/`
 /// - Windows: `%LOCALAPPDATA%\plugable-chat\cache\`
 pub fn get_cache_dir() -> PathBuf {
+    if let Some(home) = home_override() {
+        return cache_dir_under(&home);
+    }
     dirs::cache_dir()
         .map(|p| p.join(APP_NAME))
         .unwrap_or_else(|| fallback_base_dir().join("cache"))
@@ -301,6 +332,16 @@ mod tests {
         let cache_dir = get_cache_dir();
         assert!(!cache_dir.as_os_str().is_empty());
         assert!(cache_dir.to_string_lossy().contains("plugable-chat"));
+    }
+
+    #[test]
+    fn a_home_override_puts_config_data_and_cache_side_by_side_under_it() {
+        let home = PathBuf::from("/tmp/plugable-test-home");
+        assert_eq!(config_dir_under(&home), home.join("config"));
+        assert_eq!(data_dir_under(&home), home.join("data"));
+        assert_eq!(cache_dir_under(&home), home.join("cache"));
+        let dirs = [config_dir_under(&home), data_dir_under(&home), cache_dir_under(&home)];
+        assert!(dirs.iter().all(|d| d.starts_with(&home)), "nothing leaks out to the platform locations");
     }
 
     #[test]
