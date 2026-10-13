@@ -4,7 +4,9 @@ import { invoke, type FoundryCatalogModel, type FoundryServiceStatus } from '../
 import { useChatStore } from '../../../store/chat-store';
 import { FoundryModelCard } from '../cards/FoundryModelCard';
 import type { ModelDeviceFilter } from '../types';
-import { describeGpuDiagnostics, effectiveDeviceFilter, type GpuDiagnostics } from '../../../store/chat/gpu-diagnostics';
+import { effectiveDeviceFilter } from '../../../store/chat/gpu-diagnostics';
+import { modelsTabNotice, type GpuAssessment } from '../../../lib/gpu-assessment';
+import { SupportCopyButton } from '../../SupportCopyButton';
 
 export function ModelsTab() {
     const [catalogModels, setCatalogModels] = useState<FoundryCatalogModel[]>([]);
@@ -17,7 +19,8 @@ export function ModelsTab() {
     const [downloadProgress, setDownloadProgress] = useState<{ file: string; progress: number } | null>(null);
     const [error, setError] = useState<string | null>(null);
 
-    const [gpuDiagnostics, setGpuDiagnostics] = useState<GpuDiagnostics | null>(null);
+    const [assessment, setAssessment] = useState<GpuAssessment | null>(null);
+    const [catalogError, setCatalogError] = useState<string | null>(null);
     const [retryingGpu, setRetryingGpu] = useState(false);
 
     const { operations, dispatchOperation } = useChatStore();
@@ -59,8 +62,11 @@ export function ModelsTab() {
         try {
             const models = await invoke<FoundryCatalogModel[]>('get_catalog_models');
             setCatalogModels(models);
+            setCatalogError(null);
         } catch (err) {
             console.error('Failed to fetch catalog models:', err);
+            // Keep the reason: an empty list from a failed read must not be shown as "no GPU models".
+            setCatalogError(err instanceof Error ? err.message : String(err));
         }
     };
 
@@ -155,26 +161,29 @@ export function ModelsTab() {
     const { filter: activeFilter, fellBack: cpuFallback } = effectiveDeviceFilter(deviceFilter, deviceCounts);
     const gpuEmpty = deviceFilter === 'GPU' && !(deviceCounts.GPU ?? 0);
 
-    // Ask the backend why GPU acceleration is unavailable when the GPU list is empty.
+    // Ask the backend why the GPU list is empty; it asks Windows again rather than reusing an old answer.
     useEffect(() => {
         if (isLoading || !gpuEmpty) return;
-        invoke<GpuDiagnostics>('get_gpu_diagnostics')
-            .then(setGpuDiagnostics)
-            .catch((e) => console.warn('get_gpu_diagnostics failed', e));
+        invoke<GpuAssessment>('get_gpu_assessment', { refresh: true })
+            .then(setAssessment)
+            .catch((e) => console.warn('get_gpu_assessment failed', e));
     }, [isLoading, gpuEmpty]);
 
+    // The backend waits for the whole attempt (and re-reads its model list) before answering, so
+    // the list refreshed here is current.
     const handleRetryGpu = async () => {
         setRetryingGpu(true);
         try {
-            await invoke('retry_gpu_registration');
+            setAssessment(await invoke<GpuAssessment>('retry_gpu_registration'));
             await fetchAllData();
-            setGpuDiagnostics(await invoke<GpuDiagnostics>('get_gpu_diagnostics'));
         } catch (e) {
-            setError(`GPU retry failed: ${e}`);
+            setError(`GPU retry failed: ${e instanceof Error ? e.message : e}`);
         } finally {
             setRetryingGpu(false);
         }
     };
+
+    const notice = modelsTabNotice({ loading: isLoading, catalogError, gpuFilterEmpty: gpuEmpty, assessment });
 
     const filteredModels = catalogModels
         .filter((model) => {
@@ -279,23 +288,31 @@ export function ModelsTab() {
                     </div>
                 )}
 
-                {/* GPU unavailable: explain why, offer retry */}
-                {!isLoading && gpuEmpty && (
-                    <div className="gpu-diagnostics mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-900" role="alert">
-                        <p className="font-medium">No GPU models are available.</p>
-                        {describeGpuDiagnostics(gpuDiagnostics).map((line) => (
+                {/* Why the list is empty: a failed list read, or the stated GPU cause */}
+                {notice && (
+                    <div
+                        className={`gpu-diagnostics mb-4 p-3 border rounded-lg text-sm ${notice.tone === 'red' ? 'bg-red-50 border-red-300 text-red-900' : notice.tone === 'info' ? 'bg-blue-50 border-blue-200 text-blue-900' : 'bg-amber-50 border-amber-200 text-amber-900'}`}
+                        role="alert"
+                    >
+                        <p className="font-medium">{notice.headline}</p>
+                        {notice.lines.map((line) => (
                             <p key={line} className="mt-1">{line}</p>
                         ))}
-                        {cpuFallback && (
+                        {notice.kind === 'gpu' && cpuFallback && (
                             <p className="mt-1">Showing CPU models instead. They run on any computer but more slowly.</p>
                         )}
-                        <button
-                            onClick={handleRetryGpu}
-                            disabled={retryingGpu}
-                            className="gpu-retry-button mt-2 px-3 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
-                        >
-                            {retryingGpu ? 'Retrying…' : 'Retry GPU setup'}
-                        </button>
+                        <div className="mt-2 flex items-center gap-2">
+                            {(notice.kind === 'catalog-error' || assessment?.retryMayHelp !== false) && (
+                                <button
+                                    onClick={notice.kind === 'catalog-error' ? fetchAllData : handleRetryGpu}
+                                    disabled={retryingGpu}
+                                    className="gpu-retry-button px-3 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+                                >
+                                    {retryingGpu ? 'Retrying…' : notice.kind === 'catalog-error' ? 'Refresh the list' : 'Retry GPU setup'}
+                                </button>
+                            )}
+                            <SupportCopyButton shown={[notice.headline, ...notice.lines].join('\n')} />
+                        </div>
                     </div>
                 )}
 

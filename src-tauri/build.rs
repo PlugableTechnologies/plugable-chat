@@ -146,6 +146,50 @@ fn set_git_version_info(project_root: &Path) -> u32 {
     println!("cargo:rustc-env=PLUGABLE_CHAT_GIT_COUNT={}", commit_count);
     println!("cargo:rustc-env=PLUGABLE_CHAT_GIT_HASH={}", git_hash);
 
+    // CI passes the tag and the full commit id in the environment. Preferred over asking git: it
+    // cannot be wrong on a shallow checkout, and the tag (with its -rcN) is what users were given.
+    for var in ["PLUGABLE_CHAT_RELEASE_TAG", "PLUGABLE_CHAT_GIT_SHA"] {
+        println!("cargo:rerun-if-env-changed={var}");
+        if let Ok(value) = env::var(var) {
+            let value = value.trim();
+            if !value.is_empty() {
+                println!("cargo:rustc-env={var}={value}");
+            }
+        }
+    }
+    if env::var("PLUGABLE_CHAT_GIT_SHA").map(|v| v.trim().is_empty()).unwrap_or(true) {
+        let full = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(project_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(full) = full {
+            println!("cargo:rustc-env=PLUGABLE_CHAT_GIT_SHA={full}");
+        }
+    }
+    // A local build with uncommitted edits must not look like the clean commit it started from.
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    println!("cargo:rustc-env=PLUGABLE_CHAT_GIT_DIRTY={dirty}");
+    println!("cargo:rerun-if-changed=../.git/HEAD");
+    println!(
+        "cargo:rustc-env=PLUGABLE_CHAT_BUILD_TIME={}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+
     commit_count
 }
 

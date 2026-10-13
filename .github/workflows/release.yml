@@ -41,6 +41,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.parse.outputs.version }}
+      release_label: ${{ steps.parse.outputs.release_label }}
       prerelease: ${{ steps.parse.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,6 +58,8 @@ jobs:
           VERSION="${TAG#v}"
           VERSION="${VERSION%%-*}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # The tag as users know it (v0.1.0-rc12). The numeric version cannot carry -rcN.
+          echo "release_label=$TAG" >> "$GITHUB_OUTPUT"
           case "$TAG" in
             *-rc*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
             *)     echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
@@ -81,6 +84,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 180
     environment: release-signing
+    # Compiled into the app (build.rs) so the title bar, About and crash logs show the release and commit.
+    env:
+      PLUGABLE_CHAT_RELEASE_TAG: ${{ needs.verify-tag.outputs.release_label }}
+      PLUGABLE_CHAT_GIT_SHA: ${{ github.sha }}
     # Same as the Linux job: the provenance attestation needs an OIDC token and attestation write
     # access (rc5 failed at "Attest build provenance" with: missing "id-token" permission).
     permissions:
@@ -90,6 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install the pinned Rust toolchain
@@ -229,6 +237,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path release-files | Out-Null
           Get-ChildItem target/release/bundle -Include *.exe, *.msi -Recurse -File |
             Copy-Item -Destination release-files
+          # Name the files after the tag: the numeric version in Tauri's names cannot carry -rcN, so
+          # rc10 and rc11 were both plugable-chat_0.1.0_x64-setup.exe with different contents.
+          node scripts/ci/release-names.mjs "${{ needs.verify-tag.outputs.release_label }}" release-files
           # Linux has its own SHA256SUMS (signed with Sigstore); this one covers the Windows files.
           Push-Location release-files
           Get-ChildItem -File | Sort-Object Name | ForEach-Object {
@@ -252,6 +263,9 @@ jobs:
     needs: verify-tag
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      PLUGABLE_CHAT_RELEASE_TAG: ${{ needs.verify-tag.outputs.release_label }}
+      PLUGABLE_CHAT_GIT_SHA: ${{ github.sha }}
     permissions:
       contents: read
       id-token: write

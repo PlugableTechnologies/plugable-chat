@@ -17,7 +17,7 @@ use std::path::Path;
 
 /// CLI arguments for plugable-chat
 #[derive(Parser, Debug, Clone)]
-#[command(name = "plugable-chat", about = "Plugable Chat desktop app")]
+#[command(name = "plugable-chat", about = "Plugable Chat desktop app", version = crate::version_info::cli_version())]
 pub struct CliArgs {
     /// Optional model to load on launch (non-persistent)
     #[arg(long, value_name = "MODEL", env = "PLUGABLE_MODEL")]

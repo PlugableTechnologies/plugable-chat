@@ -58,6 +58,11 @@ writes no file, so it reads as red.
 | `low-disk` | data dir on a 300 MB VHD (junction) | download failures | embedding error names disk space | CI, box |
 | `quarantined-dll` | delete `foundry-libs\onnxruntime.dll` | rc9 card | ready after self-repair, or an error naming the DLL | CI, box |
 | `upgrade-over-old` | install `-OldInstaller`, then this build over it | stale files | stale `foundry-libs` file gone, user data kept, one uninstall entry | CI, box |
+| `nvidia-present-no-providers` | staged: NVIDIA adapter + driver, engine reports only CPU (twice, cold relaunch) | Pat R1, R3 | `gpu-assessment` says "hardware not used" naming the NVIDIA adapter, never "no GPU"; a CPU model runs; the preflight report carries both views | CI, box |
+| `egpu-thunderbolt-hint` | staged: NVIDIA adapter + Thunderbolt controller, engine reports only CPU | Pat R2 | the assessment tells the user to check the Thunderbolt connection | CI, box |
+| `egpu-late-arrival` | staged: no adapter at launch, an NVIDIA adapter appears at 20 s, the engine lists CUDA after a retry | Pat R2, R4 | the app notices by itself, retries GPU setup, and the assessment moves on from "no GPU" | CI, box |
+| `embedding-first-run-contention` | huggingface unreachable for the first 25 s of a first start | Bob R6, R10 | the embedding model still loads (5 attempts over about 45 s); a final failure would carry attempts and cause | CI, box |
+| `version-visible` | none | Bob R12, Pat R13 | `--version` prints the release label and commit, and matches the installer file name | CI, box |
 | `gpu-baseline` | none, NVIDIA driver present | #3 | ep-registration and model-download ok | GPU box only |
 
 Rows that cannot be set up on the current host are reported as skipped with the reason, never as passed.
@@ -148,3 +153,48 @@ may be built against the dynamic runtime and fail to link (`LNK2038 RuntimeLibra
 built on macOS; the first Windows CI run decides. `scripts/ci/assert-static-crt.ps1` (run in `ci.yml`) proves the
 exe has no `vcruntime140`/`msvcp140` import. If the link fails, remove the `[target...]` table and rely on the
 hook plus the app's preflight, or move fastembed to `ort-load-dynamic`.
+
+## Test seams (unattended runs only)
+
+When `PLUGABLE_CHAT_TEST_STATE` is set, the app also reads these, so a scenario can stage what Windows and the
+model engine "report" on a machine that has no such hardware. Without `PLUGABLE_CHAT_TEST_STATE` they are ignored,
+so a stray variable cannot change what a shipped app says.
+
+| Variable | Staged value |
+|---|---|
+| `PLUGABLE_CHAT_TEST_ADAPTERS` | JSON `{"adapters":[{"name","vendor","vramMb","pnpId","status","problemCode"}],"thunderboltDevices":[...]}` in place of the Windows adapter scan |
+| `PLUGABLE_CHAT_TEST_ADAPTERS_LATE` + `..._LATE_AFTER_SECS` | the same JSON, used once the app has run that many seconds (an adapter that appears late) |
+| `PLUGABLE_CHAT_TEST_EPS` | JSON `[{"name","isRegistered"}]` in place of the engine's provider list (nothing is downloaded for these) |
+| `PLUGABLE_CHAT_TEST_EPS_AFTER_RETRY` | the provider list once a GPU setup retry has been requested ("works the second time") |
+| `PLUGABLE_CHAT_TEST_NVIDIA_SMI` | the driver version `nvidia-smi` "reports" (empty = no answer) |
+
+The state file gains a `gpu-assessment` phase: `detail` is `<State> | <headline>`. It never decides a `--smoke`
+run. The app also writes `%APPDATA%\plugable-chat\logs\plugable-chat.log` (rotating) and
+`preflight-<time>.json` (the last five), which is what "Copy details for support" attaches.
+
+## Reported issues and the tests that reproduce them
+
+Every row below failed on rc10/rc11 and is covered by a test that was written to fail there. `R` numbers match the plan.
+
+| # | Reported by | Symptom | Test |
+|---|---|---|---|
+| R1 | Pat | NVIDIA GPU + driver present, a CPU model loads, no GPU models offered | `gpu_assessment::r1_*`; `model_chain::r1_*`; scenario `nvidia-present-no-providers`; `gpu-assessment.test.ts` r1 |
+| R2 | Pat | the GPU is an external TBT5-AI box | `gpu_assessment::r2_*`; `gpu_registration::r2_*` (late adapter); scenarios `egpu-thunderbolt-hint`, `egpu-late-arrival` |
+| R3 | Pat | a reboot changes nothing (an earlier failed look was reused) | `preflight::r3_every_refresh_asks_again_*`; scenario `nvidia-present-no-providers` (second, cold run) |
+| R4 | Pat, Bob | "Retry GPU setup" does nothing visible | `retry.test.ts` r4 (the retry now waits for the whole attempt and refreshes the list); scenario `egpu-late-arrival` |
+| R5 | Pat, Bob | a failed model-list read shown as "No GPU models are available" | `gpu_assessment::r5_*`; `gpu-assessment.test.ts` r5 |
+| R6 | Bob | first start: red "Failed to load CPU embedding model" | `embedding_init::r6_*` (retry budget); scenario `embedding-first-run-contention` |
+| R7 | Bob | Retry never clears the row | `embedding_init::r7_*`; `retry.test.ts` r7 |
+| R8 | Bob | a native-library panic ends every retry | `embedding_init::r8_*` |
+| R9 | Bob | no "Copy details for support" on that error | `support.test.ts` r9 |
+| R10 | Bob | fails once, clean on the second start (partial download) | existing `kill-mid-download`; `embedding_init::a_corrupt_model_cache_*`, `stale_download_files_*` |
+| R11 | Bob | upgrade over an older install | existing `upgrade-over-old` (no red/amber row; ready) |
+| R12 | Bob | no version in the title bar | `version_info::*`; `version-info.test.ts`; scenario `version-visible` |
+| R13 | Pat | rc10 and rc11 installers share one file name | `scripts/ci/release-names.test.mjs`; release.yml renames after signing; scenario `version-visible` |
+| R14 | Pat | machine without the VC++ runtime | existing `no-vcredist`; `gpu_assessment::missing_vcpp_is_called_out` |
+
+Add the next report as R15 with its test in the same change as its fix.
+
+What has not been exercised: the Windows-only code (the PowerShell adapter scan, free-disk and RAM probes) and the
+scenarios above have been parsed and listed on macOS only; the staged-GPU behaviour was run end to end on a macOS build
+of the real app (late adapter -> retry -> "ready"). They need a run on a disposable Windows host and on Pat's machine.

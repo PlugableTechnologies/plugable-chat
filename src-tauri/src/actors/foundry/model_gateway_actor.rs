@@ -847,9 +847,11 @@ impl ModelGatewayActor {
                 crate::test_state::status::SKIPPED,
                 "SDK backend not in use",
             );
+            super::gpu_registration::mark_startup_registration_done();
             return;
         };
         let summary = super::gpu_registration::run_registration(&sdk, &self.app_handle, 1).await;
+        super::gpu_registration::mark_startup_registration_done();
         // A failed first run used to leave the app on CPU models until restart. Transient
         // causes (network) are retried in the background with backoff; permanent ones
         // (driver, missing library) wait for the user, who gets a Retry button.
@@ -880,6 +882,10 @@ impl ModelGatewayActor {
             self.transition_to_service_unavailable(msg);
         }
 
+        // What Windows says is installed, independent of the engine, so a later "no GPU" can be
+        // explained. Runs beside start-up; the report lands in the logs folder.
+        tokio::task::spawn_blocking(crate::preflight::build_report_blocking);
+
         // GPU providers must be registered before the catalog and model selection are read.
         self.register_gpu_execution_providers().await;
 
@@ -897,6 +903,10 @@ impl ModelGatewayActor {
             let msg = self.describe_startup_failure(&failure);
             self.transition_to_service_unavailable(msg);
         }
+
+        // The catalog has been read: report both views of the GPU now that the engine has answered.
+        tokio::task::spawn_blocking(crate::preflight::build_report_blocking);
+        super::gpu_registration::spawn_hardware_watcher(self.app_handle.clone());
 
         // Pre-warm the HTTP connection pool so first chat request doesn't pay connection cost
         self.prewarm_http_connection().await;
@@ -2442,6 +2452,34 @@ impl ModelGatewayActor {
         let _ = self.app_handle.emit("model-selected", model.to_string());
     }
 
+    /// The ordered models to try on this machine, from the cached list and the current GPU state.
+    fn fallback_plan(&self) -> super::model_chain::Plan {
+        use super::model_chain::{plan_chain, Candidate, Device, Inputs};
+        let candidates: Vec<Candidate> = self
+            .available_models
+            .iter()
+            .map(|id| Candidate {
+                model_id: id.clone(),
+                alias: id.split(':').next().unwrap_or(id).to_string(),
+                device: Device::from_model_id(id),
+                size_mb: 0,
+                cached: true,
+            })
+            .collect();
+        let gpu_ready = crate::preflight::assessment_now().state == crate::gpu_assessment::GpuStateKind::Ready;
+        let is_blocked = |m: &str| self.is_model_incompatible(m);
+        plan_chain(&Inputs {
+            candidates: &candidates,
+            gpu_ready,
+            vram_mb: None,
+            ram_mb: None,
+            free_disk_mb: None,
+            is_blocked: &is_blocked,
+            preferred_alias: DEFAULT_MODEL,
+            fallback_alias: DEFAULT_FALLBACK_MODEL,
+        })
+    }
+
     /// Emit an event to request fallback to the default model due to errors.
     /// Also DIRECTLY updates and saves settings to ensure the fallback persists across restarts.
     fn emit_model_fallback_required(&self, current_model: &str, error: &str) {
@@ -2464,7 +2502,26 @@ impl ModelGatewayActor {
         // CRITICAL: Directly update settings to prevent restart loop
         // Don't rely on frontend event handler - do it here in the backend
         let app_handle = self.app_handle.clone();
-        let fallback_model = DEFAULT_FALLBACK_MODEL.to_string();
+        // Pick the next model that runs here and is already on disk: the same model on the CPU,
+        // then a small one. Only when nothing cached fits does the old fixed fallback (which may
+        // need a download) apply.
+        let chain = self.fallback_plan();
+        let next_step = chain.next_cached_after(current_model).cloned();
+        let fallback_model = next_step
+            .as_ref()
+            .map(|s| s.model_id.clone())
+            .unwrap_or_else(|| DEFAULT_FALLBACK_MODEL.to_string());
+        crate::app_log::log(
+            "model",
+            &format!(
+                "model '{}' failed ({}); next: {} ({}). Skipped: {:?}",
+                current_model,
+                error.lines().next().unwrap_or(""),
+                fallback_model,
+                next_step.as_ref().map(|s| s.why.as_str()).unwrap_or("fixed default, nothing cached fits"),
+                chain.skipped
+            ),
+        );
         let current = current_model.to_string();
         
         // Spawn a task to update settings (we can't block here in the actor)
@@ -2529,12 +2586,19 @@ impl ModelGatewayActor {
             None
         };
 
+        let fallback_model_for_event = next_step.as_ref().map(|s| s.model_id.clone()).unwrap_or_else(|| DEFAULT_FALLBACK_MODEL.to_string());
+        let next_step_device = next_step.as_ref().map(|s| match s.device {
+            super::model_chain::Device::Gpu => "gpu",
+            super::model_chain::Device::Cpu => "cpu",
+        });
+
         // Also emit event for frontend (backup mechanism)
         let _ = self.app_handle.emit(
             "model-fallback-required",
             json!({
                 "current_model": current_model,
-                "fallback_model": DEFAULT_FALLBACK_MODEL,
+                "fallback_model": fallback_model_for_event,
+                "fallback_device": next_step_device,
                 "error": error,
                 "reason": reason,
                 "alternative_model": alternative_model

@@ -18,6 +18,7 @@ import type {
 import type { ModelIncompatibleNotice } from './slices/operation-status-slice';
 import { parseFoundryModelStateEvent } from './helpers';
 import type { EpRegistrationProgressEvent } from './ep-registration-status';
+import type { GpuAssessment } from '../../lib/gpu-assessment';
 import { DEFAULT_MODEL_TO_DOWNLOAD } from './constants';
 
 // Helper to log to backend terminal for debugging
@@ -55,6 +56,7 @@ let unlistenModelFallback: (() => void) | undefined;
 let unlistenEmbeddingInit: (() => void) | undefined;
 let unlistenChatStreamStatus: (() => void) | undefined;
 let unlistenEpRegistration: (() => void) | undefined;
+let unlistenGpuAssessment: (() => void) | undefined;
 let unlistenDownloadStarted: (() => void) | undefined;
 let unlistenToolboxDownload: (() => void) | undefined;
 let unlistenAvailableModelsChanged: (() => void) | undefined;
@@ -81,6 +83,7 @@ interface ListenerSliceDeps {
     dispatchOperation: (action: import('./operations').OperationAction) => void;
     operations: import('./operations').OperationsMap;
     setModelIncompatibleNotice: (notice: ModelIncompatibleNotice | null) => void;
+    setGpuAssessment: (a: GpuAssessment | null) => void;
     
     // Model state
     currentModel: string;
@@ -491,6 +494,15 @@ export const createListenerSlice: StateCreator<
                 const action = epEventToAction(event.payload);
                 if (action) get().dispatchOperation(action);
             });
+
+            // Why the GPU is or is not in use: the backend pushes every change, and the first answer
+            // is fetched now because the event may have fired before this listener existed.
+            const gpuAssessmentListener = await listen<GpuAssessment>('gpu-assessment', (event) => {
+                get().setGpuAssessment(event.payload);
+            });
+            invoke<GpuAssessment>('get_gpu_assessment', { refresh: false })
+                .then((a) => get().setGpuAssessment(a))
+                .catch((e) => console.warn('[ChatStore] get_gpu_assessment failed:', e));
 
             // Chat stream status listener
             const chatStreamStatusListener = await listen<{ phase: string; message: string; time_to_first_response_ms?: number }>('chat-stream-status', (event) => {
@@ -1272,6 +1284,7 @@ export const createListenerSlice: StateCreator<
                 embeddingInitListener();
                 chatStreamStatusListener();
                 epRegistrationListener();
+                gpuAssessmentListener();
                 availableModelsChangedListener();
                 modelStateChangedListener();
                 startupProgressListener();
@@ -1287,6 +1300,7 @@ export const createListenerSlice: StateCreator<
             unlistenChatWarning = chatWarningListener;
             unlistenChatStreamStatus = chatStreamStatusListener;
             unlistenEpRegistration = epRegistrationListener;
+            unlistenGpuAssessment = gpuAssessmentListener;
             unlistenDownloadStarted = downloadStartedListener;
             unlistenToolboxDownload = toolboxDownloadListener;
             unlistenModelSelected = modelSelectedListener;
@@ -1364,6 +1378,7 @@ export const createListenerSlice: StateCreator<
         if (unlistenServiceRestartComplete) { unlistenServiceRestartComplete(); unlistenServiceRestartComplete = undefined; }
         if (unlistenChatStreamStatus) { unlistenChatStreamStatus(); unlistenChatStreamStatus = undefined; }
         if (unlistenEpRegistration) { unlistenEpRegistration(); unlistenEpRegistration = undefined; }
+        if (unlistenGpuAssessment) { unlistenGpuAssessment(); unlistenGpuAssessment = undefined; }
         if (unlistenDownloadStarted) { unlistenDownloadStarted(); unlistenDownloadStarted = undefined; }
         if (unlistenToolboxDownload) { unlistenToolboxDownload(); unlistenToolboxDownload = undefined; }
         if (unlistenAvailableModelsChanged) { unlistenAvailableModelsChanged(); unlistenAvailableModelsChanged = undefined; }

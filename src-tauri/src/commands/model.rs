@@ -167,7 +167,15 @@ pub async fn get_catalog_models(
         .send(FoundryMsg::GetCatalogModels { respond_to: tx })
         .await
         .map_err(|e| format!("Failed to send request: {}", e))?;
-    Ok(rx.await.map_err(|_| "Foundry actor died".to_string())?)
+    let models = rx.await.map_err(|_| "Foundry actor died".to_string())?;
+    // A failed read comes back as an empty list. Say so: the Models tab used to show that empty
+    // list as "No GPU models are available".
+    if models.is_empty() {
+        if let Some(why) = crate::preflight::last_catalog_error() {
+            return Err(format!("The model list could not be read: {why}"));
+        }
+    }
+    Ok(models)
 }
 
 /// Unload a model from memory

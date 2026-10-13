@@ -221,6 +221,22 @@ fn ep_failure(ep: &str, message: &str, cancelled: bool) -> crate::gpu_diagnostic
 }
 
 impl SdkBackend {
+    /// Ask the engine which execution providers exist and keep its raw answer (preflight report,
+    /// GPU assessment). Every caller goes through here: an early return elsewhere used to lose
+    /// what the engine said, which is how "no GPU models" could not be explained.
+    fn observed_eps(&self) -> crate::gpu_assessment::EpDiscovery {
+        crate::preflight::discover_eps_with_seam(|| {
+            self.manager
+                .discover_eps()
+                .map(|eps| {
+                    eps.iter()
+                        .map(|e| crate::gpu_assessment::EpObservation { name: e.name.clone(), is_registered: e.is_registered })
+                        .collect()
+                })
+                .map_err(|e| e.to_string())
+        })
+    }
+
     /// Discover the execution providers valid for this machine and register any that are not
     /// yet registered, downloading their packages the first time.
     ///
@@ -243,7 +259,7 @@ impl SdkBackend {
         let started = std::time::Instant::now();
         let mut summary = EpRegistrationSummary::default();
 
-        let eps = match self.manager.discover_eps() {
+        let eps = match self.observed_eps() {
             Ok(eps) => eps,
             Err(e) => {
                 println!("[SdkBackend] discover_eps failed: {e}");
@@ -251,7 +267,7 @@ impl SdkBackend {
                 // recorded against the step itself; the UI still shows the cause and a retry.
                 summary
                     .failures
-                    .push(crate::gpu_diagnostics::make_failure("discovery", &e.to_string()));
+                    .push(crate::gpu_diagnostics::make_failure("discovery", &e));
                 summary.seconds = started.elapsed().as_secs_f64();
                 return summary;
             }
@@ -267,6 +283,12 @@ impl SdkBackend {
             .map(|e| e.name.clone())
             .collect();
         if missing.is_empty() {
+            return summary;
+        }
+        // Unattended tests stage the engine's answer; downloading real packages for names that
+        // were invented by the test would only fail and hide what the test is checking.
+        if crate::preflight::eps_seam_active() {
+            println!("[SdkBackend] test provider list in use: not registering {missing:?}");
             return summary;
         }
 
@@ -388,7 +410,7 @@ impl FoundryBackend for SdkBackend {
 
     async fn connection_info(&self) -> ConnectionInfo {
         let _ = self.ensure_service().await;
-        let (registered_eps, valid_eps) = match self.manager.discover_eps() {
+        let (registered_eps, valid_eps) = match self.observed_eps() {
             Ok(eps) => {
                 let valid: Vec<String> = eps.iter().map(|e| e.name.clone()).collect();
                 let registered: Vec<String> = eps
@@ -398,6 +420,7 @@ impl FoundryBackend for SdkBackend {
                     .collect();
                 (registered, valid)
             }
+            // Recorded by observed_eps: the assessment reports it instead of showing "no GPU".
             Err(_) => (Vec::new(), Vec::new()),
         };
         ConnectionInfo {
@@ -435,12 +458,31 @@ impl FoundryBackend for SdkBackend {
         // `vision-language-chat` + GPU models as incompatible ONLY when the runtime's GPU EP
         // is WebGPU — keeping CPU vision and (on CUDA/DirectML hosts) GPU vision installable.
         let gpu_ep_is_webgpu = self
-            .manager
-            .discover_eps()
+            .observed_eps()
             .ok()
             .map(|eps| webgpu_is_only_gpu_ep(eps.iter().map(|e| e.name.as_str())))
             .unwrap_or(false);
-        match self.manager.catalog().get_models().await {
+        let listed = match self.manager.catalog().get_models().await {
+            Ok(models) => {
+                let gpu = models
+                    .iter()
+                    .filter(|m| {
+                        m.info()
+                            .runtime
+                            .as_ref()
+                            .map(|r| device_type_str(&r.device_type) == "GPU")
+                            .unwrap_or_else(|| infer_device_type_from_id(&m.info().id) == "GPU")
+                    })
+                    .count();
+                crate::preflight::record_catalog(&Ok(crate::gpu_assessment::CatalogCounts { gpu, cpu: models.len() - gpu }));
+                Ok(models)
+            }
+            Err(e) => {
+                crate::preflight::record_catalog(&Err(e.to_string()));
+                Err(e)
+            }
+        };
+        match listed {
             Ok(models) => models
                 .iter()
                 .map(|m| {

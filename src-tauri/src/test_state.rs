@@ -26,6 +26,8 @@ pub enum Phase {
     Toolbox,
     Ready,
     Error,
+    /// The GPU assessment (state + headline); never decides a smoke run.
+    GpuAssessment,
 }
 
 impl Phase {
@@ -37,6 +39,7 @@ impl Phase {
             Phase::Toolbox => "toolbox",
             Phase::Ready => "ready",
             Phase::Error => "error",
+            Phase::GpuAssessment => "gpu-assessment",
         }
     }
 }
@@ -174,13 +177,14 @@ mod tests {
             Phase::Toolbox,
             Phase::Ready,
             Phase::Error,
+            Phase::GpuAssessment,
         ]
         .iter()
         .map(|p| p.as_str())
         .collect();
         assert_eq!(
             names,
-            ["ep-registration", "embedding", "model-download", "toolbox", "ready", "error"]
+            ["ep-registration", "embedding", "model-download", "toolbox", "ready", "error", "gpu-assessment"]
         );
     }
 

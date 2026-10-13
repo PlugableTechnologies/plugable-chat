@@ -65,7 +65,7 @@ jobs:
 
       - name: Check the tauri crate and npm package versions match
         run: |
-          node --test scripts/ci/check-tauri-versions.test.mjs
+          node --test scripts/ci/check-tauri-versions.test.mjs scripts/ci/release-names.test.mjs
           node scripts/ci/check-tauri-versions.mjs
 
       - name: Check release.yml still matches the build environment CI proved
@@ -125,7 +125,7 @@ jobs:
 
       - name: Check the tauri crate and npm package versions match
         run: |
-          node --test scripts/ci/check-tauri-versions.test.mjs
+          node --test scripts/ci/check-tauri-versions.test.mjs scripts/ci/release-names.test.mjs
           node scripts/ci/check-tauri-versions.mjs
 
       - name: Type-check and build the frontend

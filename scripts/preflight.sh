@@ -29,6 +29,7 @@ optional() { # optional <tool> <label> <command...>
 # 1. Versions and dependencies that broke a Windows build only at its very last step.
 run "tauri crate and npm packages agree" node scripts/ci/check-tauri-versions.mjs
 run "version-check tests (LF and CRLF lockfiles)" node --test scripts/ci/check-tauri-versions.test.mjs
+run "release file naming (rc10 and rc11 must differ)" node --test scripts/ci/release-names.test.mjs
 run "release.yml build environment matches ci.yml" python3 scripts/ci/check-workflow-parity.py
 run "download page matches the release files" node scripts/ci/check-download-page.mjs
 run "build.rs does not start a nested cargo build (release deadlock)" bash -c '! grep -q "Command::new(\"cargo\")" src-tauri/build.rs'

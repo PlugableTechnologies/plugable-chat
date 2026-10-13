@@ -3,6 +3,8 @@ import { invoke } from '../../../lib/api';
 import { DEFAULT_MODEL_TO_DOWNLOAD } from '../constants';
 import type { OperationStatus } from '../types';
 import { reduceOperations, shouldAutoClear, type OperationAction, type OperationKey, type OperationsMap } from '../operations';
+import { runRetry } from '../retry';
+import type { GpuAssessment } from '../../../lib/gpu-assessment';
 
 const RETRY_COMMANDS: Record<OperationKey, { command: string; args?: Record<string, unknown> }> = {
     'ep-registration': { command: 'retry_gpu_registration' },
@@ -35,6 +37,13 @@ export interface OperationStatusSlice {
     dismissStatusBar: () => void;
     showStatusBar: () => void;
     
+    /** Why the GPU is or is not in use (backend `gpu-assessment` events); null until the first answer */
+    gpuAssessment: GpuAssessment | null;
+    /** Headline the user dismissed, so the same card does not return until the situation changes */
+    gpuAssessmentDismissed: string | null;
+    setGpuAssessment: (a: GpuAssessment | null) => void;
+    dismissGpuAssessment: () => void;
+
     // Heartbeat warning (frontend cannot reach backend)
     heartbeatWarningStart: number | null;
     heartbeatWarningMessage: string | null;
@@ -81,22 +90,24 @@ export const createOperationStatusSlice: StateCreator<
         }
     },
     retryOperation: async (key) => {
-        const { command, args } = RETRY_COMMANDS[key];
-        get().dispatchOperation({ type: 'progress', key, message: 'Retrying...', percent: 0 });
-        try {
-            await invoke(command, args);
-            if (key === 'model-download' || key === 'toolbox-download') {
-                get().dispatchOperation({ type: 'done', key });
-                if (key === 'model-download') await (get() as any).fetchCachedModels?.();
-            }
-        } catch (e: any) {
-            get().dispatchOperation({ type: 'error', key, message: `Retry failed: ${e?.message ?? e}` });
-        }
+        await runRetry(key, RETRY_COMMANDS[key], {
+            invoke,
+            dispatch: get().dispatchOperation,
+            refreshModels: async () => {
+                await (get() as any).fetchCachedModels?.();
+                await (get() as any).fetchModels?.();
+            },
+        });
     },
     setOperationStatus: (status) => set({ operationStatus: status, statusBarDismissed: false }),
     dismissStatusBar: () => set({ statusBarDismissed: true }),
     showStatusBar: () => set({ statusBarDismissed: false }),
     
+    gpuAssessment: null,
+    gpuAssessmentDismissed: null,
+    setGpuAssessment: (a) => set({ gpuAssessment: a, statusBarDismissed: false }),
+    dismissGpuAssessment: () => set((state) => ({ gpuAssessmentDismissed: state.gpuAssessment?.headline ?? null })),
+
     heartbeatWarningStart: null,
     heartbeatWarningMessage: null,
     setHeartbeatWarning: (startTime, message) => set({

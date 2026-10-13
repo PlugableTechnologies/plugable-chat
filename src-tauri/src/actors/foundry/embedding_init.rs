@@ -6,6 +6,8 @@
 //! corporate proxy needs no extra code here.
 
 use crate::crash_handler::SuppressCrashDialogGuard;
+use crate::actors::startup_actor::StartupMsg;
+use crate::protocol::ResourceStatus;
 use crate::test_state::{self, Phase};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use serde_json::json;
@@ -17,32 +19,80 @@ use tokio::sync::RwLock;
 
 pub type SharedEmbeddingModel = Arc<RwLock<Option<Arc<TextEmbedding>>>>;
 
-const ATTEMPTS: u32 = 3;
-const BASE_DELAY: Duration = Duration::from_secs(2);
+/// Five tries with 3, 6, 12 and 24 second waits (45 s in all). Three tries over six seconds was
+/// not enough on a first start, when the search model competes with the chat-model download and
+/// the GPU component download for the same connection (Bob's red row on first launch only).
+const ATTEMPTS: u32 = 5;
+const BASE_DELAY: Duration = Duration::from_secs(3);
+const MAX_DELAY: Duration = Duration::from_secs(30);
 
 static INIT_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Run `f` up to `attempts` times, sleeping `base << attempt` between failures (never after
-/// the last one). Blocking: call from `spawn_blocking`.
-pub fn retry_blocking<T, E: std::fmt::Debug>(
+/// Why every attempt failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptFailure {
+    pub attempts: u32,
+    pub last_error: String,
+    /// At least one attempt panicked (a native library such as ONNX Runtime failed to load).
+    pub panicked: bool,
+}
+
+/// Run `f` up to `attempts` times, sleeping `base << n` (capped) between failures and never after
+/// the last one. A panic inside one attempt counts as that attempt failing: it used to end the
+/// whole retry loop on the first try, so a library that was still being unpacked or scanned by
+/// antivirus could never be waited out. Blocking: call from `spawn_blocking`.
+pub fn run_attempts<T>(
     attempts: u32,
     base: Duration,
-    mut f: impl FnMut(u32) -> Result<T, E>,
-) -> Result<T, E> {
-    let mut attempt = 0;
-    loop {
-        match f(attempt) {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                attempt += 1;
-                if attempt >= attempts {
-                    return Err(e);
-                }
-                println!("FoundryActor: embedding init attempt {attempt} failed: {e:?}");
-                std::thread::sleep(base * (1u32 << (attempt - 1)));
+    mut f: impl FnMut(u32) -> Result<T, String>,
+) -> Result<T, AttemptFailure> {
+    let mut panicked = false;
+    let mut last_error = String::new();
+    for attempt in 0..attempts.max(1) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(attempt))) {
+            Ok(Ok(v)) => return Ok(v),
+            Ok(Err(e)) => last_error = e,
+            Err(payload) => {
+                panicked = true;
+                last_error = format!("a native library failed while loading: {}", panic_message(payload.as_ref()));
             }
         }
+        crate::app_log::log("embedding", &format!("attempt {} of {} failed: {}", attempt + 1, attempts, last_error));
+        if attempt + 1 < attempts {
+            std::thread::sleep((base * (1u32 << attempt.min(8))).min(MAX_DELAY));
+        }
     }
+    Err(AttemptFailure { attempts: attempts.max(1), last_error, panicked })
+}
+
+/// A model that loads can still be unusable (truncated file, wrong shape). Reject output that
+/// could not be a real embedding.
+pub fn validate_embeddings(out: &[Vec<f32>]) -> Result<(), String> {
+    let first = out.first().ok_or("the model returned no embedding for the test sentence")?;
+    if first.is_empty() {
+        return Err("the model returned an empty embedding".to_string());
+    }
+    if first.iter().any(|v| !v.is_finite()) {
+        return Err("the model returned non-numeric values".to_string());
+    }
+    if first.iter().all(|v| *v == 0.0) {
+        return Err("the model returned an all-zero embedding".to_string());
+    }
+    Ok(())
+}
+
+/// Remove everything inside `root` (not `root` itself) so a corrupt model is downloaded afresh.
+pub fn clear_model_cache(root: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else { return 0 };
+    let mut removed = 0;
+    for e in entries.flatten() {
+        let path = e.path();
+        let ok = if path.is_dir() { std::fs::remove_dir_all(&path).is_ok() } else { std::fs::remove_file(&path).is_ok() };
+        if ok {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Delete leftovers of an interrupted download (partial blobs, lock files, empty files) so a
@@ -121,14 +171,43 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// also fills in embeddings for chats that were saved while the model was unavailable.
 pub async fn init_cpu_embedding_model(app: AppHandle, shared: SharedEmbeddingModel) -> Result<(), String> {
     if shared.read().await.is_some() {
+        // Say so: a Retry that returns silently leaves its row on "Retrying..." for ever.
+        emit_progress(&app, ALREADY_LOADED_MESSAGE, true, false);
+        report_status(&app, ResourceStatus::Ready).await;
         return Ok(());
     }
     if INIT_RUNNING.swap(true, Ordering::SeqCst) {
-        return Err("The embedding model is already loading.".to_string());
+        return Err("The search model is still loading. Wait for it to finish.".to_string());
     }
+    report_status(&app, ResourceStatus::Initializing).await;
     let result = init_inner(&app, &shared).await;
     INIT_RUNNING.store(false, Ordering::SeqCst);
+    report_status(
+        &app,
+        match &result {
+            Ok(()) => ResourceStatus::Ready,
+            Err(message) => ResourceStatus::Failed { message: message.clone() },
+        },
+    )
+    .await;
     result
+}
+
+pub const ALREADY_LOADED_MESSAGE: &str = "CPU embedding model loaded (GPU model loads on-demand)";
+
+/// Keep the start-up coordinator's view of the embedding model true (it stayed `pending` for ever).
+async fn report_status(app: &AppHandle, status: ResourceStatus) {
+    if let Some(handles) = app.try_state::<crate::app_state::ActorHandles>() {
+        let _ = handles.startup_tx.send(StartupMsg::ReportEmbeddingStatus { status }).await;
+    }
+}
+
+/// The user-facing text after every attempt failed. Always starts with "Failed to load CPU
+/// embedding model." (the UI and the test scripts key on it) and says how many tries were made.
+pub fn format_failure(f: &AttemptFailure) -> String {
+    let described = describe_embedding_error(&f.last_error);
+    let lib = if f.panicked { " A native library failed to load; if this persists, reinstall the Visual C++ runtime." } else { "" };
+    format!("Failed to load CPU embedding model after {} attempts. {described}{lib}", f.attempts)
 }
 
 async fn init_inner(app: &AppHandle, shared: &SharedEmbeddingModel) -> Result<(), String> {
@@ -140,33 +219,43 @@ async fn init_inner(app: &AppHandle, shared: &SharedEmbeddingModel) -> Result<()
     // "Failed to retrieve onnx/model.onnx". Pin it to a writable per-user dir.
     let cache = crate::paths::ensure_writable_dir(crate::paths::get_embedding_cache_dir(), "fastembed").await;
     let cache_path = cache.path.clone();
-    // hf-hub reads HF_HOME; keep any other hub use inside the same writable tree.
-    std::env::set_var("HF_HOME", cache_path.join("hf"));
+    // hf-hub reads HF_HOME. It is set once at launch (see `lib.rs`), before any thread exists:
+    // changing the environment while other threads run is not safe. Only a fallback folder, chosen
+    // because the preferred one is not writable, differs from that and needs it set here.
+    let wanted_home = cache_path.join("hf");
+    if std::env::var_os("HF_HOME").map(std::path::PathBuf::from).as_deref() != Some(wanted_home.as_path()) {
+        std::env::set_var("HF_HOME", &wanted_home);
+    }
 
-    // catch_unwind: ORT initialisation panics when a native DLL is missing, and embedding is
-    // optional, so that must become an error message rather than a crash.
+    let attempt_cache = cache_path.clone();
     let joined = tokio::task::spawn_blocking(move || {
         let _guard = SuppressCrashDialogGuard::new();
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            retry_blocking(ATTEMPTS, BASE_DELAY, |attempt| {
-                if attempt > 0 {
-                    let n = clear_stale_download_files(&cache_path);
-                    println!("FoundryActor: cleared {n} stale download file(s) before retrying the embedding model");
-                }
-                let options = InitOptions::new(EmbeddingModel::BGEBaseENV15)
-                    .with_cache_dir(cache_path.clone())
-                    .with_show_download_progress(true);
-                TextEmbedding::try_new(options)
-            })
-        }))
+        run_attempts(ATTEMPTS, BASE_DELAY, |attempt| {
+            if attempt > 0 {
+                let n = clear_stale_download_files(&attempt_cache);
+                crate::app_log::log("embedding", &format!("cleared {n} stale download file(s) before attempt {}", attempt + 1));
+            }
+            let options = InitOptions::new(EmbeddingModel::BGEBaseENV15)
+                .with_cache_dir(attempt_cache.clone())
+                .with_show_download_progress(true);
+            // `{e:#}` includes the whole cause chain, which is where the real reason lives.
+            let model = TextEmbedding::try_new(options).map_err(|e| format!("{e:#}"))?;
+            // Loading is not working: embed a sentence before declaring success.
+            let check = model.embed(vec!["plugable chat self-check"], None).map_err(|e| format!("{e:#}")).and_then(|out| validate_embeddings(&out));
+            if let Err(why) = check {
+                let n = clear_model_cache(&attempt_cache);
+                return Err(format!("the downloaded model failed its self-check ({why}); removed {n} cached item(s) to download it again"));
+            }
+            Ok(model)
+        })
     })
     .await;
 
     let failure = match joined {
-        Ok(Ok(Ok(model))) => {
-            println!("FoundryActor: CPU embedding model loaded successfully");
+        Ok(Ok(model)) => {
+            crate::app_log::log("embedding", "CPU embedding model loaded and verified");
             *shared.write().await = Some(Arc::new(model));
-            emit_progress(app, "CPU embedding model loaded (GPU model loads on-demand)", true, false);
+            emit_progress(app, ALREADY_LOADED_MESSAGE, true, false);
             test_state::record(Phase::Embedding, test_state::status::OK, "loaded");
             if let Some(handles) = app.try_state::<crate::app_state::ActorHandles>() {
                 let vector_tx = handles.vector_tx.clone();
@@ -177,21 +266,13 @@ async fn init_inner(app: &AppHandle, shared: &SharedEmbeddingModel) -> Result<()
             }
             return Ok(());
         }
-        Ok(Ok(Err(e))) => {
-            println!("FoundryActor ERROR: Failed to load CPU embedding model: {e:?}");
-            // `{e:#}` includes the whole cause chain, which is where the real reason lives.
-            format!("Failed to load CPU embedding model. {}", describe_embedding_error(&format!("{e:#}")))
-        }
-        Ok(Err(panic_payload)) => {
-            let msg = panic_message(panic_payload.as_ref());
-            println!("FoundryActor ERROR: ONNX Runtime initialization panicked: {msg}");
-            format!("ONNX Runtime unavailable: {msg}. Embedding features disabled.")
-        }
+        Ok(Err(f)) => format_failure(&f),
         Err(e) => {
-            println!("FoundryActor ERROR: CPU embedding model init task failed: {e:?}");
-            "CPU embedding model initialization task failed".to_string()
+            crate::app_log::log("embedding", &format!("init task failed: {e:?}"));
+            format!("Failed to load CPU embedding model. The search model start-up task stopped unexpectedly. Details: {e}")
         }
     };
+    crate::app_log::log("embedding", &format!("giving up: {failure}"));
     emit_progress(app, &failure, true, true);
     test_state::record(Phase::Embedding, test_state::status::FAILED, &failure);
     Err(failure)
@@ -204,7 +285,7 @@ mod tests {
     #[test]
     fn retries_until_success() {
         let mut calls = 0;
-        let r: Result<u32, String> = retry_blocking(3, Duration::from_millis(1), |_| {
+        let r = run_attempts(3, Duration::from_millis(1), |_| {
             calls += 1;
             if calls < 3 { Err(format!("fail {calls}")) } else { Ok(calls) }
         });
@@ -215,20 +296,78 @@ mod tests {
     fn gives_up_after_the_attempt_limit_with_the_last_error_and_without_a_final_sleep() {
         let mut calls = 0;
         let started = std::time::Instant::now();
-        let r: Result<(), String> = retry_blocking(3, Duration::from_millis(40), |_| {
+        let r: Result<(), AttemptFailure> = run_attempts(3, Duration::from_millis(40), |_| {
             calls += 1;
             Err(format!("fail {calls}"))
         });
-        assert_eq!(r, Err("fail 3".to_string()));
-        assert_eq!(calls, 3);
+        let f = r.unwrap_err();
+        assert_eq!((f.attempts, f.last_error.as_str(), f.panicked), (3, "fail 3", false));
         // sleeps are 40ms + 80ms; a trailing 160ms sleep would push this past 270ms
         assert!(started.elapsed() < Duration::from_millis(270));
     }
 
     #[test]
     fn one_attempt_never_sleeps() {
-        let r: Result<(), &str> = retry_blocking(1, Duration::from_secs(60), |_| Err("x"));
-        assert_eq!(r, Err("x"));
+        let started = std::time::Instant::now();
+        let r: Result<(), AttemptFailure> = run_attempts(1, Duration::from_secs(60), |_| Err("x".into()));
+        assert_eq!(r.unwrap_err().last_error, "x");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    // R8 (Bob): a panic on the first attempt ended every retry.
+    #[test]
+    fn r8_a_panic_on_the_first_attempt_is_retried() {
+        let mut calls = 0;
+        let r = run_attempts(3, Duration::from_millis(1), |attempt| {
+            calls += 1;
+            if attempt == 0 {
+                panic!("onnxruntime.dll could not be loaded");
+            }
+            Ok(attempt)
+        });
+        assert_eq!(r, Ok(1));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn r8_when_every_attempt_panics_the_text_says_so() {
+        let f = run_attempts::<()>(2, Duration::from_millis(1), |_| panic!("DLL load failed")).unwrap_err();
+        assert!(f.panicked && f.last_error.contains("DLL load failed"), "{f:?}");
+        let text = format_failure(&f);
+        assert!(text.starts_with("Failed to load CPU embedding model") && text.contains("2 attempts") && text.contains("Visual C++"), "{text}");
+    }
+
+    // R6 (Bob): the first-start budget was about six seconds.
+    #[test]
+    fn r6_the_retry_budget_outlasts_a_busy_first_start() {
+        let total: Duration = (0..ATTEMPTS - 1).map(|n| (BASE_DELAY * (1u32 << n)).min(MAX_DELAY)).sum();
+        assert!(total >= Duration::from_secs(30), "budget {total:?}");
+    }
+
+    // R7 (Bob): a Retry that finds the model already loaded must still say "done".
+    #[test]
+    fn r7_already_loaded_is_reported_as_complete_not_silent() {
+        assert!(ALREADY_LOADED_MESSAGE.contains("loaded"));
+    }
+
+    #[test]
+    fn embeddings_that_cannot_be_real_are_rejected() {
+        assert!(validate_embeddings(&[vec![0.1, -0.2, 0.3]]).is_ok());
+        assert!(validate_embeddings(&[]).is_err());
+        assert!(validate_embeddings(&[vec![]]).is_err());
+        assert!(validate_embeddings(&[vec![0.0, 0.0]]).is_err());
+        assert!(validate_embeddings(&[vec![f32::NAN, 1.0]]).is_err());
+    }
+
+    #[test]
+    fn a_corrupt_model_cache_is_emptied_but_its_folder_stays() {
+        let dir = std::env::temp_dir().join(format!("pc-clear-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("models--x").join("blobs")).unwrap();
+        std::fs::write(dir.join("models--x").join("blobs").join("b"), b"x").unwrap();
+        std::fs::write(dir.join("loose"), b"x").unwrap();
+        assert_eq!(clear_model_cache(&dir), 2);
+        assert!(dir.exists() && std::fs::read_dir(&dir).unwrap().count() == 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -257,11 +396,5 @@ mod tests {
         assert!(blobs.join("good").exists());
         assert!(!blobs.join("abc.lock").exists());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn panic_payloads_become_text() {
-        let p = std::panic::catch_unwind(|| panic!("boom")).unwrap_err();
-        assert_eq!(panic_message(p.as_ref()), "boom");
     }
 }

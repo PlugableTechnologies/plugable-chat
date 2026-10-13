@@ -10,6 +10,7 @@
 // =============================================================================
 
 pub mod actors;
+pub mod app_log;
 pub mod agentic_loop;
 pub mod agentic_state;
 pub mod app_state;
@@ -18,7 +19,9 @@ pub mod chat_persistence;
 pub mod cli;
 pub mod crash_handler;
 pub mod demo_schema;
+pub mod gpu_assessment;
 pub mod gpu_diagnostics;
+pub mod preflight;
 pub mod message_builders;
 pub mod mid_turn_state;
 pub mod model_profiles;
@@ -42,6 +45,7 @@ pub mod tool_parsing;
 pub mod tool_capability;
 pub mod tool_registry;
 pub mod turn_record;
+pub mod version_info;
 pub mod tools;
 pub mod commands;
 
@@ -1781,6 +1785,15 @@ pub fn run() {
         }
     }
 
+    // Environment changes are only safe before other threads exist, so the model-download folder
+    // is set here once; the embedding start-up no longer changes it (unless it had to fall back).
+    preflight::note_process_start();
+    std::env::set_var("HF_HOME", paths::get_embedding_cache_dir().join("hf"));
+    // --version and --help are answers, not launches: they should not write a log line.
+    if !std::env::args().skip(1).any(|a| matches!(a.as_str(), "--version" | "-V" | "--help" | "-h")) {
+        app_log::log("launch", &format!("Plugable Chat {}", version_info::VersionInfo::current().display()));
+    }
+
     let cli_args = CliArgs::try_parse().unwrap_or_else(|e| {
         // --help and --version are answers, not mistakes: print them and stop instead of opening the app.
         if matches!(e.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion) {
@@ -1839,12 +1852,10 @@ pub fn run() {
                     }
                 }
             }
+            preflight::set_app_handle(app.handle().clone());
             // Set window title with version number
             if let Some(window) = app.get_webview_window("main") {
-                let git_count = option_env!("PLUGABLE_CHAT_GIT_COUNT")
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(0);
-                let version_title = format!("Plugable Chat v0.{:03} - Microsoft Foundry", git_count);
+                let version_title = version_info::VersionInfo::current().window_title();
                 if let Err(e) = window.set_title(&version_title) {
                     eprintln!("[Launch] Failed to set window title: {}", e);
                 }
@@ -2290,6 +2301,9 @@ pub fn run() {
             get_launch_model_problem,
             cancel_ep_registration,
             get_gpu_diagnostics,
+            version_info::get_version_info,
+            get_gpu_assessment,
+            get_support_bundle,
             retry_gpu_registration,
             retry_embedding_init,
             mark_first_run_complete,

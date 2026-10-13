@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listOperations, type OperationEntry } from '../store/chat/operations';
+import { GpuAssessmentRow } from './GpuAssessmentRow';
+import { SupportCopyButton } from './SupportCopyButton';
 import { useChatStore, OperationStatus, ModelStateData, getModelStateMessage, isModelStateBlocking, StartupStateType } from '../store/chat-store';
 
 // Format elapsed time helper
@@ -216,6 +218,9 @@ function OperationRow({ op, onRetry, onDismiss, onCancel }: {
                     Retry
                 </button>
             )}
+            {isError && (
+                <SupportCopyButton shown={`${op.label}: ${op.message}`} className={`ml-3 ${tone.text}`} />
+            )}
             {!op.state.startsWith('active') && (
                 <button onClick={onDismiss} className={`flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 ${tone.text}`} aria-label={`Dismiss ${op.label}`}>
                     <X size={16} />
@@ -380,6 +385,8 @@ export function StatusBar() {
                     }}
                 />
             ))}
+
+            <GpuAssessmentRow />
 
             {operationStatus && (
                 <div className={`status-bar flex items-center justify-between px-4 py-2 ${colors!.bg} border-b ${colors!.border} transition-all`}>

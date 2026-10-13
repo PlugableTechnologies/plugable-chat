@@ -16,16 +16,55 @@ pub async fn get_gpu_diagnostics() -> Result<GpuDiagnostics, String> {
         .map_err(|e| format!("GPU diagnostics probe failed: {e}"))
 }
 
-/// Try GPU provider registration again, with backoff, without restarting the app. Progress
-/// arrives on `ep-registration-progress`; returns the diagnostics as they stand now.
+/// Try GPU provider registration again and wait for the result (backoff included), then return
+/// the assessment as it stands. Progress arrives on `ep-registration-progress` meanwhile.
 #[tauri::command]
-pub async fn retry_gpu_registration(app_handle: AppHandle) -> Result<GpuDiagnostics, String> {
+pub async fn retry_gpu_registration(app_handle: AppHandle) -> Result<crate::gpu_assessment::GpuAssessment, String> {
     if crate::actors::foundry::gpu_registration::sdk().is_none() {
         return Err("GPU acceleration setup is not available: the Foundry SDK runtime is not in use.".to_string());
     }
-    // Already running is not an error: the caller wants the attempt, and one is in flight.
-    let _started = crate::actors::foundry::gpu_registration::spawn_retry(app_handle);
-    Ok(gpu_diagnostics::snapshot_without_probe())
+    let outcome = crate::actors::foundry::gpu_registration::retry_now(app_handle).await;
+    if !outcome.started {
+        return Err("A GPU setup attempt is already running. Wait for it to finish.".to_string());
+    }
+    Ok(crate::preflight::assessment_now())
+}
+
+/// Why the GPU is or is not in use, from Windows' view and the model engine's view together.
+/// `refresh` asks Windows again; the answer is never reused from a failed earlier look.
+#[tauri::command]
+pub async fn get_gpu_assessment(refresh: Option<bool>) -> Result<crate::gpu_assessment::GpuAssessment, String> {
+    tokio::task::spawn_blocking(move || {
+        if refresh.unwrap_or(false) {
+            crate::preflight::refresh_blocking()
+        } else {
+            crate::preflight::assessment_now()
+        }
+    })
+    .await
+    .map_err(|e| format!("GPU assessment failed: {e}"))
+}
+
+/// Everything support needs in one block of text: versions, machine facts, the GPU view from both
+/// sides, and the last lines of the app log. Written to the logs folder as well.
+#[tauri::command]
+pub async fn get_support_bundle(extra: Option<String>) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let report = crate::preflight::build_report_blocking();
+        let mut text = crate::preflight::format_report(&report);
+        if let Some(extra) = extra.filter(|e| !e.trim().is_empty()) {
+            text.push_str("\n\nWhat the app showed:\n");
+            text.push_str(extra.trim());
+        }
+        let tail = crate::app_log::tail(60);
+        if !tail.is_empty() {
+            text.push_str("\n\nRecent log:\n");
+            text.push_str(&tail.join("\n"));
+        }
+        text
+    })
+    .await
+    .map_err(|e| format!("could not collect support details: {e}"))
 }
 
 /// Run the embedding-model start-up again (download included) after it failed.

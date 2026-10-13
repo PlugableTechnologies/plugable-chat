@@ -96,11 +96,13 @@ function Start-Fresh($ctx, [string]$Path = $Installer) {
 # true, the process tree is killed (kill-mid-download).
 function Invoke-Smoke {
     param($Ctx, [hashtable]$EnvVars = @{}, [pscredential]$Credential, [string]$WorkingDirectory = $InstallDir,
-          [scriptblock]$KillWhen, [int]$TimeoutSec = $SmokeTimeoutSec)
+          [scriptblock]$KillWhen, [int]$TimeoutSec = $SmokeTimeoutSec,
+          [switch]$NoSmoke)   # run the app normally (hidden) instead of --smoke: for scenarios that wait for later events
     $Ctx.Runs++
     $idx = $Ctx.Runs
     Remove-Item -LiteralPath $Ctx.StateFile -Force -ErrorAction SilentlyContinue
     $out = Join-Path $Ctx.Dir "smoke-$idx.out.txt"
+    $appArgs = if ($NoSmoke) { "--hidden" } else { "--smoke" }
     $vars = @{ PLUGABLE_CHAT_TEST_STATE = $Ctx.StateFile; PLUGABLE_CHAT_SMOKE_TIMEOUT_SECS = [string][math]::Max(30, $TimeoutSec - 30) }
     foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
 
@@ -109,14 +111,14 @@ function Invoke-Smoke {
         $lines = @("@echo off")
         foreach ($k in $vars.Keys) { $lines += "set `"$k=$($vars[$k])`"" }
         $lines += "cd /d `"$WorkingDirectory`""
-        $lines += "`"$Exe`" --smoke > `"$out`" 2>&1"
+        $lines += "`"$Exe`" $appArgs > `"$out`" 2>&1"
         Set-Content -LiteralPath $cmd -Value $lines -Encoding ASCII
         $proc = Start-Process cmd.exe -ArgumentList "/c `"$cmd`"" -Credential $Credential -LoadUserProfile -WorkingDirectory $env:SystemRoot -PassThru -WindowStyle Hidden
     }
     else {
         $saved = @{}
         foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k, "Process"); [Environment]::SetEnvironmentVariable($k, [string]$vars[$k], "Process") }
-        try { $proc = Start-Process $Exe -ArgumentList "--smoke" -WorkingDirectory $WorkingDirectory -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError "$out.err" }
+        try { $proc = Start-Process $Exe -ArgumentList $appArgs -WorkingDirectory $WorkingDirectory -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError "$out.err" }
         finally { foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], "Process") } }
     }
     $null = $proc.Handle   # keeps ExitCode readable after exit
@@ -150,6 +152,39 @@ function Get-EmbeddingFileCount([string]$DataRoot = (Join-Path $env:LOCALAPPDATA
     if (-not (Test-Path -LiteralPath $d)) { return 0 }
     return @(Get-ChildItem -LiteralPath $d -Recurse -File -Filter "*.onnx" -ErrorAction SilentlyContinue).Count
 }
+
+
+# The newest preflight report the app wrote (config dir = %APPDATA%\plugable-chat), or $null.
+function Get-PreflightReport {
+    $dir = Join-Path $env:APPDATA "plugable-chat\logs"
+    $f = Get-ChildItem -LiteralPath $dir -Filter "preflight-*.json" -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
+    if (-not $f) { return $null }
+    return (Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json)
+}
+
+# Environment for the app's test seams (honoured only because PLUGABLE_CHAT_TEST_STATE is also set):
+# what Windows "lists", what the engine "reports", what nvidia-smi "says".
+function New-GpuSeams([switch]$Nvidia, [switch]$Thunderbolt, [string]$EpsAfterRetry = "", [string]$LateAfterSecs = "") {
+    $nv = @{ name = "NVIDIA GeForce RTX 4090"; vendor = "NVIDIA"; vramMb = 4095; pnpId = "PCI\VEN_10DE&DEV_2684"; status = "OK"; problemCode = 0 }
+    $tb = if ($Thunderbolt) { @("Intel(R) Thunderbolt(TM) Controller") } else { @() }
+    $scan = @{ adapters = @($(if ($Nvidia) { $nv })); thunderboltDevices = $tb }
+    $cpuOnly = @(@{ name = "CPUExecutionProvider"; isRegistered = $true })
+    $vars = @{
+        PLUGABLE_CHAT_TEST_EPS        = (ConvertTo-Json -InputObject $cpuOnly -Compress -Depth 5)
+        PLUGABLE_CHAT_TEST_NVIDIA_SMI = "572.16"
+    }
+    if ($LateAfterSecs) {
+        $vars.PLUGABLE_CHAT_TEST_ADAPTERS_LATE = (ConvertTo-Json -InputObject $scan -Compress -Depth 5)
+        $vars.PLUGABLE_CHAT_TEST_ADAPTERS_LATE_AFTER_SECS = $LateAfterSecs
+        $vars.PLUGABLE_CHAT_TEST_ADAPTERS = (ConvertTo-Json -InputObject @{ adapters = @(); thunderboltDevices = @() } -Compress -Depth 5)
+    }
+    else { $vars.PLUGABLE_CHAT_TEST_ADAPTERS = (ConvertTo-Json -InputObject $scan -Compress -Depth 5) }
+    if ($EpsAfterRetry) { $vars.PLUGABLE_CHAT_TEST_EPS_AFTER_RETRY = $EpsAfterRetry }
+    return $vars
+}
+
+# Every gpu-assessment record, oldest first, as "State | headline".
+function Get-GpuAssessments($recs) { @($recs | Where-Object { $_.phase -eq "gpu-assessment" } | ForEach-Object { [string]$_.detail }) }
 
 function Get-HookRegistry { Get-ItemProperty -Path "HKLM:\SOFTWARE\Plugable\plugable-chat\Installer" -ErrorAction SilentlyContinue }
 function Get-UninstallEntries {
@@ -443,6 +478,103 @@ Register "upgrade-over-old" "stale files, resources" @("cpu") "install an older 
     $f += Get-RunFailures $run
     $f += Assert-Terminal $run.Records
     $f += Assert-PhaseOk $run.Records "ready"
+    return @{ Failures = $f }
+}
+
+Register "nvidia-present-no-providers" "Pat: CPU model despite NVIDIA (R1, R3)" @("cpu") "driver + NVIDIA adapter present, engine reports only CPU: a named cause (not 'No GPU'), CPU model runs, same answer after a cold relaunch" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $seams = New-GpuSeams -Nvidia
+    foreach ($pass in 1, 2) {
+        $run = Invoke-Smoke $ctx -EnvVars $seams
+        $f += Get-RunFailures $run
+        $f += Assert-PhaseOk $run.Records "ready"   # a CPU model is running
+        $a = @(Get-GpuAssessments $run.Records)
+        if ($a.Count -eq 0) { $f += "run ${pass}: no gpu-assessment record: this build does not explain the GPU decision" }
+        elseif (-not ($a | Where-Object { $_ -match "HardwareNotUsed" -and $_ -match "NVIDIA" })) { $f += "run ${pass}: expected HardwareNotUsed naming the NVIDIA adapter, got: $($a -join ' / ')" }
+        if ($a | Where-Object { $_ -match "NoHardware" }) { $f += "run ${pass}: an NVIDIA machine was reported as having no GPU" }
+        $rep = Get-PreflightReport
+        if (-not $rep) { $f += "run ${pass}: no preflight report was written" }
+        else {
+            if (-not (@($rep.adapters.adapters) | Where-Object { $_.vendor -eq "NVIDIA" })) { $f += "run ${pass}: preflight report does not list the NVIDIA adapter" }
+            if (-not (@($rep.engineProviders.Ok) | Where-Object { $_.name -eq "CPUExecutionProvider" })) { $f += "run ${pass}: preflight report does not carry the engine's own provider list" }
+        }
+        Stop-App
+    }
+    return @{ Failures = $f }
+}
+
+Register "egpu-thunderbolt-hint" "Pat: TBT5-AI (R2)" @("cpu") "NVIDIA adapter plus a Thunderbolt controller, engine reports only CPU: the card tells the user to check the Thunderbolt connection" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $run = Invoke-Smoke $ctx -EnvVars (New-GpuSeams -Nvidia -Thunderbolt)
+    $f += Get-RunFailures $run
+    $rep = Get-PreflightReport
+    if (-not $rep) { return @{ Failures = $f + "no preflight report was written" } }
+    if (-not (@($rep.assessment.hints) | Where-Object { $_ -match "Thunderbolt" })) { $f += "no hint mentions the Thunderbolt connection: $(@($rep.assessment.hints) -join ' / ')" }
+    if (-not (@($rep.adapters.thunderboltDevices) | Where-Object { $_ -match "Thunderbolt" })) { $f += "the Thunderbolt controller is not in the report" }
+    return @{ Failures = $f }
+}
+
+Register "egpu-late-arrival" "Pat: eGPU enumerated late (R2, R4)" @("cpu") "no GPU at launch, an NVIDIA adapter appears later: the app notices, retries GPU setup by itself, and the assessment changes" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $withCuda = ConvertTo-Json -InputObject @(@{ name = "CPUExecutionProvider"; isRegistered = $true }, @{ name = "CUDAExecutionProvider"; isRegistered = $true }) -Compress -Depth 5
+    $seams = New-GpuSeams -Nvidia -LateAfterSecs "20" -EpsAfterRetry $withCuda
+    # Not --smoke: the watcher polls every 30 s, so the app has to stay up past the first poll.
+    $run = Invoke-Smoke $ctx -NoSmoke -EnvVars $seams -TimeoutSec 600 -KillWhen {
+        param($recs)
+        $a = @($recs | Where-Object { $_.phase -eq "gpu-assessment" } | ForEach-Object { [string]$_.detail })
+        # done once the assessment has moved on from "no GPU" to a state that includes the new provider
+        ($a | Where-Object { $_ -match "NoHardware" }).Count -gt 0 -and ($a | Where-Object { $_ -match "AcceleratedNoModels|Ready" }).Count -gt 0
+    }
+    $a = @(Get-GpuAssessments $run.Records)
+    if ($a.Count -eq 0) { $f += "no gpu-assessment records: this build never explains the GPU decision" }
+    elseif (-not ($a | Where-Object { $_ -match "NoHardware" })) { $f += "the app never reported the starting state (no GPU yet): $($a -join ' / ')" }
+    if (-not $run.Killed) { $f += "the app did not notice the late adapter and retry within $($run.Seconds) s: $($a -join ' / ')" }
+    return @{ Failures = $f }
+}
+
+Register "embedding-first-run-contention" "Bob: first-start embedding error (R6, R10)" @("cpu") "huggingface unreachable for the first 25 s of a first start: the embedding model must still load, not end in a red row" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $backup = Join-Path $ctx.Dir "hosts.backup"
+    Copy-Item -LiteralPath $HostsFile -Destination $backup -Force
+    $script:contentionUnblocked = $false
+    $script:contentionClock = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        Add-Content -LiteralPath $HostsFile -Value ($HfHosts | ForEach-Object { "127.0.0.1 $_" })
+        ipconfig /flushdns | Out-Null
+        # The hook runs once a second with the records so far: it lifts the block after 25 s and never kills the app.
+        $run = Invoke-Smoke $ctx -KillWhen {
+            param($recs)
+            if (-not $script:contentionUnblocked -and $script:contentionClock.Elapsed.TotalSeconds -gt 25) {
+                Copy-Item -LiteralPath $backup -Destination $HostsFile -Force
+                ipconfig /flushdns | Out-Null
+                $script:contentionUnblocked = $true
+            }
+            return $false
+        }
+    }
+    finally { Copy-Item -LiteralPath $backup -Destination $HostsFile -Force; ipconfig /flushdns | Out-Null }
+    $f += Get-RunFailures $run
+    $f += Assert-Terminal $run.Records
+    $f += Assert-PhaseOk $run.Records "embedding"
+    return @{ Failures = $f }
+}
+
+Register "version-visible" "Bob: no version in the title; Pat: same filename (R12, R13)" @("cpu") "--version reports the release label and commit, and the installer file name carries the same release" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $out = Join-Path $ctx.Dir "version.txt"
+    Start-Process $Exe -ArgumentList "--version" -Wait -RedirectStandardOutput $out -RedirectStandardError "$out.err" -WindowStyle Hidden | Out-Null
+    $text = if (Test-Path -LiteralPath $out) { Get-Content -LiteralPath $out -Raw } else { "" }
+    $name = [IO.Path]::GetFileName($Installer)
+    $tag = if ($name -match "_(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)_") { "v$($Matches[1])" } else { "" }
+    if ($text -notmatch "v\d+\.\d+\.\d+") { $f += "--version printed no release label: '$($text.Trim())'" }
+    if ($text -notmatch "\(([0-9a-f]{7})(\+dirty)?\)") { $f += "--version printed no short commit id: '$($text.Trim())'" }
+    if ($tag -and $text -notmatch [regex]::Escape($tag)) { $f += "--version says '$($text.Trim())' but the installer file name says $tag" }
+    if ($name -match "^plugable-chat_\d+\.\d+\.\d+_x64-setup\.exe$" -and $tag -match "-rc") { $f += "installer name '$name' carries no release candidate label" }
     return @{ Failures = $f }
 }
 

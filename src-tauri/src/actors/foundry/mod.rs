@@ -12,6 +12,7 @@ pub mod gpu_registration;
 mod model_gateway_actor;
 mod request_builder;
 mod service_manager;
+mod model_chain;
 mod model_incompatibility;
 mod startup_model_selection;
 mod stream_handler;

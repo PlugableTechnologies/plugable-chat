@@ -61,6 +61,7 @@ pub fn classify_ep_error(message: &str) -> EpFailureKind {
     if has(&["cancel", "aborted by user", "operation was aborted"]) {
         return EpFailureKind::Cancelled;
     }
+    // Messages that can only mean "the loader could not open a library": checked first.
     if has(&[
         "os error 126",
         "os error 193",
@@ -74,11 +75,30 @@ pub fn classify_ep_error(message: &str) -> EpFailureKind {
         "loadlibrary",
         "dlopen",
         "cannot open shared object",
-        ".dll",
-        " dll",
         "specified module could not be found",
         "not a valid win32 application",
     ]) {
+        return EpFailureKind::MissingDll;
+    }
+    // A failed *download* often names the file it was fetching ("...cuda.dll: HTTP 503"). That is
+    // a network problem and worth retrying; calling it a missing library sent people to reinstall.
+    if has(&[
+        "http",
+        "timed out",
+        "timeout",
+        "dns",
+        "error sending request",
+        "name resolution",
+        "connection refused",
+        "connection reset",
+        "tls",
+        "ssl",
+        "certificate",
+        "proxy",
+    ]) {
+        return EpFailureKind::Network;
+    }
+    if has(&[".dll", " dll"]) {
         return EpFailureKind::MissingDll;
     }
     if has(&[
@@ -325,6 +345,19 @@ mod tests {
         ] {
             assert_eq!(classify_ep_error(msg), MissingDll, "{msg}");
         }
+    }
+
+    #[test]
+    fn a_failed_download_that_names_a_dll_is_a_network_problem() {
+        for msg in [
+            "download of onnxruntime_providers_cuda.dll failed: HTTP 503",
+            "error sending request for url (https://example/cudart64_12.dll): connection timed out",
+            "tls handshake failure while fetching cublas64_12.dll",
+        ] {
+            assert_eq!(classify_ep_error(msg), Network, "{msg}");
+        }
+        // but a real load failure that happens to mention http stays a library problem
+        assert_eq!(classify_ep_error("LoadLibrary failed with error 126 (cuda provider, http cache)"), MissingDll);
     }
 
     #[test]

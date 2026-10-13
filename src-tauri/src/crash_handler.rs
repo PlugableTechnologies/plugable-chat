@@ -109,8 +109,9 @@ fn format_crash_details(panic_info: &PanicHookInfo) -> String {
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
     details.push_str(&format!("Time: {}\n", timestamp));
 
-    // Version (from Cargo.toml)
-    details.push_str(&format!("Version: {}\n", env!("CARGO_PKG_VERSION")));
+    // Release label and commit: the manifest version is the same for every release candidate.
+    details.push_str(&crate::version_info::VersionInfo::current().report_lines());
+    details.push('\n');
 
     // OS info
     details.push_str(&format!("OS: {} {}\n", std::env::consts::OS, std::env::consts::ARCH));

@@ -20,6 +20,12 @@ pub const RETRY_DELAYS: [Duration; 3] = [Duration::from_secs(5), Duration::from_
 
 static SDK: OnceLock<Arc<SdkBackend>> = OnceLock::new();
 static RETRY_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Set once the start-up registration finished, so the hardware watcher never races it.
+static STARTUP_REGISTRATION_DONE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn mark_startup_registration_done() {
+    STARTUP_REGISTRATION_DONE.store(true, Ordering::SeqCst);
+}
 
 /// Called once by the gateway actor so commands can reach the same SDK instance.
 pub(crate) fn remember_sdk(sdk: &Arc<SdkBackend>) {
@@ -142,48 +148,150 @@ pub async fn retry_with_backoff(
     summary
 }
 
-/// Start a background retry. Returns `false` if one is already running or no SDK backend exists.
-pub fn spawn_retry(app: AppHandle) -> bool {
+/// Clears the "retry running" flag on every exit path, including a panic in the retry.
+struct RunningGuard;
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        RETRY_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// What a retry request did.
+pub struct RetryOutcome {
+    /// False when another retry was already running (the caller should say so, not pretend).
+    pub started: bool,
+    pub summary: Option<EpRegistrationSummary>,
+}
+
+/// Run a full GPU setup attempt now and wait for it: register providers (with backoff for network
+/// trouble), make the model actor re-read its catalog, and ask Windows about the hardware again.
+///
+/// The Retry button used to return before any of this finished and refresh the model list at once,
+/// so the list was always read too early. The catalog is refreshed whether or not a provider
+/// newly registered: a previous run's providers may already be in place with the list stale.
+pub async fn retry_now(app: AppHandle) -> RetryOutcome {
     use tauri::Manager;
     let Some(sdk) = sdk() else {
-        return false;
-    };
-    let Some(foundry_tx) = app.try_state::<crate::app_state::ActorHandles>().map(|h| h.foundry_tx.clone()) else {
-        return false;
+        return RetryOutcome { started: false, summary: None };
     };
     if RETRY_RUNNING.swap(true, Ordering::SeqCst) {
+        return RetryOutcome { started: false, summary: None };
+    }
+    let _running = RunningGuard;
+    crate::preflight::mark_retry_requested();
+    crate::app_log::log("gpu", "GPU setup retry requested");
+
+    let summary = retry_with_backoff(&sdk, &app, &RETRY_DELAYS).await;
+
+    if let Some(foundry_tx) = app.try_state::<crate::app_state::ActorHandles>().map(|h| h.foundry_tx.clone()) {
+        // The catalog may have gained GPU variants; make the actor re-read it.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if foundry_tx.send(crate::protocol::FoundryMsg::RefreshConnectionInfo { respond_to: tx }).await.is_ok() {
+            let _ = rx.await;
+        }
+        // Read the catalog now (this records how many GPU models it lists), so the assessment
+        // below is built from the list as it stands after this attempt, not from the previous one.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if foundry_tx.send(crate::protocol::FoundryMsg::GetCatalogModels { respond_to: tx }).await.is_ok() {
+            let _ = rx.await;
+        }
+    }
+    // Re-ask Windows and rebuild the assessment now that the catalog is current.
+    let _ = tokio::task::spawn_blocking(crate::preflight::refresh_blocking).await;
+
+    // Tell listeners the model list is current: they re-read it on `done`.
+    let _ = app.emit(
+        "ep-registration-progress",
+        json!({
+            "phase": "done",
+            "message": done_message(&summary),
+            "registered": summary.registered,
+            "failed": summary.failed,
+            "failures": summary.failures,
+            "seconds": summary.seconds,
+            "refreshed": true,
+        }),
+    );
+    RetryOutcome { started: true, summary: Some(summary) }
+}
+
+/// Start a retry in the background (start-up path). Returns `false` if one is already running or
+/// no SDK backend exists.
+pub fn spawn_retry(app: AppHandle) -> bool {
+    if sdk().is_none() || RETRY_RUNNING.load(Ordering::SeqCst) {
         return false;
     }
     tauri::async_runtime::spawn(async move {
-        let summary = retry_with_backoff(&sdk, &app, &RETRY_DELAYS).await;
-        if !summary.registered.is_empty() {
-            // The catalog gained GPU variants; make the actor re-read it.
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            if foundry_tx
-                .send(crate::protocol::FoundryMsg::RefreshConnectionInfo { respond_to: tx })
-                .await
-                .is_ok()
-            {
-                let _ = rx.await;
-            }
-            // Repeat `done` now that the actor's catalog is current: a listener that re-reads
-            // the model list on `done` would otherwise have read it before the refresh.
-            let _ = app.emit(
-                "ep-registration-progress",
-                json!({
-                    "phase": "done",
-                    "message": done_message(&summary),
-                    "registered": summary.registered,
-                    "failed": summary.failed,
-                    "failures": summary.failures,
-                    "seconds": summary.seconds,
-                    "refreshed": true,
-                }),
-            );
-        }
-        RETRY_RUNNING.store(false, Ordering::SeqCst);
+        let _ = retry_now(app).await;
     });
     true
+}
+
+/// Polling interval while the machine might still change (first half hour), then relaxed.
+const WATCH_FAST: Duration = Duration::from_secs(30);
+const WATCH_SLOW: Duration = Duration::from_secs(300);
+const WATCH_FAST_TICKS: u32 = 60;
+/// While degraded and a retry could help, try again every this many ticks (5 minutes when fast).
+const WATCH_RETRY_EVERY_TICKS: u32 = 10;
+
+/// Why the watcher decided to run a GPU setup attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchDecision {
+    Idle,
+    /// A display adapter appeared, disappeared or changed state (an eGPU connected late, a
+    /// driver finished installing, the machine woke from sleep).
+    HardwareChanged,
+    /// Still degraded and a retry may help: try again on a slow cadence.
+    PeriodicRetry,
+}
+
+pub fn watch_decision(
+    previous: &[String],
+    current: &[String],
+    assessment: &crate::gpu_assessment::GpuAssessment,
+    ticks_since_retry: u32,
+) -> WatchDecision {
+    use crate::gpu_assessment::GpuStateKind as K;
+    if previous != current {
+        return WatchDecision::HardwareChanged;
+    }
+    let degraded = matches!(
+        assessment.state,
+        K::HardwareNotUsed | K::AcceleratedNoModels | K::EngineUnavailable | K::CatalogFailed | K::ScanFailed
+    );
+    if degraded && assessment.retry_may_help && ticks_since_retry >= WATCH_RETRY_EVERY_TICKS {
+        return WatchDecision::PeriodicRetry;
+    }
+    WatchDecision::Idle
+}
+
+/// Watch for hardware coming and going, and retry GPU setup when that could change the outcome.
+/// Without this an eGPU authorised after launch was never noticed until the user pressed Retry.
+pub fn spawn_hardware_watcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut tick: u32 = 0;
+        let mut since_retry: u32 = 0;
+        // The scan taken at launch is the baseline, so hardware that shows up before the first
+        // poll still counts as a change.
+        let mut previous: Option<Vec<String>> = crate::preflight::adapter_fingerprint();
+        loop {
+            tokio::time::sleep(if tick < WATCH_FAST_TICKS { WATCH_FAST } else { WATCH_SLOW }).await;
+            tick += 1;
+            since_retry += 1;
+            if !STARTUP_REGISTRATION_DONE.load(Ordering::SeqCst) || RETRY_RUNNING.load(Ordering::SeqCst) {
+                continue;
+            }
+            let Ok(assessment) = tokio::task::spawn_blocking(crate::preflight::refresh_blocking).await else { continue };
+            let Some(current) = crate::preflight::adapter_fingerprint() else { continue };
+            let Some(prev) = previous.replace(current.clone()) else { continue };
+            let decision = watch_decision(&prev, &current, &assessment, since_retry);
+            if decision != WatchDecision::Idle {
+                crate::app_log::log("gpu", &format!("hardware watcher: {decision:?}, retrying GPU setup"));
+                since_retry = 0;
+                let _ = retry_now(app.clone()).await;
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -232,5 +340,39 @@ mod tests {
     #[test]
     fn done_message_reports_success() {
         assert!(done_message(&summary(&["CUDA"], vec![])).starts_with("GPU acceleration ready (CUDA)"));
+    }
+
+    fn assessment(state: crate::gpu_assessment::GpuStateKind, retry: bool) -> crate::gpu_assessment::GpuAssessment {
+        crate::gpu_assessment::GpuAssessment { state, headline: String::new(), detail: vec![], hints: vec![], retry_may_help: retry }
+    }
+
+    // R2 (Pat): an external GPU that Windows lists after the app has started.
+    #[test]
+    fn r2_a_late_adapter_triggers_a_retry() {
+        use crate::gpu_assessment::GpuStateKind::*;
+        let before = vec!["Intel UHD|PCI|0".to_string()];
+        let after = vec!["Intel UHD|PCI|0".to_string(), "NVIDIA RTX|PCI|0".to_string()];
+        assert_eq!(watch_decision(&before, &after, &assessment(NoHardware, false), 0), WatchDecision::HardwareChanged);
+        // the same hardware, working, needs nothing
+        assert_eq!(watch_decision(&after, &after, &assessment(Ready, false), 99), WatchDecision::Idle);
+    }
+
+    #[test]
+    fn a_device_manager_problem_clearing_counts_as_a_change() {
+        use crate::gpu_assessment::GpuStateKind::*;
+        let broken = vec!["NVIDIA RTX|PCI|43".to_string()];
+        let fixed = vec!["NVIDIA RTX|PCI|0".to_string()];
+        assert_eq!(watch_decision(&broken, &fixed, &assessment(HardwareNotUsed, false), 0), WatchDecision::HardwareChanged);
+    }
+
+    #[test]
+    fn a_degraded_state_is_retried_slowly_but_a_permanent_one_is_not() {
+        use crate::gpu_assessment::GpuStateKind::*;
+        let same = vec!["NVIDIA RTX|PCI|0".to_string()];
+        assert_eq!(watch_decision(&same, &same, &assessment(HardwareNotUsed, true), 3), WatchDecision::Idle);
+        assert_eq!(watch_decision(&same, &same, &assessment(HardwareNotUsed, true), WATCH_RETRY_EVERY_TICKS), WatchDecision::PeriodicRetry);
+        // a missing driver needs the user, so polling the engine would only waste the network
+        assert_eq!(watch_decision(&same, &same, &assessment(HardwareNotUsed, false), 99), WatchDecision::Idle);
+        assert_eq!(watch_decision(&same, &same, &assessment(NoHardware, false), 99), WatchDecision::Idle);
     }
 }

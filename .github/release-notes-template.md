@@ -17,6 +17,8 @@ time you start the app.
 **Check your download.** On Windows, right-click the file, choose *Properties*, then the *Digital Signatures* tab. The signer
 should read *LEANCODE, INC.* with a timestamp. Checksum files are in the Assets list (`SHA256SUMS-windows.txt`, `SHA256SUMS`).
 
+**Which build is this?** The title bar and *Settings* (bottom of the window) show the release and the exact commit, for example `v0.1.0-rc12 (a1b2c3d)`. The installer file name carries the same release. Please include it when you report a problem; *Copy details for support* adds it for you.
+
 **How to use the app:** see the [user guide](https://github.com/PlugableTechnologies/plugable-chat/blob/main/docs/user-guide.md).
 
 ## What changed

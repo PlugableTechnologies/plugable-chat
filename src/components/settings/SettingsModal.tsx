@@ -9,6 +9,7 @@ import { ToolsTab } from './tabs/ToolsTab';
 import { SchemasTab } from './tabs/SchemasTab';
 import { FilesTab } from './tabs/FilesTab';
 import { DatabasesTab } from './tabs/DatabasesTab';
+import { VersionFooter } from './common/VersionFooter';
 
 export function SettingsModal() {
     const { isSettingsOpen, closeSettings, activeTab, setActiveTab, isLoading } = useSettingsStore();
@@ -307,6 +308,7 @@ export function SettingsModal() {
                         </>
                     )}
                 </div>
+                <VersionFooter />
             </div>
         </div>
     );
