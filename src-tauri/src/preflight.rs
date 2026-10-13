@@ -342,6 +342,13 @@ pub struct PreflightReport {
 /// Re-ask Windows (never reusing a failed answer) and combine it with what the engine said.
 pub fn refresh_blocking() -> GpuAssessment {
     let scan = scan_adapters();
+    match &scan.error {
+        Some(e) => crate::app_log::log("preflight", &format!("adapter scan failed: {e}")),
+        None => crate::app_log::log(
+            "preflight",
+            &format!("adapter scan: {} adapter(s), {} Thunderbolt device(s)", scan.adapters.len(), scan.thunderbolt_devices.len()),
+        ),
+    }
     let (driver, smi_detail) = probe_nvidia_smi();
     let vcpp = crate::gpu_diagnostics::probe_environment().1;
     with_observed(|o| {

@@ -571,7 +571,11 @@ Register "version-visible" "Bob: no version in the title; Pat: same filename (R1
     $text = if (Test-Path -LiteralPath $out) { Get-Content -LiteralPath $out -Raw } else { "" }
     $name = [IO.Path]::GetFileName($Installer)
     $tag = if ($name -match "_(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)_") { "v$($Matches[1])" } else { "" }
-    if ($text -notmatch "v\d+\.\d+\.\d+") { $f += "--version printed no release label: '$($text.Trim())'" }
+    # An unsigned CI build has no release tag (its installer is numbered 0.0.0) and calls itself "dev".
+    $expectDev = $name -match "_0\.0\.0_"
+    if ($expectDev) { if ($text -notmatch "\bdev\b") { $f += "--version printed no 'dev' label for an untagged build: '$($text.Trim())'" } }
+    elseif ($text -notmatch "v\d+\.\d+\.\d+") { $f += "--version printed no release label: '$($text.Trim())'" }
+    if ($text -match "\+dirty") { $f += "a CI build reports uncommitted changes: '$($text.Trim())'" }
     if ($text -notmatch "\(([0-9a-f]{7})(\+dirty)?\)") { $f += "--version printed no short commit id: '$($text.Trim())'" }
     if ($tag -and $text -notmatch [regex]::Escape($tag)) { $f += "--version says '$($text.Trim())' but the installer file name says $tag" }
     if ($name -match "^plugable-chat_\d+\.\d+\.\d+_x64-setup\.exe$" -and $tag -match "-rc") { $f += "installer name '$name' carries no release candidate label" }

@@ -179,7 +179,9 @@ fn set_git_version_info(project_root: &Path) -> u32 {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false);
+        .unwrap_or(false)
+        // CI regenerates tracked files (icons) before building, which is not "uncommitted work".
+        && env::var("GITHUB_ACTIONS").map(|v| v != "true").unwrap_or(true);
     println!("cargo:rustc-env=PLUGABLE_CHAT_GIT_DIRTY={dirty}");
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!(
