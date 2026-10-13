@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 @layer base {
   *,
@@ -73,8 +74,8 @@
 
 .prose p {
   color: #2e2e2e;
-  margin-top: 0.75em;
-  margin-bottom: 0.75em;
+  margin-top: 0.4em;
+  margin-bottom: 0.4em;
 }
 
 .prose h1,

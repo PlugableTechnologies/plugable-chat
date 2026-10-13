@@ -5,6 +5,8 @@ export { ChatArea } from './ChatArea';
 export * from './indicators';
 export * from './messages';
 export * from './tools';
+export * from './markdown';
+export { StatusRow } from './StatusRow';
 export * from './rag';
 export * from './attachments';
 export * from './input';

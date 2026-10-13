@@ -1,14 +1,12 @@
 import { useEffect, useState } from 'react';
 import { formatSecondsAsTime } from '../utils';
+import { StatusRow } from '../StatusRow';
 
 interface ThinkingIndicatorProps {
     startTime: number;
 }
 
-/**
- * Thinking indicator component with elapsed time
- * Shows animated dots and elapsed time while the model is reasoning
- */
+/** Live "Reasoning" status line with elapsed time while the model is thinking. */
 export const ThinkingIndicator = ({ startTime }: ThinkingIndicatorProps) => {
     const [elapsed, setElapsed] = useState(0);
 
@@ -19,16 +17,5 @@ export const ThinkingIndicator = ({ startTime }: ThinkingIndicatorProps) => {
         return () => clearInterval(interval);
     }, [startTime]);
 
-    return (
-        <div className="flex items-center gap-2 text-xs text-gray-500 mt-2 mb-1">
-            <div className="flex gap-1">
-                <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />
-                <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
-                <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" style={{ animationDelay: '600ms' }} />
-            </div>
-            <span className="font-medium text-gray-500">
-                Reasoning{elapsed >= 1 ? ` · ${formatSecondsAsTime(elapsed)}` : '...'}
-            </span>
-        </div>
-    );
+    return <StatusRow label="Reasoning" details={[elapsed >= 1 ? formatSecondsAsTime(elapsed) : null]} isLive />;
 };

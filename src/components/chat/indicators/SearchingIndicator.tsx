@@ -1,15 +1,13 @@
 import { useEffect, useState } from 'react';
 import { formatSecondsAsTime } from '../utils';
+import { StatusRow } from '../StatusRow';
 
 interface SearchingIndicatorProps {
     startTime: number;
     stage: 'indexing' | 'searching';
 }
 
-/**
- * Searching indicator component for RAG retrieval
- * Shows animated dots with indexing or searching label
- */
+/** Live status line for RAG retrieval (indexing or searching documents). */
 export const SearchingIndicator = ({ startTime, stage }: SearchingIndicatorProps) => {
     const [elapsed, setElapsed] = useState(0);
 
@@ -21,18 +19,6 @@ export const SearchingIndicator = ({ startTime, stage }: SearchingIndicatorProps
     }, [startTime]);
 
     const label = stage === 'indexing' ? 'Indexing documents' : 'Searching documents';
-    const color = stage === 'indexing' ? 'bg-blue-400' : 'bg-emerald-400';
 
-    return (
-        <div className="flex items-center gap-2 text-xs text-gray-500 mt-2 mb-1">
-            <div className="flex gap-1">
-                <div className={`w-1.5 h-1.5 ${color} rounded-full animate-pulse`} />
-                <div className={`w-1.5 h-1.5 ${color} rounded-full animate-pulse`} style={{ animationDelay: '300ms' }} />
-                <div className={`w-1.5 h-1.5 ${color} rounded-full animate-pulse`} style={{ animationDelay: '600ms' }} />
-            </div>
-            <span className="font-medium text-gray-500">
-                {label}{elapsed >= 1 ? ` · ${formatSecondsAsTime(elapsed)}` : '...'}
-            </span>
-        </div>
-    );
+    return <StatusRow label={label} details={[elapsed >= 1 ? formatSecondsAsTime(elapsed) : null]} isLive />;
 };

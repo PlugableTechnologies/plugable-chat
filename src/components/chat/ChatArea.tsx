@@ -505,7 +505,7 @@ export function ChatArea() {
                         </div>
                     </div>
                 ) : (
-                    <div className="chat-thread w-full max-w-none space-y-6 py-0">
+                    <div className="chat-thread w-full max-w-none space-y-1 py-0">
                         {chatMessages.map((m, idx) => {
                             const previousAssistantSystemPrompt =
                                 chatMessages
@@ -518,10 +518,10 @@ export function ChatArea() {
                                         data-testid={`chat-bubble-${m.role}`}
                                         data-message-id={m.id}
                                         className={`
-                                    chat-bubble relative w-full max-w-none rounded-2xl px-5 py-3.5 text-[15px] leading-7
+                                    chat-bubble relative w-full max-w-none rounded-2xl px-5 py-1.5 text-[15px] leading-6
                                     ${m.role === 'user'
                                                 ? 'chat-bubble-user bg-gray-100 text-gray-900'
-                                                : 'chat-bubble-assistant bg-gray-50 text-gray-900'
+                                                : 'chat-bubble-assistant bg-transparent text-gray-900'
                                             }
                                 `}
                                     >
@@ -533,6 +533,7 @@ export function ChatArea() {
                                                     thinkingStartTime={thinkingStartTime}
                                                     toolProcessingStartTime={toolProcessingStartTime}
                                                     previousSystemPromptText={previousAssistantSystemPrompt}
+                                                    isStreaming={assistantStreamingActive && chatMessages[chatMessages.length - 1]?.id === m.id}
                                                 />
                                             ) : (
                                                 <div className="whitespace-pre-wrap">{m.content}</div>
@@ -544,7 +545,7 @@ export function ChatArea() {
                         })}
                         {assistantStreamingActive && chatMessages[chatMessages.length - 1]?.role !== 'assistant' && (
                             <div className="flex w-full justify-start">
-                                <div className="bg-gray-50 rounded-2xl px-6 py-4">
+                                <div className="rounded-2xl px-5 py-2">
                                     <div className="flex gap-1.5">
                                         <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                                         <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
