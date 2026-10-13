@@ -165,20 +165,21 @@ function Get-PreflightReport {
 # Environment for the app's test seams (honoured only because PLUGABLE_CHAT_TEST_STATE is also set):
 # what Windows "lists", what the engine "reports", what nvidia-smi "says".
 function New-GpuSeams([switch]$Nvidia, [switch]$Thunderbolt, [string]$EpsAfterRetry = "", [string]$LateAfterSecs = "") {
-    $nv = @{ name = "NVIDIA GeForce RTX 4090"; vendor = "NVIDIA"; vramMb = 4095; pnpId = "PCI\VEN_10DE&DEV_2684"; status = "OK"; problemCode = 0 }
-    $tb = if ($Thunderbolt) { @("Intel(R) Thunderbolt(TM) Controller") } else { @() }
-    $scan = @{ adapters = @($(if ($Nvidia) { $nv })); thunderboltDevices = $tb }
-    $cpuOnly = @(@{ name = "CPUExecutionProvider"; isRegistered = $true })
+    # JSON is written out by hand: Windows PowerShell 5.1's ConvertTo-Json turns an empty array into
+    # null and a one-element array into a bare value, which the app (correctly) rejects.
+    $adapter = if ($Nvidia) { '{"name":"NVIDIA GeForce RTX 4090","vendor":"NVIDIA","vramMb":4095,"pnpId":"PCI\\VEN_10DE&DEV_2684","status":"OK","problemCode":0}' } else { "" }
+    $tb = if ($Thunderbolt) { '"Intel(R) Thunderbolt(TM) Controller"' } else { "" }
+    $scan = '{"adapters":[' + $adapter + '],"thunderboltDevices":[' + $tb + ']}'
     $vars = @{
-        PLUGABLE_CHAT_TEST_EPS        = (ConvertTo-Json -InputObject $cpuOnly -Compress -Depth 5)
+        PLUGABLE_CHAT_TEST_EPS        = '[{"name":"CPUExecutionProvider","isRegistered":true}]'
         PLUGABLE_CHAT_TEST_NVIDIA_SMI = "572.16"
     }
     if ($LateAfterSecs) {
-        $vars.PLUGABLE_CHAT_TEST_ADAPTERS_LATE = (ConvertTo-Json -InputObject $scan -Compress -Depth 5)
+        $vars.PLUGABLE_CHAT_TEST_ADAPTERS_LATE = $scan
         $vars.PLUGABLE_CHAT_TEST_ADAPTERS_LATE_AFTER_SECS = $LateAfterSecs
-        $vars.PLUGABLE_CHAT_TEST_ADAPTERS = (ConvertTo-Json -InputObject @{ adapters = @(); thunderboltDevices = @() } -Compress -Depth 5)
+        $vars.PLUGABLE_CHAT_TEST_ADAPTERS = '{"adapters":[],"thunderboltDevices":[]}'
     }
-    else { $vars.PLUGABLE_CHAT_TEST_ADAPTERS = (ConvertTo-Json -InputObject $scan -Compress -Depth 5) }
+    else { $vars.PLUGABLE_CHAT_TEST_ADAPTERS = $scan }
     if ($EpsAfterRetry) { $vars.PLUGABLE_CHAT_TEST_EPS_AFTER_RETRY = $EpsAfterRetry }
     return $vars
 }
@@ -519,7 +520,7 @@ Register "egpu-thunderbolt-hint" "Pat: TBT5-AI (R2)" @("cpu") "NVIDIA adapter pl
 Register "egpu-late-arrival" "Pat: eGPU enumerated late (R2, R4)" @("cpu") "no GPU at launch, an NVIDIA adapter appears later: the app notices, retries GPU setup by itself, and the assessment changes" {
     param($ctx)
     $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
-    $withCuda = ConvertTo-Json -InputObject @(@{ name = "CPUExecutionProvider"; isRegistered = $true }, @{ name = "CUDAExecutionProvider"; isRegistered = $true }) -Compress -Depth 5
+    $withCuda = '[{"name":"CPUExecutionProvider","isRegistered":true},{"name":"CUDAExecutionProvider","isRegistered":true}]'
     $seams = New-GpuSeams -Nvidia -LateAfterSecs "20" -EpsAfterRetry $withCuda
     # Not --smoke: the watcher polls every 30 s, so the app has to stay up past the first poll.
     $run = Invoke-Smoke $ctx -NoSmoke -EnvVars $seams -TimeoutSec 600 -KillWhen {
@@ -570,7 +571,7 @@ Register "version-visible" "Bob: no version in the title; Pat: same filename (R1
     Start-Process $Exe -ArgumentList "--version" -Wait -RedirectStandardOutput $out -RedirectStandardError "$out.err" -WindowStyle Hidden | Out-Null
     $text = if (Test-Path -LiteralPath $out) { Get-Content -LiteralPath $out -Raw } else { "" }
     $name = [IO.Path]::GetFileName($Installer)
-    $tag = if ($name -match "_(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)_") { "v$($Matches[1])" } else { "" }
+    $tag = if ($name -match "_0\.0\.0_") { "" } elseif ($name -match "_(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)_") { "v$($Matches[1])" } else { "" }
     # An unsigned CI build has no release tag (its installer is numbered 0.0.0) and calls itself "dev".
     $expectDev = $name -match "_0\.0\.0_"
     if ($expectDev) { if ($text -notmatch "\bdev\b") { $f += "--version printed no 'dev' label for an untagged build: '$($text.Trim())'" } }

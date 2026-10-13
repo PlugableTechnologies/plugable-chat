@@ -40,12 +40,34 @@ impl Adapter {
     }
 }
 
+/// Accept `null` (an empty list from PowerShell 5.1) and a bare value (a one-element list) as well
+/// as a list, so a hand-staged or script-built JSON never fails on how PowerShell wrote it.
+fn lenient_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany<T> {
+        Many(Vec<T>),
+        One(T),
+        Null(()),
+    }
+    Ok(match OneOrMany::<T>::deserialize(d)? {
+        OneOrMany::Many(v) => v,
+        OneOrMany::One(x) => vec![x],
+        OneOrMany::Null(()) => Vec::new(),
+    })
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdapterScan {
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub adapters: Vec<Adapter>,
     /// Names of Thunderbolt controllers/devices Windows lists; context for an external GPU box.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub thunderbolt_devices: Vec<String>,
     /// Set when the scan itself failed, so "found nothing" is never confused with "could not look".
     #[serde(default)]
@@ -473,6 +495,15 @@ mod tests {
     #[test]
     fn nothing_observed_yet_is_checking_not_no_gpu() {
         assert_eq!(run(None, None, None, None).state, GpuStateKind::Checking);
+    }
+
+    #[test]
+    fn staged_scan_json_tolerates_powershell_5_1_list_quirks() {
+        let s: AdapterScan = serde_json::from_str(r#"{"adapters":null,"thunderboltDevices":"Intel(R) Thunderbolt(TM) Controller"}"#).unwrap();
+        assert!(s.adapters.is_empty());
+        assert_eq!(s.thunderbolt_devices, vec!["Intel(R) Thunderbolt(TM) Controller"]);
+        let s: AdapterScan = serde_json::from_str(r#"{"adapters":{"name":"NVIDIA RTX","vendor":"NVIDIA"},"thunderboltDevices":[]}"#).unwrap();
+        assert_eq!(s.adapters.len(), 1);
     }
 
     #[test]
