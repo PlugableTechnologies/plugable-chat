@@ -42,6 +42,10 @@ pub fn registration_seam() -> Option<Result<StagedRegistration, String>> {
         .map(|json| serde_json::from_str(&json).map_err(|e| format!("{TEST_REGISTRATION_ENV} is not valid: {e}")))
 }
 
+/// Longest any host probe (PowerShell, nvidia-smi) may take before the report goes on without it.
+/// A cold PowerShell with CIM takes a few seconds on a busy machine; a minute means it is stuck.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
 static RETRY_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Called when the user (or the hardware watcher) asks for another GPU setup attempt.
@@ -139,17 +143,19 @@ pub fn scan_adapters() -> AdapterScan {
 
 #[cfg(windows)]
 fn scan_adapters_os() -> AdapterScan {
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", SCAN_SCRIPT])
-        .hide_console_window()
-        .output();
+    let out = crate::process_utils::output_with_timeout(
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", SCAN_SCRIPT])
+            .hide_console_window(),
+        PROBE_TIMEOUT,
+    );
     match out {
         Ok(o) if o.status.success() => parse_scan_json(&String::from_utf8_lossy(&o.stdout)),
         Ok(o) => AdapterScan {
             error: Some(format!("PowerShell exited with {}: {}", o.status.code().map(|c| c.to_string()).unwrap_or_else(|| "no code".into()), String::from_utf8_lossy(&o.stderr).trim().chars().take(300).collect::<String>())),
             ..Default::default()
         },
-        Err(e) => AdapterScan { error: Some(format!("could not start PowerShell: {e}")), ..Default::default() },
+        Err(e) => AdapterScan { error: Some(format!("PowerShell adapter scan failed: {e}")), ..Default::default() },
     }
 }
 
@@ -255,7 +261,10 @@ pub fn probe_nvidia_smi() -> (Option<String>, String) {
         let version = crate::gpu_diagnostics::parse_nvidia_smi_driver(&v);
         return (version.clone(), format!("test override: {}", version.as_deref().unwrap_or("no driver")));
     }
-    match std::process::Command::new("nvidia-smi").args(["--query-gpu=name,driver_version", "--format=csv,noheader"]).hide_console_window().output() {
+    match crate::process_utils::output_with_timeout(
+        std::process::Command::new("nvidia-smi").args(["--query-gpu=name,driver_version", "--format=csv,noheader"]).hide_console_window(),
+        PROBE_TIMEOUT,
+    ) {
         Ok(o) if o.status.success() => {
             let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
             // "NVIDIA GeForce RTX 4090, 572.16" -> take the last field of the first line.
@@ -291,7 +300,11 @@ fn free_disk_mb(dir: &std::path::Path) -> Option<u64> {
     // `dir` may not exist yet; ask about the drive instead.
     let drive = dir.components().next()?.as_os_str().to_string_lossy().trim_end_matches('\\').to_string();
     let script = format!("(Get-PSDrive -Name '{}' ).Free", drive.trim_end_matches(':'));
-    let out = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).hide_console_window().output().ok()?;
+    let out = crate::process_utils::output_with_timeout(
+        std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).hide_console_window(),
+        PROBE_TIMEOUT,
+    )
+    .ok()?;
     String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok().map(|b| b / (1024 * 1024))
 }
 
@@ -307,7 +320,10 @@ fn folder_facts(path: std::path::PathBuf) -> FolderFacts {
 #[cfg(windows)]
 fn ram_and_os() -> (Option<u64>, String) {
     let script = "$o=Get-CimInstance Win32_OperatingSystem; $c=Get-CimInstance Win32_ComputerSystem; \"$($o.Caption) build $($o.BuildNumber)|$([math]::Round($c.TotalPhysicalMemory/1MB))\"";
-    let out = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]).hide_console_window().output();
+    let out = crate::process_utils::output_with_timeout(
+        std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]).hide_console_window(),
+        PROBE_TIMEOUT,
+    );
     match out {
         Ok(o) => {
             let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -489,7 +505,9 @@ pub fn build_report_blocking() -> PreflightReport {
 
 fn write_report(report: &PreflightReport) {
     let dir = crate::app_log::log_dir();
-    let path = dir.join(format!("preflight-{}.json", report.generated_unix));
+    // Milliseconds, so the two start-up reports that land in the same second cannot overwrite each other.
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let path = dir.join(format!("preflight-{millis}.json"));
     let result = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, serde_json::to_string_pretty(report).unwrap_or_default()));
     match result {
         Ok(()) => {

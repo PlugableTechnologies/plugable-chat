@@ -266,6 +266,11 @@ pub fn assess(i: &AssessInputs) -> GpuAssessment {
     if i.registering {
         return done(GpuStateKind::Checking, "Setting up GPU acceleration...", vec![], false, detail);
     }
+    // Windows has not answered yet. Registration can finish before the adapter scan does, and
+    // "never looked" was reported as "no GPU" on an NVIDIA machine.
+    if i.scan.is_none() {
+        return done(GpuStateKind::Checking, "Checking GPU acceleration...", vec![], false, detail);
+    }
 
     let hardware: Vec<&Adapter> = i.scan.map(|s| s.real_gpus()).unwrap_or_default();
     let nvidia: Vec<&Adapter> = i.scan.map(|s| s.nvidia()).unwrap_or_default();
@@ -450,6 +455,13 @@ mod tests {
         assert_eq!(assess(&inputs).state, GpuStateKind::Checking);
         inputs.registering = false;
         assert_eq!(assess(&inputs).state, GpuStateKind::HardwareNotUsed);
+    }
+
+    #[test]
+    fn r15_an_unfinished_adapter_scan_is_never_no_hardware() {
+        let eps: EpDiscovery = Ok(vec![ep("CPUExecutionProvider", true)]);
+        let a = assess(&AssessInputs { scan: None, eps: Some(&eps), catalog: None, driver_version: None, vcpp_installed: None, failures: &[], registering: false });
+        assert_eq!(a.state, GpuStateKind::Checking, "{}", a.headline);
     }
 
     #[test]
