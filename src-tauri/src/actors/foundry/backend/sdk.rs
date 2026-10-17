@@ -71,6 +71,20 @@ fn get_or_create_manager(
     if let Some(dir) = library_dir {
         config = config.library_path(dir.to_string_lossy().to_string());
     }
+    // The engine's own log is the only record of why it skipped a provider; left at the SDK
+    // default it went somewhere support never sees. It is attached to "Copy details for support".
+    if !cfg!(test) {
+        config = config
+            .logs_dir(crate::app_log::engine_log_dir().to_string_lossy().to_string())
+            .log_level(foundry_local_sdk::LogLevel::Info);
+    }
+    // SDK v2 bootstraps the Windows App SDK for unpackaged apps by default; 1.2.x does not, and
+    // without it the Windows ML provider catalog can come back empty. Opt-in until a real eGPU
+    // machine shows whether 1.2.3's core honours it.
+    if std::env::var("PLUGABLE_FOUNDRY_WINML_BOOTSTRAP").map(|v| v.trim() == "1").unwrap_or(false) {
+        crate::app_log::log("gpu", "Windows App SDK bootstrap requested (PLUGABLE_FOUNDRY_WINML_BOOTSTRAP=1)");
+        config = config.additional_setting("Bootstrap", "true");
+    }
     let manager = FoundryLocalManager::create(config).map_err(|e| format!("SDK create failed: {e}"))?;
     let _ = MANAGER.set(manager);
     Ok(*MANAGER.get().expect("manager just set"))
@@ -211,6 +225,64 @@ pub struct EpRegistrationSummary {
     pub seconds: f64,
 }
 
+/// Provider names to ask the engine for, each once, in the order it listed them.
+///
+/// On a machine with two adapters (Pat: Intel Iris Xe plus an RTX 5080 over Thunderbolt) the
+/// engine lists some providers twice. Passing the duplicates back is the one input that differed
+/// from the single-GPU A10G where registration works.
+pub fn unique_missing(eps: &[crate::gpu_assessment::EpObservation]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for e in eps.iter().filter(|e| !e.is_registered) {
+        if !names.contains(&e.name) {
+            names.push(e.name.clone());
+        }
+    }
+    names
+}
+
+/// Turn the engine's answer into what we record. `(registered, failed, failures)`.
+///
+/// The engine can return `success: false` with nothing registered and nothing failed. That used to
+/// count as "nothing to report": no failure, no retry, no log line, and the card blamed the
+/// hardware. Every provider we asked for is accounted for now.
+pub fn interpret_registration(
+    requested: &[String],
+    success: bool,
+    status: &str,
+    registered: Vec<String>,
+    failed: Vec<String>,
+    cancelled: bool,
+    elapsed_ms: u128,
+) -> (Vec<String>, Vec<String>, Vec<crate::gpu_diagnostics::EpFailure>) {
+    let detail = if status.trim().is_empty() {
+        "registration failed (no detail from the runtime)".to_string()
+    } else {
+        status.trim().to_string()
+    };
+    let mut failures: Vec<crate::gpu_diagnostics::EpFailure> =
+        failed.iter().map(|ep| ep_failure(ep, &detail, cancelled)).collect();
+    let mut failed = failed;
+    let unaccounted: Vec<&String> = requested
+        .iter()
+        .filter(|ep| !registered.contains(ep) && !failed.contains(ep))
+        .collect();
+    if !unaccounted.is_empty() && !cancelled && (!success || registered.is_empty()) {
+        let message = format!(
+            "the engine returned after {elapsed_ms} ms without registering or rejecting it (success: {success}, status: {})",
+            if status.trim().is_empty() { "empty" } else { status.trim() }
+        );
+        for ep in unaccounted {
+            failures.push(crate::gpu_diagnostics::EpFailure {
+                ep: ep.clone(),
+                kind: crate::gpu_diagnostics::EpFailureKind::EngineDeclined,
+                message: message.clone(),
+            });
+            failed.push(ep.clone());
+        }
+    }
+    (registered, failed, failures)
+}
+
 /// A cancel request means the user stopped it, whatever text the runtime returned.
 fn ep_failure(ep: &str, message: &str, cancelled: bool) -> crate::gpu_diagnostics::EpFailure {
     let mut failure = crate::gpu_diagnostics::make_failure(ep, message);
@@ -262,7 +334,7 @@ impl SdkBackend {
         let eps = match self.observed_eps() {
             Ok(eps) => eps,
             Err(e) => {
-                println!("[SdkBackend] discover_eps failed: {e}");
+                crate::app_log::log("gpu", &format!("provider discovery failed: {e}"));
                 // Without discovery there is no provider name to blame, so the failure is
                 // recorded against the step itself; the UI still shows the cause and a retry.
                 summary
@@ -277,22 +349,18 @@ impl SdkBackend {
             .filter(|e| e.is_registered)
             .map(|e| e.name.clone())
             .collect();
-        let missing: Vec<String> = eps
-            .iter()
-            .filter(|e| !e.is_registered)
-            .map(|e| e.name.clone())
-            .collect();
+        let missing = unique_missing(&eps);
         if missing.is_empty() {
             return summary;
         }
         // Unattended tests stage the engine's answer; downloading real packages for names that
         // were invented by the test would only fail and hide what the test is checking.
         if crate::preflight::eps_seam_active() {
-            println!("[SdkBackend] test provider list in use: not registering {missing:?}");
+            crate::app_log::log("gpu", &format!("test provider list in use: not registering {missing:?}"));
             return summary;
         }
 
-        println!("[SdkBackend] registering execution providers: {missing:?}");
+        crate::app_log::log("gpu", &format!("registering providers: {}", missing.join(", ")));
 
         // Remember the latest (provider, percent) so the heartbeat below can say where a long
         // wait is stuck, and tell the UI right away instead of after the first percent tick.
@@ -326,34 +394,45 @@ impl SdkBackend {
                         .lock()
                         .map(|latest| latest.clone())
                         .unwrap_or_default();
-                    println!(
-                        "[SdkBackend] still registering execution providers after {}s (latest: {} {:.0}%, cancel requested: {})",
+                    crate::app_log::log("gpu", &format!(
+                        "still registering providers after {}s (latest: {} {:.0}%, cancel requested: {})",
                         started.elapsed().as_secs(),
                         ep,
                         percent,
                         cancel.load(Ordering::SeqCst)
-                    );
+                    ));
                 }
             }
         };
         summary.cancelled = cancel.load(Ordering::SeqCst);
         match result {
             Ok(r) => {
-                summary.registered = r.registered_eps;
-                summary.failed = r.failed_eps;
-                let detail = if r.status.trim().is_empty() {
-                    "registration failed (no detail from the runtime)".to_string()
-                } else {
-                    r.status
-                };
-                summary.failures = summary
-                    .failed
-                    .iter()
-                    .map(|ep| ep_failure(ep, &detail, summary.cancelled))
-                    .collect();
+                crate::app_log::log(
+                    "gpu",
+                    &format!(
+                        "engine answered after {} ms: success={}, status={:?}, registered=[{}], failed=[{}]",
+                        started.elapsed().as_millis(),
+                        r.success,
+                        r.status,
+                        r.registered_eps.join(", "),
+                        r.failed_eps.join(", ")
+                    ),
+                );
+                let (registered, failed, failures) = interpret_registration(
+                    &missing,
+                    r.success,
+                    &r.status,
+                    r.registered_eps,
+                    r.failed_eps,
+                    summary.cancelled,
+                    started.elapsed().as_millis(),
+                );
+                summary.registered = registered;
+                summary.failed = failed;
+                summary.failures = failures;
             }
             Err(e) => {
-                println!("[SdkBackend] execution provider registration failed: {e}");
+                crate::app_log::log("gpu", &format!("provider registration failed: {e}"));
                 let detail = e.to_string();
                 summary.failures = missing
                     .iter()
@@ -363,7 +442,18 @@ impl SdkBackend {
             }
         }
         summary.seconds = started.elapsed().as_secs_f64();
-        println!("[SdkBackend] execution providers: {summary:?}");
+        // Ask again so "registered nothing" is observed, not inferred from the result object.
+        let _ = self.observed_eps();
+        crate::app_log::log(
+            "gpu",
+            &format!(
+                "registration done in {:.1}s: registered=[{}], failed=[{}]{}",
+                summary.seconds,
+                summary.registered.join(", "),
+                summary.failures.iter().map(|f| format!("{} ({:?})", f.ep, f.kind)).collect::<Vec<_>>().join(", "),
+                if summary.cancelled { ", cancelled" } else { "" }
+            ),
+        );
         summary
     }
 }
@@ -464,7 +554,7 @@ impl FoundryBackend for SdkBackend {
             .unwrap_or(false);
         let listed = match self.manager.catalog().get_models().await {
             Ok(models) => {
-                let gpu = models
+                let gpu_models: Vec<String> = models
                     .iter()
                     .filter(|m| {
                         m.info()
@@ -473,7 +563,17 @@ impl FoundryBackend for SdkBackend {
                             .map(|r| device_type_str(&r.device_type) == "GPU")
                             .unwrap_or_else(|| infer_device_type_from_id(&m.info().id) == "GPU")
                     })
-                    .count();
+                    .map(|m| {
+                        let ep = m.info().runtime.as_ref().map(|r| r.execution_provider.clone()).unwrap_or_default();
+                        format!("{} ({ep})", m.info().id)
+                    })
+                    .collect();
+                let gpu = gpu_models.len();
+                // With no accelerator registered a GPU variant still showed up on Pat's machine;
+                // which one, and for which provider, says what the engine thinks it can run.
+                if (1..=5).contains(&gpu) {
+                    crate::app_log::log("gpu", &format!("GPU models listed: {}", gpu_models.join(", ")));
+                }
                 crate::preflight::record_catalog(&Ok(crate::gpu_assessment::CatalogCounts { gpu, cpu: models.len() - gpu }));
                 Ok(models)
             }
@@ -827,6 +927,90 @@ fn map_messages(messages: &[ChatMessage]) -> Vec<ChatCompletionRequestMessage> {
 
 #[cfg(test)]
 mod tests {
+    use crate::gpu_diagnostics::EpFailureKind;
+
+    fn obs(name: &str, reg: bool) -> crate::gpu_assessment::EpObservation {
+        crate::gpu_assessment::EpObservation { name: name.into(), is_registered: reg }
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // R17 (Pat, rc12): two adapters made the engine list providers twice; each is asked for once.
+    #[test]
+    fn r17_duplicate_provider_names_are_requested_once_in_order() {
+        let eps = vec![
+            obs("CUDAExecutionProvider", false),
+            obs("WebGpuExecutionProvider", false),
+            obs("OpenVINOExecutionProvider", false),
+            obs("WebGpuExecutionProvider", false),
+            obs("CPUExecutionProvider", true),
+            obs("OpenVINOExecutionProvider", false),
+        ];
+        assert_eq!(
+            super::unique_missing(&eps),
+            names(&["CUDAExecutionProvider", "WebGpuExecutionProvider", "OpenVINOExecutionProvider"])
+        );
+    }
+
+    // R18 (Pat, rc12): `success: false` with empty lists used to record nothing at all.
+    #[test]
+    fn r18_an_empty_refusal_is_an_engine_declined_failure_for_every_provider() {
+        let asked = names(&["CUDAExecutionProvider", "WebGpuExecutionProvider"]);
+        let (registered, failed, failures) =
+            super::interpret_registration(&asked, false, "", vec![], vec![], false, 9);
+        assert!(registered.is_empty());
+        assert_eq!(failed, asked);
+        assert_eq!(failures.len(), 2);
+        assert!(failures.iter().all(|f| f.kind == EpFailureKind::EngineDeclined));
+        assert!(failures[0].message.contains("9 ms") && failures[0].message.contains("success: false"));
+        assert!(!crate::actors::foundry::gpu_registration::should_retry(&super::EpRegistrationSummary {
+            failures,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn a_partial_success_does_not_blame_the_engine_for_the_rest() {
+        let asked = names(&["CUDAExecutionProvider", "OpenVINOExecutionProvider"]);
+        let (registered, failed, failures) = super::interpret_registration(
+            &asked,
+            true,
+            "ok",
+            names(&["CUDAExecutionProvider"]),
+            vec![],
+            false,
+            40_000,
+        );
+        assert_eq!(registered, names(&["CUDAExecutionProvider"]));
+        assert!(failed.is_empty() && failures.is_empty());
+    }
+
+    #[test]
+    fn named_failures_keep_their_classified_reason() {
+        let asked = names(&["CUDAExecutionProvider"]);
+        let (_, failed, failures) = super::interpret_registration(
+            &asked,
+            false,
+            "HTTP 503",
+            vec![],
+            names(&["CUDAExecutionProvider"]),
+            false,
+            1200,
+        );
+        assert_eq!(failed, asked);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].kind, EpFailureKind::Network);
+    }
+
+    #[test]
+    fn a_cancel_is_not_reported_as_the_engine_declining() {
+        let asked = names(&["CUDAExecutionProvider"]);
+        let (_, failed, failures) = super::interpret_registration(&asked, false, "", vec![], vec![], true, 5);
+        assert!(failed.is_empty() && failures.is_empty());
+    }
+
     #[test]
     fn webgpu_warning_only_when_webgpu_is_the_only_gpu_ep() {
         use super::webgpu_is_only_gpu_ep as f;

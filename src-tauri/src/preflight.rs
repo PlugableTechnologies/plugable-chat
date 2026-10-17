@@ -301,6 +301,14 @@ fn ram_and_os() -> (Option<u64>, String) {
     (None, format!("{} {}", std::env::consts::OS, std::env::consts::ARCH))
 }
 
+static ENGINE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// The folder the bundled engine was loaded from. The executable's own folder never holds these
+/// libraries, so checking it always said "none" and told support nothing.
+pub fn set_engine_dir(dir: &std::path::Path) {
+    let _ = ENGINE_DIR.set(dir.to_path_buf());
+}
+
 /// Native libraries next to the engine that GPU providers load. Presence only: a file that is
 /// there can still fail to load, and the engine's own error says so.
 pub fn find_provider_dlls(dir: &std::path::Path) -> Vec<String> {
@@ -333,6 +341,7 @@ pub struct PreflightReport {
     pub nvidia_smi: String,
     pub vcpp_installed: Option<bool>,
     pub provider_dlls: Vec<String>,
+    pub engine_dir: String,
     pub engine_providers: Option<EpDiscovery>,
     pub catalog: Option<Result<CatalogCounts, String>>,
     pub assessment: GpuAssessment,
@@ -389,6 +398,16 @@ fn announce(a: &GpuAssessment) {
     }
 }
 
+static REGISTERING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Provider registration started or finished; re-announces so the card leaves "Setting up" at once.
+pub fn set_registering(running: bool) {
+    REGISTERING.store(running, std::sync::atomic::Ordering::SeqCst);
+    if !running {
+        let _ = assessment_now();
+    }
+}
+
 pub fn assessment_now() -> GpuAssessment {
     let diag = crate::gpu_diagnostics::snapshot_without_probe();
     let failures: Vec<(String, String, String)> = diag
@@ -405,6 +424,7 @@ pub fn assessment_now() -> GpuAssessment {
             driver_version: driver.as_deref(),
             vcpp_installed: o.vcpp,
             failures: &failures,
+            registering: REGISTERING.load(std::sync::atomic::Ordering::SeqCst),
         })
     });
     announce(&a);
@@ -420,7 +440,10 @@ pub fn adapter_fingerprint() -> Option<Vec<String>> {
 pub fn build_report_blocking() -> PreflightReport {
     let assessment = refresh_blocking();
     let (ram_mb, os) = ram_and_os();
-    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let engine_dir = ENGINE_DIR
+        .get()
+        .cloned()
+        .or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())));
     let report = with_observed(|o| PreflightReport {
         version: crate::version_info::VersionInfo::current(),
         os,
@@ -430,7 +453,8 @@ pub fn build_report_blocking() -> PreflightReport {
         adapters: o.scan.clone().unwrap_or_default(),
         nvidia_smi: o.nvidia_smi.as_ref().map(|(_, d)| d.clone()).unwrap_or_default(),
         vcpp_installed: o.vcpp,
-        provider_dlls: exe_dir.map(|d| find_provider_dlls(&d)).unwrap_or_default(),
+        provider_dlls: engine_dir.as_deref().map(find_provider_dlls).unwrap_or_default(),
+        engine_dir: engine_dir.map(|d| d.display().to_string()).unwrap_or_default(),
         engine_providers: o.eps.clone(),
         catalog: o.catalog.clone(),
         assessment,
@@ -481,7 +505,11 @@ pub fn format_report(r: &PreflightReport) -> String {
     out.extend(r.assessment.hints.iter().map(|h| format!("  Try: {h}")));
     out.push(format!("nvidia-smi: {}", r.nvidia_smi));
     out.push(format!("Visual C++ runtime: {}", match r.vcpp_installed { Some(true) => "installed", Some(false) => "NOT FOUND", None => "not checked" }));
-    out.push(format!("Provider libraries next to the app: {}", if r.provider_dlls.is_empty() { "none".to_string() } else { r.provider_dlls.join(", ") }));
+    out.push(format!(
+        "Engine libraries in {}: {}",
+        if r.engine_dir.is_empty() { "(unknown folder)" } else { r.engine_dir.as_str() },
+        if r.provider_dlls.is_empty() { "none".to_string() } else { r.provider_dlls.join(", ") }
+    ));
     out.join("\n")
 }
 

@@ -189,12 +189,16 @@ impl ModelGatewayActor {
                         let b = std::sync::Arc::new(b);
                         super::gpu_registration::remember_sdk(&b);
                         match &library_dir {
-                            Some(d) => println!(
-                                "[FoundryActor] Backend: foundry-local-sdk 1.2.0 (bundled runtime @ {})",
-                                d.display()
-                            ),
+                            Some(d) => {
+                                crate::preflight::set_engine_dir(d);
+                                crate::app_log::log(
+                                    "gpu",
+                                    &format!("engine: foundry-local {} (bundled runtime @ {})", super::backend::sdk::FOUNDRY_SDK_VERSION_KEY, d.display()),
+                                );
+                            }
                             None => println!(
-                                "[FoundryActor] Backend: foundry-local-sdk 1.2.0 (dev runtime from OUT_DIR)"
+                                "[FoundryActor] Backend: foundry-local {} (dev runtime from OUT_DIR)",
+                                super::backend::sdk::FOUNDRY_SDK_VERSION_KEY
                             ),
                         }
                         (Some(b), None)

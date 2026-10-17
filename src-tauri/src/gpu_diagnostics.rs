@@ -22,6 +22,10 @@ pub enum EpFailureKind {
     Cancelled,
     /// The hardware or OS cannot run this provider.
     Unsupported,
+    /// The engine returned at once without registering or rejecting anything. On Pat's eGPU it
+    /// did this in 9 ms while the `foundry` CLI on the same machine needed 30-45 s and worked, so
+    /// it is the engine's decision, not the network's; retrying the same call gives the same answer.
+    EngineDeclined,
     Unknown,
 }
 

@@ -61,6 +61,16 @@ pub async fn get_support_bundle(extra: Option<String>) -> Result<String, String>
             text.push_str("\n\nRecent log:\n");
             text.push_str(&tail.join("\n"));
         }
+        // The engine's reason for skipping a provider is only in its own log.
+        let engine_dir = crate::app_log::engine_log_dir();
+        match crate::app_log::engine_log_excerpt_in(&engine_dir, 40) {
+            Some((path, lines)) => {
+                text.push_str(&format!("\n\nModel engine log ({}):\n", path.display()));
+                text.push_str(if lines.is_empty() { "(no provider or error lines)" } else { "" });
+                text.push_str(&lines.join("\n"));
+            }
+            None => text.push_str(&format!("\n\nModel engine log: nothing written in {}", engine_dir.display())),
+        }
         text
     })
     .await

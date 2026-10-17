@@ -6,7 +6,7 @@ export interface GpuDiagnostics {
     vcpp_installed?: boolean;
 }
 
-export type GpuFailureKind = 'network' | 'driver' | 'missing_dll' | 'cancelled' | 'unsupported' | 'unknown';
+export type GpuFailureKind = 'network' | 'driver' | 'missing_dll' | 'cancelled' | 'unsupported' | 'engine_declined' | 'unknown';
 
 const KIND_TEXT: Record<GpuFailureKind, string> = {
     network: 'The GPU components could not be downloaded. Check the internet connection (or proxy) and retry.',
@@ -14,6 +14,7 @@ const KIND_TEXT: Record<GpuFailureKind, string> = {
     missing_dll: 'A required system library is missing (usually the Microsoft Visual C++ runtime). Install it, then retry.',
     cancelled: 'GPU setup was cancelled. Retry to download the GPU components.',
     unsupported: 'This GPU is not supported by the available acceleration providers.',
+    engine_declined: 'The model engine returned without setting up this GPU and gave no reason. Copy the details for support.',
     unknown: 'GPU setup failed for an unrecognised reason.',
 };
 

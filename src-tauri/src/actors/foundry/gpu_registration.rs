@@ -71,6 +71,7 @@ pub fn kind_label(kind: EpFailureKind) -> &'static str {
         EpFailureKind::MissingDll => "a required library is missing",
         EpFailureKind::Cancelled => "cancelled",
         EpFailureKind::Unsupported => "not supported by this hardware",
+        EpFailureKind::EngineDeclined => "the model engine did not try to set it up",
         EpFailureKind::Unknown => "unknown error",
     }
 }
@@ -80,6 +81,7 @@ pub async fn run_registration(sdk: &Arc<SdkBackend>, app: &AppHandle, attempt: u
     let cancel = super::ep_registration_cancel_flag();
     cancel.store(false, Ordering::SeqCst);
     test_state::record(Phase::EpRegistration, test_state::status::STARTED, &format!("attempt {attempt}"));
+    crate::preflight::set_registering(true);
 
     let progress_handle = app.clone();
     let summary = sdk
@@ -97,6 +99,7 @@ pub async fn run_registration(sdk: &Arc<SdkBackend>, app: &AppHandle, attempt: u
     let mut all_registered = summary.already_registered.clone();
     all_registered.extend(summary.registered.iter().cloned());
     gpu_diagnostics::record_attempt(&all_registered, &summary.failures);
+    crate::preflight::set_registering(false);
 
     let message = done_message(&summary);
     let _ = app.emit(

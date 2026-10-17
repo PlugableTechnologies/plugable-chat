@@ -152,6 +152,9 @@ pub struct AssessInputs<'a> {
     pub vcpp_installed: Option<bool>,
     /// Classified registration failures from `gpu_diagnostics`: `(provider, kind label, message)`.
     pub failures: &'a [(String, String, String)],
+    /// Provider registration is still running. The preflight report runs beside it, so without
+    /// this the card said "not using it" seconds into a download that takes 30 s or more.
+    pub registering: bool,
 }
 
 fn describe_adapters(scan: &AdapterScan) -> String {
@@ -257,6 +260,10 @@ pub fn assess(i: &AssessInputs) -> GpuAssessment {
         };
     }
 
+    if i.registering {
+        return done(GpuStateKind::Checking, "Setting up GPU acceleration...", vec![], false, detail);
+    }
+
     let hardware: Vec<&Adapter> = i.scan.map(|s| s.real_gpus()).unwrap_or_default();
     let nvidia: Vec<&Adapter> = i.scan.map(|s| s.nvidia()).unwrap_or_default();
     let thunderbolt = i.scan.map(|s| !s.thunderbolt_devices.is_empty()).unwrap_or(false);
@@ -294,6 +301,9 @@ pub fn assess(i: &AssessInputs) -> GpuAssessment {
         }
         if thunderbolt && !nvidia.is_empty() {
             hints.push("For an external GPU, check the Thunderbolt cable and approve the device if Windows asks, then choose Retry GPU setup.");
+        }
+        if i.failures.iter().any(|(_, k, _)| k == "the model engine did not try to set it up") {
+            hints.push("The model engine skipped GPU setup without giving a reason. Copy the details for support: they include the engine's own log.");
         }
         if i.failures.iter().any(|(_, k, _)| k == "network problem") {
             hints.push("Check your internet connection or proxy: GPU components could not be downloaded.");
@@ -351,7 +361,7 @@ mod tests {
         catalog: Option<&Result<CatalogCounts, String>>,
         driver: Option<&str>,
     ) -> GpuAssessment {
-        assess(&AssessInputs { scan, eps, catalog, driver_version: driver, vcpp_installed: Some(true), failures: &[] })
+        assess(&AssessInputs { scan, eps, catalog, driver_version: driver, vcpp_installed: Some(true), failures: &[], registering: false })
     }
 
     // R1 (Pat): NVIDIA card, driver installed, engine reports only CPU, so a CPU model loads.
@@ -410,7 +420,7 @@ mod tests {
         let s = scan(vec![nv("NVIDIA RTX 4090")]);
         let eps: EpDiscovery = Ok(vec![ep("CPUExecutionProvider", true)]);
         let cat: Result<CatalogCounts, String> = Ok(CatalogCounts { gpu: 0, cpu: 5 });
-        let a = assess(&AssessInputs { scan: Some(&s), eps: Some(&eps), catalog: Some(&cat), driver_version: Some("572.16"), vcpp_installed: Some(false), failures: &[] });
+        let a = assess(&AssessInputs { scan: Some(&s), eps: Some(&eps), catalog: Some(&cat), driver_version: Some("572.16"), vcpp_installed: Some(false), failures: &[], registering: false });
         assert!(a.hints.iter().any(|h| h.contains("Visual C++")));
         assert!(a.detail.join("\n").contains("Visual C++ runtime was not found"));
     }
@@ -421,9 +431,37 @@ mod tests {
         let eps: EpDiscovery = Ok(vec![ep("CPUExecutionProvider", true), ep("CUDAExecutionProvider", false)]);
         let cat: Result<CatalogCounts, String> = Ok(CatalogCounts { gpu: 0, cpu: 5 });
         let f = vec![("CUDAExecutionProvider".to_string(), "network problem".to_string(), "HTTP 503".to_string())];
-        let a = assess(&AssessInputs { scan: Some(&s), eps: Some(&eps), catalog: Some(&cat), driver_version: Some("572.16"), vcpp_installed: Some(true), failures: &f });
+        let a = assess(&AssessInputs { scan: Some(&s), eps: Some(&eps), catalog: Some(&cat), driver_version: Some("572.16"), vcpp_installed: Some(true), failures: &f, registering: false });
         assert!(a.hints.iter().any(|h| h.contains("internet connection or proxy")));
         assert!(a.detail.join("\n").contains("HTTP 503"));
+    }
+
+    // R15 (Pat, rc12): the report ran beside a registration that was still starting, and the card
+    // said "not using it" within 3 s.
+    #[test]
+    fn r15_no_hardware_verdict_while_providers_are_still_registering() {
+        let s = scan(vec![igpu(), nv("NVIDIA GeForce RTX 5080")]);
+        let eps: EpDiscovery = Ok(vec![ep("CPUExecutionProvider", true), ep("CUDAExecutionProvider", false)]);
+        let cat: Result<CatalogCounts, String> = Ok(CatalogCounts { gpu: 1, cpu: 46 });
+        let mut inputs = AssessInputs { scan: Some(&s), eps: Some(&eps), catalog: Some(&cat), driver_version: Some("617.42"), vcpp_installed: Some(true), failures: &[], registering: true };
+        assert_eq!(assess(&inputs).state, GpuStateKind::Checking);
+        inputs.registering = false;
+        assert_eq!(assess(&inputs).state, GpuStateKind::HardwareNotUsed);
+    }
+
+    #[test]
+    fn r16_an_engine_that_declined_is_named_in_the_hints() {
+        let s = scan(vec![igpu(), nv("NVIDIA GeForce RTX 5080")]);
+        let eps: EpDiscovery = Ok(vec![ep("CUDAExecutionProvider", false)]);
+        let cat: Result<CatalogCounts, String> = Ok(CatalogCounts { gpu: 1, cpu: 46 });
+        let f = vec![(
+            "CUDAExecutionProvider".to_string(),
+            crate::actors::foundry::gpu_registration::kind_label(crate::gpu_diagnostics::EpFailureKind::EngineDeclined).to_string(),
+            "the engine returned after 9 ms".to_string(),
+        )];
+        let a = assess(&AssessInputs { scan: Some(&s), eps: Some(&eps), catalog: Some(&cat), driver_version: Some("617.42"), vcpp_installed: Some(true), failures: &f, registering: false });
+        assert!(a.hints.iter().any(|h| h.contains("engine's own log")), "{:?}", a.hints);
+        assert!(a.detail.join("\n").contains("returned after 9 ms"));
     }
 
     // R5: a catalog read failure must never be presented as "no GPU".

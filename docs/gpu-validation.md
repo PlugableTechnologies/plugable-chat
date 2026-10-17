@@ -112,6 +112,27 @@ Notes for the next run:
 - This release adds unattended-run flags (`--reply-file`, `--prompts-file`, `--chat-home`, `--ephemeral`, `--hidden`) used by test harnesses; none changes the
   installed app's normal behaviour, and the Chicago results above are from the same build.
 
+## rc12 on Pat's TBT5-AI eGPU (2026-10-16)
+
+Framework 13 (Intel Iris Xe) plus an RTX 5080 in a TBT5-AI over Thunderbolt, Windows 11 Home build 26300
+(Insider), driver 617.42. The `foundry` CLI 0.11.0 on the same machine registers CUDA and WebGPU in 30-45 s
+and loads models into VRAM. The app stays on the CPU.
+
+| # | Finding | Status |
+|---|---|---|
+| E1 | `download_and_register_eps` returned within 9 ms (two "engine providers" lines 9 ms apart in the log), registered nothing and named no failure. Not a timeout: the engine never tried. | Open: cause unknown. The next build's support details carry the engine's answer and its own log |
+| E2 | `success:false` with empty lists counted as "nothing to report": no failure, no retry, no log line. | Fixed: every requested provider is accounted for; the rest are `EngineDeclined` |
+| E3 | Registration logged only with `println!`, which a release build discards; Foundry Core's own log went to the SDK default folder. | Fixed: `[gpu]` lines in the app log; Core logs to `logs/foundry/` at Information, and its provider lines are in "Copy details for support" |
+| E4 | With two adapters `discover_eps` lists providers twice, and the duplicates were passed back. The single-GPU A10G never did this. | Fixed: each name is requested once; the raw list is still logged |
+| E5 | The report beside start-up said "not using it" while registration could still be running. | Fixed: the card says "Setting up GPU acceleration..." until registration ends |
+| E6 | "Provider libraries next to the app" checked the exe folder, which never holds them. | Fixed: checks the folder the engine was loaded from |
+
+Causes still to separate, in order: the duplicate names (E4); Windows ML 2.1.1 in Core 1.2.3 on build 26300 or
+with a second adapter, while the CLI uses a newer core; Foundry's CUDA bootstrapper gate on compute capability
+12.0; the Windows App SDK bootstrap (SDK v2 sets `Bootstrap=true` for unpackaged apps; try
+`PLUGABLE_FOUNDRY_WINML_BOOTSTRAP=1`). `PLUGABLE_FOUNDRY_BACKEND=cli_http` uses the system `foundry` service
+instead and is the quickest test of whether the in-process engine is at fault.
+
 ## Lessons: the box
 
 1. **Turn the PowerShell progress bar off** (`$ProgressPreference = "SilentlyContinue"`) before any
