@@ -166,7 +166,10 @@ fn describe_adapters(scan: &AdapterScan) -> String {
         .iter()
         .map(|a| {
             let mut s = a.name.clone();
-            if a.vram_mb > 0 {
+            // Win32_VideoController.AdapterRAM is 32-bit: Pat's 16 GB RTX 5080 read "4095 MB".
+            if a.vram_mb >= 4095 {
+                s.push_str(", 4 GB or more (Windows cannot report more here)");
+            } else if a.vram_mb > 0 {
                 s.push_str(&format!(", {} MB", a.vram_mb));
             }
             if a.problem_code != 0 {
@@ -462,6 +465,15 @@ mod tests {
         let a = assess(&AssessInputs { scan: Some(&s), eps: Some(&eps), catalog: Some(&cat), driver_version: Some("617.42"), vcpp_installed: Some(true), failures: &f, registering: false });
         assert!(a.hints.iter().any(|h| h.contains("engine's own log")), "{:?}", a.hints);
         assert!(a.detail.join("\n").contains("returned after 9 ms"));
+    }
+
+    #[test]
+    fn a_capped_vram_figure_is_not_shown_as_four_gigabytes() {
+        let mut card = nv("NVIDIA GeForce RTX 5080");
+        card.vram_mb = 4095;
+        let text = describe_adapters(&scan(vec![card, igpu()]));
+        assert!(text.contains("4 GB or more") && !text.contains("4095"), "{text}");
+        assert!(text.contains("128 MB"));
     }
 
     // R5: a catalog read failure must never be presented as "no GPU".

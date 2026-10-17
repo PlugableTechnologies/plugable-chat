@@ -50,7 +50,7 @@ jobs:
           # unicode-username, proxy-tls-intercept and no-vcredist always skip on a hosted runner
           # (no interactive second user, no mitmproxy, no redistributable pin), so they only run
           # when named explicitly or on the AWS box.
-          default='["baseline","readonly-nonadmin","offline-hosts-block","proxy-dead","driver-absent","kill-mid-download","low-disk","quarantined-dll","upgrade-over-old","nvidia-present-no-providers","egpu-thunderbolt-hint","egpu-late-arrival","embedding-first-run-contention","version-visible"]'
+          default='["baseline","readonly-nonadmin","offline-hosts-block","proxy-dead","driver-absent","kill-mid-download","low-disk","quarantined-dll","upgrade-over-old","nvidia-present-no-providers","egpu-thunderbolt-hint","egpu-late-arrival","engine-declined","embedding-first-run-contention","version-visible"]'
           if [ -z "$INPUT_SCENARIOS" ] || [ "$INPUT_SCENARIOS" = "cpu" ]; then
             echo "scenarios=$default" >> "$GITHUB_OUTPUT"
           else

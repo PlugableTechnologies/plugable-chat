@@ -356,7 +356,26 @@ impl SdkBackend {
         // Unattended tests stage the engine's answer; downloading real packages for names that
         // were invented by the test would only fail and hide what the test is checking.
         if crate::preflight::eps_seam_active() {
-            crate::app_log::log("gpu", &format!("test provider list in use: not registering {missing:?}"));
+            match crate::preflight::registration_seam() {
+                Some(Ok(staged)) => {
+                    crate::app_log::log("gpu", &format!("test registration answer in use for {missing:?}: {staged:?}"));
+                    let (registered, failed, failures) = interpret_registration(
+                        &missing,
+                        staged.success,
+                        &staged.status,
+                        staged.registered,
+                        staged.failed,
+                        false,
+                        started.elapsed().as_millis(),
+                    );
+                    summary.registered = registered;
+                    summary.failed = failed;
+                    summary.failures = failures;
+                }
+                Some(Err(e)) => summary.failures.push(crate::gpu_diagnostics::make_failure("test seam", &e)),
+                None => crate::app_log::log("gpu", &format!("test provider list in use: not registering {missing:?}")),
+            }
+            summary.seconds = started.elapsed().as_secs_f64();
             return summary;
         }
 

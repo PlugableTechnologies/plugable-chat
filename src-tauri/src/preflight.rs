@@ -23,6 +23,24 @@ pub const TEST_EPS_AFTER_RETRY_ENV: &str = "PLUGABLE_CHAT_TEST_EPS_AFTER_RETRY";
 /// that Windows enumerates late).
 pub const TEST_ADAPTERS_LATE_ENV: &str = "PLUGABLE_CHAT_TEST_ADAPTERS_LATE";
 pub const TEST_ADAPTERS_LATE_AFTER_ENV: &str = "PLUGABLE_CHAT_TEST_ADAPTERS_LATE_AFTER_SECS";
+/// The engine's answer to a registration request, e.g. Pat's empty refusal
+/// `{"success":false,"status":"","registered":[],"failed":[]}`. Only read with a staged provider list.
+pub const TEST_REGISTRATION_ENV: &str = "PLUGABLE_CHAT_TEST_REGISTRATION";
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct StagedRegistration {
+    pub success: bool,
+    pub status: String,
+    pub registered: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// The staged registration answer, or why it could not be read (shown as a failure, never ignored).
+pub fn registration_seam() -> Option<Result<StagedRegistration, String>> {
+    seam(TEST_REGISTRATION_ENV)
+        .map(|json| serde_json::from_str(&json).map_err(|e| format!("{TEST_REGISTRATION_ENV} is not valid: {e}")))
+}
 
 static RETRY_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -98,7 +116,7 @@ pub fn parse_scan_json(text: &str) -> AdapterScan {
 const SCAN_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 $video = @(Get-CimInstance Win32_VideoController | Select-Object Name, AdapterCompatibility, AdapterRAM, PNPDeviceID, Status, ConfigManagerErrorCode)
-$tb = @(Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match 'Thunderbolt' } | ForEach-Object { $_.Name })
+$tb = @(Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match 'Thunderbolt|USB4' } | ForEach-Object { $_.Name })
 [pscustomobject]@{ video = $video; thunderbolt = $tb } | ConvertTo-Json -Depth 4 -Compress
 "#;
 
@@ -167,6 +185,11 @@ fn with_observed<T>(f: impl FnOnce(&mut Observed) -> T) -> T {
 /// Record what `discover_eps` returned. Called from every place the engine is asked, so the raw
 /// answer is never lost to an early return.
 pub fn record_eps(result: &EpDiscovery) {
+    // The engine is asked on every catalog read; repeating an unchanged answer filled Pat's 60-line
+    // support excerpt and pushed out the lines that mattered.
+    if with_observed(|o| o.eps.as_ref() == Some(result)) {
+        return;
+    }
     match result {
         Ok(list) => crate::app_log::log(
             "gpu",

@@ -517,6 +517,26 @@ Register "egpu-thunderbolt-hint" "Pat: TBT5-AI (R2)" @("cpu") "NVIDIA adapter pl
     return @{ Failures = $f }
 }
 
+Register "engine-declined" "Pat: engine refuses with no reason (rc12, E1/E2)" @("cpu") "NVIDIA adapter present, engine lists CUDA as not registered and answers the registration with an empty refusal: the card names the engine, not the hardware, and points to the engine log" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $seams = New-GpuSeams -Nvidia -Thunderbolt
+    # Pat's machine listed some providers twice; the duplicate must be asked for once.
+    $seams.PLUGABLE_CHAT_TEST_EPS = '[{"name":"CPUExecutionProvider","isRegistered":true},{"name":"CUDAExecutionProvider","isRegistered":false},{"name":"WebGpuExecutionProvider","isRegistered":false},{"name":"WebGpuExecutionProvider","isRegistered":false}]'
+    $seams.PLUGABLE_CHAT_TEST_REGISTRATION = '{"success":false,"status":"","registered":[],"failed":[]}'
+    $run = Invoke-Smoke $ctx -EnvVars $seams
+    $f += Get-RunFailures $run
+    $f += Assert-PhaseOk $run.Records "ready"   # a CPU model still runs
+    $rep = Get-PreflightReport
+    if (-not $rep) { return @{ Failures = $f + "no preflight report was written" } }
+    if ($rep.assessment.state -ne "hardware_not_used") { $f += "expected hardware_not_used, got $($rep.assessment.state): $($rep.assessment.headline)" }
+    $detail = @($rep.assessment.detail) -join " / "
+    if ($detail -notmatch "did not try to set it up") { $f += "the refusal is not named in the details: $detail" }
+    if (@([regex]::Matches($detail, "Setting up WebGpuExecutionProvider")).Count -ne 1) { $f += "WebGpu should be reported once, not per duplicate: $detail" }
+    if (-not (@($rep.assessment.hints) | Where-Object { $_ -match "engine's own log" })) { $f += "no hint points to the engine log: $(@($rep.assessment.hints) -join ' / ')" }
+    return @{ Failures = $f }
+}
+
 Register "egpu-late-arrival" "Pat: eGPU enumerated late (R2, R4)" @("cpu") "no GPU at launch, an NVIDIA adapter appears later: the app notices, retries GPU setup by itself, and the assessment changes" {
     param($ctx)
     $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }

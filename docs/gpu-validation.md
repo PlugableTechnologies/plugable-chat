@@ -203,6 +203,10 @@ instead and is the quickest test of whether the in-process engine is at fault.
 - The agent loop (a script that dispatches a run, reads the artifacts and iterates) is not built; agents
   can follow the runbook above and `AGENTS.md`.
 - Raise the release build's time limit, or relax LTO, before the first release.
+- **Consumer cards and external GPUs are not covered by any runner.** The A10G is one data-center card on a
+  single-adapter Server build. Pat's RTX 5080 in a TBT5-AI (Blackwell, a second adapter, Windows 11 Insider) is
+  the only check, so his machine stays a release gate until a consumer-card runner exists. For a report from
+  him, `scripts/support/gpu-ground-truth.ps1` collects every layer's view in one read-only text file.
 
 ## Rules that keep the cost at zero
 

@@ -61,6 +61,7 @@ writes no file, so it reads as red.
 | `nvidia-present-no-providers` | staged: NVIDIA adapter + driver, engine reports only CPU (twice, cold relaunch) | Pat R1, R3 | `gpu-assessment` says "hardware not used" naming the NVIDIA adapter, never "no GPU"; a CPU model runs; the preflight report carries both views | CI, box |
 | `egpu-thunderbolt-hint` | staged: NVIDIA adapter + Thunderbolt controller, engine reports only CPU | Pat R2 | the assessment tells the user to check the Thunderbolt connection | CI, box |
 | `egpu-late-arrival` | staged: no adapter at launch, an NVIDIA adapter appears at 20 s, the engine lists CUDA after a retry | Pat R2, R4 | the app notices by itself, retries GPU setup, and the assessment moves on from "no GPU" | CI, box |
+| `engine-declined` | staged: NVIDIA adapter, engine lists CUDA and WebGpu (twice) as not registered and answers registration with `success:false` and empty lists | Pat E1, E2, E4 (rc12) | the card names the engine's refusal, not the hardware; each provider reported once; a hint points to the engine log; a CPU model runs | CI, box |
 | `embedding-first-run-contention` | huggingface unreachable for the first 25 s of a first start | Bob R6, R10 | the embedding model still loads (5 attempts over about 45 s); a final failure would carry attempts and cause | CI, box |
 | `version-visible` | none | Bob R12, Pat R13 | `--version` prints the release label and commit, and matches the installer file name | CI, box |
 | `gpu-baseline` | none, NVIDIA driver present | #3 | ep-registration and model-download ok | GPU box only |
@@ -192,6 +193,9 @@ Every row below failed on rc10/rc11 and is covered by a test that was written to
 | R12 | Bob | no version in the title bar | `version_info::*`; `version-info.test.ts`; scenario `version-visible` |
 | R13 | Pat | rc10 and rc11 installers share one file name | `scripts/ci/release-names.test.mjs`; release.yml renames after signing; scenario `version-visible` |
 | R14 | Pat | machine without the VC++ runtime | existing `no-vcredist`; `gpu_assessment::missing_vcpp_is_called_out` |
+| R15 | Pat (rc12) | the card said "not using it" seconds into GPU setup | `gpu_assessment::r15_*` |
+| R16 | Pat (rc12) | the engine refused with no reason and the card blamed the hardware | `gpu_assessment::r16_*`; `sdk::r18_*`; scenario `engine-declined` |
+| R17 | Pat (rc12) | two adapters made the engine list providers twice | `sdk::r17_*`; scenario `engine-declined` |
 
 Add the next report as R15 with its test in the same change as its fix.
 
