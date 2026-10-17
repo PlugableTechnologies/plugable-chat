@@ -112,6 +112,41 @@ Notes for the next run:
 - This release adds unattended-run flags (`--reply-file`, `--prompts-file`, `--chat-home`, `--ephemeral`, `--hidden`) used by test harnesses; none changes the
   installed app's normal behaviour, and the Chicago results above are from the same build.
 
+## rc13 on an A10G (2026-10-17)
+
+Commit `496f828` (the commit tagged `v0.1.0-rc13`), the CI-built unsigned installer (`windows-unsigned-496f828`, perMachine NSIS),
+g5.xlarge (NVIDIA A10G, driver 596.86, Windows Server 2025). **Run before the tag.** Box and per-run bucket torn down afterwards.
+
+| Check | Result |
+|---|---|
+| CI (Windows and Linux) on `496f828` | green |
+| clean-host default list on `windows-latest` (15 scenarios, including the new `engine-declined`) | 15 of 15 pass |
+| `installer-lifecycle.ps1` (as SYSTEM, perMachine) | 30 of 30 PASS |
+| clean-host `gpu-baseline`, `baseline`, `quarantined-dll`, `upgrade-over-old` (against the rc12 setup.exe) | 4 of 4 as expected |
+| Chicago questions through the installed app, `qwen3.5-4b-cuda-gpu:4` | 7 of 7 correct, screenshots read: 227,299; THEFT 52,813 / BATTERY 41,130 / CRIMINAL DAMAGE 25,135; 36,070 arrests; Austin 11,358; 407 homicides; 18,608 gun; July 22,561. GPU peak 59 to 87%, 7.6 to 8.6 GB |
+| Signed release ([run 38999549730](https://github.com/PlugableTechnologies/plugable-chat/actions/runs/38999549730)), tagged after the checks above | all four jobs green; the downloaded `plugable-chat_0.1.0-rc13_x64-setup.exe` and `.msi` match `SHA256SUMS-windows.txt`; the setup file's Authenticode signer is `LEANCODE, INC.` (EV, DigiCert Trusted G4 chain) with a timestamp. The signing environment's Required reviewers was still off for this release |
+
+What a working registration looks like, now that it is logged (`gpu-baseline`): the engine answered after 61.3 s with
+`success=true`, status "EP registration complete: 3 bootstrapper(s) succeeded in 61248ms", registered CUDA, WebGPU and
+NvTensorRTRTX, and the model list went to 49 GPU models. Compare Pat's rc12 machine, where the same call returned within 9 ms
+with nothing registered.
+
+Found on the way to green, all fixed before the tag (each was a timing race in the new diagnostics, seen only on Windows):
+- Registration finishing before the adapter scan was stored made the end-of-registration assessment say NoHardware on an
+  NVIDIA machine. An unfinished scan is now Checking.
+- A start-up report never appeared: the report waited on PowerShell CIM probes with no limit, and the free-disk probes ran
+  inside the shared observation lock. Host probes now give up after 45 s and run outside the lock.
+- The report started during GPU setup read its assessment first and finished last, so the newest report said "Setting up".
+  The assessment is read after the probes, and report files are named by millisecond.
+
+Notes for the next run:
+- `bootstrap-box.ps1` arms a 90-minute guest deadline; lifecycle + matrix + Chicago need more. Run `extend.sh <id> 150` right after
+  provisioning.
+- `teardown.sh` reports leftover `plugable-chat-gpu-*` buckets but does not delete them; remove the run's bucket with
+  `aws s3 rb --force` once the results are copied.
+- `run-matrix.sh` exits 1 when `unzip` warns that the results zip uses backslashes; the box's own `matrix-exit=0` and the JUnit
+  counts are the result.
+
 ## rc12 on Pat's TBT5-AI eGPU (2026-10-16)
 
 Framework 13 (Intel Iris Xe) plus an RTX 5080 in a TBT5-AI over Thunderbolt, Windows 11 Home build 26300
