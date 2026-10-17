@@ -477,22 +477,29 @@ pub fn adapter_fingerprint() -> Option<Vec<String>> {
 }
 
 pub fn build_report_blocking() -> PreflightReport {
-    let assessment = refresh_blocking();
+    let _ = refresh_blocking();
+    // The slow probes run before the GPU state is read and outside the shared lock: a report
+    // started during GPU setup used to finish last and leave "Setting up..." as the newest report,
+    // and every engine update waited on these PowerShell calls meanwhile.
     let (ram_mb, os) = ram_and_os();
+    let config_dir = folder_facts(crate::paths::get_config_dir());
+    let data_dir = folder_facts(crate::paths::get_data_dir());
     let engine_dir = ENGINE_DIR
         .get()
         .cloned()
         .or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())));
+    let provider_dlls = engine_dir.as_deref().map(find_provider_dlls).unwrap_or_default();
+    let assessment = assessment_now();
     let report = with_observed(|o| PreflightReport {
         version: crate::version_info::VersionInfo::current(),
         os,
         ram_mb,
-        config_dir: folder_facts(crate::paths::get_config_dir()),
-        data_dir: folder_facts(crate::paths::get_data_dir()),
+        config_dir,
+        data_dir,
         adapters: o.scan.clone().unwrap_or_default(),
         nvidia_smi: o.nvidia_smi.as_ref().map(|(_, d)| d.clone()).unwrap_or_default(),
         vcpp_installed: o.vcpp,
-        provider_dlls: engine_dir.as_deref().map(find_provider_dlls).unwrap_or_default(),
+        provider_dlls,
         engine_dir: engine_dir.map(|d| d.display().to_string()).unwrap_or_default(),
         engine_providers: o.eps.clone(),
         catalog: o.catalog.clone(),
