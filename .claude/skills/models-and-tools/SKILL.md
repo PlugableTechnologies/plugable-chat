@@ -7,8 +7,8 @@ description: Which chat models plugable-chat uses and how their tool calls are f
 
 - **Default `qwen3.5-4b`, fallback `phi-4-mini-instruct`** (never blocklisted) in
   `src-tauri/src/actors/foundry/service_manager.rs`. Startup selection order: saved settings model -> default -> fallback.
-  Phi-4-mini answered all 7 Chicago questions; qwen3.5-4b needs its A10G re-run before it can stay the default (criterion:
-  at least 6/7 within 3 minutes, otherwise ship Phi-4-mini).
+  Phi-4-mini answered all 7 Chicago questions; qwen3.5-4b (CUDA) answered 7/7 on the A10G for rc10 and again for rc13, so it
+  stays the default.
 - **Tool-call formats.** Phi and Qwen 2.5/3 use JSON in `<tool_call>{"name":..,"arguments":{..}}</tool_call>` (Hermes). **Qwen 3.5
   emits XML:** `<tool_call><function=sql_select><parameter=sql>...</parameter></function></tool_call>`, after a short `<think>`
   block (checked with llama.cpp and the Qwen3.5-4B GGUF: 93 tokens in 1.4 s on a Mac). The parser accepts both
@@ -20,7 +20,9 @@ description: Which chat models plugable-chat uses and how their tool calls are f
 - **Chicago demo database** (`embedded-demo`, table `main.chicago_crimes`): served by the MCP Database Toolbox
   (`toolbox`, pinned 0.24.0, downloaded on demand). Launches with `PLUGABLE_ENABLE_DEMO_DB=true` index the schema in the
   background, and the launch prompt waits for it (else the model is told "no tables cached").
-- **Foundry SDK.** Pinned `1.2.3` (winml on Windows only). Models the SDK cannot run are recorded in `incompatible_models`
+- **Foundry SDK.** Pinned `1.2.3` (winml on Windows only). GPU provider registration and why it can silently do nothing:
+  [gpu-validation](../gpu-validation/SKILL.md) ("Diagnosing ..."). The standalone `foundry` CLI (0.11.0 on Pat's machine) ships
+  a newer Core than this SDK, so "the CLI works" does not prove the app's engine will. Models the SDK cannot run are recorded in `incompatible_models`
   in `config.json` with the SDK key (`sdk-1.2.3`); the UI now says why and offers the model's CPU build. Known:
   qwen3.5-4b CUDA fails on Turing (T4); macOS `qwen3.5-4b-generic-gpu` failed on SDK 1.2.0 with a WebGPU validation error
   (fixed by 1.2.3 per its release note); the Mac CPU build `qwen3.5-4b-generic-cpu:3` works.

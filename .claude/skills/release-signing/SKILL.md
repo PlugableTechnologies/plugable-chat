@@ -17,6 +17,17 @@ All of these, in order; a tag starts signing and publishing immediately, so none
 4. Check `release-signing` environment protection (below): Required reviewers must be ON.
 5. Check the release notes and the download-page status labels still match the results in `docs/gpu-validation.md`.
 
+## Tagging and checking a release (as done for rc13, 2026-10-17)
+- Annotated tag on the exact validated commit: `git tag -a v0.1.0-rcN -m "Plugable Chat v0.1.0-rcN" <sha>`, push the tag only.
+  Record the validation afterwards in a separate docs commit (the tagged commit stays the tested one).
+- The published notes' **"What changed" is empty**: `--generate-notes` adds only the changelog link. Fill it with
+  `gh release edit` after publishing.
+- **Checking the signature from a Mac:** `pwsh` on macOS has no `Get-AuthenticodeSignature`. Cut the PE certificate table out
+  of the setup file (offset and size are data directory 4 of the optional header; skip the 8-byte WIN_CERTIFICATE header) and
+  run `openssl pkcs7 -inform DER -print_certs` on it: expect `O=LEANCODE, INC.` (EV, serial 7376809) under DigiCert Trusted G4
+  and a timestamp countersignature. The workflow's own log already shows `[sign-windows] signed and verified:` per file.
+- `SHA256SUMS-windows.txt` has CRLF line endings, so `shasum -c` on a Mac reports the files missing; strip `\r` first.
+
 ## Setup facts
 - EV certificate for **LEANCODE, INC.**, keypair alias in secret `SM_KEYPAIR_ALIAS`, expires 2027-08-11 (org validation to
   2027-09-11; client certificate to 2027-09-28). One designated signer per certificate.
@@ -26,7 +37,7 @@ All of these, in order; a tag starts signing and publishing immediately, so none
 - **Never approve your own signing run.** The person or agent that dispatched it must not approve; the auto-mode safety
   check blocks it, and the two-person gate is the point. **Current state (2026-09-30): Required reviewers is switched OFF on
   `release-signing`, by the user, to get the pipeline working. "Allow administrators to bypass configured protection rules"
-  is still ticked. Before the first real release turn Required reviewers back on (`bernieplug`, `dnuzum`) and untick the
+  is still ticked; still the case for rc13 (2026-10-17), released with no approval by the user's choice. Before the first real release turn Required reviewers back on (`bernieplug`, `dnuzum`) and untick the
   bypass box; with the bypass ticked any repo admin can skip the gate.** A smoke job can get stuck in "waiting" if its gate was
   created just before the setting changed: cancel the run and dispatch again.
 - Tag ruleset "Restrict v* release tags". `release.yml` (verify-tag -> build-windows in the environment -> build-linux with

@@ -17,9 +17,15 @@ Full detail and the table of past escapes: [docs/testing-ladder.md](../../../doc
    installer for the exact commit exists, use the EC2 box
    ([docs/gpu-validation.md](../../../docs/gpu-validation.md)): at most 3 GPU runs per task, always run
    `infra/aws-gpu/teardown.sh`, read the screenshots, never send signing credentials to the box.
+   **Before the GPU box, run the full `clean-host.yml` default list** (dispatch it only after CI for that exact commit is green: it
+   tests the latest `main` CI build). It is the only free rung that runs the real Windows start-up order.
 3. GitHub last. Do not push to `main` while a CI run you need is in flight. Signing runs need a reviewer other
    than the person who started them; never approve your own signing run.
 4. Ask-first files: `.github/workflows/release.yml`, `scripts/sign-windows.mjs`,
    `scripts/verify-windows-signatures.ps1`, `.github/CODEOWNERS`, `src-tauri/tauri*.conf.json`.
-5. When something reaches a higher rung that a lower rung could have caught, add the check to the lower rung
+5. **Start-up ordering and Windows probes are invisible on the Mac.** rc13's three races (re-assessment before the adapter scan
+   was stored, a report hung on an unbounded PowerShell probe, the stale report finishing last) all passed every Mac test and
+   showed only in clean-host scenarios. Code that runs beside start-up needs a scenario, every host probe needs a time limit
+   (`process_utils::output_with_timeout`), and nothing slow may run while holding the `preflight` observation lock.
+6. When something reaches a higher rung that a lower rung could have caught, add the check to the lower rung
    and record it under "Escapes so far" in `docs/testing-ladder.md`.

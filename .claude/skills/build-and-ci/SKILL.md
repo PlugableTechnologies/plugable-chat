@@ -28,6 +28,15 @@ Ladder first: run `scripts/preflight.sh` before pushing ([test-ladder](../test-l
   finish in 77 minutes; `release.yml` now allows 180 minutes.
 - `concurrency` is meant to cancel only PR runs, but runs on `main` were seen cancelled: **do not push to `main` while a CI
   run you need is still in flight**, and check the run page (`gh run view`) rather than assuming.
+  (On 2026-10-16 a push to `main` while the previous commit's run was in flight left both runs to finish; the cancellations may predate the `ci.yml` fix.)
+- **`clean-host.yml`** (nightly, or dispatch with `scenarios`) installs the newest `main` CI installer on fresh `windows-latest`
+  runners and replays fault scenarios through the `PLUGABLE_CHAT_TEST_*` seams (honoured only with `PLUGABLE_CHAT_TEST_STATE`).
+  Each job uploads `clean-host-logs-<run>-<scenario>` with `smoke-1.out.txt` (console), `state.jsonl` (phase records) and the
+  install log: read those, the job log only says which assertion failed. New scenarios go in `scripts/ci/faults.ps1` and the
+  default list in `clean-host.yml`.
+- **`gh` GraphQL rate limit:** `gh workflow run` and `gh run watch` stop with "API rate limit already exceeded". The REST API
+  has its own quota: `gh api -X POST repos/<o>/<r>/actions/workflows/<file>/dispatches -f ref=main -f 'inputs[x]=y'`, and poll
+  `gh api repos/<o>/<r>/actions/runs/<id>`.
 - Docs-only pushes are ignored by `paths-ignore`.
 - Read a failure with `gh run view <id> --log-failed`; the failing step is often only the last symptom (a later
   `if: always()` step failing is usually fallout).
@@ -54,6 +63,7 @@ Ladder first: run `scripts/preflight.sh` before pushing ([test-ladder](../test-l
   `target/debug`, so it never hung. Fix: `CARGO_TARGET_DIR` for the nested build is inside `OUT_DIR`. Reproduce locally by moving
   the .wasm aside and running `cargo build --release --bins --features tauri/custom-protocol --manifest-path src-tauri/Cargo.toml`
   (5 min 30 s on an 18-core Mac with the fix). Always run a fresh-checkout release build locally before tagging.
+- **Measured rc13 (2026-10-17):** Windows build-and-sign job 99 min, Linux 63 min, the whole release about 100 min.
 - **Measured (rc4, 4-core runner):** Windows compile 42.8 min (wall), Linux job 67 min, Windows job ~63 min to the signed
   installers. Critical path at the end is serial: `lance` 8 min -> `lancedb` 3.5 min -> the app crate 12 min, plus the app build
   script 4 min (the sandbox build, which currently fails to compile against the current `libc`; see the sandbox task).

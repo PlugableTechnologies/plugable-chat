@@ -24,8 +24,8 @@ splits unquoted paths with spaces (launch through a `.cmd`), a new local user ne
 ## What the installed app needs on a fresh machine
 - **Bundled next to the exe:** `foundry-libs\*` (Foundry Local Core, ONNX Runtime, GenAI, providers_shared, Windows ML DLL),
   `test-data\demo.db` (Chicago crimes, 227,299 rows).
-- **Downloads at first run:** GPU execution providers (~1.5 GB for CUDA/WebGPU; 45 s to 11 min observed, silent in the log, a
-  Cancel button and a 15 s heartbeat log exist), the chat model (Phi-4-mini ~4 GB, qwen3.5-4b ~2.5 to 4 GB), and the MCP
+- **Downloads at first run:** GPU execution providers (~1.5 GB for CUDA/WebGPU; 45 s to 11 min observed; since rc13 every step,
+  the 15 s heartbeat and the engine's answer are `[gpu]` lines in the app log, and a Cancel button exists), the chat model (Phi-4-mini ~4 GB, qwen3.5-4b ~2.5 to 4 GB), and the MCP
   Database Toolbox `toolbox.exe` on demand for the demo database (the app does not bundle it).
 - **Per-user model cache:** models live under the user's profile (under the profile, e.g. `~/.foundry/cache/models` on the Mac; check the exact Windows path on a box), so each user downloads their own.
   Tests run as SYSTEM download into the SYSTEM cache; `infra/aws-gpu/sync-model-cache.ps1` copies to the Administrator cache.
