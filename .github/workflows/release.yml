@@ -153,6 +153,10 @@ jobs:
           path: target/cargo-timings/*.html
           if-no-files-found: warn
 
+      - name: Confirm the bundled Core is the pinned one (not 1.2.3)
+        shell: pwsh
+        run: pwsh scripts/ci/assert-foundry-core.ps1 -Bundled src-tauri/foundry-libs/Microsoft.AI.Foundry.Local.Core.dll
+
       - name: Install DigiCert signing tools (smctl)
         uses: digicert/code-signing-software-trust-action@fae23a455ba4bde62b64fd7cb2f81ade788f5a95 # v1.2.1
         with:
