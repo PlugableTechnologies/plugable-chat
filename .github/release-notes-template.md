@@ -8,14 +8,14 @@ Pick your computer from the **Assets** list below.
 | Windows, managed by IT | `plugable-chat_<version>_x64_en-US.msi` | Tested, same checks as the setup file |
 | Linux (any distribution) | `plugable-chat_<version>_amd64.AppImage` | Built and signed in CI; not yet run-tested |
 | Linux (Debian/Ubuntu or Fedora/RHEL) | `.deb` or `.rpm` | Built and signed in CI; not yet run-tested |
-| macOS | not available yet | Coming soon |
+| macOS (Apple Silicon, M1 or later) | `plugable-chat_<version>_aarch64.dmg` | Built in CI and signed; **not yet run-tested**. Until Apple notarization is set up, macOS asks you to confirm the first open (right-click, *Open*) |
 
 **Windows needs an NVIDIA RTX graphics card of the Ampere generation or newer** (RTX 30-series or later). Older cards such as
 the Tesla T4 or RTX 20-series are not supported. Plan for about 6 GB of free disk space and an internet connection the first
 time you start the app.
 
 **Check your download.** On Windows, right-click the file, choose *Properties*, then the *Digital Signatures* tab. The signer
-should read *LEANCODE, INC.* with a timestamp. Checksum files are in the Assets list (`SHA256SUMS-windows.txt`, `SHA256SUMS`).
+should read *LEANCODE, INC.* with a timestamp. Checksum files are in the Assets list (`SHA256SUMS-windows.txt`, `SHA256SUMS-macos.txt`, `SHA256SUMS`).
 
 **Which build is this?** The title bar and *Settings* (bottom of the window) show the release and the exact commit, for example `v0.1.0-rc12 (a1b2c3d)`. The installer file name carries the same release. Please include it when you report a problem; *Copy details for support* adds it for you.
 

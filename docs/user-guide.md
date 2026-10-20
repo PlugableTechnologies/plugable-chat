@@ -99,5 +99,5 @@ where the numbers come from.
 ## 7. What is not supported or not yet tested
 
 - Older NVIDIA cards (Tesla T4, RTX 20-series and earlier) are not supported.
-- Linux packages are built and signed but have not been run on a real machine. A macOS download is not available yet.
+- Linux packages and the macOS disk image are built and signed in CI but have not been run on a real machine. Until Apple notarization is set up, macOS asks you to confirm the first open (right-click, *Open*).
 - Consumer RTX cards have not been tested; the checks above ran on an NVIDIA A10G.

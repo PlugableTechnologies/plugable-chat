@@ -43,6 +43,11 @@ protoc = lambda t: (re.findall(r"protoc-([\d.]+)-win64", t)[:1], re.findall(r'-n
 if protoc(ci) != protoc(rel):
     problems.append(f"protoc pin differs: ci {protoc(ci)} vs release {protoc(rel)}")
 
+# The macOS protoc download must be the same pinned version and hash in both workflows.
+mac_protoc = lambda t: (re.findall(r"protoc-([\d.]+)-osx-aarch_64", t)[:1], re.findall(r'([0-9a-f]{64})  \$zip', t)[:1])
+if not mac_protoc(ci)[0] or mac_protoc(ci) != mac_protoc(rel):
+    problems.append(f"macOS protoc pin differs or is missing: ci {mac_protoc(ci)} vs release {mac_protoc(rel)}")
+
 # The "no secrets" pre-compile must use the flags tauri build uses, or tauri recompiles (see release.yml).
 if "--features tauri/custom-protocol" not in re.sub(r"\s+", " ", rel) or "--bins" not in rel:
     problems.append("release.yml's pre-compile step no longer matches `tauri build` (--bins --features tauri/custom-protocol)")

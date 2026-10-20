@@ -13,6 +13,7 @@ export function problemsFor({ readme, guide, notes, releaseYml, tauriConf }) {
     `${productName}_<version>_x64-setup.exe`,
     `${productName}_<version>_x64_en-US.msi`,
     `${productName}_<version>_amd64.AppImage`,
+    `${productName}_<version>_aarch64.dmg`,
   ];
   for (const name of expected) {
     for (const [label, text] of [['README.md', readme], ['release notes template', notes]]) {
@@ -22,8 +23,8 @@ export function problemsFor({ readme, guide, notes, releaseYml, tauriConf }) {
   if (!releaseYml.includes('release-notes-template.md')) {
     problems.push('release.yml does not use .github/release-notes-template.md');
   }
-  if (!releaseYml.includes('SHA256SUMS-windows.txt')) {
-    problems.push('release.yml does not write SHA256SUMS-windows.txt, which the release notes mention');
+  for (const sums of ['SHA256SUMS-windows.txt', 'SHA256SUMS-macos.txt']) {
+    if (!releaseYml.includes(sums)) problems.push(`release.yml does not write ${sums}, which the release notes mention`);
   }
   for (const [label, text] of [['README.md', readme], ['docs/user-guide.md', guide]]) {
     for (const m of text.matchAll(/(^|\s)(--[a-z][a-z-]+)/g)) {

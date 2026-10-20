@@ -37,3 +37,24 @@ test('an unrenamed file fails the name check', () => {
   const p = problemsFor({ tag: 'v0.1.0-rc11', files: [{ name: 'plugable-chat_0.1.0_x64-setup.exe', sha256: 'a' }] });
   assert.match(p[0], /does not carry 0.1.0-rc11/);
 });
+
+test('macOS and Linux files carry the release too', () => {
+  assert.equal(renamedFor('plugable-chat_0.1.0_aarch64.dmg', 'v0.1.0-rc14'), 'plugable-chat_0.1.0-rc14_aarch64.dmg');
+  assert.equal(renamedFor('plugable-chat_0.1.0_amd64.deb', 'v0.1.0-rc14'), 'plugable-chat_0.1.0-rc14_amd64.deb');
+  assert.equal(renamedFor('plugable-chat_0.1.0_amd64.AppImage', 'v0.1.0-rc14'), 'plugable-chat_0.1.0-rc14_amd64.AppImage');
+  assert.equal(renamedFor('plugable-chat-0.1.0-1.x86_64.rpm', 'v0.1.0-rc14'), 'plugable-chat-0.1.0-rc14-1.x86_64.rpm');
+});
+
+test('a stable tag keeps the plain version in every platform name', () => {
+  assert.equal(renamedFor('plugable-chat_0.1.0_aarch64.dmg', 'v0.1.0'), 'plugable-chat_0.1.0_aarch64.dmg');
+});
+
+test('problemsFor accepts the rpm form and rejects an unrenamed dmg', () => {
+  assert.deepEqual(problemsFor({ tag: 'v0.1.0-rc14', files: [{ name: 'plugable-chat-0.1.0-rc14-1.x86_64.rpm', sha256: 'a' }] }), []);
+  const p = problemsFor({ tag: 'v0.1.0-rc14', files: [{ name: 'plugable-chat_0.1.0_aarch64.dmg', sha256: 'a' }] });
+  assert.match(p[0], /does not carry 0.1.0-rc14/);
+});
+
+test('a macOS or Linux file for another version is refused', () => {
+  assert.throws(() => renamedFor('plugable-chat_0.0.0_aarch64.dmg', 'v0.1.0-rc14'), /carries version 0.0.0/);
+});

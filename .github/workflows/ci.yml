@@ -196,3 +196,67 @@ jobs:
           name: windows-unsigned-${{ github.sha }}
           path: installer/*
           if-no-files-found: error
+
+  # macOS (Apple Silicon): the release builds the same app and disk image, so the first time that
+  # job runs must not be a tag. Ad hoc signed; Apple Developer ID signing is release-only.
+  build-macos:
+    name: Build and unit tests (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+
+      - name: Install protoc (pinned, hash-checked)
+        run: |
+          set -euo pipefail
+          zip="$RUNNER_TEMP/protoc.zip"
+          curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v30.2/protoc-30.2-osx-aarch_64.zip" -o "$zip"
+          echo "92728c650f6cf2b6c37891ae04ef5bc2d4b5f32c5fbbd101eda623f90bb95f63  $zip" | shasum -a 256 -c -
+          unzip -q "$zip" -d "$RUNNER_TEMP/protoc"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Install JavaScript dependencies (locked)
+        run: npm ci
+
+      - name: Build the frontend
+        run: npm run build
+
+      - name: Rust unit tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Build the app and disk image (debug profile, ad hoc signed)
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: node node_modules/@tauri-apps/cli/tauri.js build --debug --bundles app,dmg
+
+      - name: Verify the signature and that the engine libraries are inside the app
+        run: |
+          set -euo pipefail
+          app=$(find target/debug/bundle/macos -maxdepth 1 -name '*.app' | head -n 1)
+          test -n "$app" || { echo "::error::no .app bundle was built"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$app"
+          for lib in Microsoft.AI.Foundry.Local.Core.dylib libonnxruntime.dylib libonnxruntime-genai.dylib; do
+            test -f "$app/Contents/Frameworks/$lib" || { echo "::error::$lib is missing from the app"; exit 1; }
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-unsigned-${{ github.sha }}
+          path: target/debug/bundle/dmg/*.dmg
+          if-no-files-found: error

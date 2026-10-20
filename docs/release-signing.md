@@ -12,12 +12,29 @@ happens, who can approve it, and what to do when it breaks.
    approval from any listed reviewer (Bernie, Pranav, Derek) releases it. After that it
    builds, signs the executables and installers (`.exe`, `.msi`) with the company EV
    certificate, and checks every file is signed with a timestamp.
-4. `build-linux` builds `.deb`, `.rpm` and `.AppImage`. Linux has no Authenticode, so each
+4. `build-macos` (Apple Silicon only, the engine has no Intel Mac build) runs in the same
+   Environment, builds the `.app` and `.dmg`, and verifies the signature. With the six Apple
+   secrets below it signs with a Developer ID certificate and notarizes; without them it signs
+   **ad hoc**, which runs but makes Gatekeeper ask the user to confirm the first open. The job
+   summary says which one happened. Each file also gets a Sigstore signature and
+   `SHA256SUMS-macos.txt`.
+5. `build-linux` builds `.deb`, `.rpm` and `.AppImage`. Linux has no Authenticode, so each
    file gets a Sigstore signature (`*.sigstore.json`), plus `SHA256SUMS`. No approval or
    stored key is needed.
-5. `publish` creates the GitHub Release with everything above.
+6. `publish` creates the GitHub Release with everything above.
 
-Both builds also record a GitHub build-provenance attestation.
+Priority is Windows (primary), macOS (secondary), Linux (tertiary): the jobs and the release
+notes list them in that order. All three builds record a GitHub build-provenance attestation, and
+macOS and Linux files are renamed after the tag (`..._0.1.0-rc14_aarch64.dmg`) before they are
+checksummed and signed, because those cover the name.
+
+### macOS signing secrets (not yet set up, 2026-10-20)
+
+Add these to the `release-signing` Environment; all six are needed, otherwise the build is ad hoc:
+`APPLE_CERTIFICATE` (base64 of the Developer ID Application `.p12`), `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY` (`Developer ID Application: Name (TEAMID)`), `APPLE_API_ISSUER` and
+`APPLE_API_KEY` (App Store Connect API key ids, for notarization) and `APPLE_API_PRIVATE_KEY`
+(the `.p8` file contents). The workflow stops if a Developer ID build is not notarized.
 
 ## Where the certificate lives
 

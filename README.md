@@ -12,7 +12,7 @@ Open the [latest release](https://github.com/PlugableTechnologies/plugable-chat/
 | Windows, managed by IT | `plugable-chat_<version>_x64_en-US.msi` | **Tested**, same checks as the setup file |
 | Linux (any distribution) | `plugable-chat_<version>_amd64.AppImage` | Built and signed in CI; **not yet run-tested** |
 | Linux (Debian/Ubuntu, Fedora/RHEL) | `.deb` or `.rpm` | Built and signed in CI; **not yet run-tested** |
-| macOS | not available yet | Coming soon. To try it today, build it yourself (see [For developers](#for-developers)) |
+| macOS (Apple Silicon, M1 or later) | `plugable-chat_<version>_aarch64.dmg` | Built in CI and signed; **not yet run-tested**. Until Apple notarization is set up, macOS asks you to confirm the first open (right-click, *Open*) |
 
 While every release is still a pre-release, GitHub's "latest" link does not point at it: open the
 [Releases page](https://github.com/PlugableTechnologies/plugable-chat/releases) and choose the newest entry.
