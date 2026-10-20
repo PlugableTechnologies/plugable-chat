@@ -202,7 +202,7 @@ experiment in `plugable-chat --ep-probe` (run on a machine with `scripts/support
 | H4 | Stale or missing Windows execution-provider packages | `Get-AppxPackage *.EP.*`, Windows Update paused, restart pending | open (upstream: one OpenVINO case needed the packages removed) |
 | H5 | Windows Insider build 26300 | OS build in the facts; needs a comparison across hosts | open: Pat, David and Bob are all on 26300 |
 | H6 | Our manager configuration | stock SDK configuration in its own process | open |
-| H7 | A second onnxruntime in the process | every onnxruntime.dll the app could load, with versions | open (Windows ships one in System32) |
+| H7 | A second onnxruntime in the process | every onnxruntime.dll the app could load, with versions | Refuted on the A10G box (2026-10-20): Windows' System32 copy (1.17) sits beside ours (1.26) and registration works. rc14's probe wrongly said "confirmed" there; fixed afterwards so it only confirms when registration failed |
 | H8 | Bundle incomplete | `foundry-libs` against the expected five files | open: the rc13 support details listed only three of them, which may only be what that line prints |
 | H9 | Called before the engine is ready | retries after 0, 5 and 30 s | open (Bob's Retry button also failed, which argues against it) |
 

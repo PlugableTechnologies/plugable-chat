@@ -208,7 +208,7 @@ pub fn verdicts(runs: &[RunReport], facts: &HostFacts) -> Vec<Verdict> {
         h4(ours, facts),
         h5(ours, facts),
         h6(ours, runs.iter().find(|r| r.label == "stock")),
-        h7(facts),
+        h7(ours, facts),
         h8(facts),
         h9(ours),
     ]
@@ -312,22 +312,28 @@ fn h6(ours: Option<&RunReport>, stock: Option<&RunReport>) -> Verdict {
     }
 }
 
-fn h7(facts: &HostFacts) -> Verdict {
+fn h7(ours: Option<&RunReport>, facts: &HostFacts) -> Verdict {
     // The probe does not load the embedding model, so this is about what could be loaded.
-    let distinct: Vec<&String> = facts.onnxruntime_on_disk.iter().collect();
-    if distinct.is_empty() {
+    if facts.onnxruntime_on_disk.is_empty() {
         return no_run("H7", H7, "the onnxruntime search");
     }
-    let paths: std::collections::BTreeSet<String> = distinct
+    let paths: std::collections::BTreeSet<String> = facts
+        .onnxruntime_on_disk
         .iter()
-        .map(|p| p.rsplit_once(" ").map(|(path, _)| path.to_string()).unwrap_or_else(|| p.to_string()))
+        .map(|p| p.rsplit_once(' ').map(|(path, _)| path.to_string()).unwrap_or_else(|| p.to_string()))
         .collect();
     let versions: std::collections::BTreeSet<String> =
-        distinct.iter().filter_map(|p| p.rsplit_once(" ").map(|(_, v)| v.to_string())).collect();
-    if paths.len() > 1 && versions.len() > 1 {
-        verdict("H7", H7, VerdictState::Confirmed, format!("{} onnxruntime.dll files with different versions could be loaded: {}", paths.len(), facts.onnxruntime_on_disk.join("; ")))
-    } else {
-        verdict("H7", H7, VerdictState::Refuted, format!("one onnxruntime version on disk: {}", facts.onnxruntime_on_disk.join("; ")))
+        facts.onnxruntime_on_disk.iter().filter_map(|p| p.rsplit_once(' ').map(|(_, v)| v.to_string())).collect();
+    let listed = facts.onnxruntime_on_disk.join("; ");
+    let two_versions = paths.len() > 1 && versions.len() > 1;
+    // Windows ships its own onnxruntime.dll in System32, so two versions on disk are normal and
+    // were wrongly "confirmed" on a healthy A10G box. A second runtime can only be the cause when
+    // registration actually failed.
+    match (two_versions, ours.map(|r| r.registered_anything())) {
+        (_, Some(true)) => verdict("H7", H7, VerdictState::Refuted, format!("registration works here, whatever onnxruntime files exist: {listed}")),
+        (true, Some(false)) => verdict("H7", H7, VerdictState::Confirmed, format!("registration failed and {} onnxruntime.dll files with different versions could be loaded: {listed}", paths.len())),
+        (true, None) => verdict("H7", H7, VerdictState::Inconclusive, format!("two onnxruntime versions are on disk ({listed}), but the registration run gave no result to compare with")),
+        (false, _) => verdict("H7", H7, VerdictState::Refuted, format!("one onnxruntime version on disk: {listed}")),
     }
 }
 
@@ -636,12 +642,28 @@ mod tests {
         assert_eq!(state(&verdicts(&[working("ours")], &insider), "H5"), VerdictState::Refuted);
     }
 
+    fn two_runtimes() -> HostFacts {
+        HostFacts { onnxruntime_on_disk: s(&["C:\\app\\foundry-libs\\onnxruntime.dll 1.26.0", "C:\\Windows\\System32\\onnxruntime.dll 1.17.1"]), ..Default::default() }
+    }
+
     #[test]
-    fn h7_confirmed_by_two_onnxruntime_files_with_different_versions() {
-        let two = HostFacts { onnxruntime_on_disk: s(&["C:\\app\\foundry-libs\\onnxruntime.dll 1.26.0", "C:\\Windows\\System32\\onnxruntime.dll 1.17.1"]), ..Default::default() };
-        assert_eq!(state(&verdicts(&[], &two), "H7"), VerdictState::Confirmed);
+    fn h7_confirmed_only_when_registration_failed_with_two_onnxruntime_versions() {
+        assert_eq!(state(&verdicts(&[declined("ours")], &two_runtimes()), "H7"), VerdictState::Confirmed);
+    }
+
+    #[test]
+    fn h7_refuted_when_registration_works_despite_two_onnxruntime_versions() {
+        // The A10G box (2026-10-20): Windows' System32 copy is 1.17, ours 1.26, and CUDA registers.
+        let v = verdicts(&[working("ours")], &two_runtimes());
+        assert_eq!(state(&v, "H7"), VerdictState::Refuted);
+        assert!(v.iter().find(|x| x.id == "H7").unwrap().reason.contains("registration works"));
+    }
+
+    #[test]
+    fn h7_is_not_confirmed_without_a_registration_result_and_handles_missing_facts() {
+        assert_eq!(state(&verdicts(&[], &two_runtimes()), "H7"), VerdictState::Inconclusive);
         let one = HostFacts { onnxruntime_on_disk: s(&["C:\\app\\foundry-libs\\onnxruntime.dll 1.26.0"]), ..Default::default() };
-        assert_eq!(state(&verdicts(&[], &one), "H7"), VerdictState::Refuted);
+        assert_eq!(state(&verdicts(&[declined("ours")], &one), "H7"), VerdictState::Refuted);
         assert_eq!(state(&verdicts(&[], &HostFacts::default()), "H7"), VerdictState::Inconclusive);
     }
 
