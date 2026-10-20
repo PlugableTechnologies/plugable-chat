@@ -537,9 +537,11 @@ export const createListenerSlice: StateCreator<
 
                 // The warm-up could not load the model. Replace the "Loading..." status so it
                 // does not stay on screen; the model still loads on first use.
+                // It arrives after the switch already reported "loaded" and cleared its own status, so
+                // it must show whenever nothing is streaming, not only while "loading" is on screen.
                 if (phase === 'prewarm_failed') {
                     set((state) => {
-                        if (state.operationStatus?.type === 'loading') {
+                        if (!state.assistantStreamingActive) {
                             return {
                                 operationStatus: { type: 'error', message, startTime: now },
                                 statusBarDismissed: false,

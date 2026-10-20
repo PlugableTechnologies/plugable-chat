@@ -158,7 +158,7 @@ and loads models into VRAM. The app stays on the CPU.
 | E1 | `download_and_register_eps` returned within 9 ms (two "engine providers" lines 9 ms apart in the log), registered nothing and named no failure. Not a timeout: the engine never tried. | Open: cause unknown. The next build's support details carry the engine's answer and its own log |
 | E2 | `success:false` with empty lists counted as "nothing to report": no failure, no retry, no log line. | Fixed: every requested provider is accounted for; the rest are `EngineDeclined` |
 | E3 | Registration logged only with `println!`, which a release build discards; Foundry Core's own log went to the SDK default folder. | Fixed: `[gpu]` lines in the app log; Core logs to `logs/foundry/` at Information, and its provider lines are in "Copy details for support" |
-| E4 | With two adapters `discover_eps` lists providers twice, and the duplicates were passed back. The single-GPU A10G never did this. | Fixed: each name is requested once; the raw list is still logged |
+| E4 | `discover_eps` lists a provider twice (`WebGpuExecutionProvider`) and the duplicates were passed back. The single-GPU A10G never did this. | **Not fixed by deduping** (rc13, four logs on two hosts, see "rc13 on David's Arc B60 and Bob's RTX 4080" below): the engine declines even when each name is sent once. Core 1.2.4 is the expected fix, not yet verified on a failing machine |
 | E5 | The report beside start-up said "not using it" while registration could still be running. | Fixed: the card says "Setting up GPU acceleration..." until registration ends |
 | E6 | "Provider libraries next to the app" checked the exe folder, which never holds them. | Fixed: checks the folder the engine was loaded from |
 
@@ -167,6 +167,48 @@ with a second adapter, while the CLI uses a newer core; Foundry's CUDA bootstrap
 12.0; the Windows App SDK bootstrap (SDK v2 sets `Bootstrap=true` for unpackaged apps; try
 `PLUGABLE_FOUNDRY_WINML_BOOTSTRAP=1`). `PLUGABLE_FOUNDRY_BACKEND=cli_http` uses the system `foundry` service
 instead and is the quickest test of whether the in-process engine is at fault.
+
+## rc13 on David's Arc B60 and Bob's RTX 4080 (2026-10-19)
+
+David (Intel Arc B60 in a TBT5-AI plus the laptop's Arc 140V) and Bob (RTX 4080 plus Iris Xe), both Windows
+11 build 26300, rc13 installed fresh or over rc11. Both stay on the CPU. Four support files, all the same:
+the engine answers `download_and_register_eps` in 11-17 ms with
+
+    success=false, "Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only.
+    Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider."
+
+The unknown-name list is empty, `WebGpuExecutionProvider` is listed twice by the engine itself, and nothing is
+registered. Our request already sent each name once (rc13's dedupe), so the request is not the cause.
+
+**Upstream has the same bug.** `microsoft/Foundry-Local` issue 792 shows the same text from Snapdragon NPU
+machines (`Available EPs: WebGpuExecutionProvider, WebGpuExecutionProvider, QNNExecutionProvider`), so it is not
+specific to two adapters or to our code. A maintainer wrote on 2026-08-07 that it "should be fixed in Foundry
+Local Core 1.2.4 and CLI 0.10.3", and two reporters confirmed. We shipped Core 1.2.3 (`foundry-local-sdk`
+1.2.3). The Rust crate has no 1.2.4, but Core 1.2.4 is on NuGet with the same ONNX Runtime, GenAI and Windows ML
+dependencies, so rc14 stages it with `FOUNDRY_NATIVE_OVERRIDE_DIR` (`scripts/ci/fetch-foundry-core.ps1`, version in
+`src-tauri/foundry-core-version.txt`). **Not yet verified on a failing machine.**
+
+### Hypotheses and the test for each
+
+Each has a Rust test with a fake engine that models it (`ep_ladder.rs`, `ep_probe.rs`), and a real-engine
+experiment in `plugable-chat --ep-probe` (run on a machine with `scripts/support/ep-hypotheses.ps1`, in CI by
+`scripts/ci/run-ep-probe.ps1`). Verdicts are `confirmed`, `refuted` or `inconclusive`.
+
+| ID | Hypothesis | Real-engine test | Result so far |
+|---|---|---|---|
+| H1 | Core 1.2.3 rejects a request when its own list repeats a name | each name once / raw list / no names / one name at a time / bogus-name control | Matches all four logs and upstream 792; the ladder step that works is not yet known (needs a failing machine) |
+| H2 | Windows App SDK not bootstrapped | same matrix with `PLUGABLE_FOUNDRY_WINML_BOOTSTRAP=1` in another process | open |
+| H3 | Core version | same matrix against another Core build (`--ep-probe-other-core`); CI compares 1.2.3 with the bundled Core | upstream says 1.2.4 fixes it; open |
+| H4 | Stale or missing Windows execution-provider packages | `Get-AppxPackage *.EP.*`, Windows Update paused, restart pending | open (upstream: one OpenVINO case needed the packages removed) |
+| H5 | Windows Insider build 26300 | OS build in the facts; needs a comparison across hosts | open: Pat, David and Bob are all on 26300 |
+| H6 | Our manager configuration | stock SDK configuration in its own process | open |
+| H7 | A second onnxruntime in the process | every onnxruntime.dll the app could load, with versions | open (Windows ships one in System32) |
+| H8 | Bundle incomplete | `foundry-libs` against the expected five files | open: the rc13 support details listed only three of them, which may only be what that line prints |
+| H9 | Called before the engine is ready | retries after 0, 5 and 30 s | open (Bob's Retry button also failed, which argues against it) |
+
+On macOS the probe ran end to end against the real engine (2026-10-19): all three configurations produced a
+result, the control answered `Unknown EP bootstrapper name(s): NoSuchExecutionProvider`, which names the unknown
+provider (so the empty list on Windows is abnormal), and WebGPU registered. No Windows result yet.
 
 ## Lessons: the box
 

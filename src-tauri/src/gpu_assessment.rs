@@ -310,8 +310,8 @@ pub fn assess(i: &AssessInputs) -> GpuAssessment {
         if thunderbolt && !nvidia.is_empty() {
             hints.push("For an external GPU, check the Thunderbolt cable and approve the device if Windows asks, then choose Retry GPU setup.");
         }
-        if i.failures.iter().any(|(_, k, _)| k == "the model engine did not try to set it up") {
-            hints.push("The model engine skipped GPU setup without giving a reason. Copy the details for support: they include the engine's own log.");
+        if i.failures.iter().any(|(_, k, _)| k == "the model engine declined to register it") {
+            hints.push("The model engine answered without registering the GPU components; the details list every attempt made. Copy the details for support: they include the engine's own log.");
         }
         if i.failures.iter().any(|(_, k, _)| k == "network problem") {
             hints.push("Check your internet connection or proxy: GPU components could not be downloaded.");

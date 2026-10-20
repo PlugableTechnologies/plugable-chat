@@ -9,6 +9,7 @@ import type {
     Message,
 } from '../types';
 import { parseFoundryModelStateEvent } from '../helpers';
+import { setModelSucceeded } from '../model-switch';
 import { MODEL_FETCH_MAX_RETRIES, MODEL_FETCH_INITIAL_DELAY_MS } from '../constants';
 
 // Module-level state for model fetching
@@ -39,6 +40,8 @@ export interface ModelSlice {
     cachedModels: CachedModel[];
     modelInfo: ModelInfo[];
     currentModel: string;
+    /** Model the open chat was saved with, while it differs from `currentModel` (see model-switch.ts). */
+    openChatModel: string | null;
     isConnecting: boolean;
     hasFetchedCachedModels: boolean;
     reasoningEffort: ReasoningEffort;
@@ -99,6 +102,7 @@ export const createModelSlice: StateCreator<
     cachedModels: [],
     modelInfo: [],
     currentModel: 'Loading...',
+    openChatModel: null,
     isConnecting: false,
     hasFetchedCachedModels: false,
     reasoningEffort: 'low',
@@ -244,24 +248,8 @@ export const createModelSlice: StateCreator<
 
         console.log('[ChatStore] Loading model:', modelName);
         
-        // If we have an active chat, start a new one when switching models
-        if (state.currentChatId || state.chatMessages.length > 0) {
-            console.log('[ChatStore] Switching models, starting new chat');
-            set({ 
-                currentChatId: null, 
-                chatMessages: [],
-                // Clear all per-chat attachments
-                attachedDatabaseTables: [],
-                attachedTools: [],
-                attachedPaths: [],
-                ragIndexedFiles: [],
-                ragChunkCount: 0,
-            } as any);
-            // Fire-and-forget clear of backend RAG context
-            invoke<boolean>('clear_rag_context').catch(e => 
-                console.error('[ChatStore] Failed to clear RAG context on model switch:', e)
-            );
-        }
+        // The open chat stays: its thread, attachments and RAG context do not depend on the model,
+        // and the next message is saved on the chat with the new model (shouldEndChatOnModelSwitch).
 
         set({
             operationStatus: {
@@ -274,7 +262,10 @@ export const createModelSlice: StateCreator<
         try {
             // Use set_model which BOTH loads the model AND persists to settings
             // This ensures the selection survives app restart
-            await invoke('set_model', { model: modelName });
+            const answer = await invoke<boolean>('set_model', { model: modelName });
+            if (!setModelSucceeded(answer)) {
+                throw new Error('the model engine could not load it');
+            }
             set({
                 operationStatus: {
                     type: 'loading',

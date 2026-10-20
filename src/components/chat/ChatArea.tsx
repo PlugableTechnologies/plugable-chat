@@ -7,6 +7,7 @@ import {
     deriveChatPreviewFromMessage
 } from '../../store/chat-store';
 import { useSettingsStore } from '../../store/settings-store';
+import { chatModelNotice } from '../../store/chat/model-switch';
 import { StatusBar, StreamingWarningBar, ModelStateBar, StartupStateBar } from '../StatusBar';
 import { invoke } from '../../lib/api';
 import { hasOnlyThinkContent, hasOnlyToolCallContent } from '../../lib/response-parser';
@@ -54,7 +55,9 @@ export function ChatArea() {
         // Streaming state
         streamingChatId,
         // Model state machine (deterministic sync with backend)
-        modelState, isModelReady
+        modelState, isModelReady,
+        // Model chosen vs the model the open chat was saved with
+        currentModel, openChatModel, loadModel
     } = useChatStore();
 
     const { settings, openSettings, setActiveTab } = useSettingsStore();
@@ -292,6 +295,8 @@ export function ChatArea() {
         const summaryScore = existingSummary?.score ?? 0;
         const summaryPinned = existingSummary?.pinned ?? false;
 
+        // The chat is saved with the model it is sent with, so its "started with" notice ends here.
+        useChatStore.setState({ openChatModel: null } as any);
         storeState.upsertHistoryEntry({
             id: chatId,
             title: derivedTitle,
@@ -603,6 +608,26 @@ export function ChatArea() {
                 isOpen={toolModalOpen}
                 onClose={() => setToolModalOpen(false)}
             />
+
+            {/* Notice: this chat was saved with another model than the one selected */}
+            {(() => {
+                const savedModel = chatModelNotice(openChatModel, currentModel);
+                if (!savedModel) return null;
+                return (
+                    <div className="flex-shrink-0 px-4 sm:px-6" data-testid="chat-model-notice">
+                        <div className="max-w-[900px] mx-auto text-xs text-gray-500 flex items-center gap-2 py-1">
+                            <span>This chat started with {savedModel}. New replies use {currentModel}.</span>
+                            <button
+                                type="button"
+                                className="underline hover:text-gray-700"
+                                onClick={() => { void loadModel(savedModel); }}
+                            >
+                                Use {savedModel}
+                            </button>
+                        </div>
+                    </div>
+                );
+            })()}
 
             {/* Fixed Input Area at Bottom */}
             <div className="chat-input-section flex-shrink-0 mt-1 pb-4">

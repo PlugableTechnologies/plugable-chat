@@ -49,7 +49,11 @@ fn webgpu_is_only_gpu_ep<'a>(names: impl Iterator<Item = &'a str>) -> bool {
 /// the old runtime is automatically re-evaluated here. Keep in step with the `foundry-local-sdk`
 /// pin in Cargo.toml (`sdk_version_key_matches_cargo_pin` fails if they drift): changing the key
 /// is what makes a model blocklisted on an older SDK get a fresh chance.
-pub const FOUNDRY_SDK_VERSION_KEY: &str = "sdk-1.2.3";
+///
+/// The Core is part of the key because it is what decides whether a model loads: models blocklisted
+/// while Core 1.2.3 never registered a GPU provider must get a fresh chance on Core 1.2.4
+/// (`foundry-core-version.txt`; `sdk_version_key_matches_cargo_pin` keeps both halves honest).
+pub const FOUNDRY_SDK_VERSION_KEY: &str = "sdk-1.2.3+core-1.2.4";
 
 /// Process-global manager singleton (matches the SDK's own `create()` singleton contract).
 static MANAGER: OnceLock<&'static FoundryLocalManager> = OnceLock::new();
@@ -292,6 +296,140 @@ fn ep_failure(ep: &str, message: &str, cancelled: bool) -> crate::gpu_diagnostic
     failure
 }
 
+/// The real engine behind the registration ladder: one `download_and_register_eps` call per
+/// attempt, with the shared progress callback, cancel flag and a heartbeat in the log.
+pub struct SdkEngine {
+    manager: &'static FoundryLocalManager,
+    progress: Arc<std::sync::Mutex<Box<dyn FnMut(&str, f64) + Send>>>,
+    /// The latest (provider, percent), so the heartbeat can say where a long wait is stuck.
+    latest_progress: Arc<std::sync::Mutex<(String, f64)>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl SdkEngine {
+    fn report_progress(&self, ep: &str, percent: f64) {
+        if let Ok(mut latest) = self.latest_progress.lock() {
+            *latest = (ep.to_string(), percent);
+        }
+        if let Ok(mut progress) = self.progress.lock() {
+            (progress)(ep, percent);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl super::ep_ladder::RegistrationEngine for SdkEngine {
+    async fn attempt(&mut self, names: Option<Vec<String>>) -> super::ep_ladder::EngineAnswer {
+        use super::ep_ladder::EngineAnswer;
+        let started = std::time::Instant::now();
+        let mut builder = self.manager.download_and_register_eps_builder();
+        if let Some(names) = &names {
+            builder = builder.names(names.clone());
+        }
+        let latest_writer = Arc::clone(&self.latest_progress);
+        let progress = Arc::clone(&self.progress);
+        let registration = builder
+            .progress(move |ep: &str, percent: f64| {
+                if let Ok(mut latest) = latest_writer.lock() {
+                    *latest = (ep.to_string(), percent);
+                }
+                if let Ok(mut cb) = progress.lock() {
+                    (cb)(ep, percent);
+                }
+            })
+            .cancel(Arc::clone(&self.cancel))
+            .run();
+        tokio::pin!(registration);
+        let mut heartbeat_interval = tokio::time::interval(EP_REGISTRATION_HEARTBEAT_INTERVAL);
+        heartbeat_interval.tick().await; // the first tick completes immediately
+        let result = loop {
+            tokio::select! {
+                result = &mut registration => break result,
+                _ = heartbeat_interval.tick() => {
+                    let (ep, percent) = self.latest_progress
+                        .lock()
+                        .map(|latest| latest.clone())
+                        .unwrap_or_default();
+                    crate::app_log::log("gpu", &format!(
+                        "still registering providers after {}s (latest: {} {:.0}%, cancel requested: {})",
+                        started.elapsed().as_secs(),
+                        ep,
+                        percent,
+                        self.cancel.load(Ordering::SeqCst)
+                    ));
+                }
+            }
+        };
+        let requested = names.as_ref().map(|n| n.join(", ")).unwrap_or_else(|| "all providers".to_string());
+        match result {
+            Ok(r) => {
+                crate::app_log::log(
+                    "gpu",
+                    &format!(
+                        "engine answered after {} ms for [{}]: success={}, status={:?}, registered=[{}], failed=[{}]",
+                        started.elapsed().as_millis(),
+                        requested,
+                        r.success,
+                        r.status,
+                        r.registered_eps.join(", "),
+                        r.failed_eps.join(", ")
+                    ),
+                );
+                EngineAnswer {
+                    success: r.success,
+                    status: r.status,
+                    registered: r.registered_eps,
+                    failed: r.failed_eps,
+                    error: None,
+                    elapsed_ms: started.elapsed().as_millis(),
+                }
+            }
+            Err(e) => {
+                crate::app_log::log("gpu", &format!("provider registration for [{requested}] failed: {e}"));
+                EngineAnswer { error: Some(e.to_string()), elapsed_ms: started.elapsed().as_millis(), ..Default::default() }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Probe access (`plugable-chat --ep-probe`, see ep_probe.rs)
+// ---------------------------------------------------------------------------------------------
+
+/// Create the engine for one probe process. `stock` is the SDK's own minimal configuration (only
+/// the native library location), to tell whether anything in our configuration matters; otherwise
+/// it is ours, including the `PLUGABLE_FOUNDRY_WINML_BOOTSTRAP` switch.
+pub fn probe_manager(library_dir: Option<&Path>, stock: bool) -> Result<&'static FoundryLocalManager, String> {
+    if !stock {
+        let cache = std::env::temp_dir().join("plugable-chat-ep-probe-cache");
+        let _ = std::fs::create_dir_all(&cache);
+        return get_or_create_manager(&cache, library_dir);
+    }
+    let mut config = FoundryLocalConfig::new("ep-probe");
+    if let Some(dir) = library_dir {
+        config = config.library_path(dir.to_string_lossy().to_string());
+    }
+    FoundryLocalManager::create(config).map_err(|e| format!("SDK create failed: {e}"))
+}
+
+/// The engine's provider list as `(name, is_registered)`, repeats kept.
+pub fn probe_discover(manager: &'static FoundryLocalManager) -> Result<Vec<(String, bool)>, String> {
+    manager
+        .discover_eps()
+        .map(|eps| eps.iter().map(|e| (e.name.clone(), e.is_registered)).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// A registration engine for the probe: no progress reporting, never cancelled.
+pub fn probe_engine(manager: &'static FoundryLocalManager) -> SdkEngine {
+    SdkEngine {
+        manager,
+        progress: Arc::new(std::sync::Mutex::new(Box::new(|_: &str, _: f64| {}))),
+        latest_progress: Arc::new(std::sync::Mutex::new((String::new(), 0.0))),
+        cancel: Arc::new(AtomicBool::new(false)),
+    }
+}
+
 impl SdkBackend {
     /// Ask the engine which execution providers exist and keep its raw answer (preflight report,
     /// GPU assessment). Every caller goes through here: an early return elsewhere used to lose
@@ -379,87 +517,22 @@ impl SdkBackend {
             return summary;
         }
 
+        // The engine's own unregistered list, repeats kept: the ladder's raw step needs it.
+        let raw_missing: Vec<String> = eps.iter().filter(|e| !e.is_registered).map(|e| e.name.clone()).collect();
         crate::app_log::log("gpu", &format!("registering providers: {}", missing.join(", ")));
 
-        // Remember the latest (provider, percent) so the heartbeat below can say where a long
-        // wait is stuck, and tell the UI right away instead of after the first percent tick.
-        let latest_progress: Arc<std::sync::Mutex<(String, f64)>> =
-            Arc::new(std::sync::Mutex::new((missing[0].clone(), 0.0)));
-        let mut progress = progress;
-        progress(&missing[0], 0.0);
-        let latest_progress_writer = Arc::clone(&latest_progress);
-        let progress_with_latest = move |ep: &str, percent: f64| {
-            if let Ok(mut latest) = latest_progress_writer.lock() {
-                *latest = (ep.to_string(), percent);
-            }
-            progress(ep, percent);
+        let mut engine = SdkEngine {
+            manager: self.manager,
+            progress: Arc::new(std::sync::Mutex::new(Box::new(progress))),
+            latest_progress: Arc::new(std::sync::Mutex::new((missing[0].clone(), 0.0))),
+            cancel: Arc::clone(&cancel),
         };
-
-        let registration = self
-            .manager
-            .download_and_register_eps_builder()
-            .names(missing.clone())
-            .progress(progress_with_latest)
-            .cancel(Arc::clone(&cancel))
-            .run();
-        tokio::pin!(registration);
-        let mut heartbeat_interval = tokio::time::interval(EP_REGISTRATION_HEARTBEAT_INTERVAL);
-        heartbeat_interval.tick().await; // the first tick completes immediately
-        let result = loop {
-            tokio::select! {
-                result = &mut registration => break result,
-                _ = heartbeat_interval.tick() => {
-                    let (ep, percent) = latest_progress
-                        .lock()
-                        .map(|latest| latest.clone())
-                        .unwrap_or_default();
-                    crate::app_log::log("gpu", &format!(
-                        "still registering providers after {}s (latest: {} {:.0}%, cancel requested: {})",
-                        started.elapsed().as_secs(),
-                        ep,
-                        percent,
-                        cancel.load(Ordering::SeqCst)
-                    ));
-                }
-            }
-        };
+        engine.report_progress(&missing[0], 0.0);
+        let outcome = super::ep_ladder::run_ladder(&mut engine, &raw_missing, &cancel).await;
         summary.cancelled = cancel.load(Ordering::SeqCst);
-        match result {
-            Ok(r) => {
-                crate::app_log::log(
-                    "gpu",
-                    &format!(
-                        "engine answered after {} ms: success={}, status={:?}, registered=[{}], failed=[{}]",
-                        started.elapsed().as_millis(),
-                        r.success,
-                        r.status,
-                        r.registered_eps.join(", "),
-                        r.failed_eps.join(", ")
-                    ),
-                );
-                let (registered, failed, failures) = interpret_registration(
-                    &missing,
-                    r.success,
-                    &r.status,
-                    r.registered_eps,
-                    r.failed_eps,
-                    summary.cancelled,
-                    started.elapsed().as_millis(),
-                );
-                summary.registered = registered;
-                summary.failed = failed;
-                summary.failures = failures;
-            }
-            Err(e) => {
-                crate::app_log::log("gpu", &format!("provider registration failed: {e}"));
-                let detail = e.to_string();
-                summary.failures = missing
-                    .iter()
-                    .map(|ep| ep_failure(ep, &detail, summary.cancelled))
-                    .collect();
-                summary.failed = missing;
-            }
-        }
+        summary.registered = outcome.registered;
+        summary.failed = outcome.failed;
+        summary.failures = outcome.failures;
         summary.seconds = started.elapsed().as_secs_f64();
         // Ask again so "registered nothing" is observed, not inferred from the result object.
         let _ = self.observed_eps();
@@ -1057,7 +1130,8 @@ mod tests {
             .find(|l| l.trim_start().starts_with("foundry-local-sdk"))
             .and_then(|l| l.split('"').nth(1))
             .expect("foundry-local-sdk pin in Cargo.toml");
-        assert_eq!(FOUNDRY_SDK_VERSION_KEY, format!("sdk-{pinned}"));
+        let core = include_str!("../../../../foundry-core-version.txt").trim();
+        assert_eq!(FOUNDRY_SDK_VERSION_KEY, format!("sdk-{pinned}+core-{core}"));
     }
 
     use super::*;

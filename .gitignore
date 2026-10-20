@@ -15,6 +15,11 @@ dist-ssr
 # npm cache used in this repo
 .npm-cache
 
+# Foundry Local Core staged by scripts/ci/fetch-foundry-core.ps1
+.foundry-core-override-*
+.ep-probe-*
+ep-probe-out
+
 # Cargo/Tauri build output
 target
 src-tauri/target

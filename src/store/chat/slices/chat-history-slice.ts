@@ -3,6 +3,7 @@ import type { StateCreator } from 'zustand';
 import { invoke } from '../../../lib/api';
 import type { ChatSummary, Message } from '../types';
 import { RELEVANCE_SEARCH_DEBOUNCE_MS, RELEVANCE_SEARCH_MIN_LENGTH } from '../constants';
+import { chatModelNotice } from '../model-switch';
 
 // Module-level state for relevance search
 let relevanceSearchTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -131,11 +132,9 @@ export const createChatHistorySlice: StateCreator<
             }
 
             // Find the chat summary to see if it has an associated model
+            // The model the user picked stays; the chat only offers its saved model (see model-switch.ts).
             const chatSummary = state.history.find(c => c.id === id);
-            if (chatSummary?.model && chatSummary.model !== state.currentModel) {
-                console.log(`[ChatStore] Chat ${id.slice(0, 8)} uses model ${chatSummary.model}, switching current model`);
-                await get().setModel(chatSummary.model);
-            }
+            set({ openChatModel: chatModelNotice(chatSummary?.model, state.currentModel) } as any);
             
             const messagesJson = await invoke<string | null>('load_chat', { id });
             if (messagesJson) {

@@ -1,0 +1,137 @@
+PLUGABLE CHAT SUPPORT DETAILS
+Release: v0.1.0-rc13
+App version: 0.0.0
+Git commit: 496f828595825b92410eb160fd2216d1edb7ceab
+Built (unix time): 1792212454
+OS: Microsoft Windows 11 Home build 26300
+RAM: 32326 MB
+Config folder: C:\Users\USER\AppData\Roaming\plugable-chat (writable: true, free: 722365 MB)
+Data folder: C:\Users\USER\AppData\Local\plugable-chat\data (writable: true, free: 722365 MB)
+
+GPU: Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU.
+  Windows lists: Intel(R) Arc(TM) Pro B60 Graphics, 4 GB or more (Windows cannot report more here); Intel(R) Arc(TM) 140V GPU (16GB), 4 GB or more (Windows cannot report more here).
+  Thunderbolt devices present: USB4(TM) Host Router (Microsoft); USB4 Router (2.0), Sparkle Computer Co.. Ltd. - Studio-G Ultra 850; USB4 Virtual power coordination device; Thunderbolt 5 Dual HDMI Docking Station; USB4 Root Router (1.0); USB4 Virtual power coordination device; USB4 Root Router (1.0); USB4(TM) Host Router (Microsoft); USB4 Router (2.0), Plugable - Thunderbolt 5 Dual HDMI Docking Station.
+  The model engine reports: WebGpuExecutionProvider (not registered), OpenVINOExecutionProvider (not registered), WebGpuExecutionProvider (not registered).
+  nvidia-smi did not report a driver version.
+  Setting up WebGpuExecutionProvider failed (the model engine did not try to set it up): the engine returned after 12 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.)
+  Setting up OpenVINOExecutionProvider failed (the model engine did not try to set it up): the engine returned after 12 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.)
+  Try: The model engine skipped GPU setup without giving a reason. Copy the details for support: they include the engine's own log.
+  Try: Choose Retry GPU setup. If it still shows this, copy the details for support.
+nvidia-smi: could not run nvidia-smi: program not found
+Visual C++ runtime: installed
+Engine libraries in \\?\C:\Program Files\plugable-chat\foundry-libs: onnxruntime-genai.dll, onnxruntime.dll, onnxruntime_providers_shared.dll
+
+What the app showed:
+Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU.
+Windows lists: Intel(R) Arc(TM) Pro B60 Graphics, 4 GB or more (Windows cannot report more here); Intel(R) Arc(TM) 140V GPU (16GB), 4 GB or more (Windows cannot report more here).
+Thunderbolt devices present: USB4(TM) Host Router (Microsoft); USB4 Router (2.0), Sparkle Computer Co.. Ltd. - Studio-G Ultra 850; USB4 Virtual power coordination device; Thunderbolt 5 Dual HDMI Docking Station; USB4 Root Router (1.0); USB4 Virtual power coordination device; USB4 Root Router (1.0); USB4(TM) Host Router (Microsoft); USB4 Router (2.0), Plugable - Thunderbolt 5 Dual HDMI Docking Station.
+The model engine reports: WebGpuExecutionProvider (not registered), OpenVINOExecutionProvider (not registered), WebGpuExecutionProvider (not registered).
+nvidia-smi did not report a driver version.
+Setting up WebGpuExecutionProvider failed (the model engine did not try to set it up): the engine returned after 12 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.)
+Setting up OpenVINOExecutionProvider failed (the model engine did not try to set it up): the engine returned after 12 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.)
+Try: The model engine skipped GPU setup without giving a reason. Copy the details for support: they include the engine's own log.
+Try: Choose Retry GPU setup. If it still shows this, copy the details for support.
+
+Recent log:
+2026-10-19 09:33:35.904 [gpu] assessment Checking: Checking GPU acceleration...
+2026-10-19 09:33:37.451 [gpu] engine: foundry-local sdk-1.2.3 (bundled runtime @ \\?\C:\Program Files\plugable-chat\foundry-libs)
+2026-10-19 09:33:37.462 [gpu] engine providers: WebGpuExecutionProvider=not registered, OpenVINOExecutionProvider=not registered, WebGpuExecutionProvider=not registered
+2026-10-19 09:33:37.462 [gpu] registering providers: WebGpuExecutionProvider, OpenVINOExecutionProvider
+2026-10-19 09:33:37.473 [gpu] engine answered after 11 ms: success=false, status="Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.", registered=[], failed=[]
+2026-10-19 09:33:37.473 [gpu] registration done in 0.0s: registered=[], failed=[WebGpuExecutionProvider (EngineDeclined), OpenVINOExecutionProvider (EngineDeclined)]
+2026-10-19 09:33:38.103 [embedding] CPU embedding model loaded and verified
+2026-10-19 09:33:38.783 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:33:38.812 [gpu] assessment HardwareNotUsed: Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU.
+2026-10-19 09:33:38.832 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:33:40.023 [preflight] Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792427620023.json
+2026-10-19 09:33:40.043 [preflight] Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792427620043.json
+2026-10-19 09:34:02.808 [launch] Plugable Chat v0.1.0-rc13 (496f828)
+2026-10-19 09:34:03.353 [gpu] assessment Checking: Checking GPU acceleration...
+2026-10-19 09:34:04.745 [gpu] engine: foundry-local sdk-1.2.3 (bundled runtime @ \\?\C:\Program Files\plugable-chat\foundry-libs)
+2026-10-19 09:34:04.755 [gpu] engine providers: WebGpuExecutionProvider=not registered, OpenVINOExecutionProvider=not registered, WebGpuExecutionProvider=not registered
+2026-10-19 09:34:04.756 [gpu] registering providers: WebGpuExecutionProvider, OpenVINOExecutionProvider
+2026-10-19 09:34:04.771 [gpu] engine answered after 15 ms: success=false, status="Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.", registered=[], failed=[]
+2026-10-19 09:34:04.771 [gpu] registration done in 0.0s: registered=[], failed=[WebGpuExecutionProvider (EngineDeclined), OpenVINOExecutionProvider (EngineDeclined)]
+2026-10-19 09:34:05.392 [embedding] CPU embedding model loaded and verified
+2026-10-19 09:34:06.053 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:34:06.053 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:34:06.078 [gpu] assessment HardwareNotUsed: Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU.
+2026-10-19 09:34:07.302 [preflight] Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792427647301.json
+2026-10-19 09:34:07.304 [preflight] Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792427647303.json
+2026-10-19 09:34:13.796 [gpu] model list: 0 GPU, 47 CPU
+2026-10-19 09:34:14.865 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:34:35.695 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:34:49.873 [gpu] model list: 0 GPU, 47 CPU
+2026-10-19 09:34:50.843 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:34:52.541 [gpu] model list: 0 GPU, 47 CPU
+2026-10-19 09:34:53.515 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:35:06.787 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:35:09.092 [gpu] model list: 0 GPU, 47 CPU
+2026-10-19 09:35:10.069 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:35:33.834 [gpu] model list: 0 GPU, 47 CPU
+2026-10-19 09:35:37.921 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:36:09.250 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:36:40.665 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:37:11.561 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:37:42.590 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:38:13.618 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:38:44.449 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:39:26.317 [launch] Plugable Chat v0.1.0-rc13 (496f828)
+2026-10-19 09:39:26.846 [gpu] assessment Checking: Checking GPU acceleration...
+2026-10-19 09:39:28.293 [gpu] engine: foundry-local sdk-1.2.3 (bundled runtime @ \\?\C:\Program Files\plugable-chat\foundry-libs)
+2026-10-19 09:39:28.307 [gpu] engine providers: WebGpuExecutionProvider=not registered, OpenVINOExecutionProvider=not registered, WebGpuExecutionProvider=not registered
+2026-10-19 09:39:28.308 [gpu] registering providers: WebGpuExecutionProvider, OpenVINOExecutionProvider
+2026-10-19 09:39:28.319 [gpu] engine answered after 12 ms: success=false, status="Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.", registered=[], failed=[]
+2026-10-19 09:39:28.319 [gpu] registration done in 0.0s: registered=[], failed=[WebGpuExecutionProvider (EngineDeclined), OpenVINOExecutionProvider (EngineDeclined)]
+2026-10-19 09:39:29.353 [embedding] CPU embedding model loaded and verified
+2026-10-19 09:39:29.535 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:39:29.535 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:39:29.570 [gpu] assessment HardwareNotUsed: Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU.
+2026-10-19 09:39:30.872 [preflight] Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792427970871.json
+2026-10-19 09:39:30.873 [preflight] Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792427970872.json
+2026-10-19 09:39:32.807 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:39:33.992 [preflight] Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792427973991.json
+2026-10-19 09:39:39.369 [preflight] adapter scan: 2 adapter(s), 9 Thunderbolt device(s)
+2026-10-19 09:39:40.454 [preflight] Windows sees Intel(R) Arc(TM) Pro B60 Graphics, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792427980453.json
+
+Model engine log (C:\Users\USER\AppData\Roaming\plugable-chat\logs\foundry\foundry.core20261019.log):
+2026-10-19 09:33:13.562 -07:00 [INF] ExecuteCommandWithCallbackManaged: download_and_register_eps Data:{"Params":{"Names":"WebGpuExecutionProvider,OpenVINOExecutionProvider"}}
+2026-10-19 09:33:13.562 -07:00 [WRN] Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.
+2026-10-19 09:33:13.562 -07:00 [INF] [Telemetry] AppName:plugable-chat UserAgent:FoundryLocalCore Command:AutoRegisterCertifiedEps Status:Failure Direct:True Time:0ms
+2026-10-19 09:33:13.562 -07:00 [INF] [Telemetry] AppName:plugable-chat UserAgent:CoreNativeInterop Command:AutoRegisterCertifiedEps Status:Failure Direct:True Time:0ms
+2026-10-19 09:33:13.716 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:33:13.788 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:33:35.834 -07:00 [INF] Initializing EpDetector with 3 bootstrapper(s).
+2026-10-19 09:33:35.834 -07:00 [INF] EP registration deferred. Call DownloadAndRegisterEpsAsync to begin.
+2026-10-19 09:33:35.836 -07:00 [INF] Device: CPU,EPs: CPUExecutionProvider
+2026-10-19 09:33:36.856 -07:00 [INF] Device: CPU,EPs: CPUExecutionProvider
+2026-10-19 09:33:37.472 -07:00 [INF] ExecuteCommandWithCallbackManaged: download_and_register_eps Data:{"Params":{"Names":"WebGpuExecutionProvider,OpenVINOExecutionProvider"}}
+2026-10-19 09:33:37.472 -07:00 [WRN] Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.
+2026-10-19 09:33:37.472 -07:00 [INF] [Telemetry] AppName:plugable-chat UserAgent:FoundryLocalCore Command:AutoRegisterCertifiedEps Status:Failure Direct:True Time:0ms
+2026-10-19 09:33:37.473 -07:00 [INF] [Telemetry] AppName:plugable-chat UserAgent:CoreNativeInterop Command:AutoRegisterCertifiedEps Status:Failure Direct:True Time:0ms
+2026-10-19 09:33:37.619 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:33:37.689 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:34:03.285 -07:00 [INF] Initializing EpDetector with 3 bootstrapper(s).
+2026-10-19 09:34:03.285 -07:00 [INF] EP registration deferred. Call DownloadAndRegisterEpsAsync to begin.
+2026-10-19 09:34:03.288 -07:00 [INF] Device: CPU,EPs: CPUExecutionProvider
+2026-10-19 09:34:04.161 -07:00 [INF] Device: CPU,EPs: CPUExecutionProvider
+2026-10-19 09:34:04.771 -07:00 [INF] ExecuteCommandWithCallbackManaged: download_and_register_eps Data:{"Params":{"Names":"WebGpuExecutionProvider,OpenVINOExecutionProvider"}}
+2026-10-19 09:34:04.771 -07:00 [WRN] Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.
+2026-10-19 09:34:04.771 -07:00 [INF] [Telemetry] AppName:plugable-chat UserAgent:FoundryLocalCore Command:AutoRegisterCertifiedEps Status:Failure Direct:True Time:0ms
+2026-10-19 09:34:04.771 -07:00 [INF] [Telemetry] AppName:plugable-chat UserAgent:CoreNativeInterop Command:AutoRegisterCertifiedEps Status:Failure Direct:True Time:0ms
+2026-10-19 09:34:04.936 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:34:05.002 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:37:36.595 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:37:36.644 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:38:08.531 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:38:08.578 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:38:20.742 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:38:20.800 -07:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 09:39:26.773 -07:00 [INF] Initializing EpDetector with 3 bootstrapper(s).
+2026-10-19 09:39:26.773 -07:00 [INF] EP registration deferred. Call DownloadAndRegisterEpsAsync to begin.
+2026-10-19 09:39:26.775 -07:00 [INF] Device: CPU,EPs: CPUExecutionProvider
+2026-10-19 09:39:27.737 -07:00 [INF] Device: CPU,EPs: CPUExecutionProvider
+2026-10-19 09:39:28.318 -07:00 [INF] ExecuteCommandWithCallbackManaged: download_and_register_eps Data:{"Params":{"Names":"WebGpuExecutionProvider,OpenVINOExecutionProvider"}}
+2026-10-19 09:39:28.318 -07:00 [WRN] Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: WebGpuExecutionProvider, OpenVINOExecutionProvider, WebGpuExecutionProvider.
+2026-10-19 09:39:28.318 -07:00 [INF] [Telemetry] AppName:plugable-chat UserAgent:FoundryLocalCore Command:AutoRegisterCertifiedEps Status:Failure Direct:True Time:0ms
+2026-10-19 09:39:28.318 -07:00 [INF] [Telemetry] AppName:plugable-chat UserAgent:CoreNativeInterop Command:AutoRegisterCertifiedEps Status:Failure Direct:True Time:0ms

@@ -531,7 +531,7 @@ Register "engine-declined" "Pat: engine refuses with no reason (rc12, E1/E2)" @(
     if (-not $rep) { return @{ Failures = $f + "no preflight report was written" } }
     if ($rep.assessment.state -ne "hardware_not_used") { $f += "expected hardware_not_used, got $($rep.assessment.state): $($rep.assessment.headline)" }
     $detail = @($rep.assessment.detail) -join " / "
-    if ($detail -notmatch "did not try to set it up") { $f += "the refusal is not named in the details: $detail" }
+    if ($detail -notmatch "declined to register it") { $f += "the refusal is not named in the details: $detail" }
     if (@([regex]::Matches($detail, "Setting up WebGpuExecutionProvider")).Count -ne 1) { $f += "WebGpu should be reported once, not per duplicate: $detail" }
     if (-not (@($rep.assessment.hints) | Where-Object { $_ -match "engine's own log" })) { $f += "no hint points to the engine log: $(@($rep.assessment.hints) -join ' / ')" }
     return @{ Failures = $f }

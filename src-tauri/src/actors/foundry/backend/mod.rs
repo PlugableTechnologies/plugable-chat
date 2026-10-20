@@ -11,7 +11,11 @@
 //! `reqwest` or SDK types up into the actor.
 #![allow(dead_code)] // wired incrementally during the CLI→SDK migration (Phases 2–3)
 
+pub mod ep_ladder;
 pub mod sdk;
+
+#[cfg(test)]
+mod core_pin_tests;
 
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;

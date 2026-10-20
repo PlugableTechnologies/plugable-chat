@@ -128,6 +128,12 @@ jobs:
           node --test scripts/ci/check-tauri-versions.test.mjs scripts/ci/release-names.test.mjs
           node scripts/ci/check-tauri-versions.mjs
 
+      # Core 1.2.3 (what foundry-local-sdk 1.2.3 downloads) refuses to register GPU providers when its own
+      # list repeats a name. Core 1.2.4 fixes it; see the script for why this is an override.
+      - name: Stage the pinned Foundry Local Core (src-tauri/foundry-core-version.txt)
+        shell: pwsh
+        run: pwsh scripts/ci/fetch-foundry-core.ps1
+
       - name: Type-check and build the frontend
         run: npm run build
 
@@ -164,6 +170,20 @@ jobs:
       - name: Confirm the app exe links the C runtime statically
         shell: pwsh
         run: pwsh scripts/ci/assert-static-crt.ps1 -Exe target/debug/plugable-chat.exe
+
+      # A hosted runner has no GPU, so this proves the harness (every configuration runs, the report
+      # is complete, the control names the unknown provider) and compares Core 1.2.3 with the bundled
+      # Core. The verdicts that need a failing machine come from scripts/support/ep-hypotheses.ps1.
+      - name: GPU registration probe (harness check and Core version comparison)
+        shell: pwsh
+        run: pwsh scripts/ci/run-ep-probe.ps1 -Exe target/debug/plugable-chat.exe
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: ep-probe-${{ github.sha }}
+          path: ep-probe-out/*
+          if-no-files-found: warn
 
       - name: Collect the installer
         shell: pwsh

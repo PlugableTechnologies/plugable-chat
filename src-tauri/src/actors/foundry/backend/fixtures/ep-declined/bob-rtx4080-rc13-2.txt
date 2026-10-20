@@ -1,0 +1,72 @@
+PLUGABLE CHAT SUPPORT DETAILS
+Release: v0.1.0-rc13
+App version: 0.0.0
+Git commit: 496f828595825b92410eb160fd2216d1edb7ceab
+Built (unix time): 1792212454
+OS: Microsoft Windows 11 Home build 26300
+RAM: 16095 MB
+Config folder: C:\Users\USER\AppData\Roaming\plugable-chat (writable: true, free: 179942 MB)
+Data folder: C:\Users\USER\AppData\Local\plugable-chat\data (writable: true, free: 179942 MB)
+
+GPU: Windows sees NVIDIA GeForce RTX 4080, but the model engine is not using it, so models run on the CPU.
+  Windows lists: NVIDIA GeForce RTX 4080, 4 GB or more (Windows cannot report more here); Intel(R) Iris(R) Xe Graphics, 2047 MB.
+  Thunderbolt devices present: Thunderbolt(TM) Controller - 9A1D; Thunderbolt(TM) HSA Component; Thunderbolt(TM) HSA Component; Thunderbolt(TM) Controller - 9A1B.
+  The model engine reports: CUDAExecutionProvider (not registered), WebGpuExecutionProvider (not registered), OpenVINOExecutionProvider (not registered), NvTensorRTRTXExecutionProvider (not registered), WebGpuExecutionProvider (not registered).
+  NVIDIA driver (nvidia-smi): 617.42.
+  Setting up CUDAExecutionProvider failed (the model engine did not try to set it up): the engine returned after 17 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider, WebGpuExecutionProvider.)
+  Setting up WebGpuExecutionProvider failed (the model engine did not try to set it up): the engine returned after 17 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider, WebGpuExecutionProvider.)
+  Setting up OpenVINOExecutionProvider failed (the model engine did not try to set it up): the engine returned after 17 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider, WebGpuExecutionProvider.)
+  Setting up NvTensorRTRTXExecutionProvider failed (the model engine did not try to set it up): the engine returned after 17 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider, WebGpuExecutionProvider.)
+  Try: For an external GPU, check the Thunderbolt cable and approve the device if Windows asks, then choose Retry GPU setup.
+  Try: The model engine skipped GPU setup without giving a reason. Copy the details for support: they include the engine's own log.
+  Try: Choose Retry GPU setup. If it still shows this, copy the details for support.
+nvidia-smi: ok: NVIDIA GeForce RTX 4080, 617.42
+Visual C++ runtime: installed
+Engine libraries in \\?\C:\Program Files\plugable-chat\foundry-libs: onnxruntime-genai.dll, onnxruntime.dll, onnxruntime_providers_shared.dll
+
+What the app showed:
+Windows sees NVIDIA GeForce RTX 4080, but the model engine is not using it, so models run on the CPU.
+Windows lists: NVIDIA GeForce RTX 4080, 4 GB or more (Windows cannot report more here); Intel(R) Iris(R) Xe Graphics, 2047 MB.
+Thunderbolt devices present: Thunderbolt(TM) Controller - 9A1D; Thunderbolt(TM) HSA Component; Thunderbolt(TM) HSA Component; Thunderbolt(TM) Controller - 9A1B.
+The model engine reports: CUDAExecutionProvider (not registered), WebGpuExecutionProvider (not registered), OpenVINOExecutionProvider (not registered), NvTensorRTRTXExecutionProvider (not registered), WebGpuExecutionProvider (not registered).
+NVIDIA driver (nvidia-smi): 617.42.
+Setting up CUDAExecutionProvider failed (the model engine did not try to set it up): the engine returned after 17 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider, WebGpuExecutionProvider.)
+Setting up WebGpuExecutionProvider failed (the model engine did not try to set it up): the engine returned after 17 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider, WebGpuExecutionProvider.)
+Setting up OpenVINOExecutionProvider failed (the model engine did not try to set it up): the engine returned after 17 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider, WebGpuExecutionProvider.)
+Setting up NvTensorRTRTXExecutionProvider failed (the model engine did not try to set it up): the engine returned after 17 ms without registering or rejecting it (success: false, status: Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider, WebGpuExecutionProvider.)
+Try: For an external GPU, check the Thunderbolt cable and approve the device if Windows asks, then choose Retry GPU setup.
+Try: The model engine skipped GPU setup without giving a reason. Copy the details for support: they include the engine's own log.
+Try: Choose Retry GPU setup. If it still shows this, copy the details for support.
+
+Recent log:
+2026-10-19 14:09:52.818 [launch] Plugable Chat v0.1.0-rc13 (496f828)
+2026-10-19 14:09:53.573 [gpu] assessment Checking: Checking GPU acceleration...
+2026-10-19 14:09:54.396 [gpu] engine: foundry-local sdk-1.2.3 (bundled runtime @ \\?\C:\Program Files\plugable-chat\foundry-libs)
+2026-10-19 14:09:54.410 [gpu] engine providers: CUDAExecutionProvider=not registered, WebGpuExecutionProvider=not registered, OpenVINOExecutionProvider=not registered, NvTensorRTRTXExecutionProvider=not registered, WebGpuExecutionProvider=not registered
+2026-10-19 14:09:54.410 [gpu] registering providers: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider
+2026-10-19 14:09:54.426 [gpu] engine answered after 16 ms: success=false, status="Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider, WebGpuExecutionProvider.", registered=[], failed=[]
+2026-10-19 14:09:54.427 [gpu] registration done in 0.0s: registered=[], failed=[CUDAExecutionProvider (EngineDeclined), WebGpuExecutionProvider (EngineDeclined), OpenVINOExecutionProvider (EngineDeclined), NvTensorRTRTXExecutionProvider (EngineDeclined)]
+2026-10-19 14:09:55.266 [embedding] CPU embedding model loaded and verified
+2026-10-19 14:09:56.882 [preflight] adapter scan: 2 adapter(s), 4 Thunderbolt device(s)
+2026-10-19 14:09:56.882 [preflight] adapter scan: 2 adapter(s), 4 Thunderbolt device(s)
+2026-10-19 14:09:57.087 [gpu] assessment HardwareNotUsed: Windows sees NVIDIA GeForce RTX 4080, but the model engine is not using it, so models run on the CPU.
+2026-10-19 14:09:59.430 [preflight] Windows sees NVIDIA GeForce RTX 4080, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792433399428.json
+2026-10-19 14:09:59.432 [preflight] Windows sees NVIDIA GeForce RTX 4080, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792433399430.json
+2026-10-19 14:10:25.555 [preflight] adapter scan: 2 adapter(s), 4 Thunderbolt device(s)
+2026-10-19 14:10:26.787 [preflight] adapter scan: 2 adapter(s), 4 Thunderbolt device(s)
+2026-10-19 14:10:28.906 [preflight] Windows sees NVIDIA GeForce RTX 4080, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792433428905.json
+2026-10-19 14:10:56.818 [preflight] adapter scan: 2 adapter(s), 4 Thunderbolt device(s)
+2026-10-19 14:11:17.347 [preflight] adapter scan: 2 adapter(s), 4 Thunderbolt device(s)
+2026-10-19 14:11:19.558 [preflight] Windows sees NVIDIA GeForce RTX 4080, but the model engine is not using it, so models run on the CPU. -> C:\Users\USER\AppData\Roaming\plugable-chat\logs\preflight-1792433479557.json
+
+Model engine log (C:\Users\USER\AppData\Roaming\plugable-chat\logs\foundry\foundry.core20261019.log):
+2026-10-19 14:09:53.908 -04:00 [INF] Initializing EpDetector with 5 bootstrapper(s).
+2026-10-19 14:09:53.908 -04:00 [INF] EP registration deferred. Call DownloadAndRegisterEpsAsync to begin.
+2026-10-19 14:09:53.911 -04:00 [INF] Device: CPU,EPs: CPUExecutionProvider
+2026-10-19 14:09:54.245 -04:00 [INF] Device: CPU,EPs: CPUExecutionProvider
+2026-10-19 14:09:54.425 -04:00 [INF] ExecuteCommandWithCallbackManaged: download_and_register_eps Data:{"Params":{"Names":"CUDAExecutionProvider,WebGpuExecutionProvider,OpenVINOExecutionProvider,NvTensorRTRTXExecutionProvider"}}
+2026-10-19 14:09:54.425 -04:00 [WRN] Unknown EP bootstrapper name(s): . Call DiscoverEps() and retry with supported names only. Available EPs: CUDAExecutionProvider, WebGpuExecutionProvider, OpenVINOExecutionProvider, NvTensorRTRTXExecutionProvider, WebGpuExecutionProvider.
+2026-10-19 14:09:54.425 -04:00 [INF] [Telemetry] AppName:plugable-chat UserAgent:FoundryLocalCore Command:AutoRegisterCertifiedEps Status:Failure Direct:True Time:0ms
+2026-10-19 14:09:54.425 -04:00 [INF] [Telemetry] AppName:plugable-chat UserAgent:CoreNativeInterop Command:AutoRegisterCertifiedEps Status:Failure Direct:True Time:0ms
+2026-10-19 14:09:54.665 -04:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)
+2026-10-19 14:09:54.768 -04:00 [INF] [Warning:onnxruntime-genai.onnxruntime] Could not find a CPU kernel and hence can't constant fold CastLike node 'n17_24' (constant_folding.cc:302 onnxruntime::ConstantFolding::ApplyImpl)

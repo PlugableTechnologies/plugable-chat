@@ -19,6 +19,7 @@ pub mod chat_persistence;
 pub mod cli;
 pub mod crash_handler;
 pub mod demo_schema;
+pub mod ep_probe;
 pub mod gpu_assessment;
 pub mod gpu_diagnostics;
 pub mod preflight;
@@ -1814,6 +1815,28 @@ pub fn run() {
         // Fall back to defaults (no overrides) if parsing fails
         CliArgs::parse_from(["plugable-chat"])
     });
+    // The GPU registration probe is an answer, not a launch: run it and exit before any window.
+    if let Some(case) = cli_args.ep_probe_case.as_deref() {
+        let report = tauri::async_runtime::block_on(ep_probe::run_case(case, cli_args.ep_probe_other_core.as_deref().map(std::path::Path::new)));
+        ep_probe::print_case(&report);
+        return;
+    }
+    if let Some(dir) = cli_args.ep_probe.as_deref() {
+        match ep_probe::run_probe(
+            std::path::Path::new(dir),
+            cli_args.ep_probe_facts.as_deref().map(std::path::Path::new),
+            cli_args.ep_probe_other_core.as_deref().map(std::path::Path::new),
+        ) {
+            Ok(path) => {
+                println!("{}", path.display());
+                return;
+            }
+            Err(e) => {
+                eprintln!("[ep-probe] {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if cli_args.run_mcp_test_server {
         let mut server_args = McpTestCliArgs::default();
         server_args.host = cli_args.mcp_test_host.clone();

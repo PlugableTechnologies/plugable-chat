@@ -168,6 +168,19 @@ pub struct CliArgs {
     /// change the user's configuration.
     #[arg(long, env = "PLUGABLE_EPHEMERAL")]
     pub ephemeral: bool,
+    /// Run the GPU registration experiments and write a report with a verdict per hypothesis to
+    /// DIR, then exit (support use; `scripts/support/ep-hypotheses.ps1` runs it and gathers host facts)
+    #[arg(long, value_name = "DIR")]
+    pub ep_probe: Option<String>,
+    /// JSON file of host facts gathered by the wrapper script, folded into the probe's verdicts
+    #[arg(long, value_name = "FILE")]
+    pub ep_probe_facts: Option<String>,
+    /// Folder holding another Foundry Local Core build to compare against the bundled one
+    #[arg(long, value_name = "DIR")]
+    pub ep_probe_other_core: Option<String>,
+    /// Internal: one probe configuration in its own process (ours, bootstrap, stock, other-core)
+    #[arg(long, value_name = "NAME", hide = true)]
+    pub ep_probe_case: Option<String>,
     /// Run only the dev MCP test server (no app; blocks until exit)
     #[arg(
         long,

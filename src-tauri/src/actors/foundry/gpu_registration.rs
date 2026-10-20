@@ -71,7 +71,7 @@ pub fn kind_label(kind: EpFailureKind) -> &'static str {
         EpFailureKind::MissingDll => "a required library is missing",
         EpFailureKind::Cancelled => "cancelled",
         EpFailureKind::Unsupported => "not supported by this hardware",
-        EpFailureKind::EngineDeclined => "the model engine did not try to set it up",
+        EpFailureKind::EngineDeclined => "the model engine declined to register it",
         EpFailureKind::Unknown => "unknown error",
     }
 }

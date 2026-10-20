@@ -124,6 +124,12 @@ jobs:
       - name: Build the frontend
         run: npm run build
 
+      # Core 1.2.3 (what foundry-local-sdk 1.2.3 downloads) refuses to register GPU providers when its own
+      # list repeats a name. Core 1.2.4 fixes it; see the script for why this is an override.
+      - name: Stage the pinned Foundry Local Core (src-tauri/foundry-core-version.txt)
+        shell: pwsh
+        run: pwsh scripts/ci/fetch-foundry-core.ps1
+
       # Compiles every dependency, including their build scripts, before any
       # signing credential is exposed. build.rs also stages the Foundry Local
       # native libraries into src-tauri/foundry-libs here.
