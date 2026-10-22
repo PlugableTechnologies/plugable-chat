@@ -178,6 +178,39 @@ DigiCert Trusted G4 chain (checked from a Mac with the certificate-table method 
 Step timings (UTC): CI 06:03 to 06:25; box launched 06:24:49, bootstrap 2 min 37 s; lifecycle 2 min 43 s; `gpu-baseline` 3 min 04 s; other three scenarios
 2 min 05 s; Chicago questions 06:40 to 07:02; follow-ups 07:03 to 07:12.
 
+## rc15 second pass: the published, signed files (2026-10-22)
+
+The first pass above was cut short and ran the CI (debug, unsigned) build. This pass ran the **published signed `v0.1.0-rc15` files** (nothing rebuilt) on a fresh g5.xlarge (A10G, driver 596.86,
+Windows Server 2025), and on an Apple-silicon Mac. Box and per-run bucket torn down afterwards.
+
+**Windows, signed files**
+
+| Check | Result |
+|---|---|
+| Downloaded `setup.exe` and `.msi` against `SHA256SUMS-windows.txt` | both match |
+| `scripts/ci/verify-installers.ps1` (PowerShell 7) on the setup and the MSI | exit 0: both installers and both installed `plugable-chat.exe` signed by `LEANCODE, INC.` (EV 7376809) with a timestamp; the VC++ payload matches its pin and is signed by Microsoft; the installer hook ran; a first run left the install folder untouched (17 files) |
+| `installer-lifecycle.ps1` (signed setup, as SYSTEM) | 0 failed |
+| `msi-lifecycle.ps1 -ExpectSigned` (signed MSI), on a clean machine | 0 failed (22 checks) |
+| clean-host `gpu-baseline`, `baseline`, `quarantined-dll`, `upgrade-over-old` | 4 of 4 as expected |
+| Chicago questions, all 7, reply-file harness (`followups-run.ps1 -FreshChats`) | 7 of 7 `ok`, every expected answer found, 21 to 32 s each, 215 s in total |
+| Chicago questions, all 7, screenshots through the installed app (`ask.sh`) | all 7 answered; screenshots read for total, top-types, area, homicides, guns, month (227,299; Austin 11,358; 407; 18,608; July 22,561); the window title shows `v0.1.0-rc15 (00011bc)`. About 70 s per question |
+| Same-chat conversation, all 10 prompts | **9 of 10 ok; prompt 10 failed**: see issue 38 (about 18,200 input tokens, `bad allocation` in the engine; replies 8 and 9 took about 5 minutes each). No crash and no native fault |
+| Crash notices, rows 8 and 9 (`crash-test.ps1`) | pass: a kill during start-up is reported once at the next start and not after a normal close; a kill mid-answer is reported with the model and request size (`qwen3.5-4b-cuda-gpu:4`, 72 input tokens, 16384 max); the second kill switches the model off |
+| Row 3 (`PLUGABLE_FOUNDRY_BACKEND=cli_http`, no `foundry` on the machine) | pass: starts on the built-in engine, logs "The Foundry command-line tool is not installed, so Plugable Chat is using its built-in engine instead", answers |
+
+**macOS, signed `.dmg`** (checksum and GitHub attestation verified; ad hoc signed, hardened runtime, three engine libraries inside)
+
+| Check | Result |
+|---|---|
+| Launch the shipped app | **fails**: the engine library is rejected ("different Team IDs", library validation). Issue 37 |
+| Same app re-signed locally with `disable-library-validation` (a diagnosis, not a shipped file) | starts; chat answers; model switch across restarts works; the HTTP (Streamable) MCP transport works against the local stub and the live Brix box (`status` 0.4 s, `ask` 12.9 s); crash rows 8 and 9 behave as on Windows |
+
+**Run-order mistakes of mine, so nobody repeats them:** the MSI lifecycle and `upgrade-over-old` fail with "found 2 registrations" if an NSIS install is still on the machine (uninstall everything first); `verify-installers.ps1` needs PowerShell 7 (it fails on Windows PowerShell 5.1); it installs the setup with `/D=` into its own folder, and NSIS then reuses that folder for the next silent install, so reinstall with `/D=C:\Program Files\plugable-chat` after it; a JSON prompt file written by Windows PowerShell 5.1 with `-Encoding UTF8` has a byte-order mark that the app's `--prompts-file` reader rejects, so the run silently waits for its timer.
+
+**Not run:** clean-host row 10 (`gpt-oss-20b`, 8192-token context; an 11.8 GB model), rows 1, 2, 5 and 7 as manual cases (the CI scenarios `driver-absent`, `quarantined-dll` and the matrix cover their automated forms), row 6 on a real offline machine (`offline-hosts-block` passes in CI), the new Settings screens by a person, the Gatekeeper first-open flow, and the Linux files.
+
+**Timing note:** the release (optimized) build answered the screenshot run in about 70 s per question, against 3 to 10 minutes per question on the CI debug build, and the reply-file harness took 215 s for all seven. See issue 36.
+
 ## rc12 on Pat's TBT5-AI eGPU (2026-10-16)
 
 Framework 13 (Intel Iris Xe) plus an RTX 5080 in a TBT5-AI over Thunderbolt, Windows 11 Home build 26300
