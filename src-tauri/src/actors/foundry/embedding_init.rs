@@ -296,14 +296,15 @@ mod tests {
     fn gives_up_after_the_attempt_limit_with_the_last_error_and_without_a_final_sleep() {
         let mut calls = 0;
         let started = std::time::Instant::now();
-        let r: Result<(), AttemptFailure> = run_attempts(3, Duration::from_millis(40), |_| {
+        let r: Result<(), AttemptFailure> = run_attempts(3, Duration::from_millis(150), |_| {
             calls += 1;
             Err(format!("fail {calls}"))
         });
         let f = r.unwrap_err();
         assert_eq!((f.attempts, f.last_error.as_str(), f.panicked), (3, "fail 3", false));
-        // sleeps are 40ms + 80ms; a trailing 160ms sleep would push this past 270ms
-        assert!(started.elapsed() < Duration::from_millis(270));
+        // sleeps are 150ms + 300ms = 450ms; a trailing 600ms sleep would make it 1050ms. The limit sits between
+        // them with room on both sides: a loaded CI runner (macOS arm64 failed the old 150ms margin) can stall by hundreds of ms.
+        assert!(started.elapsed() < Duration::from_millis(900), "took {:?}: a final sleep after the last attempt?", started.elapsed());
     }
 
     #[test]
