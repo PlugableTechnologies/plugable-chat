@@ -49,6 +49,10 @@ pub async fn get_startup_snapshot(handles: State<'_, ActorHandles>) -> Result<St
 /// Notice text if the previous launch never finished starting (crash, kill, or closed mid-setup).
 #[tauri::command]
 pub fn get_previous_launch_crash() -> Option<String> {
+    // A mid-answer crash names the model and says what was done about it.
+    if let Some(notice) = crate::run_state::crash_notice() {
+        return Some(notice);
+    }
     crate::launch_marker::previous_launch_started_at().map(|at| {
         let dir = crate::paths::get_config_dir().display().to_string();
         crate::startup_failure::describe_unclean_previous_launch(crate::startup_failure::Os::current(), &dir, &at)
@@ -60,4 +64,5 @@ pub fn get_previous_launch_crash() -> Option<String> {
 #[tauri::command]
 pub fn mark_launch_ok() {
     crate::launch_marker::clear();
+    crate::run_state::mark_idle();
 }

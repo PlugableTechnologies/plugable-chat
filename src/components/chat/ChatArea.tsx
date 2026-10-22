@@ -24,6 +24,7 @@ import { ToolApprovalDialog } from './tools';
 import { RagFilePills, AttachedTablePills, AttachedToolPills, TabularFilePills } from './attachments';
 import { InputBar } from './input';
 import { DatabaseAttachmentModal, ToolAttachmentModal } from './modals';
+import { buildChatHistory } from './utils/history';
 
 /**
  * Main ChatArea component - orchestrates chat UI
@@ -418,11 +419,7 @@ export function ChatArea() {
                 });
             }
 
-            const history = chatMessages.map((m) => ({
-                role: m.role,
-                content: m.content,
-                system_prompt: m.systemPromptText,
-            }));
+            const history = buildChatHistory(chatMessages);
             // Call backend - streaming will trigger events
             // Frontend is source of truth for model selection
             logToBackend(`[FRONTEND] 📞 Calling backend chat command | chatId=${chatId.slice(0,8)} | historyLen=${history.length}`);

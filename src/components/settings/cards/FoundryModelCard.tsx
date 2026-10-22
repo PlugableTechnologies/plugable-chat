@@ -8,6 +8,8 @@ export function FoundryModelCard({
     isDownloading,
     downloadProgress,
     onDownload,
+    onCancelDownload,
+    onClearWarning,
     onUnload,
     onRemove,
 }: FoundryModelCardProps) {
@@ -126,6 +128,15 @@ export function FoundryModelCard({
 
             {/* Action buttons */}
             <div className="flex items-center gap-2">
+                {hasWarning && onClearWarning && (
+                    <button
+                        onClick={onClearWarning}
+                        title="Forget this warning and try the model again"
+                        className="model-clear-warning px-3 py-2 bg-white border border-amber-300 text-amber-700 rounded-lg hover:bg-amber-50 text-sm"
+                    >
+                        Retry anyway
+                    </button>
+                )}
                 {/* Warned models are still installable — the user can try them (informed choice). */}
                 {!isCached && !isDownloading && (
                     <button
@@ -155,10 +166,20 @@ export function FoundryModelCard({
                     </button>
                 )}
                 {isDownloading && (
-                    <div className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-gray-100 text-gray-500 rounded-lg text-sm">
-                        <Loader2 size={16} className="animate-spin" />
-                        Downloading...
-                    </div>
+                    <>
+                        <div className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-gray-100 text-gray-500 rounded-lg text-sm">
+                            <Loader2 size={16} className="animate-spin" />
+                            Downloading...
+                        </div>
+                        {onCancelDownload && (
+                            <button
+                                onClick={onCancelDownload}
+                                className="model-download-cancel px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
+                            >
+                                Cancel
+                            </button>
+                        )}
+                    </>
                 )}
             </div>
         </div>

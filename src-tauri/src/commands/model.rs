@@ -84,17 +84,57 @@ pub async fn download_model(
     model_name: String,
     handles: State<'_, ActorHandles>,
 ) -> Result<(), String> {
+    use crate::actors::foundry::download_cancel::{download_cancels, DOWNLOAD_CANCELLED};
     println!("[download_model] Starting download for: {}", model_name);
+    // Registered here, before the actor queues it, so Cancel works while it is still waiting.
+    download_cancels().register(&model_name);
     let (tx, rx) = oneshot::channel();
-    handles
+    let sent = handles
         .foundry_tx
         .send(FoundryMsg::DownloadModel {
             model_name: model_name.clone(),
             respond_to: tx,
         })
         .await
-        .map_err(|e| format!("Failed to send download request: {}", e))?;
-    rx.await.map_err(|_| "Foundry actor died".to_string())?
+        .map_err(|e| format!("Failed to send download request: {}", e));
+    let result = match sent {
+        Ok(()) => rx.await.map_err(|_| "Foundry actor died".to_string()).and_then(|r| r),
+        Err(e) => Err(e),
+    };
+    let cancelled = download_cancels().is_cancelled(&model_name);
+    download_cancels().finish(&model_name);
+    match result {
+        // The SDK's own wording for an interrupted download varies; the UI keys on ours.
+        Err(_) if cancelled => Err(DOWNLOAD_CANCELLED.to_string()),
+        other => other,
+    }
+}
+
+/// "Retry anyway": forget that a model was marked as not working on this runtime.
+#[tauri::command]
+pub async fn clear_model_incompatible(
+    model_name: String,
+    settings_state: State<'_, SettingsState>,
+) -> Result<bool, String> {
+    let mut guard = settings_state.settings.write().await;
+    let s = &mut *guard;
+    let removed = crate::actors::foundry::remove_from_blocklist(
+        &mut s.incompatible_models,
+        &mut s.incompatible_model_reasons,
+        &model_name,
+    );
+    if removed {
+        crate::actors::foundry::failure_strikes::failure_strikes().clear(&model_name);
+        settings::save_settings(&guard).await?;
+    }
+    Ok(removed)
+}
+
+/// Stop a queued or running model download. Does not go through the foundry actor, which is busy
+/// running the download it would be asked to stop.
+#[tauri::command]
+pub fn cancel_model_download(model_name: String) -> bool {
+    crate::actors::foundry::download_cancel::download_cancels().cancel(&model_name)
 }
 
 /// Load a model into memory

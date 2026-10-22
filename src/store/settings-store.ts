@@ -1,11 +1,10 @@
 import { create } from 'zustand';
 import { invoke } from '../lib/api';
 import { FALLBACK_PYTHON_ALLOWED_IMPORTS } from '../lib/python-allowed-imports';
+import { normalizeMcpServer, normalizeTransport, type McpTransport } from '../lib/mcp-server-config';
 
-// Transport type matching Rust backend
-export type Transport =
-    | { type: 'stdio' }
-    | { type: 'sse'; url: string };
+// Transport type matching Rust backend. Configs saved while the screen still said "SSE" are read as 'http' (see normalizeTransport).
+export type Transport = McpTransport;
 
 // MCP Server configuration
 export interface McpServerConfig {
@@ -17,8 +16,11 @@ export interface McpServerConfig {
     args: string[];
     env: Record<string, string>;
     auto_approve_tools: boolean;
+    /** true (the default): tools are found with tool search; false: "Load tools immediately", listed in the prompt. */
     defer_tools?: boolean;
     python_name?: string;  // Derived from server name for Python imports
+    /** Seconds to wait for one request (initialize, tools/list, tools/call). Unset: 30. Tools that run for minutes need more. */
+    request_timeout_secs?: number;
 }
 
 // Shared tool-calling format names (must match Rust)
@@ -272,19 +274,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 }),
             ]);
             const normalizedFormats = normalizeToolCallFormats(settings.tool_call_formats || DEFAULT_TOOL_CALL_FORMATS);
-            const normalizedServers = (settings.mcp_servers || []).map((server) => {
-                const isTestServer = server.id === 'mcp-test-server';
-                const name = isTestServer ? 'mcp_test_server' : server.name;
-                return {
-                    ...server,
-                    name,
-                    defer_tools: isTestServer ? false : (server.defer_tools ?? true),
-                    python_name: server.python_name ?? toPythonIdentifier(name || server.id),
-                };
-            });
+            const normalizedServers = (settings.mcp_servers || []).map((server) => normalizeMcpServer(server, toPythonIdentifier));
             const normalizedDbSources: DatabaseSourceConfig[] = (settings.database_toolbox?.sources || []).map((source) => ({
                 ...source,
-                transport: source.transport ?? { type: 'stdio' },
+                transport: normalizeTransport(source.transport),
                 command: source.command ?? null,
                 args: source.args ?? [],
                 env: source.env ?? {},
@@ -620,15 +613,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     addMcpServer: async (config: McpServerConfig) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
-        const isTestServer = config.id === 'mcp-test-server';
-        const name = isTestServer ? 'mcp_test_server' : config.name;
-        const pythonName = toPythonIdentifier(name || config.id);
-        const newConfig: McpServerConfig = {
-            ...config,
-            name,
-            defer_tools: isTestServer ? false : (config.defer_tools ?? true),
-            python_name: pythonName,
-        };
+        const newConfig: McpServerConfig = normalizeMcpServer(config, toPythonIdentifier);
 
         // Optimistic update
         const newSettings = {
@@ -654,15 +639,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     updateMcpServer: async (config: McpServerConfig) => {
         const currentSettings = get().settings;
         if (!currentSettings) return;
-        const isTestServer = config.id === 'mcp-test-server';
-        const name = isTestServer ? 'mcp_test_server' : config.name;
-        const pythonName = toPythonIdentifier(name || config.id);
-        const newConfig: McpServerConfig = {
-            ...config,
-            name,
-            defer_tools: isTestServer ? false : (config.defer_tools ?? true),
-            python_name: pythonName,
-        };
+        const newConfig: McpServerConfig = normalizeMcpServer(config, toPythonIdentifier);
 
         // Optimistic update
         const newSettings = {

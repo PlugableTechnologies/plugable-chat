@@ -5,6 +5,13 @@ import { invoke } from '../../../lib/api';
 import { SettingsTagInput } from '../common/SettingsTagInput';
 import { SettingsEnvVarInput } from '../common/SettingsEnvVarInput';
 import { extractToolParameters, type McpServerTestResult } from '../types';
+import {
+    DEFAULT_REQUEST_TIMEOUT_SECS,
+    loadsToolsImmediately,
+    parseTimeoutInput,
+    timeoutInputValue,
+    urlProblem,
+} from '../../../lib/mcp-server-config';
 
 interface McpServerCardProps {
     config: McpServerConfig;
@@ -89,11 +96,11 @@ export function McpServerCard({
         setIsDirty(true);
     }, []);
 
-    const updateTransport = useCallback((type: 'stdio' | 'sse', url?: string) => {
+    const updateTransport = useCallback((type: 'stdio' | 'http', url?: string) => {
         if (type === 'stdio') {
             updateField('transport', { type: 'stdio' });
         } else {
-            updateField('transport', { type: 'sse', url: url || '' });
+            updateField('transport', { type: 'http', url: url || '' });
         }
     }, [updateField]);
 
@@ -290,13 +297,13 @@ export function McpServerCard({
                                 Stdio (subprocess)
                             </button>
                             <button
-                                onClick={() => updateTransport('sse', (localConfig.transport as any).url || '')}
-                                className={`px-3 py-1.5 text-xs rounded-lg border ${localConfig.transport.type === 'sse'
+                                onClick={() => updateTransport('http', localConfig.transport.type === 'http' ? localConfig.transport.url : '')}
+                                className={`px-3 py-1.5 text-xs rounded-lg border ${localConfig.transport.type === 'http'
                                     ? 'bg-blue-50 border-blue-300 text-blue-700'
                                     : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
                                     }`}
                             >
-                                SSE (HTTP)
+                                HTTP (Streamable)
                             </button>
                         </div>
                     </div>
@@ -334,17 +341,21 @@ export function McpServerCard({
                         </>
                     )}
 
-                    {/* SSE-specific fields */}
-                    {localConfig.transport.type === 'sse' && (
+                    {/* HTTP-specific fields */}
+                    {localConfig.transport.type === 'http' && (
                         <div>
                             <label className="block text-xs font-medium text-gray-600 mb-1.5">Server URL</label>
                             <input
                                 type="text"
-                                value={(localConfig.transport as { type: 'sse'; url: string }).url}
-                                onChange={(e) => updateTransport('sse', e.target.value)}
-                                placeholder="http://localhost:3000/sse"
+                                value={localConfig.transport.url}
+                                onChange={(e) => updateTransport('http', e.target.value)}
+                                placeholder="http://host:8787/mcp"
                                 className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
                             />
+                            {urlProblem(localConfig.transport.url) && (
+                                <p className="mt-1 text-xs text-red-600">{urlProblem(localConfig.transport.url)}</p>
+                            )}
+                            <p className="mt-1 text-xs text-gray-500">The address of an MCP server that speaks Streamable HTTP. It is sent as a plain web request, with no sign-in unless the server is set up for one.</p>
                         </div>
                     )}
 
@@ -362,6 +373,40 @@ export function McpServerCard({
                             <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${localConfig.auto_approve_tools ? 'translate-x-5' : ''
                                 }`} />
                         </button>
+                    </div>
+
+                    {/* Load tools immediately (inverse of defer_tools) */}
+                    <div className="flex items-center justify-between py-2">
+                        <div className="pr-4">
+                            <div className="text-sm font-medium text-gray-700">Load tools immediately</div>
+                            <div className="text-xs text-gray-500">List this server's tools to the model straight away instead of making it search for them first. Helps small local models; adds the tool descriptions to every prompt.</div>
+                        </div>
+                        <button
+                            onClick={() => updateField('defer_tools', loadsToolsImmediately(localConfig))}
+                            className={`relative w-10 h-5 rounded-full transition-colors shrink-0 ${loadsToolsImmediately(localConfig) ? 'bg-blue-500' : 'bg-gray-300'
+                                }`}
+                            aria-label="Load tools immediately"
+                            aria-pressed={loadsToolsImmediately(localConfig)}
+                        >
+                            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${loadsToolsImmediately(localConfig) ? 'translate-x-5' : ''
+                                }`} />
+                        </button>
+                    </div>
+
+                    {/* Request timeout */}
+                    <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1.5" htmlFor={`timeout-${localConfig.id}`}>Request timeout (seconds)</label>
+                        <input
+                            id={`timeout-${localConfig.id}`}
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={timeoutInputValue(localConfig.request_timeout_secs)}
+                            onChange={(e) => updateField('request_timeout_secs', parseTimeoutInput(e.target.value))}
+                            placeholder={String(DEFAULT_REQUEST_TIMEOUT_SECS)}
+                            className="w-40 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                        />
+                        <p className="mt-1 text-xs text-gray-500">How long to wait for this server to answer one request. Leave empty for {DEFAULT_REQUEST_TIMEOUT_SECS} seconds. Tools that run for minutes need a larger number, for example 900.</p>
                     </div>
 
                     {/* Tool system prompts */}

@@ -6,7 +6,8 @@ import {
     deriveChatTitleFromPrompt, 
     deriveChatPreviewFromMessage 
 } from '../helpers';
-import { takeNextLaunchPrompt } from '../launch-queue';
+import { buildFollowUp, takeNextLaunchPrompt } from '../launch-queue';
+import { buildChatHistory } from '../../../components/chat/utils/history';
 
 // Dependencies from other slices
 interface SendMessageSliceDeps {
@@ -33,6 +34,7 @@ interface SendMessageSliceDeps {
     // Launch overrides
     launchInitialPrompt: string | null;
     launchQueuedPrompts: string[];
+    launchSameChat: boolean;
     launchPromptApplied: boolean;
     
     // Operation status
@@ -161,6 +163,43 @@ export const createSendMessageSlice: StateCreator<
         const { nextLaunchPrompt, remainingLaunchPrompts } = takeNextLaunchPrompt(state.launchQueuedPrompts);
         if (!nextLaunchPrompt) {
             set({ launchQueuedPrompts: [] } as any);
+            return;
+        }
+        if (state.launchSameChat && state.currentChatId && state.chatMessages.length > 0) {
+            // --same-chat: a follow-up in the conversation so far, as a user would type it.
+            const chatId = state.currentChatId;
+            const { history, message } = buildFollowUp(state.chatMessages, nextLaunchPrompt, buildChatHistory);
+            const ts = Date.now();
+            set({
+                launchQueuedPrompts: remainingLaunchPrompts,
+                chatMessages: [
+                    ...state.chatMessages,
+                    { id: ts.toString(), role: 'user', content: message, timestamp: ts },
+                    { id: (ts + 1).toString(), role: 'assistant', content: '', timestamp: ts + 1 },
+                ],
+                assistantStreamingActive: true,
+                streamingChatId: chatId,
+                operationStatus: { type: 'streaming', message: 'Generating response...', startTime: ts },
+                statusBarDismissed: false,
+                lastStreamActivityTs: ts,
+            } as any);
+            try {
+                await invoke<string>('chat', {
+                    chatId,
+                    title: undefined,
+                    message,
+                    history,
+                    reasoningEffort: state.reasoningEffort,
+                    model: state.currentModel,
+                    attachedFiles: [],
+                    attachedTables: [],
+                    attachedTools: [],
+                    attachedTabularFiles: [],
+                });
+            } catch (error) {
+                console.error('[ChatStore] Failed to send follow-up launch prompt:', error);
+                set({ assistantStreamingActive: false } as any);
+            }
             return;
         }
         // A fresh chat for each prompt: sendLaunchPrompt only runs on an empty conversation.

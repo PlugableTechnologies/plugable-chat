@@ -165,7 +165,7 @@ and loads models into VRAM. The app stays on the CPU.
 Causes still to separate, in order: the duplicate names (E4); Windows ML 2.1.1 in Core 1.2.3 on build 26300 or
 with a second adapter, while the CLI uses a newer core; Foundry's CUDA bootstrapper gate on compute capability
 12.0; the Windows App SDK bootstrap (SDK v2 sets `Bootstrap=true` for unpackaged apps; try
-`PLUGABLE_FOUNDRY_WINML_BOOTSTRAP=1`). `PLUGABLE_FOUNDRY_BACKEND=cli_http` uses the system `foundry` service
+`PLUGABLE_FOUNDRY_WINML_BOOTSTRAP=1`). `PLUGABLE_FOUNDRY_BACKEND=cli_http` (rc15 onward: ignored, with a log line, when the `foundry` CLI is not installed) uses the system `foundry` service
 instead and is the quickest test of whether the in-process engine is at fault.
 
 ## rc13 on David's Arc B60 and Bob's RTX 4080 (2026-10-19)
@@ -503,3 +503,17 @@ timed per question; add a per-question duration to `ask-app.ps1` output. Quality
 begins with its own reasoning ("The user asked ... I should provide ...") and ends with long follow-up menus; Phi-4-mini
 answers were plainer. The earlier failure of the 2026-10-01 signed run was the guest failsafe (default deadline) terminating
 the box; run `extend.sh <id> 150` right after bootstrap.
+
+## Long-conversation check (rc14 crash)
+
+The Chicago questions in `ask.sh` each start a fresh app launch and chat, so they never build up history. The rc14
+crash (`onnxruntime_providers_webgpu.dll`, 0xc0000409) happened on follow-up questions in one chat. Before tagging, on
+the GPU box run the installed app once with the follow-ups in a single conversation and confirm it ends with exit code 0:
+
+```
+plugable-chat.exe --hidden --ephemeral --same-chat --prompts-file chicago-followups.json ^
+  --reply-file replies.jsonl --exit-after-reply --reply-timeout-secs 3600
+```
+
+Every line of `replies.jsonl` must have `"outcome":"ok"`, and `run-state.json` must be gone after the exit (it is removed on a
+normal exit; if it is left behind, the next start reports a crash).

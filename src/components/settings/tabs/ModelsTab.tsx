@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Cpu, RefreshCw, AlertCircle, X, Loader2, HardDrive, ExternalLink } from 'lucide-react';
+import { Cpu, Search, RefreshCw, AlertCircle, X, Loader2, HardDrive, ExternalLink } from 'lucide-react';
 import { invoke, type FoundryCatalogModel, type FoundryServiceStatus } from '../../../lib/api';
 import { useChatStore } from '../../../store/chat-store';
 import { FoundryModelCard } from '../cards/FoundryModelCard';
@@ -7,6 +7,13 @@ import type { ModelDeviceFilter } from '../types';
 import { effectiveDeviceFilter } from '../../../store/chat/gpu-diagnostics';
 import { modelsTabNotice, type GpuAssessment } from '../../../lib/gpu-assessment';
 import { SupportCopyButton } from '../../SupportCopyButton';
+import { matchesModelQuery } from '../../../lib/model-filter';
+import { isDownloadPending, type DownloadEntry } from '../../../store/chat/downloads';
+
+function downloadProgressFor(d: DownloadEntry | undefined) {
+    if (!isDownloadPending(d)) return undefined;
+    return { file: d!.state === 'queued' ? 'Queued…' : d!.label, progress: d!.percent };
+}
 
 export function ModelsTab() {
     const [catalogModels, setCatalogModels] = useState<FoundryCatalogModel[]>([]);
@@ -15,31 +22,25 @@ export function ModelsTab() {
     const [serviceStatus, setServiceStatus] = useState<FoundryServiceStatus | null>(null);
     const [deviceFilter, setDeviceFilter] = useState<ModelDeviceFilter>('GPU');
     const [isLoading, setIsLoading] = useState(true);
-    const [downloadingModel, setDownloadingModel] = useState<string | null>(null);
-    const [downloadProgress, setDownloadProgress] = useState<{ file: string; progress: number } | null>(null);
+    const [searchQuery, setSearchQuery] = useState('');
     const [error, setError] = useState<string | null>(null);
 
     const [assessment, setAssessment] = useState<GpuAssessment | null>(null);
     const [catalogError, setCatalogError] = useState<string | null>(null);
     const [retryingGpu, setRetryingGpu] = useState(false);
 
-    const { operations, dispatchOperation } = useChatStore();
-    const modelDownloadOp = operations['model-download'];
+    const { downloads, downloadModel, cancelModelDownload } = useChatStore();
 
     // Fetch all data on mount
     useEffect(() => {
         fetchAllData();
     }, []);
 
-    // Track download progress from the keyed model-download operation
+    // A download finished somewhere (here, the status bar retry, or a fallback): refresh "Downloaded".
+    const doneCount = Object.values(downloads).filter((d) => d.state === 'done').length;
     useEffect(() => {
-        if (modelDownloadOp?.state === 'active') {
-            setDownloadProgress({
-                file: modelDownloadOp.file || '',
-                progress: modelDownloadOp.percent || 0,
-            });
-        }
-    }, [modelDownloadOp]);
+        if (doneCount > 0) fetchCachedModels();
+    }, [doneCount]);
 
     const fetchAllData = async () => {
         setIsLoading(true);
@@ -97,24 +98,11 @@ export function ModelsTab() {
         }
     };
 
+    // The store tracks every download (progress, queueing, cancel, completion), so a second
+    // download no longer replaces the first and nothing is left at 100%.
     const handleDownload = async (model: FoundryCatalogModel) => {
-        setDownloadingModel(model.name);
-        setDownloadProgress({ file: 'Starting...', progress: 0 });
-        dispatchOperation({ type: 'progress', key: 'model-download', message: `Downloading ${model.alias || model.name}`, percent: 0 });
-        try {
-            await invoke('download_model', { modelName: model.name });
-            await fetchCachedModels();
-            dispatchOperation({ type: 'done', key: 'model-download', message: `${model.alias || model.name} downloaded successfully` });
-        } catch (err) {
-            console.error('Download failed:', err);
-            const errorMessage = `Failed to download ${model.alias || model.name}:\n\n${err}`;
-            alert(errorMessage);
-            setError(`Download failed: ${err}`);
-            dispatchOperation({ type: 'error', key: 'model-download', message: `Failed to download ${model.alias || model.name}: ${err}` });
-        } finally {
-            setDownloadingModel(null);
-            setDownloadProgress(null);
-        }
+        const ok = await downloadModel(model.name, model.alias || model.name);
+        if (ok) await fetchCachedModels();
     };
 
     const handleUnload = async (model: FoundryCatalogModel) => {
@@ -190,6 +178,7 @@ export function ModelsTab() {
             if (activeFilter === 'Auto') return true;
             return model.runtime?.deviceType === activeFilter;
         })
+        .filter((model) => matchesModelQuery(model, searchQuery))
         .sort((a, b) => {
             // Sort: 1. Tools support first, 2. By size ascending (smaller first)
             const aTools = a.supportsToolCalling ? 1 : 0;
@@ -234,6 +223,19 @@ export function ModelsTab() {
                             <option value="CPU">CPU</option>
                             <option value="NPU">NPU</option>
                         </select>
+                    </div>
+
+                    {/* Search */}
+                    <div className="flex items-center gap-2">
+                        <Search size={16} className="text-gray-500" />
+                        <input
+                            type="search"
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            placeholder="Search models"
+                            aria-label="Search models"
+                            className="model-search text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white w-44 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        />
                     </div>
 
                     {/* Service Status */}
@@ -325,8 +327,13 @@ export function ModelsTab() {
                                 model={model}
                                 isCached={isModelCached(model)}
                                 isLoaded={isModelLoaded(model)}
-                                isDownloading={downloadingModel === model.name}
-                                downloadProgress={downloadingModel === model.name ? downloadProgress ?? undefined : undefined}
+                                isDownloading={isDownloadPending(downloads[model.name])}
+                                downloadProgress={downloadProgressFor(downloads[model.name])}
+                                onCancelDownload={() => cancelModelDownload(model.name)}
+                                onClearWarning={async () => {
+                                    await invoke('clear_model_incompatible', { modelName: model.name });
+                                    await fetchAllData();
+                                }}
                                 onDownload={() => handleDownload(model)}
                                 onUnload={() => handleUnload(model)}
                                 onRemove={() => handleRemove(model)}
@@ -339,8 +346,8 @@ export function ModelsTab() {
                 {!isLoading && filteredModels.length === 0 && (
                     <div className="text-center py-12 text-gray-500">
                         <Cpu size={48} className="mx-auto mb-4 text-gray-300" />
-                        <p>No models found for {activeFilter} device type.</p>
-                        <p className="text-sm mt-2">Try selecting a different device filter.</p>
+                        <p>{searchQuery.trim() ? `No models match "${searchQuery.trim()}".` : `No models found for ${activeFilter} device type.`}</p>
+                        <p className="text-sm mt-2">{searchQuery.trim() ? 'Clear the search or try a different device filter.' : 'Try selecting a different device filter.'}</p>
                     </div>
                 )}
             </div>

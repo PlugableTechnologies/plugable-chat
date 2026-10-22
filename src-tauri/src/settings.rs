@@ -101,14 +101,28 @@ impl FoundryBackendKind {
     /// Resolve the effective backend: the `PLUGABLE_FOUNDRY_BACKEND` env override wins
     /// (`sdk` | `cli_http`), otherwise the persisted setting.
     pub fn resolve(setting: FoundryBackendKind) -> FoundryBackendKind {
-        match std::env::var("PLUGABLE_FOUNDRY_BACKEND")
-            .ok()
-            .map(|s| s.trim().to_lowercase())
-            .as_deref()
-        {
+        Self::resolve_with(setting, std::env::var("PLUGABLE_FOUNDRY_BACKEND").ok().as_deref())
+    }
+
+    /// `resolve` with the environment value passed in. Unknown or empty values are ignored.
+    pub fn resolve_with(setting: FoundryBackendKind, env: Option<&str>) -> FoundryBackendKind {
+        match env.map(|s| s.trim().to_lowercase()).as_deref() {
             Some("sdk") => FoundryBackendKind::Sdk,
             Some("cli_http") | Some("cli") | Some("http") => FoundryBackendKind::CliHttp,
             _ => setting,
+        }
+    }
+
+    /// The legacy CLI backend needs the `foundry` command-line tool. Without it the app cannot
+    /// start on that backend (a tester who set `PLUGABLE_FOUNDRY_BACKEND=cli_http` for an
+    /// earlier build got an app that would not launch), so use the bundled SDK instead and say so.
+    pub fn effective(self, cli_installed: bool) -> (FoundryBackendKind, Option<&'static str>) {
+        match self {
+            FoundryBackendKind::CliHttp if !cli_installed => (
+                FoundryBackendKind::Sdk,
+                Some("The Foundry command-line tool is not installed, so Plugable Chat is using its built-in engine instead. You can remove the PLUGABLE_FOUNDRY_BACKEND setting."),
+            ),
+            other => (other, None),
         }
     }
 
@@ -342,11 +356,16 @@ pub fn to_python_identifier(name: &str) -> String {
 // ============ Transport Types ============
 
 /// MCP Server transport type
+///
+/// `Http` is MCP Streamable HTTP: one URL, each JSON-RPC message POSTed to it. Configs saved while the
+/// settings screen still offered "SSE (HTTP)" say `"type": "sse"`; that form never connected, so it is
+/// read as `Http` (and written back as `"http"` the next time the config is saved).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Transport {
     Stdio,
-    Sse { url: String },
+    #[serde(alias = "sse")]
+    Http { url: String },
 }
 
 impl Default for Transport {
@@ -421,7 +440,7 @@ pub struct DatabaseSourceConfig {
     pub kind: SupportedDatabaseKind,
     /// Whether this source is enabled for schema discovery
     pub enabled: bool,
-    /// Transport for MCP (stdio or SSE)
+    /// Transport for MCP (stdio, or HTTP at a URL)
     #[serde(default)]
     pub transport: Transport,
     /// Command/binary to launch the MCP toolbox
@@ -677,6 +696,9 @@ pub struct AppSettings {
     /// with `incompatible_models`.
     #[serde(default)]
     pub incompatible_model_reasons: HashMap<String, String>,
+    /// Times the app died while this model was answering (model_id -> count); cleared by a clean turn.
+    #[serde(default)]
+    pub native_crash_counts: HashMap<String, u32>,
     /// Which Foundry integration backend to use (legacy CLI/HTTP vs foundry-local-sdk).
     #[serde(default)]
     pub foundry_backend: FoundryBackendKind,
@@ -957,6 +979,7 @@ impl Default for AppSettings {
             selected_model: None,
             incompatible_models: HashMap::new(),
             incompatible_model_reasons: HashMap::new(),
+            native_crash_counts: HashMap::new(),
             foundry_backend: FoundryBackendKind::default(),
             mcp_servers: vec![default_mcp_test_server()],
             chat_format_default: default_chat_format(),
@@ -1463,6 +1486,26 @@ pub async fn save_settings_to(config_path: &std::path::Path, settings: &AppSetti
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_config_saved_as_sse_loads_as_http_and_is_written_back_as_http() {
+        let old: McpServerConfig = serde_json::from_str(
+            r#"{"id":"a","name":"a","enabled":true,"transport":{"type":"sse","url":"http://box:8787/mcp"}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.transport, Transport::Http { url: "http://box:8787/mcp".to_string() });
+        let written = serde_json::to_value(&old).unwrap();
+        assert_eq!(written["transport"], serde_json::json!({"type": "http", "url": "http://box:8787/mcp"}));
+        let again: McpServerConfig = serde_json::from_value(written).unwrap();
+        assert_eq!(again.transport, old.transport);
+    }
+
+    #[test]
+    fn a_config_with_no_transport_is_stdio() {
+        let c: McpServerConfig = serde_json::from_str(r#"{"id":"a","name":"a","enabled":true,"command":"x"}"#).unwrap();
+        assert_eq!(c.transport, Transport::Stdio);
+        assert_eq!(serde_json::to_value(&c.transport).unwrap(), serde_json::json!({"type": "stdio"}));
+    }
+
     use super::*;
 
     #[tokio::test]
@@ -1664,5 +1707,40 @@ mod demo_data_lookup_tests {
         done.first_run_completed = true;
         let round: AppSettings = serde_json::from_str(&serde_json::to_string(&done).unwrap()).unwrap();
         assert!(round.first_run_completed);
+    }
+}
+
+#[cfg(test)]
+mod backend_choice_tests {
+    use super::FoundryBackendKind::{self, CliHttp, Sdk};
+
+    #[test]
+    fn env_override_values() {
+        for (env, setting, want) in [
+            (None, Sdk, Sdk),
+            (Some(""), Sdk, Sdk),
+            (Some("sdk"), CliHttp, Sdk),
+            (Some("cli_http"), Sdk, CliHttp),
+            (Some(" CLI "), Sdk, CliHttp),
+            (Some("Http"), Sdk, CliHttp),
+            (Some("garbage"), CliHttp, CliHttp),
+            (Some("garbage"), Sdk, Sdk),
+        ] {
+            assert_eq!(FoundryBackendKind::resolve_with(setting, env), want, "{env:?} {setting:?}");
+        }
+    }
+
+    #[test]
+    fn cli_backend_without_the_cli_falls_back_to_the_sdk_with_a_notice() {
+        let (kind, notice) = CliHttp.effective(false);
+        assert_eq!(kind, Sdk);
+        assert!(notice.unwrap().contains("built-in engine"));
+    }
+
+    #[test]
+    fn other_combinations_are_left_alone() {
+        assert_eq!(CliHttp.effective(true), (CliHttp, None));
+        assert_eq!(Sdk.effective(true), (Sdk, None));
+        assert_eq!(Sdk.effective(false), (Sdk, None));
     }
 }

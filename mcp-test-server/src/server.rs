@@ -5,8 +5,9 @@
 //! - Provides a CLI switch to auto-run all tests and print a ready-made prompt
 
 use axum::{
-    extract::State as AxumState,
-    response::Html,
+    extract::{Query, State as AxumState},
+    http::{header, HeaderMap, StatusCode},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -522,6 +523,17 @@ fn get_tools() -> Vec<Tool> {
             description: "Resets all test counters to zero.".to_string(),
             input_schema: json!({"type": "object", "properties": {}}),
         },
+        Tool {
+            name: "test_sleep".to_string(),
+            description: "Sleeps for the given number of seconds, then answers. For testing request timeouts on tools that run for a long time.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "number", "description": "How long to sleep (0 to 3600)"}
+                },
+                "required": ["seconds"]
+            }),
+        },
     ]
 }
 
@@ -652,6 +664,17 @@ Use this master prompt to run everything:
         "reset_test_counts" => {
             reset_counters();
             Ok("Test counters have been reset to zero.".to_string())
+        }
+        "test_sleep" => {
+            let seconds = args
+                .get("seconds")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| "Missing required parameter: seconds".to_string())?;
+            if !(0.0..=3600.0).contains(&seconds) {
+                return Err("seconds must be between 0 and 3600".to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_secs_f64(seconds)).await;
+            Ok(format!("Slept {} seconds", seconds))
         }
         _ => Err(format!("Unknown tool: {}", name)),
     }
@@ -905,6 +928,85 @@ fn trigger_label(trigger: &TriggerSource) -> &'static str {
     }
 }
 
+
+// -----------------------------------------------------------------------------
+// MCP over HTTP (Streamable HTTP, stateless)
+// -----------------------------------------------------------------------------
+//
+// The same tools as the stdio loop, at `POST /mcp`. It follows the contract the Plugable Brix box's endpoint
+// serves, so Plugable Chat's HTTP transport can be tested against it without that box:
+//   - one JSON-RPC object per POST; a request gets `200 application/json`; a notification gets `202`, no body;
+//   - invalid JSON is `400` with a -32700 error; a batch or non-object is `400` with -32600;
+//   - `GET`/`DELETE` are `405`; any `Origin` header is `403` (browsers send one, a desktop app never does);
+//   - `?reply=sse` answers a request as `text/event-stream` carrying the one response, to exercise that path;
+//   - `?status=N` answers every request with that HTTP status, to exercise error handling.
+
+/// Routes for MCP over HTTP; merged into the UI router, whose state is the shared test state.
+fn mcp_http_router() -> Router<Arc<SharedState>> {
+    Router::new().route("/mcp", post(mcp_http_post).get(mcp_http_not_allowed).delete(mcp_http_not_allowed))
+}
+
+/// Serve only `/mcp` on an ephemeral loopback port, in the background, and return the address. For tests of an
+/// HTTP MCP client (the library uses it; the binary does not).
+#[allow(dead_code)]
+pub async fn spawn_mcp_only_server() -> std::io::Result<SocketAddr> {
+    let app = mcp_http_router().with_state(Arc::new(SharedState::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Ok(addr)
+}
+
+async fn mcp_http_not_allowed() -> Response {
+    (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "POST")], Json(json!({"error": "method not allowed"}))).into_response()
+}
+
+fn rpc_error_body(code: i64, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": Value::Null, "error": {"code": code, "message": message}})
+}
+
+async fn mcp_http_post(
+    AxumState(state): AxumState<Arc<SharedState>>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if headers.contains_key(header::ORIGIN) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "origin not allowed"}))).into_response();
+    }
+    if let Some(status) = query.get("status").and_then(|s| s.parse::<u16>().ok()).and_then(|s| StatusCode::from_u16(s).ok()) {
+        return (status, "forced status").into_response();
+    }
+    let value: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(rpc_error_body(-32700, "parse error"))).into_response(),
+    };
+    if !value.is_object() {
+        return (StatusCode::BAD_REQUEST, Json(rpc_error_body(-32600, "send one JSON-RPC object"))).into_response();
+    }
+    // A notification (no id) or a client response (no method) needs no reply.
+    if value.get("id").is_none() || value.get("method").is_none() {
+        return StatusCode::ACCEPTED.into_response();
+    }
+    let request: JsonRpcRequest = match serde_json::from_value(value) {
+        Ok(r) => r,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(rpc_error_body(-32600, "invalid request"))).into_response(),
+    };
+    let reply = handle_request(request, state).await;
+    if query.get("reply").map(|s| s.as_str()) == Some("sse") {
+        let payload = serde_json::to_string(&reply).unwrap_or_default();
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            format!("event: message\ndata: {}\n\n", payload),
+        )
+            .into_response();
+    }
+    Json(reply).into_response()
+}
+
 // -----------------------------------------------------------------------------
 // HTTP UI
 // -----------------------------------------------------------------------------
@@ -920,6 +1022,7 @@ async fn serve_ui(
         .route("/api/status", get(status_handler))
         .route("/api/logs", get(logs_handler))
         .route("/api/run-all", post(run_all_handler))
+        .merge(mcp_http_router())
         .with_state(state.clone());
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;

@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-import { listOperations, type OperationEntry } from '../store/chat/operations';
+import { listOperations, formatBytes, type OperationEntry } from '../store/chat/operations';
+import { downloadToOperationEntry, listDownloads } from '../store/chat/downloads';
+import { fallbackQuestion, findCachedFallback } from '../store/chat/fallback';
 import { GpuAssessmentRow } from './GpuAssessmentRow';
 import { SupportCopyButton } from './SupportCopyButton';
 import { useChatStore, OperationStatus, ModelStateData, getModelStateMessage, isModelStateBlocking, StartupStateType } from '../store/chat-store';
@@ -241,9 +243,17 @@ export function StatusBar() {
         setModelStuck,
         modelIncompatibleNotice,
         setModelIncompatibleNotice,
+        chatNotice,
+        setChatNotice,
+        pendingFallbackDownload,
+        setPendingFallbackDownload,
         loadModel,
         operations,
         dispatchOperation,
+        downloads,
+        dispatchDownload,
+        cancelModelDownload,
+        downloadModel,
         retryOperation,
     } = useChatStore();
     const [switchingToAlternative, setSwitchingToAlternative] = useState(false);
@@ -286,7 +296,9 @@ export function StatusBar() {
 
     const heartbeatActive = !!heartbeatWarningStart;
     const modelStuckActive = !!modelStuckWarning;
-    const operationRows = listOperations(operations);
+    // Model downloads get one row each; the derived `model-download` summary stays hidden here.
+    const operationRows = listOperations(operations).filter((op) => op.key !== 'model-download');
+    const downloadRows = listDownloads(downloads);
     const colors = operationStatus ? getStatusBarColors(operationStatus) : null;
     const icon = operationStatus ? getOperationIcon(operationStatus) : null;
 
@@ -307,6 +319,52 @@ export function StatusBar() {
                         onClick={dismissStatusBar}
                         className="flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors text-red-600"
                         aria-label="Dismiss heartbeat warning"
+                    >
+                        <X size={16} />
+                    </button>
+                </div>
+            )}
+
+            {pendingFallbackDownload && (
+                <div className="fallback-download-bar flex items-center justify-between px-4 py-2 bg-blue-50 border-b border-blue-200 text-blue-900">
+                    <span className="text-sm flex-1 min-w-0">
+                        {fallbackQuestion(pendingFallbackDownload.failedModel, pendingFallbackDownload.label, pendingFallbackDownload.sizeBytes, formatBytes)}
+                    </span>
+                    <button
+                        onClick={async () => {
+                            const p = pendingFallbackDownload;
+                            setPendingFallbackDownload(null);
+                            if (await downloadModel(p.model, p.label)) {
+                                const hit = findCachedFallback(useChatStore.getState().cachedModels, p.model);
+                                if (hit) {
+                                    await loadModel(hit.model_id);
+                                    await invoke('set_model', { model: hit.model_id });
+                                }
+                            }
+                        }}
+                        className="fallback-download-yes flex-shrink-0 ml-3 px-3 py-1 rounded-md text-sm font-medium bg-blue-600 text-white hover:bg-blue-700"
+                    >
+                        Download
+                    </button>
+                    <button
+                        onClick={() => setPendingFallbackDownload(null)}
+                        className="fallback-download-no flex-shrink-0 ml-2 px-3 py-1 rounded-md text-sm font-medium border border-blue-300 hover:bg-black/5"
+                    >
+                        Not now
+                    </button>
+                </div>
+            )}
+
+            {chatNotice && (
+                <div className="chat-notice-bar flex items-center justify-between px-4 py-2 bg-amber-50 border-b border-amber-200 text-amber-800">
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <span className="text-lg">{chatNotice.level === 'error' ? '❌' : '⚠️'}</span>
+                        <span className="text-sm">{chatNotice.text}</span>
+                    </div>
+                    <button
+                        onClick={() => setChatNotice(null)}
+                        className="flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors text-amber-600"
+                        aria-label="Dismiss notice"
                     >
                         <X size={16} />
                     </button>
@@ -383,6 +441,16 @@ export function StatusBar() {
                             console.warn('[StatusBar] cancel_ep_registration failed:', error);
                         }
                     }}
+                />
+            ))}
+
+            {downloadRows.map((d) => (
+                <OperationRow
+                    key={`download-${d.id}`}
+                    op={downloadToOperationEntry(d)}
+                    onRetry={() => { dispatchDownload({ type: 'clear', id: d.id }); void downloadModel(d.id, d.label); }}
+                    onDismiss={() => dispatchDownload({ type: 'clear', id: d.id })}
+                    onCancel={() => cancelModelDownload(d.id)}
                 />
             ))}
 

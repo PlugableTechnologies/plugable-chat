@@ -174,12 +174,14 @@ cargo run -p plugable-chat -- --run-mcp-test-server --mcp-test-port 3333
 - On startup it will:
   - Serve a small status UI at `http://127.0.0.1:43030` by default (opens your browser automatically; disable with `--open-ui false` or `--serve-ui false`; override with `--mcp-test-port <PORT>`).
   - Print a ready-made prompt you can paste into chat to trigger the full red/green sweep.
-  - Expose MCP tools including `run_all_tests`, `get_test_status`, and the existing echo/math/json/error helpers.
+  - Expose MCP tools including `run_all_tests`, `get_test_status`, `test_sleep` (sleeps N seconds, for request-timeout tests), and the existing echo/math/json/error helpers.
+  - Serve the same tools over HTTP (MCP Streamable HTTP) for testing a server entered by URL in Settings → Tools.
 - Endpoints:
   - `GET /` — UI with live red/green board and logs
   - `POST /api/run-all` — trigger full test sweep (same as the MCP tool)
   - `GET /api/status` — JSON with counts, per-test results, and the recommended prompt
   - `GET /api/logs` — recent log lines for agentic debugging
+  - `POST /mcp` — the MCP tools over HTTP, one JSON-RPC object per request (`202` for a notification, `403` for any request with an `Origin` header, `405` for GET/DELETE). `?reply=sse` answers as a `text/event-stream`; `?status=503` forces an HTTP status. For example, add a server with transport `HTTP (Streamable)` and URL `http://127.0.0.1:43030/mcp`.
 
 To auto-connect the desktop app to the dev test server, launch it with:
 

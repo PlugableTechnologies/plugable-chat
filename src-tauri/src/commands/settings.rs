@@ -572,6 +572,7 @@ pub async fn get_launch_overrides(
         model: launch_config.launch_overrides.model.clone(),
         initial_prompt: launch_config.launch_overrides.initial_prompt.clone(),
         queued_prompts: launch_config.launch_overrides.queued_prompts.clone(),
+        same_chat: launch_config.launch_overrides.same_chat,
     })
 }
 
@@ -592,4 +593,5 @@ pub struct LaunchOverridesPayload {
     pub model: Option<String>,
     pub initial_prompt: Option<String>,
     pub queued_prompts: Vec<String>,
+    pub same_chat: bool,
 }

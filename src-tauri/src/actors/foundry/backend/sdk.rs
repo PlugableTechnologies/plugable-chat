@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
+use super::super::context_budget;
 use super::{
     BackendError, ChatStreamOutcome, ChatStreamRequest, ConnectionInfo, FoundryBackend, ProgressSink,
     RawModel,
@@ -203,7 +204,14 @@ fn variant_preference_key(m: &CatalogModel) -> (bool, u8, u8, u64) {
     } else {
         3
     };
-    let device_rank = if m.runtime.device_type == "GPU" { 0 } else { 1 };
+    // GPU, then CPU (runs anywhere), then NPU/other (only useful on hardware we don't probe).
+    // rc14 let the smallest download win, which picked a 2.2 GB OpenVINO NPU build on a PC
+    // without an NPU.
+    let device_rank = match m.runtime.device_type.as_str() {
+        "GPU" => 0,
+        "CPU" => 1,
+        _ => 2,
+    };
     (m.incompatible, device_rank, provider_rank, m.file_size_mb as u64)
 }
 
@@ -768,7 +776,7 @@ impl FoundryBackend for SdkBackend {
             .map_err(BackendError::Server)?;
         // A load failure here is deterministic per (model, runtime) — classify as Server so
         // the actor records it in the version-keyed blocklist.
-        m.load().await.map_err(|e| BackendError::Server(e.to_string()))
+        m.load().await.map_err(|e| BackendError::classify_load(e.to_string()))
     }
 
     async fn unload(&self, model: &str) -> Result<(), String> {
@@ -776,9 +784,18 @@ impl FoundryBackend for SdkBackend {
         m.unload().await.map(|_| ()).map_err(|e| e.to_string())
     }
 
-    async fn download(&self, model: &str, progress: ProgressSink) -> Result<(), String> {
+    async fn download(
+        &self,
+        model: &str,
+        progress: ProgressSink,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<(), String> {
         let m = self.model(model).await?;
-        m.download(Some(progress)).await.map_err(|e| e.to_string())
+        let mut builder = m.download_builder().progress(progress);
+        if let Some(flag) = cancel {
+            builder = builder.cancel(flag);
+        }
+        builder.run().await.map_err(|e| e.to_string())
     }
 
     async fn remove_cached(&self, model: &str) -> Result<(), String> {
@@ -792,152 +809,10 @@ impl FoundryBackend for SdkBackend {
         sink: UnboundedSender<String>,
         cancel: watch::Receiver<bool>,
     ) -> ChatStreamOutcome {
-        let mut outcome = ChatStreamOutcome::default();
-        let mut cancel = cancel;
-
-        // Resolve + ensure loaded.
-        let model = match self.model(&req.model).await {
-            Ok(m) => m,
-            Err(e) => {
-                outcome.error = Some(BackendError::Server(e));
-                return outcome;
-            }
-        };
-        if !model.is_loaded().await.unwrap_or(false) {
-            if let Err(e) = model.load().await {
-                outcome.error = Some(BackendError::Server(e.to_string()));
-                return outcome;
-            }
-        }
-
-        // Build the client with family-specific tuning (mirrors request_builder.rs).
-        // NOTE: the SDK chat builder exposes no `reasoning_effort` (Phi/Generic) or
-        // `repetition_penalty` (Granite); those tuning hints are dropped on this backend.
-        let mut client = model.create_chat_client();
-        match req.family {
-            ModelFamily::GptOss | ModelFamily::Qwen => {
-                client = client.max_tokens(16384).temperature(0.7);
-            }
-            ModelFamily::Phi => {
-                if req.supports_reasoning && req.supports_reasoning_effort {
-                    client = client.max_tokens(8192);
-                } else {
-                    client = client.max_tokens(16384);
-                }
-            }
-            ModelFamily::Gemma => {
-                client = client.max_tokens(8192).temperature(0.7).top_k(40);
-            }
-            ModelFamily::Granite => {
-                client = client.max_tokens(8192).temperature(0.7);
-            }
-            ModelFamily::Generic => {
-                if req.supports_reasoning && req.supports_reasoning_effort {
-                    client = client.max_tokens(8192);
-                } else {
-                    client = client.max_tokens(16384);
-                }
-            }
-        }
-
-        // Map messages and tools.
-        let messages = map_messages(&req.messages);
-        let tools: Option<Vec<ChatCompletionTools>> = if req.use_native_tools {
-            req.tools.as_ref().map(|ts| {
-                ts.iter()
-                    .map(|t| {
-                        ChatCompletionTools::Function(ChatCompletionTool {
-                            function: FunctionObject {
-                                name: t.function.name.clone(),
-                                description: t.function.description.clone(),
-                                parameters: t.function.parameters.clone(),
-                                strict: None,
-                            },
-                        })
-                    })
-                    .collect()
-            })
-        } else {
-            None
-        };
-        if tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
-            client = client.tool_choice(ChatToolChoice::Auto);
-        }
-
-        let mut stream = match client
-            .complete_streaming_chat(&messages, tools.as_deref())
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                outcome.error = Some(BackendError::Server(e.to_string()));
-                return outcome;
-            }
-        };
-
-        // Reuse the existing accumulator so native tool calls become the identical
-        // `<tool_call>{…}</tool_call>` text the downstream parsers already handle.
-        let mut tool_calls = super::super::StreamingToolCalls::default();
-
-        loop {
-            if *cancel.borrow() {
-                outcome.cancelled = true;
-                break;
-            }
-            tokio::select! {
-                biased;
-                _ = cancel.changed() => { continue; }
-                item = stream.next() => {
-                    match item {
-                        None => break,
-                        Some(Ok(chunk)) => {
-                            if let Some(choice) = chunk.choices.get(0) {
-                                if let Some(content) = &choice.delta.content {
-                                    if !content.is_empty() {
-                                        let _ = sink.send(content.clone());
-                                    }
-                                }
-                                if let Some(tcs) = &choice.delta.tool_calls {
-                                    let vals: Vec<Value> = tcs
-                                        .iter()
-                                        .map(|c| {
-                                            let (name, args) = match &c.function {
-                                                Some(f) => (f.name.clone(), f.arguments.clone()),
-                                                None => (None, None),
-                                            };
-                                            json!({
-                                                "index": c.index,
-                                                "id": c.id,
-                                                "function": { "name": name, "arguments": args },
-                                            })
-                                        })
-                                        .collect();
-                                    tool_calls.process_streaming_tool_call_delta(&vals);
-                                }
-                            }
-                        }
-                        Some(Err(e)) => {
-                            outcome.error = Some(BackendError::Server(e.to_string()));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Emit accumulated native tool calls in the exact legacy text format.
-        if !tool_calls.is_empty() {
-            for call in tool_calls.into_parsed_calls() {
-                let text = format!(
-                    "\n<tool_call>{{\"name\": \"{}\", \"arguments\": {}}}</tool_call>\n",
-                    call.tool,
-                    serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string())
-                );
-                let _ = sink.send(text);
-            }
-        }
-
-        outcome
+        super::with_overflow_retry(|scale| {
+            self.chat_stream_attempt(req.clone(), sink.clone(), cancel.clone(), scale)
+        })
+        .await
     }
 
     fn runtime_version_key(&self) -> String {
@@ -1017,8 +892,215 @@ fn map_messages(messages: &[ChatMessage]) -> Vec<ChatCompletionRequestMessage> {
         .collect()
 }
 
+impl SdkBackend {
+    async fn chat_stream_attempt(
+        &self,
+        req: ChatStreamRequest,
+        sink: UnboundedSender<String>,
+        cancel: watch::Receiver<bool>,
+        budget_scale: f64,
+    ) -> ChatStreamOutcome {
+        let mut outcome = ChatStreamOutcome::default();
+        let mut cancel = cancel;
+
+        // Resolve + ensure loaded.
+        let model = match self.model(&req.model).await {
+            Ok(m) => m,
+            Err(e) => {
+                outcome.error = Some(BackendError::classify_load(e));
+                return outcome;
+            }
+        };
+        if !model.is_loaded().await.unwrap_or(false) {
+            if let Err(e) = model.load().await {
+                outcome.error = Some(BackendError::classify_load(e.to_string()));
+                return outcome;
+            }
+        }
+
+        // Build the client with family-specific tuning (mirrors request_builder.rs).
+        // NOTE: the SDK chat builder exposes no `reasoning_effort` (Phi/Generic) or
+        // `repetition_penalty` (Granite); those tuning hints are dropped on this backend.
+        let mut client = model.create_chat_client();
+        let reasoning_capped = req.supports_reasoning && req.supports_reasoning_effort;
+        let family_cap: u64 = match req.family {
+            ModelFamily::GptOss | ModelFamily::Qwen => 16384,
+            ModelFamily::Phi | ModelFamily::Generic => {
+                if reasoning_capped { 8192 } else { 16384 }
+            }
+            ModelFamily::Gemma | ModelFamily::Granite => 8192,
+        };
+        match req.family {
+            ModelFamily::GptOss | ModelFamily::Qwen | ModelFamily::Granite => {
+                client = client.temperature(0.7);
+            }
+            ModelFamily::Gemma => {
+                client = client.temperature(0.7).top_k(40);
+            }
+            ModelFamily::Phi | ModelFamily::Generic => {}
+        }
+
+        // Fit the request to this model's context window. Asking a small-context model for
+        // the family's full output cap made the core reject the request, which used to be
+        // misread as "model incompatible".
+        // `budget_scale` < 1 on the retry after the core still rejected the size.
+        let context_length = model.context_length();
+        let plan = context_budget::plan_request(&req.messages, context_length, family_cap, budget_scale);
+        let (messages_in, max_tokens) = (plan.messages, plan.max_tokens);
+        println!(
+            "[SdkBackend] max_tokens={max_tokens} (cap {family_cap}, input ~{}, dropped {}, context {:?}, scale {budget_scale})",
+            plan.input_tokens, plan.dropped, context_length
+        );
+        crate::run_state::note_request(plan.input_tokens, max_tokens);
+        client = client.max_tokens(max_tokens as u32);
+
+        // Map messages and tools.
+        let messages = map_messages(&messages_in);
+        let tools: Option<Vec<ChatCompletionTools>> = if req.use_native_tools {
+            req.tools.as_ref().map(|ts| {
+                ts.iter()
+                    .map(|t| {
+                        ChatCompletionTools::Function(ChatCompletionTool {
+                            function: FunctionObject {
+                                name: t.function.name.clone(),
+                                description: t.function.description.clone(),
+                                parameters: t.function.parameters.clone(),
+                                strict: None,
+                            },
+                        })
+                    })
+                    .collect()
+            })
+        } else {
+            None
+        };
+        if tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
+            client = client.tool_choice(ChatToolChoice::Auto);
+        }
+
+        let mut stream = match client
+            .complete_streaming_chat(&messages, tools.as_deref())
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                outcome.error = Some(BackendError::classify_generation(e.to_string()));
+                return outcome;
+            }
+        };
+
+        // Reuse the existing accumulator so native tool calls become the identical
+        // `<tool_call>{…}</tool_call>` text the downstream parsers already handle.
+        let mut tool_calls = super::super::StreamingToolCalls::default();
+
+        loop {
+            if *cancel.borrow() {
+                outcome.cancelled = true;
+                break;
+            }
+            tokio::select! {
+                biased;
+                _ = cancel.changed() => { continue; }
+                item = stream.next() => {
+                    match item {
+                        None => break,
+                        Some(Ok(chunk)) => {
+                            if let Some(choice) = chunk.choices.get(0) {
+                                if let Some(content) = &choice.delta.content {
+                                    if !content.is_empty() {
+                                        let _ = sink.send(content.clone());
+                                    }
+                                }
+                                if let Some(tcs) = &choice.delta.tool_calls {
+                                    let vals: Vec<Value> = tcs
+                                        .iter()
+                                        .map(|c| {
+                                            let (name, args) = match &c.function {
+                                                Some(f) => (f.name.clone(), f.arguments.clone()),
+                                                None => (None, None),
+                                            };
+                                            json!({
+                                                "index": c.index,
+                                                "id": c.id,
+                                                "function": { "name": name, "arguments": args },
+                                            })
+                                        })
+                                        .collect();
+                                    tool_calls.process_streaming_tool_call_delta(&vals);
+                                }
+                            }
+                        }
+                        Some(Err(e)) => {
+                            outcome.error = Some(BackendError::classify_generation(e.to_string()));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit accumulated native tool calls in the exact legacy text format.
+        if !tool_calls.is_empty() {
+            for call in tool_calls.into_parsed_calls() {
+                let text = format!(
+                    "\n<tool_call>{{\"name\": \"{}\", \"arguments\": {}}}</tool_call>\n",
+                    call.tool,
+                    serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string())
+                );
+                let _ = sink.send(text);
+            }
+        }
+
+        outcome
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    fn variant(name: &str, device: &str, ep: &str, size: u64) -> CatalogModel {
+        CatalogModel {
+            name: name.to_string(),
+            display_name: String::new(),
+            alias: "phi-4-mini-instruct".to_string(),
+            uri: String::new(),
+            version: String::new(),
+            file_size_mb: size,
+            license: String::new(),
+            task: String::new(),
+            supports_tool_calling: false,
+            runtime: CatalogModelRuntime {
+                device_type: device.to_string(),
+                execution_provider: ep.to_string(),
+            },
+            publisher: String::new(),
+            incompatible: false,
+            incompatible_reason: None,
+        }
+    }
+
+    #[test]
+    fn rc14_picked_the_smallest_npu_build_on_a_pc_without_an_npu() {
+        let mut v = vec![
+            variant("phi-4-mini-instruct-openvino-npu:4", "NPU", "OpenVINOExecutionProvider", 2200),
+            variant("phi-4-mini-instruct-generic-cpu:5", "CPU", "CPUExecutionProvider", 4900),
+        ];
+        v.sort_by_key(variant_preference_key);
+        assert_eq!(v[0].name, "phi-4-mini-instruct-generic-cpu:5");
+    }
+
+    #[test]
+    fn gpu_beats_cpu_beats_npu_and_size_only_breaks_ties() {
+        let mut v = vec![
+            variant("npu", "NPU", "OpenVINOExecutionProvider", 100),
+            variant("cpu", "CPU", "CPUExecutionProvider", 100),
+            variant("gpu-big", "GPU", "WebGpuExecutionProvider", 9000),
+            variant("gpu-small", "GPU", "WebGpuExecutionProvider", 8000),
+        ];
+        v.sort_by_key(variant_preference_key);
+        let order: Vec<&str> = v.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(order, vec!["gpu-small", "gpu-big", "cpu", "npu"]);
+    }
+
     use crate::gpu_diagnostics::EpFailureKind;
 
     fn obs(name: &str, reg: bool) -> crate::gpu_assessment::EpObservation {
@@ -1480,6 +1562,7 @@ mod tests {
                         last = p;
                     }
                 }),
+                None,
             )
             .await
             .expect("download");

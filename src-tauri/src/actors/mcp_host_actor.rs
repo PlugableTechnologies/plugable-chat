@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
@@ -109,69 +109,23 @@ pub fn server_originated_request(line: &str) -> Option<ServerOriginatedMessage> 
     Some(ServerOriginatedMessage { method, reply })
 }
 
-/// Connected MCP server state
-struct McpServerConnection {
-    config: McpServerConfig,
+/// A spawned stdio server and its pipes.
+struct StdioLink {
     process: Child,
     stdin: ChildStdin,
-    stdout_lines: Lines<BufReader<tokio::process::ChildStdout>>,
-    tools: Vec<McpTool>,
-    request_id: u64,
+    stdout_lines: Lines<BufReader<ChildStdout>>,
 }
 
-impl McpServerConnection {
-    fn next_id(&mut self) -> u64 {
-        self.request_id += 1;
-        self.request_id
-    }
-
-    /// Send a request and wait for response
-    async fn send_request(&mut self, method: &str, params: Option<Value>) -> Result<Value, String> {
-        let id = self.next_id();
-
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id,
-            method: method.to_string(),
-            params,
-        };
-
-        let request_str = serde_json::to_string(&request)
-            .map_err(|e| format!("Failed to serialize request: {}", e))?;
-
-        println!("McpHostActor: Sending: {}", request_str);
-
-        // Write request
+impl StdioLink {
+    async fn send_line(&mut self, line: &str, what: &str) -> Result<(), String> {
         self.stdin
-            .write_all(format!("{}\n", request_str).as_bytes())
+            .write_all(format!("{}\n", line).as_bytes())
             .await
-            .map_err(|e| format!("Failed to write request: {}", e))?;
+            .map_err(|e| format!("Failed to write {}: {}", what, e))?;
         self.stdin
             .flush()
             .await
-            .map_err(|e| format!("Failed to flush request: {}", e))?;
-
-        // Read response with timeout, ensuring we match on the request id
-        let request_timeout = request_timeout_for(&self.config);
-        let read_result = tokio::time::timeout(request_timeout, self.read_response(id)).await;
-
-        match read_result {
-            Ok(Ok(response)) => {
-                if let Some(error) = response.error {
-                    Err(format!("MCP error {}: {}", error.code, error.message))
-                } else {
-                    response
-                        .result
-                        .ok_or_else(|| "No result in response".to_string())
-                }
-            }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(format!(
-                "Request timed out after {}s waiting for id {} (raise request_timeout_secs for this server)",
-                request_timeout.as_secs(),
-                id
-            )),
-        }
+            .map_err(|e| format!("Failed to flush {}: {}", what, e))
     }
 
     /// Read a JSON-RPC response from stdout
@@ -238,6 +192,221 @@ impl McpServerConnection {
             }
         }
     }
+}
+
+/// An MCP server reached over Streamable HTTP: every message is a POST to one URL. There is no
+/// connection to keep open; the optional session id and protocol version the server hands out on
+/// `initialize` are sent back on later requests.
+struct HttpLink {
+    client: reqwest::Client,
+    url: String,
+    session_id: Option<String>,
+    protocol_version: Option<String>,
+}
+
+/// The protocol version a Streamable HTTP client asks for. The stdio path keeps the older one it was built against.
+const HTTP_PROTOCOL_VERSION: &str = "2025-03-26";
+
+impl HttpLink {
+    fn new(url: &str) -> Result<Self, String> {
+        let url = url.trim();
+        if url.is_empty() {
+            return Err("No URL set for this HTTP server".to_string());
+        }
+        let parsed = reqwest::Url::parse(url).map_err(|e| format!("'{}' is not a valid URL: {}", url, e))?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err(format!("The URL must start with http:// or https://, got '{}'", url));
+        }
+        // No Origin header is ever sent (a desktop app is not a web page), and there is no overall
+        // reqwest timeout: the per-server request timeout wraps each call, because a tool may run for minutes.
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .user_agent("plugable-chat")
+            .build()
+            .map_err(|e| format!("Could not set up the HTTP client: {}", e))?;
+        Ok(Self { client, url: url.to_string(), session_id: None, protocol_version: None })
+    }
+
+    fn request_builder(&self, body: &str) -> reqwest::RequestBuilder {
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(body.to_string());
+        if let Some(session) = &self.session_id {
+            req = req.header("Mcp-Session-Id", session);
+        }
+        if let Some(version) = &self.protocol_version {
+            req = req.header("MCP-Protocol-Version", version);
+        }
+        req
+    }
+
+    /// POST one request and return the response with the matching id.
+    async fn post_request(&mut self, body: &str, expected_id: u64) -> Result<JsonRpcResponse, String> {
+        let response = self
+            .request_builder(body)
+            .send()
+            .await
+            .map_err(|e| format!("Could not reach {}: {}", self.url, e))?;
+        if let Some(session) = response.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
+            self.session_id = Some(session.to_string());
+        }
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read the reply from {}: {}", self.url, e))?;
+        println!("McpHostActor: Received (HTTP {}): {}", status.as_u16(), text.chars().take(2000).collect::<String>());
+        if !status.is_success() {
+            let detail: String = text.trim().chars().take(300).collect();
+            return Err(format!("HTTP {} from {}{}", status.as_u16(), self.url, if detail.is_empty() { String::new() } else { format!(": {}", detail) }));
+        }
+        parse_http_reply(&content_type, &text, expected_id)
+    }
+
+    /// POST a notification; the server answers 202 (or any 2xx) with no body to use.
+    async fn post_notification(&mut self, body: &str) -> Result<(), String> {
+        let response = self
+            .request_builder(body)
+            .send()
+            .await
+            .map_err(|e| format!("Could not reach {}: {}", self.url, e))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("HTTP {} from {}", response.status().as_u16(), self.url))
+        }
+    }
+
+    /// End the session if the server gave us one. Best effort: the server may not support it.
+    async fn close(&mut self) {
+        if let Some(session) = self.session_id.take() {
+            let delete = self.client.delete(&self.url).header("Mcp-Session-Id", session).send();
+            let _ = tokio::time::timeout(Duration::from_secs(3), delete).await;
+        }
+    }
+}
+
+/// Find the response to `expected_id` in an HTTP reply. A reply is either one JSON-RPC message
+/// (`application/json`) or a server-sent-event stream that carries it (`text/event-stream`); messages
+/// that are requests or notifications from the server are skipped, as on stdio.
+pub fn parse_http_reply(content_type: &str, body: &str, expected_id: u64) -> Result<JsonRpcResponse, String> {
+    let mut candidates: Vec<String> = Vec::new();
+    if content_type.contains("text/event-stream") {
+        let mut data = String::new();
+        for line in body.lines().chain(std::iter::once("")) {
+            if line.is_empty() {
+                if !data.is_empty() {
+                    candidates.push(std::mem::take(&mut data));
+                }
+            } else if let Some(rest) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+            }
+        }
+    } else {
+        candidates.push(body.to_string());
+    }
+    for candidate in candidates {
+        let value: Value = match serde_json::from_str(candidate.trim()) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // A JSON array is a batch of messages.
+        let messages = match value {
+            Value::Array(items) => items,
+            other => vec![other],
+        };
+        for message in messages {
+            if message.get("method").is_some() {
+                continue; // a request or notification from the server, not our answer
+            }
+            if let Ok(response) = serde_json::from_value::<JsonRpcResponse>(message) {
+                if response.id == Some(expected_id) {
+                    return Ok(response);
+                }
+            }
+        }
+    }
+    Err(format!("The server's reply held no response to request {}", expected_id))
+}
+
+enum Link {
+    Stdio(StdioLink),
+    Http(HttpLink),
+}
+
+/// Connected MCP server state
+struct McpServerConnection {
+    config: McpServerConfig,
+    link: Link,
+    tools: Vec<McpTool>,
+    request_id: u64,
+}
+
+impl McpServerConnection {
+    fn next_id(&mut self) -> u64 {
+        self.request_id += 1;
+        self.request_id
+    }
+
+    /// Send a request and wait for response
+    async fn send_request(&mut self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        let id = self.next_id();
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method: method.to_string(),
+            params,
+        };
+
+        let request_str = serde_json::to_string(&request)
+            .map_err(|e| format!("Failed to serialize request: {}", e))?;
+
+        println!("McpHostActor: Sending: {}", request_str);
+
+        // The whole exchange (write, then read the answer with the matching id) shares one limit.
+        let request_timeout = request_timeout_for(&self.config);
+        let read_result = match &mut self.link {
+            Link::Stdio(link) => {
+                tokio::time::timeout(request_timeout, async {
+                    link.send_line(&request_str, "request").await?;
+                    link.read_response(id).await
+                })
+                .await
+            }
+            Link::Http(link) => tokio::time::timeout(request_timeout, link.post_request(&request_str, id)).await,
+        };
+
+        match read_result {
+            Ok(Ok(response)) => {
+                if let Some(error) = response.error {
+                    Err(format!("MCP error {}: {}", error.code, error.message))
+                } else {
+                    response
+                        .result
+                        .ok_or_else(|| "No result in response".to_string())
+                }
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(format!(
+                "Request timed out after {}s waiting for id {} (raise request_timeout_secs for this server)",
+                request_timeout.as_secs(),
+                id
+            )),
+        }
+    }
 
     /// Send a notification (no response expected)
     async fn send_notification(
@@ -263,23 +432,95 @@ impl McpServerConnection {
 
         println!("McpHostActor: Sending notification: {}", notif_str);
 
-        self.stdin
-            .write_all(format!("{}\n", notif_str).as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write notification: {}", e))?;
-        self.stdin
-            .flush()
-            .await
-            .map_err(|e| format!("Failed to flush notification: {}", e))?;
+        match &mut self.link {
+            Link::Stdio(link) => link.send_line(&notif_str, "notification").await,
+            Link::Http(link) => {
+                match tokio::time::timeout(request_timeout_for(&self.config), link.post_notification(&notif_str)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(format!("Notification '{}' timed out", method)),
+                }
+            }
+        }
+    }
 
-        Ok(())
+    /// The exit status if a spawned process has already ended; None while it runs or when there is no process.
+    fn exited(&mut self) -> Result<Option<std::process::ExitStatus>, std::io::Error> {
+        match &mut self.link {
+            Link::Stdio(link) => link.process.try_wait(),
+            Link::Http(_) => Ok(None),
+        }
+    }
+
+    /// Stop the server: kill the process, or end the HTTP session.
+    async fn kill(&mut self) -> Result<(), String> {
+        match &mut self.link {
+            Link::Stdio(link) => link
+                .process
+                .kill()
+                .await
+                .map_err(|e| format!("Failed to kill process: {}", e)),
+            Link::Http(link) => {
+                link.close().await;
+                Ok(())
+            }
+        }
+    }
+
+    /// initialize, notifications/initialized, tools/list. Stdio keeps its own inline version of this
+    /// (it adds process-start checks and stderr capture around it); the HTTP paths share this one.
+    async fn handshake(&mut self, client_name: &str) -> Result<Vec<McpTool>, String> {
+        let init = self
+            .send_request(
+                "initialize",
+                Some(json!({
+                    "protocolVersion": HTTP_PROTOCOL_VERSION,
+                    "capabilities": { "tools": {} },
+                    "clientInfo": { "name": client_name, "version": "0.1.0" }
+                })),
+            )
+            .await
+            .map_err(|e| format!("Failed to initialize MCP server: {}", e))?;
+        if let (Link::Http(link), Some(version)) = (&mut self.link, init.get("protocolVersion").and_then(|v| v.as_str())) {
+            link.protocol_version = Some(version.to_string());
+        }
+        if let Err(e) = self.send_notification("notifications/initialized", None).await {
+            println!("McpHostActor: Warning: Failed to send initialized notification: {}", e);
+        }
+        let listed = self
+            .send_request("tools/list", None)
+            .await
+            .map_err(|e| format!("Failed to fetch tools: {}", e))?;
+        Ok(listed
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|tools| tools.iter().filter_map(|t| serde_json::from_value::<McpTool>(t.clone()).ok()).collect())
+            .unwrap_or_default())
+    }
+}
+
+/// A connected server as the router keeps it. The connection sits behind its own lock so a tool call
+/// that takes minutes holds only that server's lock, never the table: other servers, the tool list and the
+/// settings screen keep working while it runs. `config` and `tools` are fixed at connect time.
+struct McpServerEntry {
+    config: McpServerConfig,
+    tools: Vec<McpTool>,
+    connection: Arc<tokio::sync::Mutex<McpServerConnection>>,
+}
+
+impl McpServerEntry {
+    fn new(connection: McpServerConnection) -> Self {
+        Self {
+            config: connection.config.clone(),
+            tools: connection.tools.clone(),
+            connection: Arc::new(tokio::sync::Mutex::new(connection)),
+        }
     }
 }
 
 /// MCP Host Actor - manages MCP server connections
 pub struct McpToolRouterActor {
     mcp_tool_msg_rx: mpsc::Receiver<McpHostMsg>,
-    connections: Arc<RwLock<HashMap<String, McpServerConnection>>>,
+    connections: Arc<RwLock<HashMap<String, McpServerEntry>>>,
 }
 
 impl McpToolRouterActor {
@@ -318,8 +559,13 @@ impl McpToolRouterActor {
                     arguments,
                     respond_to,
                 } => {
-                    let result = self.execute_tool(&server_id, &tool_name, arguments).await;
-                    let _ = respond_to.send(result);
+                    // Run the call in its own task. A tool can take minutes, and this loop must keep answering
+                    // everything else (tool lists, connects, status) in the meantime.
+                    let connections = self.connections.clone();
+                    tokio::spawn(async move {
+                        let result = execute_tool_on(&connections, &server_id, &tool_name, arguments).await;
+                        let _ = respond_to.send(result);
+                    });
                 }
                 McpHostMsg::GetAllToolDescriptions { respond_to } => {
                     let result = self.get_all_tool_descriptions().await;
@@ -349,9 +595,12 @@ impl McpToolRouterActor {
         println!("McpHostActor: Shutting down...");
         // Clean up all connections on shutdown
         let mut connections = self.connections.write().await;
-        for (id, mut conn) in connections.drain() {
-            println!("McpHostActor: Killing server process: {}", id);
-            let _ = conn.process.kill().await;
+        for (id, entry) in connections.drain() {
+            println!("McpHostActor: Stopping server: {}", id);
+            // A call still running holds the lock; the process (kill_on_drop) dies when that call lets go.
+            if let Ok(mut conn) = entry.connection.try_lock() {
+                let _ = conn.kill().await;
+            }
         }
     }
 
@@ -371,14 +620,34 @@ impl McpToolRouterActor {
 
         match &config.transport {
             Transport::Stdio => self.connect_stdio_server(config).await,
-            Transport::Sse { url } => {
-                // SSE transport - to be implemented later
-                Err(format!(
-                    "SSE transport not yet implemented for URL: {}",
-                    url
-                ))
-            }
+            Transport::Http { .. } => self.connect_http_server(config).await,
         }
+    }
+
+    /// Connect to a server at a URL (MCP Streamable HTTP).
+    async fn connect_http_server(&self, config: McpServerConfig) -> Result<(), String> {
+        let url = match &config.transport {
+            Transport::Http { url } => url.clone(),
+            Transport::Stdio => return Err("Not an HTTP server".to_string()),
+        };
+        println!("McpHostActor: Connecting over HTTP to {}", url);
+        let mut connection = McpServerConnection {
+            config: config.clone(),
+            link: Link::Http(HttpLink::new(&url)?),
+            tools: Vec::new(),
+            request_id: 0,
+        };
+        let tools = connection.handshake("plugable-chat").await?;
+        let mode = if config.defer_tools { "DEFERRED" } else { "ACTIVE" };
+        println!("McpHostActor: Server {} has {} tools [{}]", config.id, tools.len(), mode);
+        connection.tools = tools;
+        let server_id = config.id.clone();
+        self.connections
+            .write()
+            .await
+            .insert(server_id.clone(), McpServerEntry::new(connection));
+        println!("McpHostActor: Server {} connected successfully", server_id);
+        Ok(())
     }
 
     async fn connect_stdio_server(&self, config: McpServerConfig) -> Result<(), String> {
@@ -467,9 +736,7 @@ impl McpToolRouterActor {
         // Create connection
         let mut connection = McpServerConnection {
             config,
-            process: child,
-            stdin,
-            stdout_lines,
+            link: Link::Stdio(StdioLink { process: child, stdin, stdout_lines }),
             tools: Vec::new(),
             request_id: 0,
         };
@@ -505,7 +772,7 @@ impl McpToolRouterActor {
         };
 
         // Check if process is still running
-        match connection.process.try_wait() {
+        match connection.exited() {
             Ok(Some(status)) => {
                 // Wait a moment for stderr to be collected
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -573,7 +840,7 @@ impl McpToolRouterActor {
                     "McpHostActor: Failed to initialize server {}: {}",
                     server_id, e
                 );
-                let _ = connection.process.kill().await;
+                let _ = connection.kill().await;
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let stderr_output = stderr_buffer.lock().await;
                 return Err(format_error_with_output(
@@ -623,7 +890,7 @@ impl McpToolRouterActor {
         // Store connection
         {
             let mut connections = self.connections.write().await;
-            connections.insert(server_id.clone(), connection);
+            connections.insert(server_id.clone(), McpServerEntry::new(connection));
         }
 
         println!("McpHostActor: Server {} connected successfully", server_id);
@@ -631,14 +898,16 @@ impl McpToolRouterActor {
     }
 
     async fn disconnect_server(&self, server_id: &str) -> Result<(), String> {
-        let mut connections = self.connections.write().await;
+        // Take it out of the table first so no new call can start. A call already running holds the
+        // connection lock; it finishes (or times out) and the process then dies with the last reference
+        // (kill_on_drop), so a disconnect never waits minutes for a slow tool.
+        let removed = self.connections.write().await.remove(server_id);
 
-        if let Some(mut conn) = connections.remove(server_id) {
+        if let Some(entry) = removed {
             println!("McpHostActor: Disconnecting server: {}", server_id);
-            conn.process
-                .kill()
-                .await
-                .map_err(|e| format!("Failed to kill process: {}", e))?;
+            if let Ok(mut conn) = entry.connection.try_lock() {
+                conn.kill().await?;
+            }
             Ok(())
         } else {
             Err(format!("Server {} not connected", server_id))
@@ -648,8 +917,8 @@ impl McpToolRouterActor {
     async fn list_tools(&self, server_id: &str) -> Result<Vec<McpTool>, String> {
         let connections = self.connections.read().await;
 
-        if let Some(conn) = connections.get(server_id) {
-            Ok(conn.tools.clone())
+        if let Some(entry) = connections.get(server_id) {
+            Ok(entry.tools.clone())
         } else {
             Err(format!("Server {} not connected", server_id))
         }
@@ -661,81 +930,7 @@ impl McpToolRouterActor {
         tool_name: &str,
         arguments: Value,
     ) -> Result<McpToolResult, String> {
-        // Log the input
-        println!("\n╔══════════════════════════════════════════════════════════════");
-        println!("║ MCP TOOL CALL INPUT");
-        println!("╠══════════════════════════════════════════════════════════════");
-        println!("║ Server:    {}", server_id);
-        println!("║ Tool:      {}", tool_name);
-        println!(
-            "║ Arguments: {}",
-            serde_json::to_string_pretty(&arguments).unwrap_or_else(|_| arguments.to_string())
-        );
-        println!("╚══════════════════════════════════════════════════════════════\n");
-
-        let mut connections = self.connections.write().await;
-        let connection = connections.get_mut(server_id).ok_or_else(|| {
-            println!("║ ERROR: Server {} not connected", server_id);
-            format!("Server {} not connected", server_id)
-        })?;
-
-        let result = connection
-            .send_request(
-                "tools/call",
-                Some(json!({
-                    "name": tool_name,
-                    "arguments": arguments
-                })),
-            )
-            .await;
-
-        match result {
-            Ok(raw_result) => {
-                // Parse the result
-                let tool_result: McpToolResult = serde_json::from_value(raw_result.clone())
-                    .map_err(|e| format!("Failed to parse tool result: {}", e))?;
-
-                // Log the output
-                println!("\n╔══════════════════════════════════════════════════════════════");
-                println!("║ MCP TOOL CALL OUTPUT");
-                println!("╠══════════════════════════════════════════════════════════════");
-                println!("║ Server:   {}", server_id);
-                println!("║ Tool:     {}", tool_name);
-                println!("║ Is Error: {}", tool_result.is_error);
-                println!("║ Content:");
-                for content in &tool_result.content {
-                    if let Some(text) = &content.text {
-                        // Indent multi-line output
-                        for line in text.lines() {
-                            println!("║   {}", line);
-                        }
-                    }
-                    if let Some(data) = &content.data {
-                        let preview: String = data.chars().take(200).collect();
-                        println!(
-                            "║   [Binary data: {} bytes, preview: {}...]",
-                            data.len(),
-                            preview
-                        );
-                    }
-                }
-                println!("╚══════════════════════════════════════════════════════════════\n");
-
-                Ok(tool_result)
-            }
-            Err(e) => {
-                // Log the error
-                println!("\n╔══════════════════════════════════════════════════════════════");
-                println!("║ MCP TOOL CALL ERROR");
-                println!("╠══════════════════════════════════════════════════════════════");
-                println!("║ Server: {}", server_id);
-                println!("║ Tool:   {}", tool_name);
-                println!("║ Error:  {}", e);
-                println!("╚══════════════════════════════════════════════════════════════\n");
-
-                Err(e)
-            }
-        }
+        execute_tool_on(&self.connections, server_id, tool_name, arguments).await
     }
 
     async fn get_all_tool_descriptions(&self) -> Vec<(String, Vec<McpTool>)> {
@@ -743,8 +938,8 @@ impl McpToolRouterActor {
 
         let result: Vec<_> = connections
             .iter()
-            .filter(|(_, conn)| conn.config.enabled)
-            .map(|(id, conn)| (id.clone(), conn.tools.clone()))
+            .filter(|(_, entry)| entry.config.enabled)
+            .map(|(id, entry)| (id.clone(), entry.tools.clone()))
             .collect();
 
         println!(
@@ -752,8 +947,8 @@ impl McpToolRouterActor {
             result.len()
         );
         for (id, tools) in &result {
-            if let Some(conn) = connections.get(id) {
-                let mode = if conn.config.defer_tools {
+            if let Some(entry) = connections.get(id) {
+                let mode = if entry.config.defer_tools {
                     "DEFERRED"
                 } else {
                     "ACTIVE"
@@ -885,11 +1080,24 @@ impl McpToolRouterActor {
 
         match &config.transport {
             Transport::Stdio => self.test_stdio_server_config(config).await,
-            Transport::Sse { url } => Err(format!(
-                "SSE transport not yet implemented for URL: {}",
-                url
-            )),
+            Transport::Http { url } => {
+                let url = url.clone();
+                self.test_http_server_config(config, &url).await
+            }
         }
+    }
+
+    /// Test a server at a URL: initialize, list its tools, then end the session. Stores nothing.
+    async fn test_http_server_config(&self, config: McpServerConfig, url: &str) -> Result<Vec<McpTool>, String> {
+        let mut connection = McpServerConnection {
+            config,
+            link: Link::Http(HttpLink::new(url)?),
+            tools: Vec::new(),
+            request_id: 0,
+        };
+        let result = connection.handshake("plugable-chat-test").await;
+        let _ = connection.kill().await;
+        result
     }
 
     /// Test a stdio server config - spawns process, initializes, gets tools, then cleans up
@@ -967,9 +1175,7 @@ impl McpToolRouterActor {
         // Create temporary connection
         let mut connection = McpServerConnection {
             config: config.clone(),
-            process: child,
-            stdin,
-            stdout_lines,
+            link: Link::Stdio(StdioLink { process: child, stdin, stdout_lines }),
             tools: Vec::new(),
             request_id: 0,
         };
@@ -993,7 +1199,7 @@ impl McpToolRouterActor {
         };
 
         // Check if process is still running
-        match connection.process.try_wait() {
+        match connection.exited() {
             Ok(Some(status)) => {
                 // Wait a moment for stderr to be collected
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1044,7 +1250,7 @@ impl McpToolRouterActor {
                     .await;
             }
             Err(e) => {
-                let _ = connection.process.kill().await;
+                let _ = connection.kill().await;
                 // Wait a moment to collect any final stderr output
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let stderr_output = stderr_buffer.lock().await;
@@ -1068,7 +1274,7 @@ impl McpToolRouterActor {
                 }
             }
             Err(e) => {
-                let _ = connection.process.kill().await;
+                let _ = connection.kill().await;
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let stderr_output = stderr_buffer.lock().await;
                 return Err(format_error_with_output(
@@ -1079,7 +1285,7 @@ impl McpToolRouterActor {
         };
 
         // Clean up - kill the process
-        let _ = connection.process.kill().await;
+        let _ = connection.kill().await;
 
         let mode = if config.defer_tools {
             "DEFERRED"
@@ -1101,6 +1307,96 @@ impl McpToolRouterActor {
         }
 
         Ok(tools)
+    }
+}
+
+/// Execute a tool on a connected server. Free of the actor so the run loop can spawn it: only the one
+/// server's connection lock is held while the call runs, never the table.
+async fn execute_tool_on(
+    connections: &RwLock<HashMap<String, McpServerEntry>>,
+    server_id: &str,
+    tool_name: &str,
+    arguments: Value,
+) -> Result<McpToolResult, String> {
+    // Log the input
+    println!("\n╔══════════════════════════════════════════════════════════════");
+    println!("║ MCP TOOL CALL INPUT");
+    println!("╠══════════════════════════════════════════════════════════════");
+    println!("║ Server:    {}", server_id);
+    println!("║ Tool:      {}", tool_name);
+    println!(
+        "║ Arguments: {}",
+        serde_json::to_string_pretty(&arguments).unwrap_or_else(|_| arguments.to_string())
+    );
+    println!("╚══════════════════════════════════════════════════════════════\n");
+
+    // Hold the table lock only long enough to find the server; the call itself can take minutes.
+    let connection = {
+        let connections = connections.read().await;
+        connections.get(server_id).map(|entry| entry.connection.clone())
+    }
+    .ok_or_else(|| {
+        println!("║ ERROR: Server {} not connected", server_id);
+        format!("Server {} not connected", server_id)
+    })?;
+    let mut connection = connection.lock().await;
+
+    let result = connection
+        .send_request(
+            "tools/call",
+            Some(json!({
+                "name": tool_name,
+                "arguments": arguments
+            })),
+        )
+        .await;
+
+    match result {
+        Ok(raw_result) => {
+            // Parse the result
+            let tool_result: McpToolResult = serde_json::from_value(raw_result.clone())
+                .map_err(|e| format!("Failed to parse tool result: {}", e))?;
+
+            // Log the output
+            println!("\n╔══════════════════════════════════════════════════════════════");
+            println!("║ MCP TOOL CALL OUTPUT");
+            println!("╠══════════════════════════════════════════════════════════════");
+            println!("║ Server:   {}", server_id);
+            println!("║ Tool:     {}", tool_name);
+            println!("║ Is Error: {}", tool_result.is_error);
+            println!("║ Content:");
+            for content in &tool_result.content {
+                if let Some(text) = &content.text {
+                    // Indent multi-line output
+                    for line in text.lines() {
+                        println!("║   {}", line);
+                    }
+                }
+                if let Some(data) = &content.data {
+                    let preview: String = data.chars().take(200).collect();
+                    println!(
+                        "║   [Binary data: {} bytes, preview: {}...]",
+                        data.len(),
+                        preview
+                    );
+                }
+            }
+            println!("╚══════════════════════════════════════════════════════════════\n");
+
+            Ok(tool_result)
+        }
+        Err(e) => {
+            // Log the error
+            println!("\n╔══════════════════════════════════════════════════════════════");
+            println!("║ MCP TOOL CALL ERROR");
+            println!("╠══════════════════════════════════════════════════════════════");
+            println!("║ Server: {}", server_id);
+            println!("║ Tool:   {}", tool_name);
+            println!("║ Error:  {}", e);
+            println!("╚══════════════════════════════════════════════════════════════\n");
+
+            Err(e)
+        }
     }
 }
 
@@ -1224,5 +1520,176 @@ for line in sys.stdin:
         assert_eq!(crate::tool_execution::mcp_result_text(&structured), r#"{"orders":6992}"#);
         let noisy = actor.execute_tool("scripted", "noisy", json!({})).await.unwrap();
         assert_eq!(crate::tool_execution::mcp_result_text(&noisy), "answered");
+    }
+
+    // ---- HTTP transport ---------------------------------------------------------------------------
+
+    #[test]
+    fn a_json_reply_and_an_event_stream_reply_both_yield_the_response_to_our_request() {
+        let json_body = r#"{"jsonrpc":"2.0","id":4,"result":{"ok":true}}"#;
+        let r = parse_http_reply("application/json", json_body, 4).unwrap();
+        assert_eq!((r.id, r.result), (Some(4), Some(json!({"ok": true}))));
+
+        let sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"ok\":true}}\n\n";
+        let r = parse_http_reply("text/event-stream; charset=utf-8", sse, 4).unwrap();
+        assert_eq!(r.result, Some(json!({"ok": true})));
+    }
+
+    #[test]
+    fn server_messages_and_other_ids_in_a_reply_are_skipped_and_a_batch_is_searched() {
+        let sse = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{\"stale\":true}}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"mine\":true}}\n\n",
+        );
+        assert_eq!(parse_http_reply("text/event-stream", sse, 5).unwrap().result, Some(json!({"mine": true})));
+        let batch = r#"[{"jsonrpc":"2.0","id":1,"result":{}},{"jsonrpc":"2.0","id":2,"result":{"two":2}}]"#;
+        assert_eq!(parse_http_reply("application/json", batch, 2).unwrap().result, Some(json!({"two": 2})));
+        // multi-line data fields are joined with a newline before parsing
+        let split = "data: {\"jsonrpc\":\"2.0\",\ndata: \"id\":6,\"result\":{}}\n\n";
+        assert!(parse_http_reply("text/event-stream", split, 6).is_ok());
+    }
+
+    #[test]
+    fn a_reply_with_no_answer_to_our_request_is_an_error_that_says_so() {
+        let err = parse_http_reply("application/json", r#"{"jsonrpc":"2.0","id":1,"result":{}}"#, 2).unwrap_err();
+        assert!(err.contains("no response to request 2"), "{err}");
+        assert!(parse_http_reply("application/json", "not json", 1).is_err());
+        assert!(parse_http_reply("text/event-stream", "", 1).is_err());
+    }
+
+    #[test]
+    fn an_http_server_needs_a_real_http_url() {
+        for bad in ["", "   ", "not a url", "ftp://box/mcp", "box:8787/mcp"] {
+            assert!(HttpLink::new(bad).is_err(), "{bad:?} should be refused");
+        }
+        assert!(HttpLink::new("http://100.127.91.127:8787/mcp").is_ok());
+        assert!(HttpLink::new("https://example.test/mcp").is_ok());
+    }
+
+    fn http_config(url: &str, timeout_secs: Option<u64>) -> McpServerConfig {
+        let mut config = McpServerConfig::new("stub".to_string(), "stub".to_string());
+        config.enabled = true;
+        config.transport = Transport::Http { url: url.to_string() };
+        config.request_timeout_secs = timeout_secs;
+        config
+    }
+
+    async fn stub_url(query: &str) -> String {
+        let addr = mcp_test_server::spawn_mcp_only_server().await.expect("the stub server starts");
+        format!("http://{}/mcp{}", addr, query)
+    }
+
+    async fn connect_http(url: &str, timeout_secs: Option<u64>) -> Result<McpToolRouterActor, String> {
+        let (_tx, rx) = mpsc::channel(1);
+        let actor = McpToolRouterActor::new(rx);
+        actor.connect_http_server(http_config(url, timeout_secs)).await?;
+        Ok(actor)
+    }
+
+    #[tokio::test]
+    async fn an_http_server_connects_lists_its_tools_and_answers_a_call() {
+        let actor = connect_http(&stub_url("").await, None).await.expect("connects");
+        let tools = actor.list_tools("stub").await.unwrap();
+        assert!(tools.iter().any(|t| t.name == "test_echo") && tools.iter().any(|t| t.name == "test_sleep"), "{tools:?}");
+        let result = actor.execute_tool("stub", "test_echo", json!({"message": "hello"})).await.unwrap();
+        assert_eq!(crate::tool_execution::mcp_result_text(&result), "Echo: hello");
+        let err = actor.execute_tool("stub", "test_error", json!({"error_type": "runtime"})).await.unwrap();
+        assert!(err.is_error, "a tool's own error stays an is_error result, not a transport failure");
+    }
+
+    #[tokio::test]
+    async fn an_event_stream_reply_works_end_to_end() {
+        let actor = connect_http(&stub_url("?reply=sse").await, None).await.expect("connects over SSE-framed replies");
+        let result = actor.execute_tool("stub", "test_echo", json!({"message": "via sse"})).await.unwrap();
+        assert_eq!(crate::tool_execution::mcp_result_text(&result), "Echo: via sse");
+    }
+
+    #[tokio::test]
+    async fn a_non_200_reply_names_the_status_and_the_url() {
+        let url = stub_url("?status=503").await;
+        let err = connect_http(&url, None).await.err().expect("the server refuses");
+        assert!(err.contains("HTTP 503") && err.contains(&url), "{err}");
+        let gone = connect_http("http://127.0.0.1:9/mcp", None).await.err().expect("nothing listens there");
+        assert!(gone.contains("Could not reach"), "{gone}");
+    }
+
+    #[tokio::test]
+    async fn a_long_http_call_times_out_at_the_servers_limit_naming_the_setting_and_succeeds_under_a_longer_one() {
+        let url = stub_url("").await;
+        let short = connect_http(&url, Some(1)).await.unwrap();
+        let err = short.execute_tool("stub", "test_sleep", json!({"seconds": 3})).await.unwrap_err();
+        assert!(err.contains("timed out after 1s") && err.contains("request_timeout_secs"), "{err}");
+        let long = connect_http(&url, Some(10)).await.unwrap();
+        let ok = long.execute_tool("stub", "test_sleep", json!({"seconds": 2})).await.unwrap();
+        assert_eq!(crate::tool_execution::mcp_result_text(&ok), "Slept 2 seconds");
+    }
+
+    #[tokio::test]
+    async fn a_call_that_runs_for_minutes_does_not_freeze_the_rest_of_the_router() {
+        let (_tx, rx) = mpsc::channel(1);
+        let actor = Arc::new(McpToolRouterActor::new(rx));
+        let url = stub_url("").await;
+        actor.connect_http_server(http_config(&url, Some(30))).await.unwrap();
+        let mut other = http_config(&url, Some(30));
+        other.id = "other".to_string();
+        actor.connect_http_server(other).await.unwrap();
+
+        let slow = { let actor = actor.clone(); tokio::spawn(async move { actor.execute_tool("stub", "test_sleep", json!({"seconds": 3})).await }) };
+        tokio::time::sleep(Duration::from_millis(300)).await; // the slow call is now in flight
+
+        let started = std::time::Instant::now();
+        let descriptions = actor.get_all_tool_descriptions().await;
+        assert_eq!(descriptions.len(), 2);
+        assert!(actor.list_tools("stub").await.is_ok());
+        let quick = actor.execute_tool("other", "test_echo", json!({"message": "still here"})).await.unwrap();
+        assert_eq!(crate::tool_execution::mcp_result_text(&quick), "Echo: still here");
+        assert!(started.elapsed() < Duration::from_secs(2), "other work waited {:?} behind a slow call", started.elapsed());
+        assert!(slow.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_connection_test_for_an_http_server_lists_tools_and_reports_a_bad_url() {
+        let (_tx, rx) = mpsc::channel(1);
+        let actor = McpToolRouterActor::new(rx);
+        let tools = actor.test_server_config(http_config(&stub_url("").await, None)).await.unwrap();
+        assert!(tools.len() >= 5, "{tools:?}");
+        let err = actor.test_server_config(http_config("", None)).await.unwrap_err();
+        assert!(err.contains("No URL"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_actor_loop_keeps_answering_while_a_tool_call_runs() {
+        // Through the real message channel: a slow ExecuteTool must not hold up a GetAllToolDescriptions behind it.
+        let (tx, rx) = mpsc::channel(8);
+        let actor = McpToolRouterActor::new(rx);
+        tokio::spawn(actor.run());
+        let url = stub_url("").await;
+
+        let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+        tx.send(McpHostMsg::ConnectServer { config: http_config(&url, Some(30)), respond_to: connected_tx }).await.unwrap();
+        connected_rx.await.unwrap().expect("connects");
+
+        let (slow_tx, slow_rx) = tokio::sync::oneshot::channel();
+        tx.send(McpHostMsg::ExecuteTool {
+            server_id: "stub".to_string(),
+            tool_name: "test_sleep".to_string(),
+            arguments: json!({"seconds": 3}),
+            respond_to: slow_tx,
+        })
+        .await
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let (desc_tx, desc_rx) = tokio::sync::oneshot::channel();
+        tx.send(McpHostMsg::GetAllToolDescriptions { respond_to: desc_tx }).await.unwrap();
+        let descriptions = tokio::time::timeout(Duration::from_secs(2), desc_rx)
+            .await
+            .expect("the tool list must not wait behind a running tool call")
+            .unwrap();
+        assert_eq!(descriptions.len(), 1);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let slow = slow_rx.await.unwrap().expect("the slow call still completes");
+        assert_eq!(crate::tool_execution::mcp_result_text(&slow), "Slept 3 seconds");
     }
 }

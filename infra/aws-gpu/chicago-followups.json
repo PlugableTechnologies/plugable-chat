@@ -1,0 +1,12 @@
+[
+  "How many crimes are in the chicago_crimes table?",
+  "And how many of those resulted in an arrest?",
+  "What are the top 5 primary types of crime?",
+  "Of those, which has the highest arrest rate?",
+  "Which community area has the most crimes?",
+  "How many crimes happened there in 2025?",
+  "Break that down by primary type, top 3 only.",
+  "What was the most common location description for the top type?",
+  "Which month had the most crimes overall?",
+  "Summarize what we've learned about the data in three bullet points."
+]

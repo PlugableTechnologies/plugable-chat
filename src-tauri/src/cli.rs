@@ -157,6 +157,10 @@ pub struct CliArgs {
     /// A JSON array of strings in this file (optionally written @path). They follow --initial-prompt.
     #[arg(long, value_name = "PATH", env = "PLUGABLE_PROMPTS_FILE")]
     pub prompts_file: Option<String>,
+    /// Run the --prompts-file prompts as follow-ups in ONE chat (the history grows turn by turn)
+    /// instead of a fresh chat each. This is how a long conversation is reproduced unattended.
+    #[arg(long, env = "PLUGABLE_SAME_CHAT")]
+    pub same_chat: bool,
     /// Start with the main window hidden (for unattended runs).
     #[arg(long, env = "PLUGABLE_HIDDEN")]
     pub hidden: bool,
@@ -614,6 +618,7 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
         model: launch_model,
         initial_prompt,
         queued_prompts,
+        same_chat: args.same_chat,
         table_files,
     }
 }
@@ -661,6 +666,12 @@ mod tests {
         let err = CliArgs::try_parse_from(["plugable-chat", "--help"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         assert!(err.to_string().contains("--reply-file"), "the help lists the unattended-run flags");
+    }
+
+    #[test]
+    fn same_chat_is_off_by_default_and_reaches_the_overrides() {
+        assert!(!apply_cli_overrides(&parse(&["--initial-prompt", "a"]), &mut AppSettings::default()).same_chat);
+        assert!(apply_cli_overrides(&parse(&["--initial-prompt", "a", "--same-chat"]), &mut AppSettings::default()).same_chat);
     }
 
     #[test]

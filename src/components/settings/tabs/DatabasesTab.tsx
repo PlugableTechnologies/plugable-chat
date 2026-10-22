@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Plus, Trash2, RefreshCw, Loader2, AlertCircle, X } from 'lucide-react';
 import { useSettingsStore, type DatabaseSourceConfig, type SupportedDatabaseKind, type DatabaseToolboxConfig } from '../../../store/settings-store';
 import { invoke, listen } from '../../../lib/api';
@@ -7,6 +7,7 @@ import { SettingsEnvVarInput } from '../common/SettingsEnvVarInput';
 import { SchemaRefreshStatusBar } from '../preview/SchemaRefreshStatusBar';
 import { useChatStore } from '../../../store/chat-store';
 import { describeDatabaseError } from '../../../store/chat/operations';
+import { dropResolvedErrors, isToolboxBlockedError, refreshSucceeded } from '../../../lib/database-errors';
 import type { SchemaRefreshProgress, SchemaRefreshStatus, SchemaRefreshError, SchemaRefreshResult } from '../types';
 
 interface ToolboxInstallStatus {
@@ -46,6 +47,8 @@ export function DatabasesTab({
     const [refreshStatus, setRefreshStatus] = useState<SchemaRefreshStatus | null>(null);
     // Per-source errors from the last refresh attempt
     const [sourceErrors, setSourceErrors] = useState<Record<string, SchemaRefreshError>>({});
+    const sourceErrorsRef = useRef(sourceErrors);
+    sourceErrorsRef.current = sourceErrors;
     const [toolboxInstallStatus, setToolboxInstallStatus] = useState<ToolboxInstallStatus | null>(null);
     const [toolboxInstallProgress, setToolboxInstallProgress] = useState<ToolboxInstallProgress | null>(null);
     const [toolboxInstalling, setToolboxInstalling] = useState(false);
@@ -63,7 +66,18 @@ export function DatabasesTab({
 
     // The backend auto-downloads the toolbox when a source is enabled; refresh once it lands.
     useEffect(() => {
-        if (toolboxOp?.state === 'done') loadToolboxInstallStatus();
+        if (toolboxOp?.state === 'done') {
+            loadToolboxInstallStatus();
+            // The failure may have been "toolbox not downloaded"; it no longer applies.
+            setSaveError((prev) => (isToolboxBlockedError(prev) ? null : prev));
+            // Run the refresh again for the sources that were waiting on the toolbox, so nothing
+            // needs an app restart to start working.
+            const waiting = Object.entries(sourceErrorsRef.current)
+                .filter(([, e]) => isToolboxBlockedError(e.error))
+                .map(([id]) => id);
+            setSourceErrors((prev) => Object.fromEntries(Object.entries(prev).filter(([, e]) => !isToolboxBlockedError(e.error))));
+            waiting.forEach((id) => { void handleRefreshSchemas(id); });
+        }
     }, [toolboxOp?.state, loadToolboxInstallStatus]);
 
     useEffect(() => {
@@ -102,6 +116,11 @@ export function DatabasesTab({
                 startTime: prev?.startTime || Date.now(),
             }));
             
+            // The automatic retry after a toolbox install reports success here; drop the stale alert.
+            if (refreshSucceeded(event.payload)) {
+                setSourceErrors((prev) => dropResolvedErrors(prev, event.payload));
+                setSaveError((prev) => (prev && prev.includes(event.payload.source_name) ? null : prev));
+            }
             if (event.payload.is_complete || event.payload.error) {
                 setTimeout(() => setRefreshStatus(null), 5000);
             }
@@ -270,7 +289,7 @@ export function DatabasesTab({
         <div className="space-y-6">
             <div>
                 <h3 className="text-lg font-medium text-gray-900">Database Sources</h3>
-                <p className="text-sm text-gray-500">Configure database MCP servers (stdio or SSE).</p>
+                <p className="text-sm text-gray-500">Configure database MCP servers (stdio or HTTP).</p>
             </div>
 
             {saveError && (
@@ -522,25 +541,25 @@ export function DatabasesTab({
                                             Stdio (subprocess)
                                         </button>
                                         <button
-                                            onClick={() => updateSource(idx, { transport: { type: 'sse', url: (source.transport as any).url || '' } })}
-                                            className={`px-3 py-1.5 text-xs rounded-lg border ${source.transport.type === 'sse'
+                                            onClick={() => updateSource(idx, { transport: { type: 'http', url: source.transport.type === 'http' ? source.transport.url : '' } })}
+                                            className={`px-3 py-1.5 text-xs rounded-lg border ${source.transport.type === 'http'
                                                 ? 'bg-blue-50 border-blue-300 text-blue-700'
                                                 : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
                                                 }`}
                                         >
-                                            SSE (HTTP)
+                                            HTTP (Streamable)
                                         </button>
                                     </div>
                                 </div>
 
-                                {source.transport.type === 'sse' && (
+                                {source.transport.type === 'http' && (
                                     <div>
                                         <label className="block text-xs font-medium text-gray-700 mb-1.5">Server URL</label>
                                         <input
                                             type="text"
-                                            value={(source.transport as any).url || ''}
-                                            onChange={(e) => updateSource(idx, { transport: { type: 'sse', url: e.target.value } })}
-                                            placeholder="http://localhost:3000/sse"
+                                            value={source.transport.type === 'http' ? source.transport.url : ''}
+                                            onChange={(e) => updateSource(idx, { transport: { type: 'http', url: e.target.value } })}
+                                            placeholder="http://host:8787/mcp"
                                             className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
                                         />
                                     </div>

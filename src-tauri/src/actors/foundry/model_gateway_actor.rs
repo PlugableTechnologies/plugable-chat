@@ -163,7 +163,16 @@ impl ModelGatewayActor {
             .try_state::<SettingsState>()
             .map(|s| futures::executor::block_on(s.settings.read()).foundry_backend)
             .unwrap_or_default();
-        match crate::settings::FoundryBackendKind::resolve(setting) {
+        let cli_installed = {
+            let p = super::service_manager::find_foundry_binary();
+            std::path::Path::new(&p).exists()
+        };
+        let (kind, cli_notice) = crate::settings::FoundryBackendKind::resolve(setting).effective(cli_installed);
+        if let Some(n) = cli_notice {
+            println!("[FoundryActor] {n}");
+            crate::app_log::log("foundry", n);
+        }
+        match kind {
             crate::settings::FoundryBackendKind::CliHttp => {
                 println!("[FoundryActor] Backend: CLI + HTTP (legacy)");
                 (None, None)
@@ -1398,22 +1407,54 @@ impl ModelGatewayActor {
                                 reasoning_effort: reasoning_effort.clone(),
                                 use_responses_api: false,
                             };
+                            // Leaves a trace that survives a native crash (see run_state.rs).
+                            crate::run_state::mark_chatting(&model);
                             let outcome = sdk
                                 .chat_stream(req, respond_to.clone(), stream_cancel_rx)
                                 .await;
+                            crate::run_state::mark_idle();
+                            if outcome.error.is_none() && !outcome.cancelled {
+                                self.forget_native_crashes(&model).await;
+                            }
+                            if outcome.error.is_none() && !outcome.cancelled {
+                                super::failure_strikes::failure_strikes().clear(&model);
+                            }
                             if let Some(be) = outcome.error {
                                 let msg = be.message().to_string();
                                 println!("[FoundryActor] SDK chat error: {}", msg);
-                                if be.is_server()
+                                // Notices go out-of-band (`chat-notice`): anything sent through
+                                // `respond_to` is saved as an assistant message and replayed to
+                                // the next model as history.
+                                if be.is_cancelled() {
+                                    // Not the model's fault: no blocklist, no fallback.
+                                } else if be.is_server()
+                                    && !model.to_lowercase().contains(DEFAULT_FALLBACK_MODEL)
+                                    && !super::failure_strikes::should_blocklist(
+                                        super::failure_strikes::failure_strikes().record(&model),
+                                    )
+                                {
+                                    // First generation failure: could be a one-off. Don't
+                                    // blocklist or switch yet; a second in a row will.
+                                    self.emit_chat_notice(
+                                        "warning",
+                                        "The model hit an error while answering. Try again; if it fails a second time it will be marked as not working on this PC.",
+                                    );
+                                } else if be.is_server()
                                     && !model.to_lowercase().contains(DEFAULT_FALLBACK_MODEL)
                                 {
                                     self.mark_model_incompatible(&model, &msg).await;
                                     self.emit_model_fallback_required(&model, &msg);
-                                    let _ = respond_to.send(
-                                        "⚠️ This model isn't compatible with your Foundry Local runtime. Switching to a supported model…".to_string(),
+                                    self.emit_chat_notice(
+                                        "warning",
+                                        "This model isn't compatible with your Foundry Local runtime. Switching to a supported model…",
+                                    );
+                                } else if be.is_context_overflow() {
+                                    self.emit_chat_notice(
+                                        "warning",
+                                        "This conversation is too long for the selected model's context window. Start a new chat or pick a model with a larger context.",
                                     );
                                 } else {
-                                    let _ = respond_to.send(format!("Error: {}", msg));
+                                    self.emit_chat_notice("error", &format!("Error: {}", msg));
                                 }
                             }
                             continue;
@@ -1602,8 +1643,9 @@ impl ModelGatewayActor {
                                             self.emit_model_fallback_required(&model, &error_msg);
                                             // Show a friendly message instead of the raw HTTP/JSON
                                             // body; the fallback listener switches models from here.
-                                            let _ = respond_to_clone.send(
-                                                "⚠️ The current model ran into a problem with your Foundry Local runtime. Switching to a supported model…".to_string(),
+                                            self.emit_chat_notice(
+                                                "warning",
+                                                "The current model ran into a problem with your Foundry Local runtime. Switching to a supported model…",
                                             );
                                         } else {
                                             let _ = respond_to_clone.send(format!("Error: {}", text));
@@ -2484,6 +2526,25 @@ impl ModelGatewayActor {
         })
     }
 
+    /// A turn finished normally: the model's crash history no longer counts against it.
+    async fn forget_native_crashes(&self, model: &str) {
+        if let Some(st) = self.app_handle.try_state::<SettingsState>() {
+            let mut guard = st.settings.write().await;
+            if guard.native_crash_counts.contains_key(model) {
+                crate::run_state::record_clean_turn(&mut guard.native_crash_counts, model);
+                let _ = settings::save_settings(&guard).await;
+            }
+        }
+    }
+
+    /// UI-only message shown in the chat. Deliberately NOT sent on the token channel so it is
+    /// never persisted as an assistant turn or fed back to a model as history.
+    fn emit_chat_notice(&self, level: &str, text: &str) {
+        let _ = self
+            .app_handle
+            .emit("chat-notice", json!({ "level": level, "text": text }));
+    }
+
     /// Emit an event to request fallback to the default model due to errors.
     /// Also DIRECTLY updates and saves settings to ensure the fallback persists across restarts.
     fn emit_model_fallback_required(&self, current_model: &str, error: &str) {
@@ -2527,9 +2588,12 @@ impl ModelGatewayActor {
             ),
         );
         let current = current_model.to_string();
+        // Nothing cached fits: the fallback needs a download, which the user must approve first.
+        // Saving it as the selected model now would make the next start download it anyway.
+        let persist_fallback = next_step.is_some();
         
         // Spawn a task to update settings (we can't block here in the actor)
-        tokio::spawn(async move {
+        if persist_fallback { tokio::spawn(async move {
             println!("[FoundryActor] Attempting to persist fallback model to settings...");
             let _ = std::io::stdout().flush();
             
@@ -2573,7 +2637,7 @@ impl ModelGatewayActor {
                 );
                 let _ = std::io::stdout().flush();
             }
-        });
+        }); }
         
         // Explain why, and offer the same alias's CPU build when it is cached (slower, but works
         // where the GPU build hits a runtime bug). Only for blocklisted models: a transient
@@ -2596,18 +2660,33 @@ impl ModelGatewayActor {
             super::model_chain::Device::Cpu => "cpu",
         });
 
-        // Also emit event for frontend (backup mechanism)
-        let _ = self.app_handle.emit(
-            "model-fallback-required",
-            json!({
-                "current_model": current_model,
-                "fallback_model": fallback_model_for_event,
-                "fallback_device": next_step_device,
-                "error": error,
-                "reason": reason,
-                "alternative_model": alternative_model
-            }),
-        );
+        let payload = json!({
+            "current_model": current_model,
+            "fallback_model": fallback_model_for_event,
+            "fallback_device": next_step_device,
+            "needs_download": !persist_fallback,
+            "error": error,
+            "reason": reason,
+            "alternative_model": alternative_model
+        });
+        // When a download is needed, say how big, so the UI can ask before fetching anything.
+        match (&self.sdk, persist_fallback) {
+            (Some(sdk), false) => {
+                let sdk = sdk.clone();
+                let app = self.app_handle.clone();
+                let fallback = fallback_model_for_event.clone();
+                tokio::spawn(async move {
+                    let (resolved, size_bytes) = sdk.download_info(&fallback).await;
+                    let mut p = payload;
+                    p["fallback_resolved_name"] = json!(resolved);
+                    p["fallback_size_bytes"] = json!(size_bytes);
+                    let _ = app.emit("model-fallback-required", p);
+                });
+            }
+            _ => {
+                let _ = self.app_handle.emit("model-fallback-required", payload);
+            }
+        }
     }
 
     /// Emit an event when the available models list changes (after download, removal, or reload).
@@ -2979,13 +3058,18 @@ impl ModelGatewayActor {
     ) -> Result<(), String> {
         // Tell the UI which model (and how big) before the first byte moves, so the header can
         // show a real name instead of a generic "Downloading model...".
+        // Cancelled while queued behind another download: never start it.
+        if super::download_cancel::download_cancels().is_cancelled(model_name) {
+            return Err(super::download_cancel::DOWNLOAD_CANCELLED.to_string());
+        }
         let (resolved_name, size_bytes) = match &self.sdk {
             Some(sdk) => sdk.download_info(model_name).await,
             None => (model_name.to_string(), None),
         };
         let _ = self.app_handle.emit(
             "model-download-started",
-            serde_json::json!({ "model": resolved_name, "size_bytes": size_bytes }),
+            // `id` is the name the UI asked for; progress events carry the same name in `file`.
+            serde_json::json!({ "id": model_name, "model": resolved_name, "size_bytes": size_bytes }),
         );
         crate::test_state::record(
             crate::test_state::Phase::ModelDownload,
@@ -3025,7 +3109,8 @@ impl ModelGatewayActor {
                     serde_json::json!({ "file": file, "progress": p }),
                 );
             });
-            return sdk.download(model_name, progress).await;
+            let cancel = super::download_cancel::download_cancels().flag(model_name);
+            return sdk.download(model_name, progress, cancel).await;
         }
 
         let url = format!("http://127.0.0.1:{}/openai/download", port);

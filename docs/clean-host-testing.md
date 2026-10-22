@@ -10,11 +10,13 @@ that is how the "Foundry must be installed" report was missed.
 |---|---|---|---|
 | 1 | Fresh Windows host, nothing installed, no Foundry Local | Clean VM or reset machine; install the signed setup `.exe` | App starts, downloads model on its own; no "install Foundry" text anywhere |
 | 2 | AI runtime files missing | Delete `Microsoft.AI.Foundry.Local.Core.dll` from the install folder (Windows), (on macOS, `PLUGABLE_FOUNDRY_LIBRARY_DIR=<empty folder>` was tried on 2026-10-07 in a dev build and did **not** produce the failure: the SDK still loaded, so this row needs a packaged Windows install) | Red "Plugable Chat can't start" card: reinstall link, VC++ Redistributable link, raw error shown, **no Mac wording on Windows** |
-| 3 | Legacy CLI path, CLI missing | `PLUGABLE_FOUNDRY_BACKEND=cli_http`, `foundry` not on PATH | Same card, raw error shown, no hang |
+| 3 | Legacy CLI path, CLI missing | `PLUGABLE_FOUNDRY_BACKEND=cli_http`, `foundry` not on PATH | App starts on the built-in engine (rc15 onward; rc14 would not start) and logs that the CLI is not installed; no card, no hang |
 | 4 | CLI installed, service will not start | `cli_http`, make `foundry service start` fail (rename a required file or use a bad shim) | Card names the failed command and its exit code (not "Could not connect") |
 | 5 | No NVIDIA driver / unsupported GPU | Windows host with no NVIDIA driver (or Intel/AMD only) | Card or status explains the GPU problem with the driver link; app does not look hung |
 | 6 | No internet at first launch | Disconnect network before first start | Download failure text mentions internet and disk space, not a CLI command |
 | 7 | Previously-installed Foundry Local + Plugable Chat (David's laptop) | Host with both already present | Same behaviour as case 1; bundled engine is used |
+| 9 | App died while answering last time | Ask a question, kill the process (`taskkill /F /IM plugable-chat.exe`) while the answer streams; launch again | Notice names the model and the request size and says it will be switched off if it happens again; killing it mid-answer a second time on the same model switches that model off (Settings > Models shows why, with *Retry anyway*) |
+| 10 | Model larger than its context window | Select `gpt-oss-20b` (8192-token context) and ask a question with a long history | The answer arrives; no "isn't compatible" banner; the model is not marked *May not run here* |
 | 8 | App died during startup last time | Launch the app, then kill it (`taskkill /F /IM plugable-chat.exe`) before a model name appears; launch again | Amber "did not finish starting last time" notice with the expected-case explanation; a normal close or a successful start never shows it |
 
 Pass criteria for every row: a human with no context can tell what is wrong and what to do from the screen alone.

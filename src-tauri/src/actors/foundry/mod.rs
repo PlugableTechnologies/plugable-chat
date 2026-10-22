@@ -7,6 +7,9 @@
 //! - Service lifecycle management
 
 pub mod backend;
+pub mod context_budget;
+pub mod download_cancel;
+pub mod failure_strikes;
 pub mod embedding_init;
 pub mod gpu_registration;
 mod model_gateway_actor;
@@ -18,6 +21,7 @@ mod startup_model_selection;
 mod stream_handler;
 
 pub use model_gateway_actor::ModelGatewayActor;
+pub use model_incompatibility::remove_from_blocklist;
 
 /// Set to `true` (by the `cancel_ep_registration` command) to stop the first-run download of
 /// GPU execution providers. Shared by the start-up step in the gateway actor.

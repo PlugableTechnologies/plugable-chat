@@ -24,3 +24,15 @@ test('does not change the queue it is given', () => {
     takeNextLaunchPrompt(queue);
     assert.deepEqual(queue, ['a', 'b']);
 });
+
+import { buildFollowUp } from './launch-queue.ts';
+
+test('a --same-chat follow-up carries every earlier turn as history and trims the prompt', () => {
+    const msgs = [
+        { role: 'user', content: 'q1' },
+        { role: 'assistant', content: 'a1' },
+    ];
+    const r = buildFollowUp(msgs, '  q2  ', (m) => m.map((x) => ({ role: x.role, content: x.content })));
+    assert.equal(r.message, 'q2');
+    assert.deepEqual(r.history, [{ role: 'user', content: 'q1' }, { role: 'assistant', content: 'a1' }]);
+});

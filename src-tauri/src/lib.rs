@@ -13,6 +13,7 @@ pub mod actors;
 pub mod app_log;
 pub mod agentic_loop;
 pub mod agentic_state;
+pub mod sql_tables;
 pub mod app_state;
 pub mod auto_discovery;
 pub mod chat_persistence;
@@ -32,6 +33,7 @@ pub mod protocol;
 pub mod python_helpers;
 pub mod repetition_detector;
 pub mod launch_marker;
+pub mod run_state;
 pub mod settings;
 pub mod smoke;
 pub mod startup_failure;
@@ -267,6 +269,21 @@ fn build_filtered_schema_text(
     );
     
     schema_text
+}
+
+/// Settle, per server, whether its tools start deferred (found with tool search) or active (listed in the prompt).
+///
+/// A server's own `defer_tools` is honoured, so a server set to "Load tools immediately" stays active while tool
+/// search is on. The one override: with tool search switched off nothing can discover a deferred tool, so regular
+/// servers are made active. Database sources stay as configured: they only feed `sql_select` context.
+/// (Before this, tool search being on forced every server deferred, which made the per-server setting inert.)
+fn apply_tool_search_to_servers(configs: &mut [settings::McpServerConfig], tool_search_enabled: bool) {
+    if tool_search_enabled {
+        return;
+    }
+    for config in configs.iter_mut().filter(|c| !c.is_database_source) {
+        config.defer_tools = false;
+    }
 }
 
 /// Keep the shared registry's database built-ins in sync with current settings.
@@ -761,24 +778,10 @@ async fn chat(
     )
     .await;
 
-    // Apply global tool_search flag to server defer settings (only if tool_search is actually available)
+    // Tool search switched off globally forces regular servers' tools active; otherwise each server keeps its own setting.
     let tool_search_allowed = tool_filter.builtin_allowed("tool_search");
     let tool_search_enabled = always_on_builtin_tools.contains(&"tool_search".to_string());
-    if tool_search_enabled && tool_search_allowed {
-        for config in &mut server_configs {
-            config.defer_tools = true;
-        }
-    } else if !tool_search_enabled {
-        // If tool search is explicitly disabled globally, we MUST surface regular tools or they'll be unreachable.
-        // HOWEVER, database sources should stay deferred because they are only meant for sql_select context injection.
-        for config in &mut server_configs {
-            if !config.is_database_source {
-                config.defer_tools = false;
-            }
-        }
-    }
-    // Otherwise, we respect the per-server config. This prevents bloating the prompt with 
-    // database tools that are handled via sql_select.
+    apply_tool_search_to_servers(&mut server_configs, tool_search_enabled);
 
     // Get tool descriptions from MCP Host Actor
     let (tools_tx, tools_rx) = oneshot::channel();
@@ -1862,6 +1865,7 @@ pub fn run() {
         std::env::set_var(paths::HOME_OVERRIDE_ENV_VAR, home);
     }
     launch_marker::begin();
+    run_state::begin();
     let cli_args_for_setup = cli_args.clone();
     let launch_filter = parse_tool_filter(&cli_args);
 
@@ -1973,6 +1977,26 @@ pub fn run() {
                 settings_sm.enabled_capabilities()
             );
             
+            // A native crash mid-answer left run-state.json behind: count it against that model,
+            // and switch the model off if it keeps taking the app down.
+            let mut app_settings = app_settings;
+            {
+                let last = run_state::classify(run_state::previous().as_ref());
+                if !matches!(last, run_state::LastRun::Clean) {
+                    app_log::log("crash", &format!("previous run did not exit cleanly: {:?}", last));
+                }
+                let notice = run_state::apply_to_settings(
+                    &mut app_settings,
+                    &last,
+                    actors::foundry::backend::sdk::FOUNDRY_SDK_VERSION_KEY,
+                );
+                if notice.is_some() {
+                    if let Err(e) = tauri::async_runtime::block_on(settings::save_settings(&app_settings)) {
+                        println!("[RunState] Failed to save crash handling: {e}");
+                    }
+                }
+                run_state::set_crash_notice(notice);
+            }
             let settings_state = SettingsState {
                 settings: Arc::new(RwLock::new(app_settings)),
             };
@@ -2323,6 +2347,8 @@ pub fn run() {
             get_launch_overrides,
             get_launch_model_problem,
             cancel_ep_registration,
+            cancel_model_download,
+            clear_model_incompatible,
             get_gpu_diagnostics,
             version_info::get_version_info,
             get_gpu_assessment,
@@ -2359,6 +2385,7 @@ pub fn run() {
             // A normal exit (even mid-startup) is not a crash.
             if matches!(event, tauri::RunEvent::Exit) {
                 launch_marker::clear();
+                run_state::clear();
             }
         });
 }
@@ -2405,6 +2432,23 @@ mod inline_tests {
                 panic!("expected tool calls, got final response: {}", response)
             }
         }
+    }
+
+    #[test]
+    fn a_servers_own_defer_setting_is_honoured_while_tool_search_is_on_and_overridden_only_when_it_is_off() {
+        let mk = |id: &str, defer: bool, db: bool| {
+            let mut c = settings::McpServerConfig::new(id.to_string(), id.to_string());
+            c.defer_tools = defer;
+            c.is_database_source = db;
+            c
+        };
+        let mut on = vec![mk("deferred", true, false), mk("immediate", false, false), mk("db", true, true)];
+        apply_tool_search_to_servers(&mut on, true);
+        assert_eq!(on.iter().map(|c| c.defer_tools).collect::<Vec<_>>(), vec![true, false, true], "tool search on: nothing is forced");
+
+        let mut off = vec![mk("deferred", true, false), mk("immediate", false, false), mk("db", true, true)];
+        apply_tool_search_to_servers(&mut off, false);
+        assert_eq!(off.iter().map(|c| c.defer_tools).collect::<Vec<_>>(), vec![false, false, true], "tool search off: regular servers go active, database sources stay deferred");
     }
 
     #[test]

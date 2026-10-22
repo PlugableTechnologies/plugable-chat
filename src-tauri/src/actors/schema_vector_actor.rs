@@ -1097,9 +1097,8 @@ async fn lookup_table_source(
         Err(e) => return Err(format!("Failed to query tables: {}", e)),
     };
 
-    // Collect all tables from enabled sources
-    let mut matches: Vec<(String, String)> = Vec::new(); // (source_id, fq_name)
-    let table_name_lower = table_name.to_lowercase();
+    // Collect every enabled table (source, fully qualified name); matching happens after.
+    let mut all_tables: Vec<(String, String)> = Vec::new();
 
     while let Some(batch_result) = stream.next().await {
         let batch = match batch_result {
@@ -1119,40 +1118,37 @@ async fn lookup_table_source(
 
         if let (Some(fq), Some(src)) = (fq_names, source_ids) {
             for i in 0..batch.num_rows() {
-                // Skip disabled tables
                 if let Some(enabled) = enabled_col {
                     if !enabled.value(i) {
                         continue;
                     }
                 }
-
-                let fq_name = fq.value(i);
-                let source_id = src.value(i);
-                let fq_lower = fq_name.to_lowercase();
-
-                // Check for exact match first
-                if fq_lower == table_name_lower {
-                    matches.push((source_id.to_string(), fq_name.to_string()));
-                    continue;
-                }
-
-                // Check if table_name matches the last part (e.g., "chicago_crimes" matches "main.chicago_crimes")
-                let parts: Vec<&str> = fq_lower.split('.').collect();
-                if let Some(last_part) = parts.last() {
-                    if *last_part == table_name_lower {
-                        matches.push((source_id.to_string(), fq_name.to_string()));
-                    }
-                }
+                all_tables.push((src.value(i).to_string(), fq.value(i).to_string()));
             }
         }
     }
 
+    // Exact and partial names ("chicago_crimes" -> "main.chicago_crimes") as before, plus a
+    // unique close spelling, which the caller uses to repair the SQL.
+    let mut fqns: Vec<String> = all_tables.iter().map(|(_, f)| f.clone()).collect();
+    fqns.sort();
+    fqns.dedup();
+    let mut matches: Vec<(String, String)> = match crate::sql_tables::resolve_table_name(table_name, &fqns) {
+        crate::sql_tables::Resolution::Exact(fq) | crate::sql_tables::Resolution::Corrected(fq) => all_tables
+            .iter()
+            .filter(|(_, f)| *f == fq)
+            .cloned()
+            .collect(),
+        crate::sql_tables::Resolution::Ambiguous(list) => all_tables
+            .iter()
+            .filter(|(_, f)| list.contains(f))
+            .cloned()
+            .collect(),
+        crate::sql_tables::Resolution::NotFound => Vec::new(),
+    };
+
     match matches.len() {
-        0 => Err(format!(
-            "Table '{}' not found in any enabled database source. Available sources: {}",
-            table_name,
-            enabled_sources.join(", ")
-        )),
+        0 => Err(crate::sql_tables::table_not_found_message(table_name, &fqns)),
         1 => {
             let (source_id, fq_name) = matches.remove(0);
             println!(

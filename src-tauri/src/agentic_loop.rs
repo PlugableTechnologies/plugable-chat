@@ -507,14 +507,14 @@ pub async fn execute_builtin_tool_call(
             }
 
             // Resolve source_id from table names in the SQL query
-            let source_id = match resolve_source_from_sql(
+            let (source_id, sql) = match resolve_source_from_sql(
                 &sql,
                 &handles.schema_tx,
                 &config.enabled_db_sources,
             )
             .await
             {
-                Ok(id) => id,
+                Ok(resolved) => resolved,
                 Err(e) => {
                     println!("[AgenticLoop] Failed to resolve source from SQL: {}", e);
                     // Return structured error for recovery
@@ -607,60 +607,29 @@ fn parse_sql_select_arguments(arguments: &Value) -> String {
     String::new()
 }
 
-/// Extract table names from a SQL query.
-/// Handles patterns like FROM table, FROM schema.table, JOIN table, etc.
 fn extract_table_names_from_sql(sql: &str) -> Vec<String> {
-    let mut tables = Vec::new();
-    let sql_tokens: Vec<&str> = sql.split_whitespace().collect();
-    
-    // Find positions of FROM and JOIN keywords
-    for (i, token) in sql_tokens.iter().enumerate() {
-        let token_upper = token.to_uppercase();
-        if (token_upper == "FROM" || token_upper == "JOIN") && i + 1 < sql_tokens.len() {
-            // Next token is the table name
-            let table_token = sql_tokens[i + 1];
-            // Clean up the table name (remove trailing commas, parentheses, etc.)
-            let table_name = table_token
-                .trim_matches(|c| c == '(' || c == ')' || c == ',' || c == ';')
-                .to_string();
-            
-            // Skip if it's a subquery or keyword
-            if !table_name.is_empty() 
-                && !table_name.starts_with('(')
-                && !["SELECT", "WHERE", "ON", "AS", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "NATURAL"]
-                    .contains(&table_name.to_uppercase().as_str())
-            {
-                tables.push(table_name);
-            }
-        }
-    }
-    
-    // Deduplicate while preserving order
-    let mut seen = std::collections::HashSet::new();
-    tables.retain(|t| seen.insert(t.clone()));
-    
-    tables
+    crate::sql_tables::extract_table_names(sql)
 }
 
 /// Resolve source_id from table names in SQL using the schema vector store.
+/// Returns the source and the SQL to run: when the model misspelled the table (stray spaces,
+/// a letter off) and exactly one real table is that close, the SQL is rewritten to the real name.
 async fn resolve_source_from_sql(
     sql: &str,
     schema_tx: &mpsc::Sender<SchemaVectorMsg>,
     enabled_db_sources: &[String],
-) -> Result<String, String> {
-    let table_names = extract_table_names_from_sql(sql);
+) -> Result<(String, String), String> {
+    let table_refs = crate::sql_tables::extract_table_refs(sql);
     
-    if table_names.is_empty() {
+    let Some(first) = table_refs.first() else {
         return Err("Could not extract table name from SQL query. Ensure the query has a FROM or JOIN clause.".to_string());
-    }
+    };
     
     // Use the first table to determine the source
-    let first_table = &table_names[0];
-    
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if schema_tx
         .send(SchemaVectorMsg::LookupTableSource {
-            table_name: first_table.clone(),
+            table_name: first.name.clone(),
             enabled_sources: enabled_db_sources.to_vec(),
             respond_to: reply_tx,
         })
@@ -671,7 +640,13 @@ async fn resolve_source_from_sql(
     }
     
     match reply_rx.await {
-        Ok(Ok((source_id, _fq_name))) => Ok(source_id),
+        Ok(Ok((source_id, fq_name))) => {
+            let repaired = crate::sql_tables::repair_sql(sql, first, &fq_name);
+            if repaired != sql {
+                println!("[AgenticLoop] Repaired table '{}' -> '{}'", first.raw, fq_name);
+            }
+            Ok((source_id, repaired))
+        }
         Ok(Err(e)) => Err(e),
         Err(_) => Err("Schema store lookup failed".to_string()),
     }

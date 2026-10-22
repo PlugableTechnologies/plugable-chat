@@ -27,6 +27,9 @@ export interface FoundryModelCardProps {
     isDownloading: boolean;
     downloadProgress?: { file: string; progress: number };
     onDownload: () => void;
+    onCancelDownload?: () => void;
+    /** "Retry anyway": forget the stored incompatibility warning for this model */
+    onClearWarning?: () => void;
     onUnload: () => void;
     onRemove: () => void;
 }

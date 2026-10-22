@@ -16,6 +16,16 @@ pub fn friendly_incompatibility_reason(raw_error: &str, runtime_version: &str) -
             runtime_version
         );
     }
+    if lower.contains("maximum context length") || lower.contains("max_tokens") {
+        return format!(
+            "The request was larger than this model's context window ({}). Try a shorter chat; \
+             this does not mean the model can't run here.",
+            runtime_version
+        );
+    }
+    if lower.contains("operation was cancel") {
+        return format!("The run was cancelled before it finished ({}).", runtime_version);
+    }
     let first_line = raw_error
         .lines()
         .map(str::trim)
@@ -51,6 +61,17 @@ pub fn find_cpu_variant_of_same_alias(
         })
         .find(|candidate| !is_model_incompatible(candidate))
         .cloned()
+}
+
+/// Removes `model_id` from the blocklist and its stored reason ("Retry anyway").
+/// Returns whether it was blocklisted.
+pub fn remove_from_blocklist(
+    incompatible: &mut std::collections::HashMap<String, String>,
+    reasons: &mut std::collections::HashMap<String, String>,
+    model_id: &str,
+) -> bool {
+    reasons.remove(model_id);
+    incompatible.remove(model_id).is_some()
 }
 
 #[cfg(test)]
@@ -121,5 +142,27 @@ mod tests {
             None
         );
         assert_eq!(find_cpu_variant_of_same_alias("qwen3.5-4b-generic-cpu:3", &cpu, &none_incompatible), None);
+    }
+
+    #[test]
+    fn retry_anyway_removes_the_entry_and_its_reason_only() {
+        use std::collections::HashMap;
+        let mut inc: HashMap<String, String> =
+            [("a".into(), "v".into()), ("b".into(), "v".into())].into();
+        let mut why: HashMap<String, String> =
+            [("a".into(), "r".into()), ("b".into(), "r".into())].into();
+        assert!(remove_from_blocklist(&mut inc, &mut why, "a"));
+        assert!(!inc.contains_key("a") && !why.contains_key("a"));
+        assert!(inc.contains_key("b") && why.contains_key("b"));
+        assert!(!remove_from_blocklist(&mut inc, &mut why, "a"), "already gone");
+    }
+
+    #[test]
+    fn context_and_cancel_errors_get_plain_reasons() {
+        let ctx = "System.ArgumentException: This request requires 17537 total tokens, which exceeds the model's maximum context length of 8192 tokens";
+        let r = friendly_incompatibility_reason(ctx, "sdk-1.2.3");
+        assert!(r.contains("context window") && !r.contains("ArgumentException"), "{r}");
+        let r = friendly_incompatibility_reason("Operation was cancelled: The operation was canceled.", "sdk-1.2.3");
+        assert!(r.contains("cancelled"), "{r}");
     }
 }

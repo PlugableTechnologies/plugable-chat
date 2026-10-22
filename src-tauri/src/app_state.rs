@@ -188,6 +188,8 @@ pub struct LaunchOverrides {
     pub initial_prompt: Option<String>,
     /// Prompts that follow the initial one, each in a fresh chat (from --prompts-file)
     pub queued_prompts: Vec<String>,
+    /// Run the queued prompts as follow-ups in the same chat (from --same-chat)
+    pub same_chat: bool,
     /// Tabular data files to attach for Python analysis (from --table-file)
     pub table_files: Vec<String>,
 }

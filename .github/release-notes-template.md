@@ -19,6 +19,10 @@ should read *LEANCODE, INC.* with a timestamp. Checksum files are in the Assets 
 
 **Which build is this?** The title bar and *Settings* (bottom of the window) show the release and the exact commit, for example `v0.1.0-rc12 (a1b2c3d)`. The installer file name carries the same release. Please include it when you report a problem; *Copy details for support* adds it for you.
 
+**Windows "Installed apps" shows `0.1.0` for every release candidate.** Windows only accepts numbers in an installer's version, so `-rc15` cannot appear there. The title bar and *Settings* carry the full release and commit; use those to tell builds apart.
+
+**Please do not set `PLUGABLE_FOUNDRY_BACKEND`.** It was a test switch for an older build. If it is set and the `foundry` command-line tool is not installed, the app now uses its built-in engine instead.
+
 **How to use the app:** see the [user guide](https://github.com/PlugableTechnologies/plugable-chat/blob/main/docs/user-guide.md).
 
 ## What changed

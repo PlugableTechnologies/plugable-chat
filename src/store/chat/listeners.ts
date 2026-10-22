@@ -1,5 +1,6 @@
 import { appendTokenToBuffer } from './streaming-buffer';
-import { embeddingEventToAction, epEventToAction, formatBytes } from './operations';
+import { embeddingEventToAction, epEventToAction } from './operations';
+import { planFallback } from './fallback';
 import type { StateCreator } from 'zustand';
 import { invoke, listen } from '../../lib/api';
 import { 
@@ -53,6 +54,7 @@ let unlistenSystemPrompt: (() => void) | undefined;
 let unlistenRagProgress: (() => void) | undefined;
 let unlistenModelStuck: (() => void) | undefined;
 let unlistenModelFallback: (() => void) | undefined;
+let unlistenChatNotice: (() => void) | undefined;
 let unlistenEmbeddingInit: (() => void) | undefined;
 let unlistenChatStreamStatus: (() => void) | undefined;
 let unlistenEpRegistration: (() => void) | undefined;
@@ -81,8 +83,12 @@ interface ListenerSliceDeps {
     // Operation status
     operationStatus: OperationStatus | null;
     dispatchOperation: (action: import('./operations').OperationAction) => void;
+    dispatchDownload: (action: import('./downloads').DownloadAction) => void;
+    setPendingFallbackDownload: (p: import('./slices/operation-status-slice').PendingFallbackDownload | null) => void;
+    downloadModel: (modelName: string, label?: string) => Promise<boolean>;
     operations: import('./operations').OperationsMap;
     setModelIncompatibleNotice: (notice: ModelIncompatibleNotice | null) => void;
+    setChatNotice: (notice: { level: 'warning' | 'error'; text: string } | null) => void;
     setGpuAssessment: (a: GpuAssessment | null) => void;
     
     // Model state
@@ -235,23 +241,21 @@ async function initializeModelsOnStartup<T extends ListenerSliceDeps>(
             // No models available - attempt auto-download
             console.log('[ChatStore] No cached models found. Attempting auto-download of:', DEFAULT_MODEL_TO_DOWNLOAD);
             
-            get().dispatchOperation({ type: 'progress', key: 'model-download', message: `Downloading ${DEFAULT_MODEL_TO_DOWNLOAD}`, percent: 0 });
             set({ currentModel: 'Downloading...' } as any);
             
             try {
-                await invoke('download_model', { modelName: DEFAULT_MODEL_TO_DOWNLOAD });
-                console.log('[ChatStore] Default model download complete');
-                get().dispatchOperation({ type: 'done', key: 'model-download', message: `${DEFAULT_MODEL_TO_DOWNLOAD} downloaded` });
+                // Tracked: the entry always ends as done, error or cancelled.
+                const downloaded = await get().downloadModel(DEFAULT_MODEL_TO_DOWNLOAD);
+                if (downloaded) console.log('[ChatStore] Default model download complete');
                 
                 // Refresh models after download
-                await get().fetchCachedModels();
-                await get().fetchModels();
+                if (downloaded) await get().fetchModels();
                 
                 // Now load the model
                 const updatedState = get();
-                const downloadedModel = updatedState.cachedModels.find(m => 
+                const downloadedModel = downloaded ? updatedState.cachedModels.find(m => 
                     m.model_id.toLowerCase().includes(DEFAULT_MODEL_TO_DOWNLOAD.toLowerCase())
-                );
+                ) : undefined;
                 
                 if (downloadedModel) {
                     console.log('[ChatStore] Loading downloaded model:', downloadedModel.model_id);
@@ -264,11 +268,7 @@ async function initializeModelsOnStartup<T extends ListenerSliceDeps>(
                 }
             } catch (downloadError: any) {
                 console.error('[ChatStore] Failed to download default model:', downloadError);
-                get().dispatchOperation({
-                    type: 'error',
-                    key: 'model-download',
-                    message: `Model download failed (${downloadError?.message ?? downloadError}). Check your internet connection and free disk space, then retry.`,
-                });
+                console.error('[ChatStore] Default model setup failed:', downloadError);
                 set({ currentModel: 'No models' } as any);
             }
         } else {
@@ -599,23 +599,15 @@ export const createListenerSlice: StateCreator<
             });
             
             // Model download progress listener
+            // `file` is the name the download was requested with, i.e. the download's id.
             const downloadProgressListener = await listen<{ file: string; progress: number }>('model-download-progress', (event) => {
-                const model = get().operations['model-download'];
-                get().dispatchOperation({
-                    type: 'progress',
-                    key: 'model-download',
-                    message: model?.message,
-                    percent: event.payload.progress,
-                    file: event.payload.file,
-                });
+                get().dispatchDownload({ type: 'progress', id: event.payload.file, percent: event.payload.progress });
             });
 
             // Backend announces which model it resolved before the download starts
-            const downloadStartedListener = await listen<{ model: string; size_bytes?: number }>('model-download-started', (event) => {
-                const { model, size_bytes } = event.payload;
-                const size = size_bytes ? ` (${formatBytes(size_bytes)})` : '';
-                get().dispatchOperation({ type: 'progress', key: 'model-download', message: `Downloading ${model}${size}`, percent: 0 });
-                set({ downloadingModelName: model, downloadingModelSizeBytes: size_bytes ?? null } as any);
+            const downloadStartedListener = await listen<{ id?: string; model: string; size_bytes?: number }>('model-download-started', (event) => {
+                const { id, model, size_bytes } = event.payload;
+                get().dispatchDownload({ type: 'started', id: id ?? model, label: model, sizeBytes: size_bytes ?? undefined });
             });
 
             // Toolbox auto-download (database sources)
@@ -908,8 +900,14 @@ export const createListenerSlice: StateCreator<
                 }, 15000);
             });
 
+            // App notices travel on their own event, never as chat tokens, so they are not
+            // persisted or sent back to the next model as history.
+            const chatNoticeListener = await listen<{ level: 'warning' | 'error'; text: string }>('chat-notice', (event) => {
+                get().setChatNotice({ level: event.payload.level, text: event.payload.text });
+            });
+
             // Model fallback listener
-            const modelFallbackListener = await listen<{ current_model: string; fallback_model: string; error: string; reason?: string; alternative_model?: string | null }>('model-fallback-required', async (event) => {
+            const modelFallbackListener = await listen<{ current_model: string; fallback_model: string; fallback_resolved_name?: string | null; fallback_size_bytes?: number | null; error: string; reason?: string; alternative_model?: string | null }>('model-fallback-required', async (event) => {
                 const { current_model, fallback_model, error, reason, alternative_model } = event.payload;
                 console.warn(`[ChatStore] 🔄 Model fallback required: ${current_model} -> ${fallback_model}, error: ${error}`);
                 // Tell the user why (not just that we switched) and offer the CPU build if cached.
@@ -919,93 +917,51 @@ export const createListenerSlice: StateCreator<
                     alternativeModel: alternative_model ?? null,
                 });
                 
-                const state = get();
-                const fallbackAvailable = state.cachedModels.some(
-                    m => m.model_id.toLowerCase().includes(fallback_model.toLowerCase()) ||
-                         m.alias.toLowerCase().includes(fallback_model.toLowerCase())
-                );
-                
-                if (fallbackAvailable) {
-                    const fallbackModelInfo = state.cachedModels.find(
-                        m => m.model_id.toLowerCase().includes(fallback_model.toLowerCase()) ||
-                             m.alias.toLowerCase().includes(fallback_model.toLowerCase())
-                    );
-                    
-                    if (fallbackModelInfo && state.currentModel !== fallbackModelInfo.model_id) {
-                        const fallbackName = fallbackModelInfo.alias || fallbackModelInfo.model_id;
-                        console.log(`[ChatStore] Switching to fallback model: ${fallbackModelInfo.model_id}`);
-                        set({
-                            operationStatus: {
-                                type: 'loading',
-                                message: `“${current_model}” isn’t compatible with your Foundry Local version — switching to ${fallbackName}…`,
-                                startTime: Date.now(),
-                            },
-                            statusBarDismissed: false,
-                        } as any);
-                        
-                        try {
-                            await get().loadModel(fallbackModelInfo.model_id);
-                            await invoke('set_model', { model: fallbackModelInfo.model_id });
-                            console.log('[ChatStore] Fallback model selection persisted to settings:', fallbackModelInfo.model_id);
-                            
-                            set({
-                                operationStatus: {
-                                    type: 'loading',
-                                    message: `Switched to ${fallbackName}`,
-                                    completed: true,
-                                    startTime: Date.now(),
-                                },
-                            } as any);
-                            setTimeout(() => {
-                                const currentState = get();
-                                if (currentState.operationStatus?.completed) {
-                                    set({ operationStatus: null } as any);
-                                }
-                            }, 5000);
-                        } catch (loadError: any) {
-                            console.error('[ChatStore] Failed to load fallback model:', loadError);
-                            set({
-                                backendError: `Failed to load fallback model: ${loadError.message || loadError}`,
-                                operationStatus: null,
-                            } as any);
-                        }
-                    }
-                } else {
-                    console.log(`[ChatStore] Fallback model ${fallback_model} not cached. Attempting download...`);
+                const plan = planFallback(event.payload, get().cachedModels, get().currentModel);
+                if (plan.kind === 'switch') {
+                    const fallbackName = plan.name;
+                    console.log(`[ChatStore] Switching to fallback model: ${plan.modelId}`);
                     set({
                         operationStatus: {
-                            type: 'downloading',
-                            message: `Downloading ${fallback_model} (fallback model)...`,
-                            progress: 0,
+                            type: 'loading',
+                            message: `“${current_model}” isn’t compatible with your Foundry Local version — switching to ${fallbackName}…`,
                             startTime: Date.now(),
                         },
                         statusBarDismissed: false,
                     } as any);
-                    
+
                     try {
-                        await invoke('download_model', { modelName: fallback_model });
-                        console.log('[ChatStore] Fallback model download complete');
-                        
-                        await get().fetchCachedModels();
-                        
-                        const updatedState = get();
-                        const downloadedModel = updatedState.cachedModels.find(
-                            m => m.model_id.toLowerCase().includes(fallback_model.toLowerCase()) ||
-                                 m.alias.toLowerCase().includes(fallback_model.toLowerCase())
-                        );
-                        
-                        if (downloadedModel) {
-                            await get().loadModel(downloadedModel.model_id);
-                            await invoke('set_model', { model: downloadedModel.model_id });
-                            console.log('[ChatStore] Fallback model selection persisted to settings:', downloadedModel.model_id);
-                        }
-                    } catch (downloadError: any) {
-                        console.error('[ChatStore] Failed to download fallback model:', downloadError);
+                        await get().loadModel(plan.modelId);
+                        await invoke('set_model', { model: plan.modelId });
                         set({
-                            backendError: `Model error: ${error}. Fallback download failed: ${downloadError.message || downloadError}`,
+                            operationStatus: {
+                                type: 'loading',
+                                message: `Switched to ${fallbackName}`,
+                                completed: true,
+                                startTime: Date.now(),
+                            },
+                        } as any);
+                        setTimeout(() => {
+                            if (get().operationStatus?.completed) {
+                                set({ operationStatus: null } as any);
+                            }
+                        }, 5000);
+                    } catch (loadError: any) {
+                        console.error('[ChatStore] Failed to load fallback model:', loadError);
+                        set({
+                            backendError: `Failed to load fallback model: ${loadError.message || loadError}`,
                             operationStatus: null,
                         } as any);
                     }
+                } else if (plan.kind === 'confirm-download') {
+                    // Never download unasked: the status bar asks, and only a click starts it.
+                    console.log(`[ChatStore] Fallback model ${fallback_model} is not on disk; asking before downloading.`);
+                    get().setPendingFallbackDownload({
+                        failedModel: current_model,
+                        model: plan.model,
+                        label: plan.label,
+                        sizeBytes: plan.sizeBytes,
+                    });
                 }
             });
 
@@ -1264,6 +1220,7 @@ export const createListenerSlice: StateCreator<
                 modelSelectedListener();
                 modelStuckListener();
                 modelFallbackListener();
+                chatNoticeListener();
                 toolBlockedListener();
                 chatSavedListener();
                 sidebarUpdateListener();
@@ -1318,6 +1275,7 @@ export const createListenerSlice: StateCreator<
             unlistenSidebarUpdate = sidebarUpdateListener;
             unlistenModelStuck = modelStuckListener;
             unlistenModelFallback = modelFallbackListener;
+            unlistenChatNotice = chatNoticeListener;
             unlistenDownloadProgress = downloadProgressListener;
             unlistenLoadComplete = loadCompleteListener;
             unlistenRagProgress = ragProgressListener;
@@ -1362,6 +1320,7 @@ export const createListenerSlice: StateCreator<
         if (unlistenSidebarUpdate) { unlistenSidebarUpdate(); unlistenSidebarUpdate = undefined; }
         if (unlistenModelStuck) { unlistenModelStuck(); unlistenModelStuck = undefined; }
         if (unlistenModelFallback) { unlistenModelFallback(); unlistenModelFallback = undefined; }
+        if (unlistenChatNotice) { unlistenChatNotice(); unlistenChatNotice = undefined; }
         if (unlistenToolCallsPending) { unlistenToolCallsPending(); unlistenToolCallsPending = undefined; }
         if (unlistenToolExecuting) { unlistenToolExecuting(); unlistenToolExecuting = undefined; }
         if (unlistenToolHeartbeat) { unlistenToolHeartbeat(); unlistenToolHeartbeat = undefined; }

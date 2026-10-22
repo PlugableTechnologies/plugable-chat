@@ -10,6 +10,7 @@ import type {
 } from '../types';
 import { parseFoundryModelStateEvent } from '../helpers';
 import { setModelSucceeded } from '../model-switch';
+import { isDownloadPending } from '../downloads';
 import { MODEL_FETCH_MAX_RETRIES, MODEL_FETCH_INITIAL_DELAY_MS } from '../constants';
 
 // Module-level state for model fetching
@@ -53,7 +54,8 @@ export interface ModelSlice {
     fetchModelInfo: () => Promise<void>;
     setModel: (model: string) => Promise<void>;
     loadModel: (modelName: string) => Promise<void>;
-    downloadModel: (modelName: string) => Promise<void>;
+    /** Tracked download: always ends as done, error or cancelled. Resolves true on success. */
+    downloadModel: (modelName: string, label?: string) => Promise<boolean>;
     getLoadedModels: () => Promise<string[]>;
     setReasoningEffort: (effort: ReasoningEffort) => void;
     
@@ -62,6 +64,8 @@ export interface ModelSlice {
     launchModelOverride: string | null;
     launchInitialPrompt: string | null;
     launchQueuedPrompts: string[];
+    /** --same-chat: queued prompts continue the current chat instead of starting a new one */
+    launchSameChat: boolean;
     launchPromptApplied: boolean;
     markLaunchPromptApplied: () => void;
     loadLaunchOverrides: () => Promise<void>;
@@ -296,45 +300,28 @@ export const createModelSlice: StateCreator<
         }
     },
 
-    downloadModel: async (modelName: string) => {
+    downloadModel: async (modelName: string, label?: string) => {
+        const store = get() as any;
+        // The same model is already queued or running; a second click must not start a twin.
+        if (isDownloadPending(store.downloads?.[modelName])) return false;
         console.log('[ChatStore] Downloading model:', modelName);
-        set({
-            operationStatus: {
-                type: 'downloading',
-                message: `Downloading ${modelName}...`,
-                progress: 0,
-                startTime: Date.now(),
-            },
-            statusBarDismissed: false,
-        } as any);
+        store.dispatchDownload({ type: 'start', id: modelName, label });
         try {
             await invoke('download_model', { modelName });
-            set({
-                operationStatus: {
-                    type: 'downloading',
-                    message: `${modelName} downloaded successfully`,
-                    completed: true,
-                    progress: 100,
-                    startTime: Date.now(),
-                },
-            } as any);
-            // Refresh cached models
-            await get().fetchCachedModels();
-            // After download, auto-load if no model is currently loaded
-            if (get().currentModel === 'No models') {
-                await get().loadModel(modelName);
-            }
+            store.dispatchDownload({ type: 'done', id: modelName });
         } catch (e: any) {
-            console.error('[ChatStore] Failed to download model:', e);
-            set({
-                operationStatus: {
-                    type: 'downloading',
-                    message: `Failed to download ${modelName}: ${e.message || e}`,
-                    startTime: Date.now(),
-                },
-                backendError: `Failed to download model: ${e.message || e}`,
-            } as any);
+            const message = String(e?.message ?? e);
+            console.error('[ChatStore] Failed to download model:', message);
+            // A user cancel removes the row; any other failure keeps it with a Retry button.
+            store.dispatchDownload({ type: 'error', id: modelName, message });
+            return false;
         }
+        await get().fetchCachedModels();
+        // After download, auto-load if no model is currently loaded
+        if (get().currentModel === 'No models') {
+            await get().loadModel(modelName);
+        }
+        return true;
     },
     
     getLoadedModels: async () => {
@@ -354,17 +341,19 @@ export const createModelSlice: StateCreator<
     launchModelOverride: null,
     launchInitialPrompt: null,
     launchQueuedPrompts: [],
+    launchSameChat: false,
     launchPromptApplied: false,
     markLaunchPromptApplied: () => set({ launchPromptApplied: true }),
     loadLaunchOverrides: async () => {
         if (get().launchOverridesLoaded) return;
         try {
-            const payload = await invoke<{ model?: string | null; initial_prompt?: string | null; queued_prompts?: string[] | null }>('get_launch_overrides');
+            const payload = await invoke<{ model?: string | null; initial_prompt?: string | null; queued_prompts?: string[] | null; same_chat?: boolean | null }>('get_launch_overrides');
             set({
                 launchOverridesLoaded: true,
                 launchModelOverride: payload?.model ?? null,
                 launchInitialPrompt: payload?.initial_prompt ?? null,
                 launchQueuedPrompts: payload?.queued_prompts ?? [],
+                launchSameChat: payload?.same_chat ?? false,
             });
             console.log('[ChatStore] Launch overrides loaded:', payload);
         } catch (e: any) {
