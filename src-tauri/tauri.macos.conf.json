@@ -6,7 +6,8 @@
         "foundry-libs/Microsoft.AI.Foundry.Local.Core.dylib",
         "foundry-libs/libonnxruntime.dylib",
         "foundry-libs/libonnxruntime-genai.dylib"
-      ]
+      ],
+      "entitlements": "entitlements.plist"
     }
   }
 }

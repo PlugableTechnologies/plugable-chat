@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      The AI engine libraries in Contents/Frameworks (Microsoft's Foundry Local Core, ONNX Runtime and
+      ONNX Runtime GenAI) carry their own signatures, not the app's. The hardened runtime's library
+      validation refuses to load a library signed by a different team ("mapping process and mapped file
+      have different Team IDs"), and two ad hoc signatures count as different teams. rc15 shipped without
+      this and did not start on any Mac. Needed with a Developer ID signature as well, for the same reason.
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

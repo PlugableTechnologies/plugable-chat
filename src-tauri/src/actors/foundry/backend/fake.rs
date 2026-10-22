@@ -13,7 +13,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
 use super::{
-    with_overflow_retry, BackendError, ChatStreamOutcome, ChatStreamRequest, ConnectionInfo,
+    with_overflow_retry, BackendError, Budget, ChatStreamOutcome, ChatStreamRequest, ConnectionInfo,
     FoundryBackend, ProgressSink, RawModel,
 };
 use crate::actors::foundry::context_budget;
@@ -42,6 +42,9 @@ pub struct FakeBackend {
     pub catalog: Mutex<Vec<CatalogModel>>,
     /// Tokens per character the fake core uses (the estimator assumes ~0.29).
     pub strict_tokens_per_char: Mutex<f64>,
+    /// When set, the fake engine runs out of memory ("bad allocation", the real A10G text) building any request
+    /// whose input is larger than this many core tokens, whatever the model's context window says.
+    pub oom_above_input_tokens: Mutex<Option<u64>>,
 }
 
 impl FakeBackend {
@@ -68,7 +71,7 @@ impl FakeBackend {
             .sum()
     }
 
-    async fn attempt(&self, req: ChatStreamRequest, sink: UnboundedSender<String>, scale: f64) -> ChatStreamOutcome {
+    async fn attempt(&self, req: ChatStreamRequest, sink: UnboundedSender<String>, budget: Budget) -> ChatStreamOutcome {
         let mut outcome = ChatStreamOutcome::default();
         let ctx = self.contexts.lock().unwrap().get(&req.model).copied();
         let next = self.script.lock().unwrap().pop_front();
@@ -87,11 +90,21 @@ impl FakeBackend {
             ModelFamily::Gemma | ModelFamily::Granite => 8192,
             _ => 16384,
         };
-        let plan = context_budget::plan_request(&req.messages, ctx, cap, scale);
+        let plan = context_budget::plan_request(&req.messages, ctx, cap, budget.scale, budget.input_ceiling);
+        outcome.input_tokens = plan.input_tokens;
         self.received
             .lock()
             .unwrap()
             .push((req.model.clone(), plan.messages.clone(), plan.max_tokens));
+        // The "core" can also run out of memory on a long prompt, independent of the window.
+        if let Some(limit) = *self.oom_above_input_tokens.lock().unwrap() {
+            if self.core_tokens(&plan.messages) > limit {
+                outcome.error = Some(BackendError::classify_generation(
+                    "command execution error: Error: Microsoft.ML.OnnxRuntimeGenAI.OnnxRuntimeGenAIException: Non-zero status code returned while running SimplifiedLayerNormalization node. Name:'/model/layers.3/attn/k_norm/SimplifiedLayerNormalization' Status Message: bad allocation",
+                ));
+                return outcome;
+            }
+        }
         // The "core": input + max_tokens must fit the true window, counted pessimistically.
         let real_ctx = ctx.unwrap_or(context_budget::DEFAULT_CONTEXT_LENGTH);
         let total = self.core_tokens(&plan.messages) + plan.max_tokens;
@@ -146,7 +159,8 @@ impl FoundryBackend for FakeBackend {
         sink: UnboundedSender<String>,
         _cancel: watch::Receiver<bool>,
     ) -> ChatStreamOutcome {
-        with_overflow_retry(|scale| self.attempt(req.clone(), sink.clone(), scale)).await
+        let model = req.model.clone();
+        with_overflow_retry(&model, |budget| self.attempt(req.clone(), sink.clone(), budget)).await
     }
 
     fn runtime_version_key(&self) -> String { "fake-1.0".to_string() }

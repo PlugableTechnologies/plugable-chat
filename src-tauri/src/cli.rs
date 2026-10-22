@@ -239,9 +239,15 @@ pub struct CliArgs {
     pub mcp_test_print_prompt: bool,
 }
 
+/// Windows PowerShell 5.1 writes a byte-order mark with `-Encoding UTF8`. A JSON reader rejects it ("expected value at
+/// line 1"), and a harness run then waited out its timer with no prompt (rc15 validation), so every file we read as JSON drops it first.
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// Parse the contents of a `--prompts-file`: a JSON array of non-empty strings.
 pub fn parse_prompts_json(text: &str) -> Result<Vec<String>, String> {
-    let prompts: Vec<String> = serde_json::from_str(text).map_err(|e| format!("expected a JSON array of strings: {e}"))?;
+    let prompts: Vec<String> = serde_json::from_str(strip_bom(text)).map_err(|e| format!("expected a JSON array of strings: {e}"))?;
     Ok(prompts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
 }
 
@@ -259,7 +265,7 @@ pub fn read_value_or_file(raw: &str) -> Result<String, String> {
 /// Parse a JSON value from either inline JSON or a @path reference
 pub fn parse_json_or_file<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
     let data = read_value_or_file(raw)?;
-    serde_json::from_str(&data).map_err(|e| format!("Failed to parse JSON: {}", e))
+    serde_json::from_str(strip_bom(&data)).map_err(|e| format!("Failed to parse JSON: {}", e))
 }
 
 /// Parse a tool call format name from string
@@ -709,5 +715,19 @@ mod tests {
         let timeout = |id: &str| settings.mcp_servers.iter().find(|s| s.id == id).and_then(|s| s.request_timeout_secs);
         assert_eq!(timeout("own"), Some(45));
         assert_eq!(timeout("plain"), Some(900));
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_stop_a_prompts_file_or_a_server_file_from_loading() {
+        assert_eq!(parse_prompts_json("\u{feff}[\"one\", \" two \"]").unwrap(), vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(parse_prompts_json("[\"one\"]").unwrap(), vec!["one".to_string()]);
+        let dir = std::env::temp_dir().join(format!("plugable-bom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("server.json");
+        std::fs::write(&f, "\u{feff}{\"id\":\"a\",\"name\":\"a\",\"enabled\":true}").unwrap();
+        let cfg: crate::settings::McpServerConfig = parse_json_or_file(&format!("@{}", f.display())).unwrap();
+        assert_eq!(cfg.id, "a");
+        assert!(parse_prompts_json("not json").is_err(), "real errors still surface");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

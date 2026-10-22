@@ -179,3 +179,74 @@ async fn download_cancel_stops_it_and_a_queued_cancel_never_starts() {
     assert!(r.is_err());
     assert!(seen.lock().unwrap().len() <= 3);
 }
+
+// ---- out of memory on a long prompt (rc15 on an A10G: "bad allocation" at ~18,000 input tokens) ----
+
+const OOM_TEXT: &str = "command execution error: Error: Microsoft.ML.OnnxRuntimeGenAI.OnnxRuntimeGenAIException: Non-zero status code returned while running SimplifiedLayerNormalization node. Name:'/model/layers.3/attn/k_norm/SimplifiedLayerNormalization' Status Message: bad allocation";
+
+#[test]
+fn an_allocation_failure_is_a_client_problem_not_a_bad_model() {
+    for m in [OOM_TEXT, "CUDA out of memory", "std::bad_alloc", "Failed to allocate 2147483648 bytes", "E_OUTOFMEMORY"] {
+        let e = BackendError::classify_generation(m);
+        assert!(matches!(e, BackendError::Client(_)), "{m}");
+        assert!(e.is_out_of_memory() && !e.is_server(), "{m}: must not feed the blocklist");
+    }
+    // a genuine runtime fault is still the model's
+    assert!(BackendError::classify_generation("ORT runtime exception: WebGPU validation failed").is_server());
+}
+
+#[tokio::test]
+async fn a_long_conversation_that_runs_out_of_memory_is_retried_smaller_and_answers() {
+    super::forget_memory_ceilings();
+    let model = "qwen3.5-oom-retry:1";
+    let b = FakeBackend::new().with_context(model, 262_144);
+    *b.oom_above_input_tokens.lock().unwrap() = Some(20_000);
+    // About 27,000 estimated input tokens of history against a 20,000-token memory limit: the first attempt fails, 60% of it fits.
+    let long = vec![msg("system", 400), msg("user", 36_000), msg("assistant", 36_000), msg("user", 24_000), msg("assistant", 40), msg("user", 40)];
+    let out = run(&b, req(model, long)).await;
+    assert!(out.error.is_none(), "the retry must answer: {:?}", out.error);
+    let seen = b.received.lock().unwrap();
+    assert_eq!(seen.len(), 2, "exactly one retry");
+    assert!(seen[1].1.len() < seen[0].1.len(), "the retry sends less history");
+    assert_eq!(seen[1].1.last().unwrap().content.len(), msg("user", 40).content.len(), "the newest message is kept");
+}
+
+#[tokio::test]
+async fn once_a_memory_limit_is_found_later_turns_stay_under_it_without_a_failed_attempt() {
+    super::forget_memory_ceilings();
+    let model = "qwen3.5-oom-remembered:1";
+    let b = FakeBackend::new().with_context(model, 262_144);
+    *b.oom_above_input_tokens.lock().unwrap() = Some(20_000);
+    let long = || vec![msg("system", 400), msg("user", 36_000), msg("assistant", 36_000), msg("user", 24_000), msg("assistant", 40), msg("user", 40)];
+    assert!(run(&b, req(model, long())).await.error.is_none());
+    let before = b.received.lock().unwrap().len();
+    assert!(run(&b, req(model, long())).await.error.is_none());
+    assert_eq!(b.received.lock().unwrap().len() - before, 1, "the second turn must not fail first");
+    assert!(super::memory_ceiling(model).is_some());
+}
+
+#[tokio::test]
+async fn if_even_the_smaller_request_runs_out_of_memory_the_user_gets_a_plain_message_and_the_model_is_not_blamed() {
+    super::forget_memory_ceilings();
+    let model = "qwen3.5-oom-hopeless:1";
+    let b = FakeBackend::new().with_context(model, 262_144);
+    *b.oom_above_input_tokens.lock().unwrap() = Some(50); // nothing realistic fits
+    let out = run(&b, req(model, vec![msg("system", 400), msg("user", 12_000 * 3), msg("assistant", 12_000 * 3), msg("user", 4000)])).await;
+    let err = out.error.expect("must fail");
+    assert!(err.is_out_of_memory() && !err.is_server(), "{err:?}");
+    assert!(err.message().contains("Start a new chat"), "{}", err.message());
+    assert!(err.message().contains("graphics memory"), "{}", err.message());
+    assert_eq!(b.received.lock().unwrap().len(), 2, "one retry only, no loop");
+}
+
+#[tokio::test]
+async fn a_request_that_fits_in_memory_is_untouched() {
+    super::forget_memory_ceilings();
+    let model = "qwen3.5-oom-fits:1";
+    let b = FakeBackend::new().with_context(model, 262_144);
+    *b.oom_above_input_tokens.lock().unwrap() = Some(6_000);
+    let out = run(&b, req(model, vec![msg("system", 400), msg("user", 800)])).await;
+    assert!(out.error.is_none());
+    assert_eq!(b.received.lock().unwrap().len(), 1);
+    assert!(super::memory_ceiling(model).is_none());
+}

@@ -259,6 +259,14 @@ jobs:
             test -f "$app/Contents/Frameworks/$lib" || { echo "::error::$lib is missing from the app"; exit 1; }
           done
 
+      # rc15's Mac build was signed and complete but could not start: macOS refused to load the engine libraries
+      # inside it (library validation). Nothing here ran the app, so CI could not see it. This does.
+      - name: Run the app headless and check that its AI engine loads
+        run: |
+          set -euo pipefail
+          app=$(find target/debug/bundle/macos -maxdepth 1 -name '*.app' | head -n 1)
+          bash scripts/ci/mac-engine-loads.sh "$app" 150
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos-unsigned-${{ github.sha }}

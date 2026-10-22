@@ -104,9 +104,12 @@ impl BackendError {
         if lower.contains("operation was cancel") || lower.contains("operationcanceledexception") {
             BackendError::Cancelled(msg)
         } else if is_context_overflow(&lower)
+            || is_out_of_memory(&lower)
             || lower.contains("system.argumentexception")
             || lower.contains("max_tokens")
         {
+            // Running out of memory on a long prompt says nothing about the model: the same model
+            // answers a shorter one (rc15, A10G: "bad allocation" at ~18,000 input tokens).
             BackendError::Client(msg)
         } else if lower.contains("connection refused")
             || lower.contains("timed out")
@@ -132,11 +135,37 @@ impl BackendError {
     pub fn is_context_overflow(&self) -> bool {
         matches!(self, BackendError::Client(m) if is_context_overflow(&m.to_lowercase()))
     }
+
+    /// True when the engine ran out of memory building the request (the prompt is too long for this
+    /// computer's graphics memory), or when we already turned such a failure into the plain-language message.
+    pub fn is_out_of_memory(&self) -> bool {
+        matches!(self, BackendError::Client(m) if is_out_of_memory(&m.to_lowercase()))
+    }
 }
 
 fn is_context_overflow(lower: &str) -> bool {
     lower.contains("maximum context length") || lower.contains("exceeds the model's maximum")
 }
+
+/// Allocation failures as the engines word them: ONNX Runtime / GenAI ("bad allocation",
+/// "Failed to allocate"), CUDA and DirectML ("out of memory", `E_OUTOFMEMORY`), and our own message.
+fn is_out_of_memory(lower: &str) -> bool {
+    [
+        "bad allocation",
+        "bad_alloc",
+        "out of memory",
+        "failed to allocate",
+        "e_outofmemory",
+        "memory allocation",
+        "cudaerrormemoryallocation",
+        OOM_MARKER,
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
+/// Part of the plain-language message shown when a conversation cannot fit in graphics memory.
+const OOM_MARKER: &str = "too long for this computer's graphics memory";
 
 #[cfg(test)]
 mod error_class_tests {
@@ -185,20 +214,84 @@ mod error_class_tests {
 /// Budget scales tried in order: the full window, then a tighter one.
 pub const OVERFLOW_RETRY_SCALES: [f64; 2] = [1.0, 0.6];
 
-/// Runs `attempt(scale)`; if the core says the request was too large for the context (nothing
-/// was generated), tries once more with a tighter budget instead of failing the turn.
-/// Our token estimate differs from the core's, so this is the safety net for the clamp.
-pub async fn with_overflow_retry<F, Fut>(attempt: F) -> ChatStreamOutcome
+/// After an out-of-memory failure, the retry plans for this share of the input that just failed.
+pub const MEMORY_RETRY_SHARE: f64 = 0.6;
+/// Never plan below this many input tokens because of a memory failure: below it the failure is
+/// not about the conversation's length.
+const MIN_MEMORY_CEILING: u64 = 1024;
+
+/// How a request is fitted for one attempt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Budget {
+    /// Share of the model's context window to plan against (1.0 = all of it).
+    pub scale: f64,
+    /// Hard ceiling on input tokens, learned from a memory failure earlier in this run.
+    pub input_ceiling: Option<u64>,
+}
+
+static MEMORY_CEILINGS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+
+/// The input size (tokens) this run found too large for the model on this machine, if any. Held for
+/// the life of the process only: free memory differs from one start to the next.
+pub fn memory_ceiling(model: &str) -> Option<u64> {
+    MEMORY_CEILINGS.get().and_then(|m| m.lock().ok()).and_then(|m| m.get(model).copied())
+}
+
+fn note_memory_ceiling(model: &str, failed_input_tokens: u64) -> u64 {
+    let ceiling = ((failed_input_tokens as f64 * MEMORY_RETRY_SHARE) as u64).max(MIN_MEMORY_CEILING);
+    if let Ok(mut m) = MEMORY_CEILINGS.get_or_init(Default::default).lock() {
+        let e = m.entry(model.to_string()).or_insert(ceiling);
+        *e = (*e).min(ceiling);
+        return *e;
+    }
+    ceiling
+}
+
+/// Forget what a run learned (tests, and after a model is unloaded).
+pub fn forget_memory_ceilings() {
+    if let Some(m) = MEMORY_CEILINGS.get() {
+        if let Ok(mut m) = m.lock() {
+            m.clear();
+        }
+    }
+}
+
+/// Runs `attempt(budget)`. Two kinds of failure on a request that was too big get one more try
+/// instead of failing the turn, because nothing was generated:
+/// * the core says it exceeds the context window (our estimate differs from its): plan against a tighter window;
+/// * the engine runs out of memory: plan against a smaller input, 60% of the one that just failed, and
+///   remember that ceiling for later turns so the conversation keeps going on this computer.
+/// If the retry also runs out of memory the user gets a plain message, and the model is not blamed.
+pub async fn with_overflow_retry<F, Fut>(model: &str, attempt: F) -> ChatStreamOutcome
 where
-    F: Fn(f64) -> Fut,
+    F: Fn(Budget) -> Fut,
     Fut: std::future::Future<Output = ChatStreamOutcome>,
 {
-    let first = attempt(OVERFLOW_RETRY_SCALES[0]).await;
+    let first = attempt(Budget { scale: OVERFLOW_RETRY_SCALES[0], input_ceiling: memory_ceiling(model) }).await;
     if first.error.as_ref().map_or(false, |e| e.is_context_overflow()) {
         println!("[Backend] Context overflow; retrying once with a tighter budget");
-        return attempt(OVERFLOW_RETRY_SCALES[1]).await;
+        return attempt(Budget { scale: OVERFLOW_RETRY_SCALES[1], input_ceiling: memory_ceiling(model) }).await;
+    }
+    if first.error.as_ref().map_or(false, |e| e.is_out_of_memory()) && first.input_tokens > 0 {
+        let ceiling = note_memory_ceiling(model, first.input_tokens);
+        println!(
+            "[Backend] Out of memory at about {} input tokens; retrying once with at most {ceiling}",
+            first.input_tokens
+        );
+        let mut second = attempt(Budget { scale: OVERFLOW_RETRY_SCALES[0], input_ceiling: Some(ceiling) }).await;
+        if let Some(e) = second.error.take() {
+            second.error = Some(if e.is_out_of_memory() { oom_message(&e, first.input_tokens) } else { e });
+        }
+        return second;
     }
     first
+}
+
+fn oom_message(original: &BackendError, input_tokens: u64) -> BackendError {
+    BackendError::Client(format!(
+        "This conversation is {OOM_MARKER} (about {input_tokens} tokens of history). Start a new chat to continue, or ask in a shorter chat. Details: {}",
+        original.message()
+    ))
 }
 
 /// Outcome of a streamed chat turn. Text deltas are delivered out-of-band via the `sink`.
@@ -206,6 +299,8 @@ where
 pub struct ChatStreamOutcome {
     pub cancelled: bool,
     pub error: Option<BackendError>,
+    /// Estimated input tokens of the request that was sent (0 when it never got that far); the memory retry plans from it.
+    pub input_tokens: u64,
 }
 
 /// Progress callback for downloads (percentage, 0.0..=100.0).

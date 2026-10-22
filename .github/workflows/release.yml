@@ -384,6 +384,13 @@ jobs:
             xcrun stapler validate "$dmg"
           fi
 
+      # Run what we are about to publish. rc15's Mac file was signed and complete but could not start.
+      - name: Run the app headless and check that its AI engine loads
+        run: |
+          set -euo pipefail
+          app=$(find target/release/bundle/macos -maxdepth 1 -name '*.app' | head -n 1)
+          bash scripts/ci/mac-engine-loads.sh "$app" 150
+
       - name: Collect release files and checksums
         run: |
           set -euo pipefail

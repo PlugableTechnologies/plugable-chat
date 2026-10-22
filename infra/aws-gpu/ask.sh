@@ -73,8 +73,9 @@ for NAME in "${NAMES[@]}"; do
   QUESTION="$(python3 -c "import json;print(next(q['question'] for q in json.load(open('$HERE/chicago-questions.json')) if q['name']=='$NAME'))")"
   URL="$(python3 -c "import boto3;print(boto3.client('s3').generate_presigned_url('put_object',Params={'Bucket':'$BUCKET','Key':'ask-$IID-$NAME.png'},ExpiresIn=7200))")"
   echo "=== $NAME: $QUESTION"
-  RESULT="$(box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Question '$QUESTION' -Model '$MODEL' -PutUrl '$URL' $APPARG -WaitSeconds $WAIT" $((WAIT + 120)) | tail -4)"
-  echo "$RESULT"
+  RESULT="$(box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\ask-app.ps1 -Question '$QUESTION' -Model '$MODEL' -PutUrl '$URL' $APPARG -WaitSeconds $WAIT" $((WAIT + 120)))"
+  # Keep all of the output when looking for the result line: scheduler warnings after it pushed it out of a `tail -4` (rc15).
+  echo "$RESULT" | grep -E 'outcome=|gpu peak|InvalidInstanceId' | tail -3
   if echo "$RESULT" | grep -q 'InvalidInstanceId'; then echo "box is gone (SSM refused); stopping" >&2; FAILED=$((FAILED + 1)); break; fi
   echo "$NAME: $(echo "$RESULT" | grep -o 'outcome=.*' | head -1)" >> "$OUT/summary.txt"
   echo "$RESULT" | grep -q 'outcome=chat-finished' || FAILED=$((FAILED + 1))

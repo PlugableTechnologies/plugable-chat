@@ -270,6 +270,9 @@ pub fn fail_run(app: &tauri::AppHandle, outcome: TurnOutcome, detail: &str) {
 pub fn exit_app(_app: &tauri::AppHandle, code: i32) {
     use std::io::Write;
     crate::launch_marker::clear();
+    // This path ends the process directly, so the normal-exit cleanup in `run()` never runs. Without this a
+    // harness run left run-state.json behind (rc15 validation); it is a normal exit, not a crash.
+    crate::run_state::clear();
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     std::process::exit(code);

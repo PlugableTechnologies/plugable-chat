@@ -809,8 +809,9 @@ impl FoundryBackend for SdkBackend {
         sink: UnboundedSender<String>,
         cancel: watch::Receiver<bool>,
     ) -> ChatStreamOutcome {
-        super::with_overflow_retry(|scale| {
-            self.chat_stream_attempt(req.clone(), sink.clone(), cancel.clone(), scale)
+        let model = req.model.clone();
+        super::with_overflow_retry(&model, |budget| {
+            self.chat_stream_attempt(req.clone(), sink.clone(), cancel.clone(), budget)
         })
         .await
     }
@@ -898,7 +899,7 @@ impl SdkBackend {
         req: ChatStreamRequest,
         sink: UnboundedSender<String>,
         cancel: watch::Receiver<bool>,
-        budget_scale: f64,
+        budget: super::Budget,
     ) -> ChatStreamOutcome {
         let mut outcome = ChatStreamOutcome::default();
         let mut cancel = cancel;
@@ -943,13 +944,15 @@ impl SdkBackend {
         // Fit the request to this model's context window. Asking a small-context model for
         // the family's full output cap made the core reject the request, which used to be
         // misread as "model incompatible".
-        // `budget_scale` < 1 on the retry after the core still rejected the size.
+        // `budget.scale` < 1 on the retry after the core still rejected the size; `budget.input_ceiling`
+        // is set after an out-of-memory failure.
         let context_length = model.context_length();
-        let plan = context_budget::plan_request(&req.messages, context_length, family_cap, budget_scale);
+        let plan = context_budget::plan_request(&req.messages, context_length, family_cap, budget.scale, budget.input_ceiling);
+        outcome.input_tokens = plan.input_tokens;
         let (messages_in, max_tokens) = (plan.messages, plan.max_tokens);
         println!(
-            "[SdkBackend] max_tokens={max_tokens} (cap {family_cap}, input ~{}, dropped {}, context {:?}, scale {budget_scale})",
-            plan.input_tokens, plan.dropped, context_length
+            "[SdkBackend] max_tokens={max_tokens} (cap {family_cap}, input ~{}, dropped {}, context {:?}, scale {}, ceiling {:?})",
+            plan.input_tokens, plan.dropped, context_length, budget.scale, budget.input_ceiling
         );
         crate::run_state::note_request(plan.input_tokens, max_tokens);
         client = client.max_tokens(max_tokens as u32);
