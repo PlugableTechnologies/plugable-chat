@@ -147,6 +147,37 @@ Notes for the next run:
 - `run-matrix.sh` exits 1 when `unzip` warns that the results zip uses backslashes; the box's own `matrix-exit=0` and the JUnit
   counts are the result.
 
+## rc15 on an A10G (2026-10-22)
+
+Commit `00011bc` (the commit tagged `v0.1.0-rc15`), the CI-built unsigned installer (`windows-unsigned-00011bc`, perMachine NSIS),
+g5.xlarge (NVIDIA A10G, driver 596.86, Windows Server 2025). **Run before the signed release was published** (the tag was pushed while
+the last check ran, with the release's publish step as the gate). Box and per-run bucket torn down afterwards.
+
+| Check | Result |
+|---|---|
+| CI (Linux, macOS, Windows) on `00011bc` | green (22 min; macOS had failed on the previous commit's timing test, widened in this one) |
+| clean-host default list on `windows-latest` (16 scenarios) | 16 of 16 pass (`nvidia-present-no-providers` had failed on the previous main build) |
+| `installer-lifecycle.ps1` (as SYSTEM, perMachine) | 30 of 30 PASS |
+| clean-host `gpu-baseline`, `baseline`, `quarantined-dll`, `upgrade-over-old` (against the rc14 setup.exe) | 4 of 4 as expected |
+| Chicago questions through the installed app, `qwen3.5-4b-cuda-gpu:4` | **3 of 7 asked** (stopped there on purpose, for time), all correct, screenshots read: 227,299; THEFT 52,813 / BATTERY 41,130 / CRIMINAL DAMAGE 25,135; 36,070 arrests |
+| Long-conversation check (`followups-run.ps1`, first **4 of 10** prompts in one chat) | 4 of 4 `ok`, one tool call each, 32 to 41 s per reply, app log "exiting with code 0" |
+
+Found on the way (none blocks the release):
+- `exit_app` (the `--exit-after-reply` path) skips `run_state::clear()`, so a harness run leaves `run-state.json` behind (phase `idle`, which
+  gives no notice at the next start). A normal window close clears it: checked on the box, present while the app ran, gone after
+  `CloseMainWindow`. Until `exit_app` clears it too, the "run-state.json must be gone" check above can only be made by closing the window.
+- Per-question time through `ask.sh` was 3, 6.6 and 9.7 minutes, but the same model answered the follow-ups in 32 to 41 s each in one chat. The cost is the fresh
+  launch, provider setup and screenshot flow per question, not generation. Timings and options are in issue 36.
+- `followups-run.ps1` could not read the app's exit code (a PowerShell quirk with redirected output); the log line is the evidence.
+
+Signed release ([run 39738797697](https://github.com/PlugableTechnologies/plugable-chat/actions/runs/39738797697), tagged 07:11 UTC, 1 h 48 min to publish: Windows 80 min,
+Linux 62 min, macOS 107 min, publish under a minute; no approval step, the environment still has no required reviewers): all jobs green; 15 assets as a pre-release.
+The downloaded `plugable-chat_0.1.0-rc15_x64-setup.exe` matches `SHA256SUMS-windows.txt`; its Authenticode signer is `LEANCODE, INC.` (EV, serial 7376809) under the
+DigiCert Trusted G4 chain (checked from a Mac with the certificate-table method in the `release-signing` skill). The macOS and Linux files were not run.
+
+Step timings (UTC): CI 06:03 to 06:25; box launched 06:24:49, bootstrap 2 min 37 s; lifecycle 2 min 43 s; `gpu-baseline` 3 min 04 s; other three scenarios
+2 min 05 s; Chicago questions 06:40 to 07:02; follow-ups 07:03 to 07:12.
+
 ## rc12 on Pat's TBT5-AI eGPU (2026-10-16)
 
 Framework 13 (Intel Iris Xe) plus an RTX 5080 in a TBT5-AI over Thunderbolt, Windows 11 Home build 26300
