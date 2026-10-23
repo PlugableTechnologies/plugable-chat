@@ -1415,6 +1415,11 @@ impl ModelGatewayActor {
                             crate::run_state::mark_idle();
                             if outcome.error.is_none() && !outcome.cancelled {
                                 self.forget_native_crashes(&model).await;
+                                // The engine's files on disk just worked: record them (once per run).
+                                static RECORDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                                if !crate::engine_health::gpu_off() && !RECORDED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                    tokio::task::spawn_blocking(crate::engine_health::note_good_session);
+                                }
                             }
                             if outcome.error.is_none() && !outcome.cancelled {
                                 super::failure_strikes::failure_strikes().clear(&model);

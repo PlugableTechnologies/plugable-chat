@@ -200,6 +200,11 @@ pub fn clear() {
     clear_in(&crate::paths::get_config_dir());
 }
 
+/// True while a chat turn is being answered (background engine work must wait).
+pub fn is_chatting() -> bool {
+    CURRENT.get().and_then(|m| m.lock().ok().map(|s| s.phase == Phase::Chatting)).unwrap_or(false)
+}
+
 pub fn mark_idle() {
     with_current(|s| s.phase = Phase::Idle);
 }
