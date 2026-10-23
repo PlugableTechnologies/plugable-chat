@@ -581,3 +581,9 @@ plugable-chat.exe --hidden --ephemeral --same-chat --prompts-file chicago-follow
 
 Every line of `replies.jsonl` must have `"outcome":"ok"`, and `run-state.json` must be gone after the exit (it is removed on a
 normal exit; if it is left behind, the next start reports a crash).
+
+## rc16 (2026-10-23, tag on 6c321f3)
+
+Validated on an A10G on the same commit's CI build: installer lifecycle 0 failed, 10-prompt single chat 10 of 10 (the rc15 failure at prompt 10 is fixed), Chicago 7 of 7, crash rows 8 and 9, and `infra/aws-gpu/engine-recovery-test.ps1` (a half-size `onnxruntime_providers_cuda.dll` is set aside in `ep.quarantine-*`, re-downloaded, the app answers; two kills switch the GPU off; `--repair-engine` clears it).
+On the signed files: checksums, attestation, Authenticode (LEANCODE, INC.), lifecycle 0 failed, Chicago 7 of 7. macOS signed app loads its engine.
+`infra/aws-gpu/netloss-repro.ps1` (firewall block on the app, 90 s, while generating and while idle) did NOT crash the app on the A10G, so the Intel Arc / WebGPU network-loss crash is unreproduced. Not run on the signed files: 10-prompt, recovery test, MSI on a clean machine. One earlier Chicago 7 run on the CI build hung for 55 minutes with no replies and did not recur on rerun; cause unknown.
