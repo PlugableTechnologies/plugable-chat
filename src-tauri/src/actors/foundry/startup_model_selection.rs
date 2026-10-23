@@ -13,6 +13,8 @@ pub enum StartupModelSource {
     Settings,
     DefaultModel,
     FallbackModel,
+    /// Neither preferred model is usable; a small compatible one was chosen so the app still works.
+    AnyCompatible,
 }
 
 impl StartupModelSource {
@@ -22,6 +24,7 @@ impl StartupModelSource {
             StartupModelSource::Settings => "settings",
             StartupModelSource::DefaultModel => "default model",
             StartupModelSource::FallbackModel => "fallback - settings and default models not available",
+            StartupModelSource::AnyCompatible => "any compatible model - the preferred models are not usable",
         }
     }
 }
@@ -53,6 +56,27 @@ fn resolve_requested_model<'a>(requested: &str, available_models: &'a [String]) 
     } else {
         None
     }
+}
+
+/// Size in billions of parameters from an id such as `qwen3.5-4b-generic-cpu:3` (the `4b` token).
+fn size_billions(id: &str) -> Option<f32> {
+    id.to_lowercase().split(|c: char| c == '-' || c == ':' || c == '_').find_map(|tok| {
+        let n = tok.strip_suffix('b')?;
+        n.parse::<f32>().ok()
+    })
+}
+
+/// Last resort: the best small model that is usable. Big models are never picked here (a 20B
+/// model on a small GPU is how this fallback once caused problems); CPU variants come first
+/// because they are what still works when the GPU runtime is the thing that broke.
+fn any_compatible<'a>(available: &'a [String], usable: &dyn Fn(&&'a String) -> bool) -> Option<&'a String> {
+    let mut pool: Vec<&String> = available
+        .iter()
+        .filter(|m| usable(m))
+        .filter(|m| size_billions(m).map(|b| b <= 12.0).unwrap_or(false))
+        .collect();
+    pool.sort_by_key(|m| (!m.to_lowercase().contains("cpu"), size_billions(m).map(|b| (b * 10.0) as u32).unwrap_or(u32::MAX), m.to_lowercase()));
+    pool.into_iter().next()
 }
 
 pub fn select_startup_model(
@@ -103,7 +127,8 @@ pub fn select_startup_model(
     let selected_model = persisted
         .map(|m| (m.clone(), StartupModelSource::Settings))
         .or_else(|| default_model.map(|m| (m.clone(), StartupModelSource::DefaultModel)))
-        .or_else(|| fallback_model.map(|m| (m.clone(), StartupModelSource::FallbackModel)));
+        .or_else(|| fallback_model.map(|m| (m.clone(), StartupModelSource::FallbackModel)))
+        .or_else(|| any_compatible(available_models, &usable).map(|m| (m.clone(), StartupModelSource::AnyCompatible)));
 
     StartupModelSelection { selected_model, launch_override_problem }
 }
@@ -213,6 +238,20 @@ mod tests {
         let ambiguous = cached(&["qwen3.5-4b-generic-gpu:4", "qwen3.5-4b-generic-cpu:2"]);
         let by_ambiguous_prefix = select_startup_model(Some("qwen3.5-4b"), None, &ambiguous, &none_incompatible);
         assert!(by_ambiguous_prefix.launch_override_problem.is_some());
+    }
+
+    #[test]
+    fn when_the_preferred_models_are_blocked_a_small_cpu_model_is_chosen() {
+        let available = cached(&["gpt-oss-20b-generic-gpu:1", "qwen3.5-4b-generic-gpu:4", "qwen3-1.7b-generic-cpu:2", "phi-4-mini-instruct-generic-gpu:1"]);
+        let blocked = |m: &str| m.contains("qwen3.5-4b") || m.contains("phi-4-mini");
+        let sel = select_startup_model(None, None, &available, &blocked);
+        assert_eq!(sel.selected_model, Some(("qwen3-1.7b-generic-cpu:2".to_string(), StartupModelSource::AnyCompatible)));
+    }
+
+    #[test]
+    fn the_last_resort_never_picks_a_big_model() {
+        let available = cached(&["gpt-oss-20b-generic-gpu:1"]);
+        assert!(select_startup_model(None, None, &available, &none_incompatible).selected_model.is_none());
     }
 
     #[test]

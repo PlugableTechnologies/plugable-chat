@@ -32,6 +32,7 @@ pub mod process_utils;
 pub mod protocol;
 pub mod python_helpers;
 pub mod repetition_detector;
+pub mod engine_health;
 pub mod launch_marker;
 pub mod run_state;
 pub mod settings;
@@ -1985,11 +1986,20 @@ pub fn run() {
                 if !matches!(last, run_state::LastRun::Clean) {
                     app_log::log("crash", &format!("previous run did not exit cleanly: {:?}", last));
                 }
-                let notice = run_state::apply_to_settings(
+                // The engine's downloaded parts get first say: a death in a provider dll is not the
+                // model's fault, and must not switch every model off.
+                if cli_args_for_setup.repair_engine {
+                    let line = engine_health::repair(&mut app_settings);
+                    app_log::log("repair", &format!("--repair-engine: {line}"));
+                }
+                let plan = engine_health::apply_at_launch(&last, &mut app_settings);
+                let model_last = if plan.spare_the_model { run_state::LastRun::Clean } else { last.clone() };
+                let model_notice = run_state::apply_to_settings(
                     &mut app_settings,
-                    &last,
+                    &model_last,
                     actors::foundry::backend::sdk::FOUNDRY_SDK_VERSION_KEY,
                 );
+                let notice = plan.notice.clone().or(model_notice);
                 if notice.is_some() {
                     if let Err(e) = tauri::async_runtime::block_on(settings::save_settings(&app_settings)) {
                         println!("[RunState] Failed to save crash handling: {e}");
@@ -2354,6 +2364,9 @@ pub fn run() {
             get_gpu_assessment,
             get_support_bundle,
             retry_gpu_registration,
+            get_engine_health,
+            repair_engine,
+            try_gpu_again,
             retry_embedding_init,
             mark_first_run_complete,
             heartbeat_ping,

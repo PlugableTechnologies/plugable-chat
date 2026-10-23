@@ -7,7 +7,8 @@
 ;                bundled, Microsoft-signed vc_redist.x64.exe when it is not), check that the
 ;                WebView2 runtime is present, and record the outcome in the registry and in
 ;                %TEMP%\plugable-chat-install.log.
-;   PREUNINSTALL / POSTUNINSTALL  close the app, remove only our own registry key.
+;   PREUNINSTALL / POSTUNINSTALL  close the app, remove only our own registry key; an interactive
+;                uninstall also offers (default No) to remove the downloaded GPU components.
 ;
 ; Design rules:
 ;   - No failure here is fatal. The app has its own first-launch self-check and shows a
@@ -269,6 +270,15 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; Offer a truly clean start: the GPU components the model engine downloaded live outside the
+  ; install folder (a damaged one used to survive uninstall and reinstall and crash every prompt).
+  ; Interactive only, default No; silent uninstalls never touch them. Models and chats stay.
+  ${IfNot} ${Silent}
+    MessageBox MB_YESNO|MB_DEFBUTTON2|MB_ICONQUESTION "Also remove the GPU components that Plugable Chat downloaded ($PROFILE\.plugable-chat\ep)?$\r$\n$\r$\nThey are downloaded again the next time you start the app. Your models and chats are not affected." IDNO pc_keep_ep
+      RMDir /r "$PROFILE\.plugable-chat\ep"
+      !insertmacro PcLogUn "removed downloaded GPU components at user request"
+    pc_keep_ep:
+  ${EndIf}
   SetRegView 64
   DeleteRegKey HKLM "${PC_REG_KEY}"
   DeleteRegKey /ifempty HKLM "SOFTWARE\Plugable\plugable-chat"

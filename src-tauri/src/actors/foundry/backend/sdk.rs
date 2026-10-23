@@ -621,24 +621,42 @@ impl FoundryBackend for SdkBackend {
     }
 
     async fn list_models(&self) -> Vec<RawModel> {
-        match self.manager.catalog().get_cached_models().await {
-            Ok(models) => models
-                .iter()
-                .map(|m| RawModel {
-                    id: m.id().to_string(),
-                    // The actor infers capabilities primarily from the id; surface the SDK's
-                    // tool-calling capability as a tag for parity with the CLI tag path.
-                    tags: match m.supports_tool_calling() {
-                        Some(true) => vec!["supportsToolCalling".to_string()],
-                        _ => Vec::new(),
-                    },
-                })
-                .collect(),
-            Err(e) => {
-                println!("[SdkBackend] list_models (get_cached_models) failed: {e}");
-                Vec::new()
+        let live: Result<Vec<(String, Vec<String>)>, ()> = if crate::engine_health::test_fault("empty-catalog") {
+            Err(())
+        } else {
+            match self.manager.catalog().get_cached_models().await {
+                Ok(models) => Ok(models
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.id().to_string(),
+                            // The actor infers capabilities primarily from the id; surface the SDK's
+                            // tool-calling capability as a tag for parity with the CLI tag path.
+                            match m.supports_tool_calling() {
+                                Some(true) => vec!["supportsToolCalling".to_string()],
+                                _ => Vec::new(),
+                            },
+                        )
+                    })
+                    .collect()),
+                Err(e) => {
+                    println!("[SdkBackend] list_models (get_cached_models) failed: {e}");
+                    Err(())
+                }
             }
+        };
+        let dir = crate::paths::get_config_dir();
+        if let Ok(v) = &live {
+            crate::engine_health::save_last_known_models_in(&dir, v);
         }
+        // A failed or empty catalog read is usually the network; keep the models seen before.
+        let online = if matches!(&live, Ok(v) if !v.is_empty()) {
+            true
+        } else {
+            super::super::gpu_registration::online().await
+        };
+        let shown = crate::engine_health::models_to_show(live, online, crate::engine_health::last_known_models_in(&dir));
+        shown.into_iter().map(|(id, tags)| RawModel { id, tags }).collect()
     }
 
     async fn list_catalog(&self) -> Vec<CatalogModel> {

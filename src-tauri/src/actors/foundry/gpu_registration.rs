@@ -145,6 +145,11 @@ pub async fn retry_with_backoff(
             break;
         }
         tokio::time::sleep(*delay).await;
+        // No point downloading with the network down; the watcher tries again once it is back.
+        if !online().await {
+            crate::app_log::log("gpu", "GPU setup retry skipped: no network");
+            continue;
+        }
         attempt += 1;
         summary = run_registration(sdk, app, attempt).await;
     }
@@ -230,6 +235,31 @@ pub fn spawn_retry(app: AppHandle) -> bool {
     true
 }
 
+/// True when a network connection can be made. Uses literal addresses so a dead DNS cannot stall it.
+pub async fn online() -> bool {
+    if crate::engine_health::test_fault("offline") {
+        return false;
+    }
+    tokio::task::spawn_blocking(|| {
+        use std::net::{SocketAddr, TcpStream};
+        let timeout = Duration::from_secs(2);
+        ["1.1.1.1:443", "8.8.8.8:443"]
+            .iter()
+            .filter_map(|a| a.parse::<SocketAddr>().ok())
+            .any(|a| TcpStream::connect_timeout(&a, timeout).is_ok())
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Whether the background watcher may start GPU setup now. It downloads and re-registers native
+/// providers, so it never runs while a chat is being answered, while GPU acceleration is switched
+/// off, or when there is no network (a drop mid-session is exactly when the engine must be left
+/// alone; rc15 crashed inside the WebGPU provider after an unplugged cable).
+pub fn watcher_may_act(online: bool, chatting: bool, gpu_off: bool) -> bool {
+    online && !chatting && !gpu_off
+}
+
 /// Polling interval while the machine might still change (first half hour), then relaxed.
 const WATCH_FAST: Duration = Duration::from_secs(30);
 const WATCH_SLOW: Duration = Duration::from_secs(300);
@@ -289,6 +319,11 @@ pub fn spawn_hardware_watcher(app: AppHandle) {
             let Some(prev) = previous.replace(current.clone()) else { continue };
             let decision = watch_decision(&prev, &current, &assessment, since_retry);
             if decision != WatchDecision::Idle {
+                if !watcher_may_act(online().await, crate::run_state::is_chatting(), crate::engine_health::gpu_off()) {
+                    // Keep the old fingerprint so the change is still seen on a later tick.
+                    previous = Some(prev);
+                    continue;
+                }
                 crate::app_log::log("gpu", &format!("hardware watcher: {decision:?}, retrying GPU setup"));
                 since_retry = 0;
                 let _ = retry_now(app.clone()).await;
@@ -366,6 +401,14 @@ mod tests {
         let broken = vec!["NVIDIA RTX|PCI|43".to_string()];
         let fixed = vec!["NVIDIA RTX|PCI|0".to_string()];
         assert_eq!(watch_decision(&broken, &fixed, &assessment(HardwareNotUsed, false), 0), WatchDecision::HardwareChanged);
+    }
+
+    #[test]
+    fn the_watcher_leaves_the_engine_alone_when_offline_chatting_or_gpu_off() {
+        assert!(watcher_may_act(true, false, false));
+        assert!(!watcher_may_act(false, false, false));
+        assert!(!watcher_may_act(true, true, false));
+        assert!(!watcher_may_act(true, false, true));
     }
 
     #[test]
