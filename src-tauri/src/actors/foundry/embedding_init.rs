@@ -95,8 +95,11 @@ pub fn clear_model_cache(root: &std::path::Path) -> usize {
     removed
 }
 
-/// Delete leftovers of an interrupted download (partial blobs, lock files, empty files) so a
-/// retry starts clean instead of tripping over them. Returns how many files were removed.
+/// Delete leftovers of an interrupted download that would only get in the way (lock files, empty
+/// files) so a retry starts cleanly. Partial downloads (`.part` / `.incomplete`) are kept: hf-hub
+/// resumes them from where they stopped, so a connection that drops at 90% no longer restarts at
+/// byte 0. A partial file that turns out to be corrupt is caught by `error_means_corrupt_model` or
+/// the self-check, which empty the whole cache. Returns how many files were removed.
 pub fn clear_stale_download_files(root: &std::path::Path) -> usize {
     fn walk(dir: &std::path::Path, removed: &mut usize) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -108,10 +111,7 @@ pub fn clear_stale_download_files(root: &std::path::Path) -> usize {
                 continue;
             }
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
-            let stale = name.ends_with(".lock")
-                || name.ends_with(".part")
-                || name.ends_with(".incomplete")
-                || (meta.is_file() && meta.len() == 0);
+            let stale = name.ends_with(".lock") || (meta.is_file() && meta.len() == 0);
             if stale && std::fs::remove_file(&path).is_ok() {
                 *removed += 1;
             }
@@ -122,6 +122,25 @@ pub fn clear_stale_download_files(root: &std::path::Path) -> usize {
     removed
 }
 
+/// True when the error says the downloaded files themselves are bad (not that the network failed),
+/// so keeping partial files would just reproduce the failure.
+pub fn error_means_corrupt_model(raw: &str) -> bool {
+    let l = raw.to_ascii_lowercase();
+    ["protobuf", "deserializ", "invalid model", "failed to load model", "corrupt", "unexpected end of file", "expected value at line", "invalid_protobuf", "model file is"]
+        .iter()
+        .any(|needle| l.contains(needle))
+}
+
+/// A connection that was reset or closed under us (Windows 10054, "forcibly closed"): a firewall,
+/// antivirus or proxy cutting the connection, not a certificate problem.
+pub fn is_connection_reset(raw: &str) -> bool {
+    let l = raw.to_ascii_lowercase();
+    l.contains("os error 10054") || l.contains("forcibly closed") || l.contains("connection reset") || l.contains("connection aborted") || l.contains("os error 10053")
+}
+
+/// Message shown when the connection to Hugging Face is cut part-way.
+pub const CONNECTION_INTERRUPTED_MESSAGE: &str = "The connection to huggingface.co was interrupted - a firewall, antivirus or proxy may be blocking it (allow huggingface.co and cdn-lfs.huggingface.co).";
+
 /// Turn the raw download/initialisation error into a message that names the likely cause, then
 /// keeps the original text for support. The raw text alone ("Failed to retrieve
 /// onnx/model.onnx") does not say whether the network, the disk or a proxy is at fault.
@@ -129,14 +148,19 @@ pub fn describe_embedding_error(raw: &str) -> String {
     let l = raw.to_ascii_lowercase();
     let cause = if l.contains("os error 112") || l.contains("no space left") || l.contains("not enough space") || l.contains("disk full") {
         "There is not enough free disk space to download the search model. Free some space and try again."
-    } else if l.contains("certificate") || l.contains("tls") || l.contains("ssl") {
+    } else if is_connection_reset(raw) {
+        // Checked before the certificate case: a reset during the TLS handshake mentions "tls" too.
+        CONNECTION_INTERRUPTED_MESSAGE
+    } else if l.contains("certificate") || l.contains("unknownissuer") || l.contains("self signed") || l.contains("self-signed") || l.contains("invalid peer") {
         "A security certificate problem blocked the download (a proxy or firewall may be inspecting traffic)."
     } else if l.contains("proxy") {
         "The configured proxy could not be reached. Check the HTTPS_PROXY setting or your network."
     } else if l.contains("dns") || l.contains("failed to lookup") || l.contains("resolve") || l.contains("os error 11001") || l.contains("no such host") {
         "Could not reach huggingface.co: the name did not resolve. Check your internet connection or firewall."
+    } else if l.contains("tls") || l.contains("ssl") || l.contains("handshake") {
+        CONNECTION_INTERRUPTED_MESSAGE
     } else if l.contains("connection refused") || l.contains("os error 10061") || l.contains("timed out") || l.contains("os error 10060")
-        || l.contains("connection reset") || l.contains("network") || l.contains("unreachable") || l.contains("connect")
+        || l.contains("network") || l.contains("unreachable") || l.contains("connect")
     {
         "Could not connect to huggingface.co to download the search model. Check your internet connection or firewall."
     } else if l.contains("permission denied") || l.contains("access is denied") || l.contains("os error 5") || l.contains("read-only") {
@@ -193,6 +217,61 @@ pub async fn init_cpu_embedding_model(app: AppHandle, shared: SharedEmbeddingMod
     result
 }
 
+/// First wait of the background recovery loop, doubling to `RECOVERY_MAX_DELAY`.
+const RECOVERY_BASE_DELAY: Duration = Duration::from_secs(30);
+const RECOVERY_MAX_DELAY: Duration = Duration::from_secs(15 * 60);
+/// How often the recovery loop looks at the network while waiting for its next attempt.
+const RECOVERY_POLL: Duration = Duration::from_secs(5);
+
+/// Wait before background retry number `n` (0-based): 30 s, 60 s, ... capped at 15 minutes.
+pub fn recovery_delay(n: u32) -> Duration {
+    (RECOVERY_BASE_DELAY * (1u32 << n.min(10))).min(RECOVERY_MAX_DELAY)
+}
+
+/// Whether the recovery loop should retry now: the wait is over, or the network has just come back
+/// after being down (no point waiting out a long backoff once the cause is gone).
+pub fn recovery_should_retry(waited: Duration, delay: Duration, was_online: bool, is_online: bool) -> bool {
+    waited >= delay || (!was_online && is_online)
+}
+
+/// Start-up entry point: the quick attempts of `init_cpu_embedding_model`, then, if they all fail,
+/// keep trying in the background for the life of the app (30 s doubling to 15 min, and at once when
+/// the network returns) so a transient block never leaves search off until a restart. Chat never
+/// waits for this. Returns once the model is loaded.
+pub async fn run_embedding_init_with_recovery(app: AppHandle, shared: SharedEmbeddingModel) {
+    let mut n: u32 = 0;
+    loop {
+        match init_cpu_embedding_model(app.clone(), shared.clone()).await {
+            Ok(()) => return,
+            // Another caller (the Retry button) is already loading it; look again shortly.
+            Err(e) if e.contains("still loading") => tokio::time::sleep(RECOVERY_POLL).await,
+            Err(_) => {
+                let delay = recovery_delay(n);
+                n = n.saturating_add(1);
+                crate::app_log::log("embedding", &format!("search model unavailable; background retry {n} in {} s", delay.as_secs()));
+                let mut waited = Duration::ZERO;
+                let mut was_online = super::gpu_registration::online().await;
+                while waited < delay {
+                    tokio::time::sleep(RECOVERY_POLL).await;
+                    waited += RECOVERY_POLL;
+                    if shared.read().await.is_some() {
+                        return;
+                    }
+                    let is_online = super::gpu_registration::online().await;
+                    let retry = recovery_should_retry(waited, delay, was_online, is_online);
+                    was_online = is_online;
+                    if retry {
+                        break;
+                    }
+                }
+            }
+        }
+        if shared.read().await.is_some() {
+            return;
+        }
+    }
+}
+
 pub const ALREADY_LOADED_MESSAGE: &str = "CPU embedding model loaded (GPU model loads on-demand)";
 
 /// Keep the start-up coordinator's view of the embedding model true (it stayed `pending` for ever).
@@ -233,13 +312,21 @@ async fn init_inner(app: &AppHandle, shared: &SharedEmbeddingModel) -> Result<()
         run_attempts(ATTEMPTS, BASE_DELAY, |attempt| {
             if attempt > 0 {
                 let n = clear_stale_download_files(&attempt_cache);
-                crate::app_log::log("embedding", &format!("cleared {n} stale download file(s) before attempt {}", attempt + 1));
+                crate::app_log::log("embedding", &format!("cleared {n} lock/empty file(s) before attempt {} (partial downloads kept so they resume)", attempt + 1));
             }
             let options = InitOptions::new(EmbeddingModel::BGEBaseENV15)
                 .with_cache_dir(attempt_cache.clone())
                 .with_show_download_progress(true);
             // `{e:#}` includes the whole cause chain, which is where the real reason lives.
-            let model = TextEmbedding::try_new(options).map_err(|e| format!("{e:#}"))?;
+            let model = TextEmbedding::try_new(options).map_err(|e| {
+                let raw = format!("{e:#}");
+                // Bad bytes (not a bad network) must not be resumed: start the download afresh.
+                if error_means_corrupt_model(&raw) {
+                    let n = clear_model_cache(&attempt_cache);
+                    return format!("{raw}; the cached model looks corrupt, removed {n} cached item(s) to download it again");
+                }
+                raw
+            })?;
             // Loading is not working: embed a sentence before declaring success.
             let check = model.embed(vec!["plugable chat self-check"], None).map_err(|e| format!("{e:#}")).and_then(|out| validate_embeddings(&out));
             if let Err(why) = check {
@@ -385,17 +472,69 @@ mod tests {
     }
 
     #[test]
-    fn stale_download_files_are_removed_and_real_files_kept() {
+    fn stale_lock_and_empty_files_are_removed_but_partial_downloads_are_kept_for_resume() {
         let dir = std::env::temp_dir().join(format!("pc-stale-{}", std::process::id()));
         let blobs = dir.join("models--x").join("blobs");
         std::fs::create_dir_all(&blobs).unwrap();
         std::fs::write(blobs.join("abc.lock"), b"x").unwrap();
         std::fs::write(blobs.join("def.sync.part"), b"partial").unwrap();
+        std::fs::write(blobs.join("ghi.incomplete"), b"partial").unwrap();
         std::fs::write(blobs.join("empty"), b"").unwrap();
+        std::fs::write(blobs.join("empty.part"), b"").unwrap();
         std::fs::write(blobs.join("good"), b"model bytes").unwrap();
         assert_eq!(clear_stale_download_files(&dir), 3);
         assert!(blobs.join("good").exists());
+        assert!(blobs.join("def.sync.part").exists(), "a partial download must survive so it can resume");
+        assert!(blobs.join("ghi.incomplete").exists());
         assert!(!blobs.join("abc.lock").exists());
+        assert!(!blobs.join("empty").exists() && !blobs.join("empty.part").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_model_errors_are_told_apart_from_network_errors() {
+        assert!(error_means_corrupt_model("Protobuf parsing failed"));
+        assert!(error_means_corrupt_model("Failed to load model: invalid model"));
+        assert!(!error_means_corrupt_model("request error: os error 10054"));
+        assert!(!error_means_corrupt_model("dns error: failed to lookup address"));
+    }
+
+    // rc16 (Bob): a reset connection was reported as a certificate problem.
+    #[test]
+    fn a_connection_reset_is_an_interruption_not_a_certificate_error() {
+        let raw = "Failed to retrieve onnx/model.onnx: request error: https://huggingface.co/...: Connection Failed: tls connection init failed: An existing connection was forcibly closed by the remote host. (os error 10054)";
+        for r in [raw, "connection reset by peer", "read: Connection reset", "os error 10054"] {
+            let d = describe_embedding_error(r);
+            assert!(d.contains("connection to huggingface.co was interrupted"), "{d}");
+            assert!(d.contains("firewall, antivirus or proxy") && d.contains("cdn-lfs.huggingface.co"), "{d}");
+            assert!(!d.contains("certificate"), "{d}");
+            assert!(d.ends_with(&format!("Details: {r}")), "raw detail must be kept: {d}");
+        }
+    }
+
+    #[test]
+    fn a_real_certificate_error_is_still_reported_as_one() {
+        for r in ["invalid peer certificate: UnknownIssuer", "certificate verify failed: self signed certificate in certificate chain"] {
+            let d = describe_embedding_error(r);
+            assert!(d.contains("certificate problem"), "{d}");
+        }
+    }
+
+    #[test]
+    fn background_retry_waits_30s_doubling_to_a_15_minute_cap() {
+        let secs: Vec<u64> = (0..8).map(|n| recovery_delay(n).as_secs()).collect();
+        assert_eq!(secs, vec![30, 60, 120, 240, 480, 900, 900, 900]);
+        assert_eq!(recovery_delay(u32::MAX).as_secs(), 900);
+    }
+
+    #[test]
+    fn background_retry_fires_when_the_wait_is_over_or_the_network_returns() {
+        let d = Duration::from_secs(480);
+        assert!(!recovery_should_retry(Duration::from_secs(10), d, true, true));
+        assert!(!recovery_should_retry(Duration::from_secs(10), d, false, false));
+        assert!(!recovery_should_retry(Duration::from_secs(10), d, true, false));
+        assert!(recovery_should_retry(Duration::from_secs(480), d, true, true));
+        // offline then online again: retry at once, however long the backoff still has to run
+        assert!(recovery_should_retry(Duration::from_secs(10), d, false, true));
     }
 }

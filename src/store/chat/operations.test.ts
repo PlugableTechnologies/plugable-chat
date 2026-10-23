@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-    classifyDatabaseError, embeddingEventToAction, epEventToAction, hasActiveOperations,
+    classifyDatabaseError, describeOperationError, isQuietOperation, embeddingEventToAction, epEventToAction, hasActiveOperations,
     listOperations, reduceOperations, shouldAutoClear,
 } from './operations.ts';
 
@@ -84,4 +84,32 @@ test('ep done after a cancel clears the row', () => {
 test('ep done with failures shows a persistent error', () => {
     const a = _epEventToAction({ phase: 'done', message: 'could not set up: CUDA (network problem)', failures: [{ ep: 'CUDA' }] });
     assert.equal(a?.type, 'error');
+});
+
+test('an error banner gets a one-line cause and keeps the raw text as details', () => {
+    const raw = 'Failed to retrieve onnx/model.onnx: os error 10054 '.repeat(20);
+    const v = describeOperationError('embedding', `Failed to load CPU embedding model after 5 attempts. The connection to huggingface.co was interrupted - a firewall may be blocking it. Details: ${raw}`);
+    assert.match(v.summary, /^Search features unavailable - retrying\. The connection to huggingface\.co was interrupted/);
+    assert.ok(!v.summary.includes('10054'));
+    assert.equal(v.details, raw);
+    assert.equal(v.quiet, true);
+});
+
+test('a long message with no marker is cut to its first sentence and kept whole as details', () => {
+    const msg = `Model failed to load. ${'x'.repeat(500)}`;
+    const v = describeOperationError('model-download', msg);
+    assert.equal(v.summary, 'Model failed to load.');
+    assert.equal(v.details, msg);
+    assert.equal(v.quiet, false);
+});
+
+test('a short message with no details is shown as is', () => {
+    const v = describeOperationError('toolbox-download', 'Toolbox download failed.');
+    assert.deepEqual(v, { summary: 'Toolbox download failed.', details: undefined, quiet: false });
+});
+
+test('only search-model and GPU-component failures are quiet', () => {
+    assert.equal(isQuietOperation('embedding'), true);
+    assert.equal(isQuietOperation('ep-registration'), true);
+    assert.equal(isQuietOperation('model-download'), false);
 });

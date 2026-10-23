@@ -19,6 +19,8 @@ interface InputBarProps {
     filesDisabled?: boolean;
     dbDisabled?: boolean;
     disabled?: boolean;
+    /** Why the input is disabled; shown as the placeholder. */
+    disabledPlaceholder?: string;
 }
 
 /**
@@ -41,7 +43,8 @@ export const InputBar = ({
     onClearAttachments,
     filesDisabled = false,
     dbDisabled = false,
-    disabled = false
+    disabled = false,
+    disabledPlaceholder
 }: InputBarProps) => {
     const [menuOpen, setMenuOpen] = useState(false);
     const isMultiline = input.includes('\n') || (textareaRef.current && textareaRef.current.scrollHeight > 44);
@@ -96,7 +99,7 @@ export const InputBar = ({
                     value={input}
                     onChange={(e) => !disabled && setInput(e.target.value)}
                     onKeyDown={(e) => !disabled && handleKeyDown(e)}
-                    placeholder={disabled ? "Response streaming in another chat..." : hasAttachments ? "Ask about your documents..." : "Ask anything"}
+                    placeholder={disabled ? (disabledPlaceholder ?? "Not available right now...") : hasAttachments ? "Ask about your documents..." : "Ask anything"}
                     style={{ height: 'auto', minHeight: '32px' }}
                     disabled={disabled}
                 />

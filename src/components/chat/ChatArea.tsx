@@ -8,7 +8,7 @@ import {
 } from '../../store/chat-store';
 import { useSettingsStore } from '../../store/settings-store';
 import { chatModelNotice } from '../../store/chat/model-switch';
-import { StatusBar, StreamingWarningBar, ModelStateBar, StartupStateBar } from '../StatusBar';
+import { StatusBar, StreamingWarningBar, ModelStateBar, StartupStateBar, SearchUnavailableChip } from '../StatusBar';
 import { invoke } from '../../lib/api';
 import { hasOnlyThinkContent, hasOnlyToolCallContent } from '../../lib/response-parser';
 
@@ -23,6 +23,7 @@ import { AssistantMessage } from './messages';
 import { ToolApprovalDialog } from './tools';
 import { RagFilePills, AttachedTablePills, AttachedToolPills, TabularFilePills } from './attachments';
 import { InputBar } from './input';
+import { inputDisabledReason } from '../../store/chat/input-disabled-reason';
 import { DatabaseAttachmentModal, ToolAttachmentModal } from './modals';
 import { buildChatHistory } from './utils/history';
 import { isToolResultMessage, toolResultView } from './utils/tool-result-message';
@@ -60,7 +61,9 @@ export function ChatArea() {
         // Model state machine (deterministic sync with backend)
         modelState, isModelReady,
         // Model chosen vs the model the open chat was saved with
-        currentModel, openChatModel, loadModel
+        currentModel, openChatModel, loadModel,
+        // Inputs for the reason the input is disabled
+        downloads, operations
     } = useChatStore();
 
     const { settings, openSettings, setActiveTab } = useSettingsStore();
@@ -70,6 +73,14 @@ export function ChatArea() {
     
     // Model state blocking: block prompts when model is not ready (loading, switching, etc.)
     const isModelBlocking = !isModelReady;
+    const inputBlockReason = inputDisabledReason({
+        streamingInOtherChat: isStreamingInOtherChat,
+        isModelReady,
+        modelState,
+        downloads,
+        operations,
+        nowMs: Date.now(),
+    });
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const [thinkingStartTime, setThinkingStartTime] = useState<number | null>(null);
@@ -489,6 +500,7 @@ export function ChatArea() {
 
             {/* Startup state bar for initialization progress */}
             <StartupStateBar />
+            <SearchUnavailableChip />
 
             {/* Model state bar for blocking states (loading, switching, etc.) */}
             <ModelStateBar />
@@ -676,6 +688,7 @@ export function ChatArea() {
                         filesDisabled={filesDisabled}
                         dbDisabled={dbDisabled}
                         disabled={isStreamingInOtherChat || isModelBlocking}
+                        disabledPlaceholder={inputBlockReason?.placeholder}
                     />
                 </div>
             </div>

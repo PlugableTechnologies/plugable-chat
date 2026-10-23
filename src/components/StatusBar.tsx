@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-import { listOperations, formatBytes, type OperationEntry } from '../store/chat/operations';
+import { listOperations, formatBytes, describeOperationError, type OperationEntry } from '../store/chat/operations';
+import { startupBarModel, searchFeaturesUnavailable, SEARCH_UNAVAILABLE_CHIP_TEXT } from '../store/chat/startup-display';
 import { downloadToOperationEntry, listDownloads } from '../store/chat/downloads';
 import { fallbackQuestion, findCachedFallback } from '../store/chat/fallback';
 import { GpuAssessmentRow } from './GpuAssessmentRow';
 import { SupportCopyButton } from './SupportCopyButton';
-import { useChatStore, OperationStatus, ModelStateData, getModelStateMessage, isModelStateBlocking, StartupStateType } from '../store/chat-store';
+import { useChatStore, OperationStatus, ModelStateData, getModelStateMessage, isModelStateBlocking } from '../store/chat-store';
 
 // Format elapsed time helper
 const formatElapsedTime = (seconds: number): string => {
@@ -173,23 +174,43 @@ function OperationRow({ op, onRetry, onDismiss, onCancel }: {
         return () => clearInterval(id);
     }, [op.state, op.startTime]);
 
+    const [detailsOpen, setDetailsOpen] = useState(false);
     const isError = op.state === 'error';
     const isDone = op.state === 'done';
-    const tone = isError
+    const errorView = isError ? describeOperationError(op.key, op.message) : null;
+    const tone = isError && errorView?.quiet
+        ? { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-800', bar: 'bg-amber-500' }
+        : isError
         ? { bg: 'bg-red-50', border: 'border-red-300', text: 'text-red-800', bar: 'bg-red-500' }
         : isDone
             ? { bg: 'bg-green-50', border: 'border-green-200', text: 'text-green-800', bar: 'bg-green-500' }
             : { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-800', bar: 'bg-blue-500' };
 
     return (
-        <div className={`operation-row operation-row-${op.key} flex items-center justify-between px-4 py-2 ${tone.bg} border-b ${tone.border}`} role={isError ? 'alert' : 'status'}>
+        <div className={`operation-row operation-row-${op.key} flex items-center justify-between px-4 py-2 ${tone.bg} border-b ${tone.border}`} role={isError && !errorView?.quiet ? 'alert' : 'status'}>
             <div className="flex items-center gap-3 flex-1 min-w-0">
                 <span className={`flex-shrink-0 ${tone.text}`}>{isError ? '⚠️' : isDone ? '✅' : '⏳'}</span>
                 <div className="flex-1 min-w-0">
-                    <div className={`text-sm font-medium ${tone.text} ${isError ? '' : 'truncate'}`}>
-                        {op.message}
+                    <div className={`text-sm font-medium ${tone.text} ${isError ? 'operation-error-summary' : 'truncate'}`}>
+                        {isError ? errorView!.summary : op.message}
                         {!isError && op.percent !== undefined && !isDone ? ` ${op.percent}%` : ''}
                     </div>
+                    {isError && errorView?.details && (
+                        <div className="mt-1">
+                            <button
+                                onClick={() => setDetailsOpen((v) => !v)}
+                                aria-expanded={detailsOpen}
+                                className={`operation-details-toggle text-xs underline ${tone.text}`}
+                            >
+                                {detailsOpen ? 'Hide details' : 'Details'}
+                            </button>
+                            {detailsOpen && (
+                                <pre className={`operation-details-text mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words text-xs font-mono ${tone.text}`}>
+                                    {errorView.details}
+                                </pre>
+                            )}
+                        </div>
+                    )}
                     {op.state === 'active' && (
                         <div className="mt-1 h-1.5 w-full rounded-full bg-black/10 overflow-hidden">
                             <div
@@ -215,7 +236,7 @@ function OperationRow({ op, onRetry, onDismiss, onCancel }: {
             {isError && op.retryable && (
                 <button
                     onClick={onRetry}
-                    className="operation-retry-button flex-shrink-0 ml-3 px-3 py-1 rounded-md text-sm font-medium bg-red-600 text-white hover:bg-red-700"
+                    className={`operation-retry-button flex-shrink-0 ml-3 px-3 py-1 rounded-md text-sm font-medium text-white ${errorView?.quiet ? 'bg-amber-600 hover:bg-amber-700' : 'bg-red-600 hover:bg-red-700'}`}
                 >
                     Retry
                 </button>
@@ -560,48 +581,17 @@ export function StreamingWarningBar() {
     );
 }
 
-// Get startup state message
-const getStartupStateMessage = (state: StartupStateType): string => {
-    switch (state) {
-        case 'initializing':
-            return 'Starting up...';
-        case 'connecting_to_foundry':
-            return 'Connecting to Foundry...';
-        case 'awaiting_frontend':
-            return 'Synchronizing...';
-        case 'ready':
-            return 'Ready';
-        case 'failed':
-            return 'Startup failed';
+// Get startup bar colours for a tone chosen by `startupBarModel`
+const getStartupToneColors = (tone: 'red' | 'amber' | 'blue' | 'green') => {
+    switch (tone) {
+        case 'green':
+            return { bg: 'bg-green-50', border: 'border-green-200', text: 'text-green-800', icon: '✅' };
+        case 'red':
+            return { bg: 'bg-red-50', border: 'border-red-300', text: 'text-red-800', icon: '❌' };
+        case 'amber':
+            return { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-800', icon: '⏳' };
         default:
-            return 'Unknown state';
-    }
-};
-
-// Get startup state colors
-const getStartupStateColors = (state: StartupStateType) => {
-    switch (state) {
-        case 'ready':
-            return {
-                bg: 'bg-green-50',
-                border: 'border-green-200',
-                text: 'text-green-800',
-                icon: '✅'
-            };
-        case 'failed':
-            return {
-                bg: 'bg-red-50',
-                border: 'border-red-300',
-                text: 'text-red-800',
-                icon: '❌'
-            };
-        default:
-            return {
-                bg: 'bg-blue-50',
-                border: 'border-blue-200',
-                text: 'text-blue-800',
-                icon: '🔄'
-            };
+            return { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-800', icon: '🔄' };
     }
 };
 
@@ -632,16 +622,12 @@ export function StartupStateBar() {
         return null;
     }
     
-    const colors = getStartupStateColors(startupState);
-    const message = getStartupStateMessage(startupState);
-    
-    // Count ready subsystems
-    const subsystems = subsystemStatus ? [
-        { name: 'Foundry', status: subsystemStatus.foundry_service?.status },
-        { name: 'Model', status: subsystemStatus.model?.status },
-        { name: 'Embeddings', status: subsystemStatus.cpu_embedding?.status },
-    ] : [];
-    const readyCount = subsystems.filter(s => s.status === 'ready').length;
+    // Red only when chat itself is blocked; the search model is not counted (see startupBarModel).
+    const barModel = startupBarModel(startupState, subsystemStatus);
+    const colors = getStartupToneColors(barModel.tone);
+    const message = barModel.message;
+    const readyCount = barModel.readyCount;
+    const subsystems = { length: barModel.totalCount };
     
     return (
         <div className={`startup-state-bar flex items-center justify-between px-4 py-2 ${colors.bg} border-b ${colors.border}`}>
@@ -649,7 +635,7 @@ export function StartupStateBar() {
                 {/* Icon with animation */}
                 <div className="flex items-center flex-shrink-0">
                     <span className="text-lg mr-1">{colors.icon}</span>
-                    {startupState !== 'ready' && startupState !== 'failed' && (
+                    {barModel.tone === 'blue' && (
                         <div className="flex gap-0.5">
                             <div className={`w-1 h-1 ${colors.text} bg-current rounded-full animate-pulse`} />
                             <div className={`w-1 h-1 ${colors.text} bg-current rounded-full animate-pulse`} style={{ animationDelay: '200ms' }} />
@@ -671,7 +657,7 @@ export function StartupStateBar() {
                 )}
                 
                 {/* Elapsed time */}
-                {elapsed > 0 && startupState !== 'ready' && startupState !== 'failed' && (
+                {elapsed > 0 && (barModel.tone === 'blue' || barModel.tone === 'amber') && (
                     <div className={`flex-shrink-0 text-xs ${colors.text} opacity-75 font-mono`}>
                         {formatElapsedTime(elapsed)}
                     </div>
@@ -751,3 +737,19 @@ export function ModelStateBar() {
     );
 }
 
+
+// Quiet amber note when the search model failed but chat works. The operation row carries the
+// Details and Retry; this chip covers the case where that row was never shown (the failure
+// happened before the window attached its listeners, or the row was dismissed).
+export function SearchUnavailableChip() {
+    const { subsystemStatus, operations } = useChatStore();
+    if (!searchFeaturesUnavailable(subsystemStatus) || operations.embedding) {
+        return null;
+    }
+    return (
+        <div className="search-unavailable-chip flex items-center gap-2 px-4 py-1 bg-amber-50 border-b border-amber-200 text-amber-800 text-xs" role="status">
+            <span>⏳</span>
+            <span>{SEARCH_UNAVAILABLE_CHIP_TEXT}</span>
+        </div>
+    );
+}

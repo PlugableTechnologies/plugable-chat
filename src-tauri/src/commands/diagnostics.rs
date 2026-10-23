@@ -5,6 +5,7 @@
 
 use crate::app_state::EmbeddingModelState;
 use crate::gpu_diagnostics::{self, GpuDiagnostics};
+use std::time::Duration;
 use tauri::{AppHandle, State};
 
 /// Why GPU acceleration is or is not available: registered providers, classified failures,
@@ -99,10 +100,103 @@ pub async fn get_gpu_assessment(refresh: Option<bool>) -> Result<crate::gpu_asse
     .map_err(|e| format!("GPU assessment failed: {e}"))
 }
 
+/// Hosts the app must reach, found in the code and scripts: the search model (Hugging Face and its
+/// file CDN), provider packages (NuGet), the database toolbox, and the Visual C++ runtime link. The
+/// model engine's own catalog host lives inside the Foundry SDK and is not named in this repo.
+pub const REACHABILITY_HOSTS: [&str; 5] = [
+    "huggingface.co",
+    "cdn-lfs.huggingface.co",
+    "api.nuget.org",
+    "storage.googleapis.com",
+    "aka.ms",
+];
+
+/// Result of trying one host: either an HTTP status (any answer proves the path works) or why not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostOutcome {
+    Reachable { status: u16, millis: u128 },
+    Failed { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostCheck {
+    pub host: String,
+    pub outcome: HostOutcome,
+}
+
+/// Plain-language reason for a failed request; names a reset as a likely firewall/antivirus/proxy.
+pub fn describe_host_failure(raw: &str) -> String {
+    use crate::actors::foundry::embedding_init::is_connection_reset;
+    let l = raw.to_ascii_lowercase();
+    let cause = if is_connection_reset(raw) {
+        "connection reset (a firewall, antivirus or proxy may be blocking it)"
+    } else if l.contains("dns") || l.contains("failed to lookup") || l.contains("no such host") || l.contains("os error 11001") {
+        "name did not resolve"
+    } else if l.contains("certificate") || l.contains("unknownissuer") {
+        "certificate problem"
+    } else if l.contains("timed out") || l.contains("timeout") || l.contains("os error 10060") {
+        "timed out"
+    } else {
+        "could not connect"
+    };
+    format!("{cause}: {raw}")
+}
+
+/// One line per host for the support bundle.
+pub fn format_host_checks(checks: &[HostCheck]) -> String {
+    let mut out = String::from("Network reachability (HTTPS, this machine, this moment):");
+    for c in checks {
+        match &c.outcome {
+            HostOutcome::Reachable { status, millis } => out.push_str(&format!("\n  {}: reachable (HTTP {status}, {millis} ms)", c.host)),
+            HostOutcome::Failed { reason } => out.push_str(&format!("\n  {}: FAILED - {reason}", c.host)),
+        }
+    }
+    out
+}
+
+async fn check_one_host(client: reqwest::Client, host: String) -> HostCheck {
+    let started = std::time::Instant::now();
+    let outcome = match client.head(format!("https://{host}/")).send().await {
+        Ok(resp) => HostOutcome::Reachable { status: resp.status().as_u16(), millis: started.elapsed().as_millis() },
+        Err(e) => {
+            let mut raw = e.to_string();
+            let mut src = std::error::Error::source(&e);
+            while let Some(inner) = src {
+                raw.push_str(&format!(": {inner}"));
+                src = inner.source();
+            }
+            HostOutcome::Failed { reason: describe_host_failure(&raw) }
+        }
+    };
+    HostCheck { host, outcome }
+}
+
+/// Try every host in `REACHABILITY_HOSTS` at the same time, each bounded to 6 seconds. Uses the same
+/// proxy and certificate settings the app's own downloads use.
+pub async fn check_host_reachability() -> Vec<HostCheck> {
+    let client = match reqwest::Client::builder().timeout(Duration::from_secs(6)).build() {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![HostCheck { host: "(http client)".to_string(), outcome: HostOutcome::Failed { reason: e.to_string() } }];
+        }
+    };
+    let tasks: Vec<_> = REACHABILITY_HOSTS
+        .iter()
+        .map(|h| tokio::spawn(check_one_host(client.clone(), h.to_string())))
+        .collect();
+    let mut out = Vec::new();
+    for (task, host) in tasks.into_iter().zip(REACHABILITY_HOSTS) {
+        out.push(task.await.unwrap_or_else(|e| HostCheck { host: host.to_string(), outcome: HostOutcome::Failed { reason: e.to_string() } }));
+    }
+    out
+}
+
 /// Everything support needs in one block of text: versions, machine facts, the GPU view from both
 /// sides, and the last lines of the app log. Written to the logs folder as well.
 #[tauri::command]
 pub async fn get_support_bundle(extra: Option<String>) -> Result<String, String> {
+    // A blocked host (the rc16 failure) is invisible in the log tail; ask each one directly.
+    let reachability = format_host_checks(&check_host_reachability().await);
     tokio::task::spawn_blocking(move || {
         let report = crate::preflight::build_report_blocking();
         let mut text = crate::preflight::format_report(&report);
@@ -110,6 +204,8 @@ pub async fn get_support_bundle(extra: Option<String>) -> Result<String, String>
             text.push_str("\n\nWhat the app showed:\n");
             text.push_str(extra.trim());
         }
+        text.push_str("\n\n");
+        text.push_str(&reachability);
         let tail = crate::app_log::tail(60);
         if !tail.is_empty() {
             text.push_str("\n\nRecent log:\n");
@@ -138,4 +234,34 @@ pub async fn retry_embedding_init(
     embedding_state: State<'_, EmbeddingModelState>,
 ) -> Result<(), String> {
     crate::actors::foundry::embedding_init::init_cpu_embedding_model(app_handle, embedding_state.cpu_model.clone()).await
+}
+
+#[cfg(test)]
+mod reachability_tests {
+    use super::*;
+
+    #[test]
+    fn the_hosts_checked_include_the_search_model_and_its_cdn() {
+        assert!(REACHABILITY_HOSTS.contains(&"huggingface.co") && REACHABILITY_HOSTS.contains(&"cdn-lfs.huggingface.co"));
+    }
+
+    #[test]
+    fn a_reset_is_reported_as_a_likely_firewall_block() {
+        let r = describe_host_failure("error sending request: tls connection init failed: forcibly closed by the remote host (os error 10054)");
+        assert!(r.starts_with("connection reset (a firewall, antivirus or proxy"), "{r}");
+        assert!(describe_host_failure("dns error: failed to lookup address").starts_with("name did not resolve"));
+        assert!(describe_host_failure("invalid peer certificate: UnknownIssuer").starts_with("certificate problem"));
+        assert!(describe_host_failure("operation timed out").starts_with("timed out"));
+    }
+
+    #[test]
+    fn the_bundle_section_has_one_line_per_host() {
+        let text = format_host_checks(&[
+            HostCheck { host: "huggingface.co".into(), outcome: HostOutcome::Reachable { status: 200, millis: 41 } },
+            HostCheck { host: "api.nuget.org".into(), outcome: HostOutcome::Failed { reason: "timed out: x".into() } },
+        ]);
+        assert!(text.contains("huggingface.co: reachable (HTTP 200, 41 ms)"), "{text}");
+        assert!(text.contains("api.nuget.org: FAILED - timed out: x"), "{text}");
+        assert_eq!(text.lines().count(), 3);
+    }
 }

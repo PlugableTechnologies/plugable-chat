@@ -76,6 +76,22 @@ pub fn kind_label(kind: EpFailureKind) -> &'static str {
     }
 }
 
+/// Tell the start-up coordinator a long provider download is still moving, at most every 10 s,
+/// so its stall deadline (`STARTUP_STALL_DEADLINE`) measures silence, not slowness.
+fn send_startup_heartbeat(app: &AppHandle) {
+    use std::sync::atomic::AtomicU64;
+    use tauri::Manager;
+    static LAST_BEAT_SECS: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if now.saturating_sub(LAST_BEAT_SECS.load(Ordering::Relaxed)) < 10 {
+        return;
+    }
+    LAST_BEAT_SECS.store(now, Ordering::Relaxed);
+    if let Some(handles) = app.try_state::<crate::app_state::ActorHandles>() {
+        let _ = handles.startup_tx.try_send(crate::actors::startup_actor::StartupMsg::ReportProgressHeartbeat);
+    }
+}
+
 /// Register providers once: emit progress, record diagnostics and the test-state phase.
 pub async fn run_registration(sdk: &Arc<SdkBackend>, app: &AppHandle, attempt: u32) -> EpRegistrationSummary {
     let cancel = super::ep_registration_cancel_flag();
@@ -87,6 +103,7 @@ pub async fn run_registration(sdk: &Arc<SdkBackend>, app: &AppHandle, attempt: u
     let summary = sdk
         .register_execution_providers(
             move |ep, percent| {
+                send_startup_heartbeat(&progress_handle);
                 let _ = progress_handle.emit(
                     "ep-registration-progress",
                     json!({ "phase": "downloading", "ep": ep, "percent": percent }),

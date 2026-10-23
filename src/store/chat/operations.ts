@@ -169,3 +169,46 @@ export function formatBytes(bytes: number): string {
     if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} MB`;
     return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
+
+/**
+ * Operations whose failure never stops chat (search model, GPU components). They show as a quiet
+ * amber note, not a red alert.
+ */
+export function isQuietOperation(key: OperationKey): boolean {
+    return key === 'embedding' || key === 'ep-registration';
+}
+
+export interface OperationErrorView {
+    /** One line saying what is wrong. */
+    summary: string;
+    /** The raw text for support; shown only when the user expands "Details". */
+    details?: string;
+    quiet: boolean;
+}
+
+const SUMMARY_MAX_CHARS = 200;
+
+/**
+ * Split a backend error into a one-line cause and the raw detail. Backend messages have the shape
+ * "<cause> Details: <raw error>"; anything long without that marker is cut at its first sentence.
+ */
+export function describeOperationError(key: OperationKey, message: string): OperationErrorView {
+    const quiet = isQuietOperation(key);
+    const marker = message.indexOf(' Details: ');
+    let summary = marker >= 0 ? message.slice(0, marker) : message;
+    let details: string | undefined = marker >= 0 ? message.slice(marker + ' Details: '.length) : undefined;
+    // "Failed to load CPU embedding model after 5 attempts. <cause>" -> keep only the cause
+    const lead = summary.match(/^Failed to load CPU embedding model[^.]*\.\s+(.+)$/s);
+    if (lead) summary = lead[1];
+    if (summary.length > SUMMARY_MAX_CHARS || summary.includes('\n')) {
+        const firstLine = summary.split('\n')[0];
+        const sentence = firstLine.match(/^.{1,200}?[.!?](\s|$)/s)?.[0].trim();
+        const short = sentence ?? `${firstLine.slice(0, SUMMARY_MAX_CHARS).trimEnd()}...`;
+        details = details ?? message;
+        summary = short;
+    }
+    if (key === 'embedding') {
+        summary = `Search features unavailable - retrying. ${summary}`;
+    }
+    return { summary, details, quiet };
+}

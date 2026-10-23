@@ -584,6 +584,58 @@ Register "embedding-first-run-contention" "Bob: first-start embedding error (R6,
     return @{ Failures = $f }
 }
 
+Register "embedding-tls-reset-recovers" "rc16 Bob: TLS connection resets (os error 10054) while the search model downloads" @("cpu") "every HTTPS connection to huggingface.co is reset until the quick retries are spent: the error must say the connection was interrupted (not a certificate problem), chat must not be blocked, and the background retry must load the model once the reset stops" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $backup = Join-Path $ctx.Dir "hosts.backup"
+    Copy-Item -LiteralPath $HostsFile -Destination $backup -Force
+    # A listener on the HTTPS port that closes every connection with a reset (SO_LINGER 0) is what a
+    # middlebox cutting the connection looks like to the app: os error 10054 during the TLS handshake.
+    $resetter = Start-Job -ScriptBlock {
+        $l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 443)
+        $l.Start()
+        while ($true) {
+            $c = $l.AcceptTcpClient()
+            $c.LingerState = [Net.Sockets.LingerOption]::new($true, 0)
+            $c.Close()
+        }
+    }
+    $script:resetLifted = $false
+    try {
+        Add-Content -LiteralPath $HostsFile -Value ($HfHosts | ForEach-Object { "127.0.0.1 $_" })
+        ipconfig /flushdns | Out-Null
+        # Not --smoke: smoke ends at the first embedding failure, and this scenario is about what happens after it.
+        $run = Invoke-Smoke $ctx -NoSmoke -TimeoutSec 900 -KillWhen {
+            param($recs)
+            $emb = @($recs | Where-Object { $_.phase -eq "embedding" })
+            $failedSeen = @($emb | Where-Object { "$($_.status)" -eq "failed" }).Count -gt 0
+            if ($failedSeen -and -not $script:resetLifted) {
+                # The quick attempts gave up. Stop resetting: the background retry has to notice by itself.
+                Stop-Job $resetter -ErrorAction SilentlyContinue
+                Copy-Item -LiteralPath $backup -Destination $HostsFile -Force
+                ipconfig /flushdns | Out-Null
+                $script:resetLifted = $true
+            }
+            return ($script:resetLifted -and @($emb | Where-Object { "$($_.status)" -eq "ok" }).Count -gt 0)
+        }
+    }
+    finally {
+        Stop-Job $resetter -ErrorAction SilentlyContinue
+        Remove-Job $resetter -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $backup -Destination $HostsFile -Force
+        ipconfig /flushdns | Out-Null
+    }
+    if ($run.TimedOut) { $f += "the search model never loaded after the resets stopped ($($run.Seconds) s): no background retry" }
+    $emb = @($run.Records | Where-Object { $_.phase -eq "embedding" })
+    $failed = @($emb | Where-Object { "$($_.status)" -eq "failed" })
+    if ($failed.Count -eq 0) { $f += "no embedding failure was recorded while every connection was being reset" }
+    elseif ("$($failed[0].detail)" -notmatch "(?i)interrupted|firewall|antivirus") { $f += "the reset was not described as an interrupted connection: '$($failed[0].detail)'" }
+    elseif ("$($failed[0].detail)" -match "(?i)certificate problem") { $f += "a connection reset was reported as a certificate problem: '$($failed[0].detail)'" }
+    $f += Assert-PhaseOk $run.Records "embedding"
+    if ((Get-EmbeddingFileCount) -lt 1) { $f += "no embedding model files under the user's data directory after recovery" }
+    return @{ Failures = $f }
+}
+
 Register "version-visible" "Bob: no version in the title; Pat: same filename (R12, R13)" @("cpu") "--version reports the release label and commit, and the installer file name carries the same release" {
     param($ctx)
     $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }

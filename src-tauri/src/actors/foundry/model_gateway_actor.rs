@@ -875,7 +875,7 @@ impl ModelGatewayActor {
         }
         // Provider download and registration run native code and the network; a hang here used to
         // block start-up for good. Bound it, then carry on with what is registered.
-        let limit = std::env::var("PLUGABLE_CHAT_EP_REGISTER_TIMEOUT_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(900);
+        let limit = std::env::var("PLUGABLE_CHAT_EP_REGISTER_TIMEOUT_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(crate::actors::startup_actor::EP_REGISTRATION_LIMIT_SECS);
         let attempt = async {
             if crate::engine_health::test_fault("registration-hang") {
                 std::future::pending::<()>().await;
@@ -927,6 +927,22 @@ impl ModelGatewayActor {
         // explained. Runs beside start-up; the report lands in the logs folder.
         tokio::task::spawn_blocking(crate::preflight::build_report_blocking);
 
+        // Initialize CPU embedding model at startup for search during chat. It starts here, in
+        // parallel with GPU provider registration (which can take 15 minutes on a first run),
+        // because the two use different network hosts and neither needs the other. It used to
+        // wait for registration, so a slow GPU setup delayed search for no reason.
+        // GPU embedding model is loaded on-demand when RAG indexing is requested,
+        // to avoid GPU memory contention with the LLM at startup.
+        println!("FoundryActor: Initializing CPU embedding model (BGE-Base-EN-v1.5) in parallel with GPU setup...");
+        {
+            let shared_cpu_model = Arc::clone(&self.shared_cpu_embedding_model);
+            let app_handle_clone = self.app_handle.clone();
+            // Separate task so the actor message loop is never blocked.
+            tokio::spawn(async move {
+                super::embedding_init::run_embedding_init_with_recovery(app_handle_clone, shared_cpu_model).await;
+            });
+        }
+
         // GPU providers must be registered before the catalog and model selection are read.
         self.register_gpu_execution_providers().await;
 
@@ -961,19 +977,7 @@ impl ModelGatewayActor {
             println!("FoundryActor: No model selected yet, skipping pre-warm");
         }
 
-        // Initialize CPU embedding model at startup for search during chat.
-        // GPU embedding model is loaded on-demand when RAG indexing is requested,
-        // to avoid GPU memory contention with the LLM at startup.
-        println!("FoundryActor: Initializing CPU embedding model (BGE-Base-EN-v1.5)...");
-        println!("FoundryActor: GPU embedding model will be loaded on-demand for RAG indexing");
-
-        let shared_cpu_model = Arc::clone(&self.shared_cpu_embedding_model);
-        let app_handle_clone = self.app_handle.clone();
-        
-        // Initialize CPU embedding model in a separate task to avoid blocking the actor message loop
-        tokio::spawn(async move {
-            let _ = super::embedding_init::init_cpu_embedding_model(app_handle_clone, shared_cpu_model).await;
-        });
+        // The CPU embedding model was started before GPU registration (see below).
 
         while let Some(msg) = self.foundry_msg_rx.recv().await {
             match msg {

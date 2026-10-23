@@ -19,17 +19,28 @@ use crate::protocol::{
 /// A model failure (no model could be selected or loaded) that lasts this long ends the
 /// "Connecting to Foundry" spinner: the app is waiting for something only the user can fix.
 pub const MODEL_FAILURE_GRACE: Duration = Duration::from_secs(15);
-/// Start-up that has not finished in this long is reported as failed instead of spinning forever
-/// (a first run downloads providers and a model, which takes minutes, so this is generous).
-pub const STARTUP_DEADLINE: Duration = Duration::from_secs(600);
+/// Longest GPU provider registration allowed before the engine carries on without it. The
+/// start-up deadline must outlast it: a slow first run (about 1.5 GB of providers) is not a failure.
+pub const EP_REGISTRATION_LIMIT_SECS: u64 = 900;
+/// Start-up that makes no progress for this long (no status report from the engine, the search
+/// model, MCP, or the GPU provider download) is reported as failed instead of spinning for ever.
+/// Longer than `EP_REGISTRATION_LIMIT_SECS` so a legitimate slow registration never trips it.
+pub const STARTUP_STALL_DEADLINE: Duration = Duration::from_secs(EP_REGISTRATION_LIMIT_SECS + 300);
+/// Absolute ceiling for a start-up that keeps reporting progress but never finishes.
+pub const STARTUP_HARD_CEILING: Duration = Duration::from_secs(2 * 60 * 60);
+
+const _: () = assert!(STARTUP_STALL_DEADLINE.as_secs() > EP_REGISTRATION_LIMIT_SECS);
 
 /// Decides whether start-up should be declared failed. Pure so the rules are tested.
 /// `model_failure` is the message of a failed model subsystem and how long it has been failed.
+/// `since_progress` is the time since anything last reported progress; `elapsed` is the time since
+/// launch. Only the model (or engine) failing, a stall, or the hard ceiling fail start-up: a missing
+/// search model or a slow GPU setup never does.
 pub fn startup_verdict(
     connecting: bool,
     model_failure: Option<(&str, Duration)>,
+    since_progress: Duration,
     elapsed: Duration,
-    deadline: Duration,
 ) -> Option<String> {
     if !connecting {
         return None;
@@ -39,10 +50,16 @@ pub fn startup_verdict(
             return Some(message.to_string());
         }
     }
-    if elapsed >= deadline {
+    if since_progress >= STARTUP_STALL_DEADLINE {
+        return Some(format!(
+            "Plugable Chat made no progress starting for {} minutes. Use Repair engine in Settings > Models, or restart the app.",
+            since_progress.as_secs() / 60
+        ));
+    }
+    if elapsed >= STARTUP_HARD_CEILING {
         return Some(format!(
             "Plugable Chat did not finish starting after {} minutes. Use Repair engine in Settings > Models, or restart the app.",
-            deadline.as_secs() / 60
+            elapsed.as_secs() / 60
         ));
     }
     None
@@ -60,6 +77,9 @@ pub enum StartupMsg {
     },
     /// Report status update from embedding initialization
     ReportEmbeddingStatus { status: ResourceStatus },
+    /// Something long-running (GPU provider download) is still making progress; keeps the
+    /// stall deadline from firing. Carries no state change.
+    ReportProgressHeartbeat,
     /// Report status update from MCP host
     ReportMcpStatus { status: ResourceStatus },
     /// Report settings loaded
@@ -99,6 +119,8 @@ pub struct StartupCoordinatorActor {
     /// Whether frontend has connected
     frontend_connected: bool,
     started: Instant,
+    /// Last time any subsystem reported progress (see `startup_verdict`).
+    last_progress: Instant,
     /// When the model subsystem last became Failed (cleared when it recovers).
     model_failed_since: Option<Instant>,
 }
@@ -116,6 +138,7 @@ impl StartupCoordinatorActor {
             current_model: None,
             frontend_connected: false,
             started: Instant::now(),
+            last_progress: Instant::now(),
             model_failed_since: None,
         }
     }
@@ -140,7 +163,18 @@ impl StartupCoordinatorActor {
                     continue;
                 }
             };
+            if matches!(
+                msg,
+                StartupMsg::ReportFoundryStatus { .. }
+                    | StartupMsg::ReportEmbeddingStatus { .. }
+                    | StartupMsg::ReportMcpStatus { .. }
+                    | StartupMsg::ReportProgressHeartbeat
+            ) {
+                self.last_progress = Instant::now();
+            }
             match msg {
+                StartupMsg::ReportProgressHeartbeat => {}
+
                 StartupMsg::ReportFoundryStatus {
                     status,
                     model_state,
@@ -283,7 +317,7 @@ impl StartupCoordinatorActor {
         };
         let connecting = matches!(self.startup_state, StartupState::ConnectingToFoundry | StartupState::Initializing);
         if let Some(message) =
-            startup_verdict(connecting, failure.as_ref().map(|(m, d)| (m.as_str(), *d)), self.started.elapsed(), STARTUP_DEADLINE)
+            startup_verdict(connecting, failure.as_ref().map(|(m, d)| (m.as_str(), *d)), self.last_progress.elapsed(), self.started.elapsed())
         {
             self.transition_state(StartupState::Failed { message });
         }
@@ -337,24 +371,51 @@ impl StartupCoordinatorActor {
 mod tests {
     use super::*;
 
+    const FRESH: Duration = Duration::from_secs(1);
+
     #[test]
     fn a_model_failure_ends_the_spinner_after_the_grace_period() {
         let m = Some(("No compatible model available.", Duration::from_secs(20)));
-        assert_eq!(startup_verdict(true, m, Duration::from_secs(30), STARTUP_DEADLINE).as_deref(), Some("No compatible model available."));
+        assert_eq!(startup_verdict(true, m, FRESH, Duration::from_secs(30)).as_deref(), Some("No compatible model available."));
         let fresh = Some(("x", Duration::from_secs(3)));
-        assert_eq!(startup_verdict(true, fresh, Duration::from_secs(30), STARTUP_DEADLINE), None);
+        assert_eq!(startup_verdict(true, fresh, FRESH, Duration::from_secs(30)), None);
     }
 
     #[test]
-    fn a_start_up_that_never_finishes_is_reported_at_the_deadline() {
-        assert_eq!(startup_verdict(true, None, Duration::from_secs(599), STARTUP_DEADLINE), None);
-        let v = startup_verdict(true, None, Duration::from_secs(600), STARTUP_DEADLINE).unwrap();
-        assert!(v.contains("10 minutes") && v.contains("Repair"));
+    fn a_start_up_that_stops_making_progress_is_reported_at_the_stall_deadline() {
+        let just_before = STARTUP_STALL_DEADLINE - Duration::from_secs(1);
+        assert_eq!(startup_verdict(true, None, just_before, just_before), None);
+        let v = startup_verdict(true, None, STARTUP_STALL_DEADLINE, STARTUP_STALL_DEADLINE).unwrap();
+        assert!(v.contains("20 minutes") && v.contains("Repair"), "{v}");
+    }
+
+    // rc16 (Bob): a 453 s GPU provider registration plus a 4 GB model download is slow, not failed.
+    #[test]
+    fn a_slow_gpu_registration_that_keeps_reporting_progress_never_fails_start_up() {
+        // 14 minutes in (inside the 15 minute registration limit), progress seen a moment ago.
+        assert_eq!(startup_verdict(true, None, FRESH, Duration::from_secs(14 * 60)), None);
+        // Even past the registration limit, a start-up still reporting progress is left alone.
+        assert_eq!(startup_verdict(true, None, FRESH, Duration::from_secs(EP_REGISTRATION_LIMIT_SECS + 60)), None);
+        // ...and silence shorter than the registration limit never trips the stall deadline.
+        assert_eq!(startup_verdict(true, None, Duration::from_secs(EP_REGISTRATION_LIMIT_SECS), Duration::from_secs(1500)), None);
+    }
+
+    #[test]
+    fn a_missing_search_model_is_not_a_start_up_failure() {
+        // The verdict only sees the model subsystem; the embedding status is not an input at all.
+        assert_eq!(startup_verdict(true, None, FRESH, Duration::from_secs(700)), None);
+    }
+
+    #[test]
+    fn a_start_up_that_never_finishes_is_reported_at_the_hard_ceiling() {
+        assert_eq!(startup_verdict(true, None, FRESH, STARTUP_HARD_CEILING - Duration::from_secs(1)), None);
+        let v = startup_verdict(true, None, FRESH, STARTUP_HARD_CEILING).unwrap();
+        assert!(v.contains("120 minutes"), "{v}");
     }
 
     #[test]
     fn nothing_is_declared_once_start_up_has_moved_on() {
         let m = Some(("x", Duration::from_secs(99)));
-        assert_eq!(startup_verdict(false, m, Duration::from_secs(9999), STARTUP_DEADLINE), None);
+        assert_eq!(startup_verdict(false, m, Duration::from_secs(9999), Duration::from_secs(9999)), None);
     }
 }

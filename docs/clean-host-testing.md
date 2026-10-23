@@ -65,6 +65,7 @@ writes no file, so it reads as red.
 | `egpu-late-arrival` | staged: no adapter at launch, an NVIDIA adapter appears at 20 s, the engine lists CUDA after a retry | Pat R2, R4 | the app notices by itself, retries GPU setup, and the assessment moves on from "no GPU" | CI, box |
 | `engine-declined` | staged: NVIDIA adapter, engine lists CUDA and WebGpu (twice) as not registered and answers registration with `success:false` and empty lists | Pat E1, E2, E4 (rc12) | the card names the engine's refusal, not the hardware; each provider reported once; a hint points to the engine log; a CPU model runs | CI, box |
 | `embedding-first-run-contention` | huggingface unreachable for the first 25 s of a first start | Bob R6, R10 | the embedding model still loads (5 attempts over about 45 s); a final failure would carry attempts and cause | CI, box |
+| `embedding-tls-reset-recovers` | every HTTPS connection to huggingface.co is reset (os error 10054) until the quick retries are spent, then the resets stop | rc16 Bob | the error says the connection was interrupted (never "certificate"); the background retry loads the model by itself | CI (new, never run), box |
 | `version-visible` | none | Bob R12, Pat R13 | `--version` prints the release label and commit, and matches the installer file name | CI, box |
 | `gpu-baseline` | none, NVIDIA driver present | #3 | ep-registration and model-download ok | GPU box only |
 
