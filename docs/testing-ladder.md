@@ -107,4 +107,21 @@ needs a reviewer other than the person who started the run; the signing smoke te
 | The app died inside `onnxruntime_providers_webgpu.dll` (0xc0000409) after several follow-up questions on the Chicago data | Wash (rc14), Event Viewer | rung 1: `run_state` tests (a mid-answer death is detected next launch; the second one switches the model off). The cause is not proven (hypothesis: unbounded history) and a native crash capture with a minidump is not built: it needs a Windows build to check. Repro is clean-host case 9 plus the multi-turn Chicago scenario on the GPU box |
 | `main.chicago_ crimes` (a space inside the table name, written by the model) was read as the table `main.chicago_`; the error listed sources, not tables, so the model repeated itself | Bob (rc14) | rung 1: `sql_tables` tests (garbled, quoted, aliased, ambiguous and near-miss names; SQL is rewritten when one real table matches) |
 | After the toolbox finished installing, the red "Schema refresh failed" alert stayed until the app was restarted | Wash (rc14) | rung 1: `database-errors.test.ts`; the tab now re-runs a refresh that was waiting on the toolbox |
+| Unplugging the network crashed the app in `onnxruntime_providers_webgpu.dll` (0xc0000409); the damaged dll then survived reinstall, every prompt crashed, and every model was switched off ("No compatible model available") | Wash (rc15), Event Viewer | rung 1: `engine_health` tests (marker, quarantine, GPU-off ladder, attribution from the Application log), `gpu_registration` watcher gate, `startup_actor` verdict. rc16 fault injection: see "Engine-health fault injection" below; the real check is the GPU box (truncate an `ep\webgpu-ep` file, kill the app twice) |
 | `PLUGABLE_FOUNDRY_BACKEND=cli_http` stopped the app from starting where the `foundry` CLI was absent | Pat (rc14) | rung 1: `backend_choice_tests` (falls back to the SDK with a log line). The Windows launch itself is clean-host case 3 |
+
+## Engine-health fault injection (rc16)
+
+The app sets damaged GPU components aside and switches GPU acceleration off on its own (`src-tauri/src/engine_health.rs`). To exercise that without waiting for a real crash:
+
+| Variable / flag | Effect |
+|---|---|
+| `PLUGABLE_CHAT_TEST_FAULT=offline` | the connectivity probe says there is no network (watcher and retries stand down; the catalog falls back to the last-known models) |
+| `PLUGABLE_CHAT_TEST_FAULT=ep-fault` | if the previous run died, attribute it to `onnxruntime_providers_webgpu.dll` under `ep\` (quarantine that provider) |
+| `PLUGABLE_CHAT_TEST_FAULT=ep-mismatch` | treat the verified marker as mismatched (quarantine the whole `ep` folder) |
+| `PLUGABLE_CHAT_TEST_FAULT=registration-hang` | provider registration never returns (use with `PLUGABLE_CHAT_EP_REGISTER_TIMEOUT_SECS=20` to see start-up carry on) |
+| `PLUGABLE_CHAT_TEST_FAULT=empty-catalog` | the model list call fails (the last-known list is shown) |
+| `PLUGABLE_CHAT_EP_DIR=<dir>` | use this folder instead of `~/.plugable-chat/ep` |
+| `--repair-engine` / `PLUGABLE_REPAIR_ENGINE=1` | what Settings > Models > Repair engine does, before start-up |
+
+Values of `PLUGABLE_CHAT_TEST_FAULT` combine with commas. A real check on the GPU box: after a successful chat turn truncate a file in `ep\webgpu-ep\`, kill the app, relaunch: the folder is renamed to `ep.quarantine-<unix time>` and Core downloads it again. Two `taskkill /f` in a row switch GPU acceleration off (`engine-health.json` in the config folder, `gpu_off`). Windows names the faulting module in the Application log and the app reads it with `wevtutil` at launch; a fast-fail crash (0xc0000409) skips in-process handlers, so there is no in-process hook.

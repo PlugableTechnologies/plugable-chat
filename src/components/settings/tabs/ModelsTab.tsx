@@ -9,6 +9,7 @@ import { modelsTabNotice, type GpuAssessment } from '../../../lib/gpu-assessment
 import { SupportCopyButton } from '../../SupportCopyButton';
 import { matchesModelQuery } from '../../../lib/model-filter';
 import { isDownloadPending, type DownloadEntry } from '../../../store/chat/downloads';
+import { engineNotice, type EngineHealth } from '../../../lib/engine-health';
 
 function downloadProgressFor(d: DownloadEntry | undefined) {
     if (!isDownloadPending(d)) return undefined;
@@ -28,6 +29,9 @@ export function ModelsTab() {
     const [assessment, setAssessment] = useState<GpuAssessment | null>(null);
     const [catalogError, setCatalogError] = useState<string | null>(null);
     const [retryingGpu, setRetryingGpu] = useState(false);
+    const [engineHealth, setEngineHealth] = useState<EngineHealth | null>(null);
+    const [repairing, setRepairing] = useState(false);
+    const [repairDone, setRepairDone] = useState(false);
 
     const { downloads, downloadModel, cancelModelDownload } = useChatStore();
 
@@ -159,6 +163,38 @@ export function ModelsTab() {
 
     // The backend waits for the whole attempt (and re-reads its model list) before answering, so
     // the list refreshed here is current.
+    useEffect(() => {
+        invoke<EngineHealth>('get_engine_health').then(setEngineHealth).catch(() => setEngineHealth(null));
+    }, []);
+
+    // No reinstall or reboot: set the GPU components aside (they download again), forget crash
+    // history and the GPU-off switch, then run GPU setup.
+    const handleRepair = async () => {
+        setRepairing(true);
+        setRepairDone(false);
+        try {
+            await invoke('repair_engine');
+            setRepairDone(true);
+            setEngineHealth(await invoke<EngineHealth>('get_engine_health'));
+        } catch (e) {
+            setError(`Repair failed: ${e instanceof Error ? e.message : e}`);
+        } finally {
+            setRepairing(false);
+        }
+    };
+
+    const handleTryGpuAgain = async () => {
+        setRepairing(true);
+        try {
+            await invoke('try_gpu_again');
+            setEngineHealth(await invoke<EngineHealth>('get_engine_health'));
+        } catch (e) {
+            setError(`Could not turn the GPU back on: ${e instanceof Error ? e.message : e}`);
+        } finally {
+            setRepairing(false);
+        }
+    };
+
     const handleRetryGpu = async () => {
         setRetryingGpu(true);
         try {
@@ -317,6 +353,45 @@ export function ModelsTab() {
                         </div>
                     </div>
                 )}
+
+                {/* The engine acted on its own after a crash, or the user wants a clean start */}
+                {(() => {
+                    const en = engineNotice(engineHealth);
+                    return (
+                        <div
+                            className={`engine-health mb-4 p-3 border rounded-lg text-sm ${en?.tone === 'amber' ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-gray-50 border-gray-200 text-gray-700'}`}
+                        >
+                            {en && (
+                                <>
+                                    <p className="font-medium">{en.headline}</p>
+                                    {en.lines.map((line) => (
+                                        <p key={line} className="mt-1">{line}</p>
+                                    ))}
+                                </>
+                            )}
+                            <div className="mt-2 flex items-center gap-2">
+                                {en?.action === 'try-gpu-again' && (
+                                    <button
+                                        onClick={handleTryGpuAgain}
+                                        disabled={repairing}
+                                        className="engine-try-gpu px-3 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+                                    >
+                                        Try GPU again
+                                    </button>
+                                )}
+                                <button
+                                    onClick={handleRepair}
+                                    disabled={repairing}
+                                    title="Sets the downloaded GPU components aside so they download again, and clears crash history. Your models and chats are not touched."
+                                    className="engine-repair px-3 py-1 rounded-md bg-white border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                    {repairing ? 'Repairing…' : 'Repair engine'}
+                                </button>
+                                {repairDone && <span className="text-green-700">Repaired. GPU components are downloading again.</span>}
+                            </div>
+                        </div>
+                    );
+                })()}
 
                 {/* Model Cards Grid */}
                 {!isLoading && (

@@ -161,6 +161,11 @@ pub struct CliArgs {
     /// instead of a fresh chat each. This is how a long conversation is reproduced unattended.
     #[arg(long, env = "PLUGABLE_SAME_CHAT")]
     pub same_chat: bool,
+    /// Repair the model engine before starting: set the downloaded GPU components aside (Core
+    /// downloads them again), clear crash history, the GPU-off switch and engine-blamed model
+    /// blocks. The same thing Settings > Models > Repair does; for support and unattended tests.
+    #[arg(long, env = "PLUGABLE_REPAIR_ENGINE")]
+    pub repair_engine: bool,
     /// Start with the main window hidden (for unattended runs).
     #[arg(long, env = "PLUGABLE_HIDDEN")]
     pub hidden: bool,
@@ -659,6 +664,12 @@ mod tests {
         assert_eq!(args.prompts_file.as_deref(), Some("/t/p.json"));
         assert_eq!(args.chat_home.as_deref(), Some("/t/home"));
         assert_eq!(args.mcp_timeout_secs, Some(900));
+    }
+
+    #[test]
+    fn repair_engine_is_a_flag_and_off_by_default() {
+        assert!(parse(&["--repair-engine"]).repair_engine);
+        assert!(!parse(&[]).repair_engine);
     }
 
     #[test]

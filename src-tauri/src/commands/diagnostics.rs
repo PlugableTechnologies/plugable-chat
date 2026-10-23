@@ -30,6 +30,60 @@ pub async fn retry_gpu_registration(app_handle: AppHandle) -> Result<crate::gpu_
     Ok(crate::preflight::assessment_now())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineHealthView {
+    pub gpu_off: bool,
+    pub gpu_off_reason: Option<String>,
+    pub unclean_deaths: u32,
+    pub last_quarantine: Option<String>,
+}
+
+/// Whether the engine's downloaded parts were set aside, or GPU acceleration was switched off,
+/// after the app closed unexpectedly.
+#[tauri::command]
+pub fn get_engine_health() -> EngineHealthView {
+    let h = crate::engine_health::health_in(&crate::paths::get_config_dir());
+    EngineHealthView {
+        gpu_off: crate::engine_health::gpu_off(),
+        gpu_off_reason: h.gpu_off_reason,
+        unclean_deaths: h.unclean_deaths,
+        last_quarantine: h.last_quarantine,
+    }
+}
+
+/// Settings > Models > Repair: set the GPU components aside so they download again, clear crash
+/// history and engine-blamed model blocks, then run GPU setup. No reinstall or reboot needed.
+#[tauri::command]
+pub async fn repair_engine(
+    app_handle: AppHandle,
+    settings_state: State<'_, crate::app_state::SettingsState>,
+) -> Result<String, String> {
+    let line = {
+        let mut guard = settings_state.settings.write().await;
+        let line = crate::engine_health::repair(&mut guard);
+        crate::settings::save_settings(&guard).await?;
+        line
+    };
+    crate::app_log::log("repair", &format!("Repair requested: {line}"));
+    crate::actors::foundry::gpu_registration::spawn_retry(app_handle);
+    Ok(line)
+}
+
+/// "Try GPU again" after GPU acceleration was switched off: turn it on and run GPU setup.
+#[tauri::command]
+pub async fn try_gpu_again(app_handle: AppHandle) -> Result<(), String> {
+    let dir = crate::paths::get_config_dir();
+    let mut h = crate::engine_health::health_in(&dir);
+    h.gpu_off = false;
+    h.gpu_off_reason = None;
+    h.unclean_deaths = 0;
+    crate::engine_health::save_health_in(&dir, &h);
+    crate::engine_health::set_gpu_off(false);
+    crate::actors::foundry::gpu_registration::spawn_retry(app_handle);
+    Ok(())
+}
+
 /// Why the GPU is or is not in use, from Windows' view and the model engine's view together.
 /// `refresh` asks Windows again; the answer is never reused from a failed earlier look.
 #[tauri::command]

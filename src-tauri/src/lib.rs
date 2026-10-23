@@ -1988,6 +1988,10 @@ pub fn run() {
                 }
                 // The engine's downloaded parts get first say: a death in a provider dll is not the
                 // model's fault, and must not switch every model off.
+                if cli_args_for_setup.repair_engine {
+                    let line = engine_health::repair(&mut app_settings);
+                    app_log::log("repair", &format!("--repair-engine: {line}"));
+                }
                 let plan = engine_health::apply_at_launch(&last, &mut app_settings);
                 let model_last = if plan.spare_the_model { run_state::LastRun::Clean } else { last.clone() };
                 let model_notice = run_state::apply_to_settings(
@@ -2360,6 +2364,9 @@ pub fn run() {
             get_gpu_assessment,
             get_support_bundle,
             retry_gpu_registration,
+            get_engine_health,
+            repair_engine,
+            try_gpu_again,
             retry_embedding_init,
             mark_first_run_complete,
             heartbeat_ping,
