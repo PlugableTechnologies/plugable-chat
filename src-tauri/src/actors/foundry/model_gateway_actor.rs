@@ -863,7 +863,35 @@ impl ModelGatewayActor {
             super::gpu_registration::mark_startup_registration_done();
             return;
         };
-        let summary = super::gpu_registration::run_registration(&sdk, &self.app_handle, 1).await;
+        if crate::engine_health::gpu_off() {
+            crate::test_state::record(
+                crate::test_state::Phase::EpRegistration,
+                crate::test_state::status::SKIPPED,
+                "GPU acceleration is switched off (the app closed unexpectedly twice in a row)",
+            );
+            crate::app_log::log("gpu", "GPU provider registration skipped: GPU acceleration is switched off");
+            super::gpu_registration::mark_startup_registration_done();
+            return;
+        }
+        // Provider download and registration run native code and the network; a hang here used to
+        // block start-up for good. Bound it, then carry on with what is registered.
+        let limit = std::env::var("PLUGABLE_CHAT_EP_REGISTER_TIMEOUT_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(900);
+        let attempt = async {
+            if crate::engine_health::test_fault("registration-hang") {
+                std::future::pending::<()>().await;
+            }
+            super::gpu_registration::run_registration(&sdk, &self.app_handle, 1).await
+        };
+        let summary = match tokio::time::timeout(Duration::from_secs(limit), attempt).await {
+            Ok(s) => s,
+            Err(_) => {
+                super::ep_registration_cancel_flag().store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::preflight::set_registering(false);
+                crate::app_log::log("gpu", &format!("GPU provider registration gave up after {limit}s; continuing on what is registered"));
+                super::gpu_registration::mark_startup_registration_done();
+                return;
+            }
+        };
         super::gpu_registration::mark_startup_registration_done();
         // A failed first run used to leave the app on CPU models until restart. Transient
         // causes (network) are retried in the background with backoff; permanent ones
@@ -2185,6 +2213,22 @@ impl ModelGatewayActor {
                 // The frontend will handle showing help to the user
                 self.available_models = Vec::new();
                 self.model_info = Vec::new();
+                // Without this the model stayed "Initializing" for good: the UI spun on
+                // "Connecting to Foundry" with nothing to act on.
+                if self.model_id.is_none() && matches!(self.model_state, ModelState::Initializing) {
+                    let hint = if crate::engine_health::gpu_off() {
+                        " GPU acceleration is switched off, so only CPU models are listed."
+                    } else {
+                        ""
+                    };
+                    self.transition_to_error(
+                        format!(
+                            "No downloaded models were found.{hint} Download {} or {} (Settings > Models), or use Repair in Settings > Models if models were there before.",
+                            DEFAULT_MODEL, DEFAULT_FALLBACK_MODEL
+                        ),
+                        None,
+                    );
+                }
                 return true; // Service is reachable, just no models cached
             }
 
@@ -2394,10 +2438,13 @@ impl ModelGatewayActor {
     async fn get_models_via_rest(&self, port: u16) -> Vec<FoundryModel> {
         // SDK backend: list cached models via the typed catalog API instead of /openai/models.
         if let Some(sdk) = &self.sdk {
+            let gpu_off = crate::engine_health::gpu_off();
             return sdk
                 .list_models()
                 .await
                 .into_iter()
+                // With GPU acceleration switched off only CPU variants can load.
+                .filter(|m| !gpu_off || m.id.to_lowercase().contains("cpu"))
                 .map(|m| FoundryModel { id: m.id, tags: m.tags })
                 .collect();
         }

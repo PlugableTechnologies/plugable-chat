@@ -168,6 +168,40 @@ pub fn newest_unseen_fault(seen: &[String]) -> Option<NativeFault> {
     }
 }
 
+// ---------- last-known model list ----------
+
+const MODELS_FILE: &str = "last-known-models.json";
+
+/// Remembers the cached models (id, tags) the engine last listed, so a catalog call that fails
+/// offline does not make every downloaded model vanish ("No compatible model available").
+pub fn save_last_known_models_in(dir: &Path, models: &[(String, Vec<String>)]) {
+    if models.is_empty() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(dir);
+    if let Ok(json) = serde_json::to_string(models) {
+        let _ = std::fs::write(dir.join(MODELS_FILE), json);
+    }
+}
+
+pub fn last_known_models_in(dir: &Path) -> Vec<(String, Vec<String>)> {
+    std::fs::read_to_string(dir.join(MODELS_FILE)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// What to show when the engine lists models: a live non-empty list wins; a failed or (offline)
+/// empty one falls back to the last-known list.
+pub fn models_to_show(
+    live: Result<Vec<(String, Vec<String>)>, ()>,
+    online: bool,
+    last_known: Vec<(String, Vec<String>)>,
+) -> Vec<(String, Vec<String>)> {
+    match live {
+        Ok(v) if !v.is_empty() => v,
+        Ok(v) if online => v,
+        _ => last_known,
+    }
+}
+
 // ---------- the verified marker ----------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -596,6 +630,27 @@ mod tests {
         assert!(!st.incompatible_models.contains_key("a"));
         assert!(st.incompatible_models.contains_key("b"));
         assert!(st.native_crash_counts.is_empty());
+    }
+
+    #[test]
+    fn a_failed_or_offline_empty_catalog_keeps_the_last_known_models() {
+        let known = vec![("qwen3.5-4b-generic-cpu:3".to_string(), vec![])];
+        assert_eq!(models_to_show(Err(()), true, known.clone()), known);
+        assert_eq!(models_to_show(Ok(vec![]), false, known.clone()), known);
+        // online and genuinely empty: believe it
+        assert!(models_to_show(Ok(vec![]), true, known.clone()).is_empty());
+        let live = vec![("m".to_string(), vec![])];
+        assert_eq!(models_to_show(Ok(live.clone()), false, known), live);
+    }
+
+    #[test]
+    fn last_known_models_round_trip_and_empty_is_never_saved() {
+        let d = temp("models");
+        save_last_known_models_in(&d, &[]);
+        assert!(last_known_models_in(&d).is_empty());
+        let m = vec![("a".to_string(), vec!["t".to_string()])];
+        save_last_known_models_in(&d, &m);
+        assert_eq!(last_known_models_in(&d), m);
     }
 
     #[test]
