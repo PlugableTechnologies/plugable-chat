@@ -7,7 +7,7 @@
 //! - Handling the frontend handshake protocol
 //! - Emitting startup progress events
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
 
@@ -15,6 +15,38 @@ use crate::protocol::{
     ModelInfo, ModelState, ResourceStatus, StartupProgressEvent, StartupSnapshot, StartupState,
     SubsystemStatus,
 };
+
+/// A model failure (no model could be selected or loaded) that lasts this long ends the
+/// "Connecting to Foundry" spinner: the app is waiting for something only the user can fix.
+pub const MODEL_FAILURE_GRACE: Duration = Duration::from_secs(15);
+/// Start-up that has not finished in this long is reported as failed instead of spinning forever
+/// (a first run downloads providers and a model, which takes minutes, so this is generous).
+pub const STARTUP_DEADLINE: Duration = Duration::from_secs(600);
+
+/// Decides whether start-up should be declared failed. Pure so the rules are tested.
+/// `model_failure` is the message of a failed model subsystem and how long it has been failed.
+pub fn startup_verdict(
+    connecting: bool,
+    model_failure: Option<(&str, Duration)>,
+    elapsed: Duration,
+    deadline: Duration,
+) -> Option<String> {
+    if !connecting {
+        return None;
+    }
+    if let Some((message, failed_for)) = model_failure {
+        if failed_for >= MODEL_FAILURE_GRACE {
+            return Some(message.to_string());
+        }
+    }
+    if elapsed >= deadline {
+        return Some(format!(
+            "Plugable Chat did not finish starting after {} minutes. Use Repair engine in Settings > Models, or restart the app.",
+            deadline.as_secs() / 60
+        ));
+    }
+    None
+}
 
 /// Messages for the Startup Coordinator Actor
 pub enum StartupMsg {
@@ -66,6 +98,9 @@ pub struct StartupCoordinatorActor {
     current_model: Option<String>,
     /// Whether frontend has connected
     frontend_connected: bool,
+    started: Instant,
+    /// When the model subsystem last became Failed (cleared when it recovers).
+    model_failed_since: Option<Instant>,
 }
 
 impl StartupCoordinatorActor {
@@ -80,6 +115,8 @@ impl StartupCoordinatorActor {
             model_info: Vec::new(),
             current_model: None,
             frontend_connected: false,
+            started: Instant::now(),
+            model_failed_since: None,
         }
     }
 
@@ -91,7 +128,18 @@ impl StartupCoordinatorActor {
         self.subsystem_status.settings = ResourceStatus::Ready;
         self.transition_state(StartupState::ConnectingToFoundry);
 
-        while let Some(msg) = self.msg_rx.recv().await {
+        let mut watchdog = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            let msg = tokio::select! {
+                m = self.msg_rx.recv() => match m {
+                    Some(m) => m,
+                    None => break,
+                },
+                _ = watchdog.tick() => {
+                    self.check_deadline();
+                    continue;
+                }
+            };
             match msg {
                 StartupMsg::ReportFoundryStatus {
                     status,
@@ -101,6 +149,7 @@ impl StartupCoordinatorActor {
                     current_model,
                 } => {
                     self.subsystem_status.foundry_service = status.clone();
+                    let prior_model_failed = self.subsystem_status.model.is_failed();
 
                     if let Some(ms) = model_state {
                         self.model_state = ms.clone();
@@ -120,6 +169,12 @@ impl StartupCoordinatorActor {
                             ModelState::ServiceRestarting => ResourceStatus::Initializing,
                             ModelState::Reconnecting => ResourceStatus::Initializing,
                         };
+                    }
+
+                    match (&self.subsystem_status.model, prior_model_failed) {
+                        (m, false) if m.is_failed() => self.model_failed_since = Some(Instant::now()),
+                        (m, _) if !m.is_failed() => self.model_failed_since = None,
+                        _ => {}
                     }
 
                     if let Some(models) = available_models {
@@ -200,8 +255,9 @@ impl StartupCoordinatorActor {
         let model_ready = self.subsystem_status.model.is_ready();
         let backend_fully_ready = foundry_ready && model_ready;
         
-        // Transition to AwaitingFrontend when foundry is connected AND model is ready
-        if matches!(self.startup_state, StartupState::ConnectingToFoundry) && backend_fully_ready {
+        // Transition to AwaitingFrontend when foundry is connected AND model is ready.
+        // A start-up that was declared failed recovers when the missing piece arrives.
+        if matches!(self.startup_state, StartupState::ConnectingToFoundry | StartupState::Failed { .. }) && backend_fully_ready {
             if self.frontend_connected {
                 // Frontend already connected, go straight to Ready
                 self.transition_state(StartupState::Ready);
@@ -212,10 +268,24 @@ impl StartupCoordinatorActor {
 
         // If frontend already connected and we just became ready, transition to Ready
         if self.frontend_connected
-            && matches!(self.startup_state, StartupState::AwaitingFrontend | StartupState::ConnectingToFoundry)
+            && matches!(self.startup_state, StartupState::AwaitingFrontend | StartupState::ConnectingToFoundry | StartupState::Failed { .. })
             && backend_fully_ready
         {
             self.transition_state(StartupState::Ready);
+        }
+    }
+
+    /// Ends the spinner when start-up cannot finish on its own (see `startup_verdict`).
+    fn check_deadline(&mut self) {
+        let failure = match &self.subsystem_status.model {
+            ResourceStatus::Failed { message } => self.model_failed_since.map(|t| (message.clone(), t.elapsed())),
+            _ => None,
+        };
+        let connecting = matches!(self.startup_state, StartupState::ConnectingToFoundry | StartupState::Initializing);
+        if let Some(message) =
+            startup_verdict(connecting, failure.as_ref().map(|(m, d)| (m.as_str(), *d)), self.started.elapsed(), STARTUP_DEADLINE)
+        {
+            self.transition_state(StartupState::Failed { message });
         }
     }
 
@@ -260,5 +330,31 @@ impl StartupCoordinatorActor {
         if let Err(e) = self.app_handle.emit("startup-progress", &event) {
             eprintln!("[StartupActor] Failed to emit progress: {:?}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_model_failure_ends_the_spinner_after_the_grace_period() {
+        let m = Some(("No compatible model available.", Duration::from_secs(20)));
+        assert_eq!(startup_verdict(true, m, Duration::from_secs(30), STARTUP_DEADLINE).as_deref(), Some("No compatible model available."));
+        let fresh = Some(("x", Duration::from_secs(3)));
+        assert_eq!(startup_verdict(true, fresh, Duration::from_secs(30), STARTUP_DEADLINE), None);
+    }
+
+    #[test]
+    fn a_start_up_that_never_finishes_is_reported_at_the_deadline() {
+        assert_eq!(startup_verdict(true, None, Duration::from_secs(599), STARTUP_DEADLINE), None);
+        let v = startup_verdict(true, None, Duration::from_secs(600), STARTUP_DEADLINE).unwrap();
+        assert!(v.contains("10 minutes") && v.contains("Repair"));
+    }
+
+    #[test]
+    fn nothing_is_declared_once_start_up_has_moved_on() {
+        let m = Some(("x", Duration::from_secs(99)));
+        assert_eq!(startup_verdict(false, m, Duration::from_secs(9999), STARTUP_DEADLINE), None);
     }
 }
