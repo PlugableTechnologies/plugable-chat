@@ -4,6 +4,7 @@ import { invoke } from '../../../lib/api';
 import type { ChatSummary, Message } from '../types';
 import { RELEVANCE_SEARCH_DEBOUNCE_MS, RELEVANCE_SEARCH_MIN_LENGTH } from '../constants';
 import { chatModelNotice } from '../model-switch';
+import { parseSavedMessages } from '../loaded-messages';
 
 // Module-level state for relevance search
 let relevanceSearchTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -138,15 +139,16 @@ export const createChatHistorySlice: StateCreator<
             
             const messagesJson = await invoke<string | null>('load_chat', { id });
             if (messagesJson) {
-                const messages = JSON.parse(messagesJson);
-                // Ensure messages have IDs if missing (legacy)
-                const processedMessages = messages.map((m: any, idx: number) => ({
-                    ...m,
-                    id: m.id || `${Date.now()}-${idx}`,
-                    timestamp: m.timestamp || Date.now(),
-                    systemPromptText: m.system_prompt || m.systemPromptText,
-                }));
-                set({ chatMessages: processedMessages, currentChatId: id, backendError: null } as any);
+                // One unreadable entry is skipped; it must not hide the rest of the chat.
+                const { messages: processedMessages, skipped } = parseSavedMessages(messagesJson);
+                if (skipped > 0) console.warn(`[ChatStore] ${skipped} unreadable message(s) skipped while loading chat ${id.slice(0, 8)}`);
+                set({
+                    chatMessages: processedMessages,
+                    currentChatId: id,
+                    backendError: skipped > 0
+                        ? `${skipped} saved message${skipped === 1 ? ' was' : 's were'} damaged and could not be shown.`
+                        : null,
+                } as any);
             } else {
                 set({ chatMessages: [], currentChatId: id } as any);
             }

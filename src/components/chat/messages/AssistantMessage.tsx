@@ -7,6 +7,7 @@ import { RagContextBlock, CodeExecutionBlock } from '../rag';
 import { ToolProcessingBlock, InlineToolCallResult, SqlResultTable } from '../tools';
 import { MarkdownContent } from '../markdown';
 import { StatusRow } from '../StatusRow';
+import { showNoAnswerNote, showOrphanToolCall, toolCallName } from '../utils/assistant-display';
 
 export interface AssistantMessageProps {
     message: Message;
@@ -26,6 +27,9 @@ export const AssistantMessage = memo(function AssistantMessage({
     isStreaming = false,
 }: AssistantMessageProps) {
     const toolCalls = message.toolCalls || [];
+    // The last message is still being worked on while a stream, the reasoning indicator or a tool run is up.
+    const turnInProgress =
+        isStreaming || (isLastMessage && (thinkingStartTime !== null || toolProcessingStartTime !== null));
     const parsedParts = useMemo(() => parseMessageContent(message.content), [message.content]);
     const textParts = useMemo(() => parsedParts.filter((p) => p.type === 'text'), [parsedParts]);
     const toolCallParts = useMemo(() => parsedParts.filter((p) => p.type === 'tool_call'), [parsedParts]);
@@ -148,6 +152,11 @@ export const AssistantMessage = memo(function AssistantMessage({
                         <InlineToolCallResult key={`toolcall-${toolCallRecord.id}`} call={toolCallRecord} />
                     );
                     toolCallIndex++;
+                } else if (showOrphanToolCall(turnInProgress, false)) {
+                    // Saved without a result (the app stopped first): say a call was made, not nothing.
+                    nodes.push(
+                        <StatusRow key={`orphan-call-${idx}`} label={`Tool call: ${toolCallName(part.content)}`} details={['no result was saved']} />
+                    );
                 }
                 return;
             }
@@ -180,7 +189,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         }
 
         return nodes;
-    }, [parsedParts, toolCalls, hasPythonToolCalls, fallbackInsertAfter, shouldInlineFallbackToolCalls, isStreaming]);
+    }, [parsedParts, toolCalls, hasPythonToolCalls, fallbackInsertAfter, shouldInlineFallbackToolCalls, isStreaming, turnInProgress]);
 
     const hasThinkOnly = useMemo(() => {
         const hasThink = parsedParts.some((p) => p.type === 'think');
@@ -211,6 +220,15 @@ export const AssistantMessage = memo(function AssistantMessage({
                 <RagContextBlock chunks={message.ragChunks} />
             )}
             {renderedParts}
+            {showNoAnswerNote({
+                hasThink: parsedParts.some((p) => p.type === 'think'),
+                hasMeaningfulText: hasAnyText,
+                hasToolCallParts: toolCallParts.length > 0,
+                toolRecordCount: toolCalls.length,
+                inProgress: turnInProgress,
+            }) && (
+                <StatusRow label="No answer was produced" details={['ask again to retry']} tone="error" />
+            )}
             {(pythonOutputToShow || fallbackAnswer) && (
                 <MarkdownContent
                     content={stripHarmonyTokens(stripOpenAITokens(pythonOutputToShow || fallbackAnswer))}

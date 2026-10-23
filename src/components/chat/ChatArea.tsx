@@ -25,6 +25,8 @@ import { RagFilePills, AttachedTablePills, AttachedToolPills, TabularFilePills }
 import { InputBar } from './input';
 import { DatabaseAttachmentModal, ToolAttachmentModal } from './modals';
 import { buildChatHistory } from './utils/history';
+import { isToolResultMessage, toolResultView } from './utils/tool-result-message';
+import { StatusRow } from './StatusRow';
 
 /**
  * Main ChatArea component - orchestrates chat UI
@@ -515,13 +517,13 @@ export function ChatArea() {
                                     .reverse()
                                     .find((prev) => prev.role === 'assistant' && prev.systemPromptText)?.systemPromptText || null;
                             return (
-                                <div key={m.id} className={`chat-message-row flex w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                <div key={m.id} className={`chat-message-row flex w-full ${m.role === 'user' && !isToolResultMessage(m) ? 'justify-end' : 'justify-start'}`}>
                                     <div
                                         data-testid={`chat-bubble-${m.role}`}
                                         data-message-id={m.id}
                                         className={`
                                     chat-bubble relative w-full max-w-none rounded-2xl px-5 py-1.5 text-[15px] leading-6
-                                    ${m.role === 'user'
+                                    ${m.role === 'user' && !isToolResultMessage(m)
                                                 ? 'chat-bubble-user bg-gray-100 text-gray-900'
                                                 : 'chat-bubble-assistant bg-transparent text-gray-900'
                                             }
@@ -537,6 +539,10 @@ export function ChatArea() {
                                                     previousSystemPromptText={previousAssistantSystemPrompt}
                                                     isStreaming={assistantStreamingActive && chatMessages[chatMessages.length - 1]?.id === m.id}
                                                 />
+                                            ) : isToolResultMessage(m) ? (
+                                                <StatusRow label="Tool result" tone={toolResultView(m).isError ? 'error' : 'neutral'}>
+                                                    <div className="whitespace-pre-wrap text-xs">{toolResultView(m).body}</div>
+                                                </StatusRow>
                                             ) : (
                                                 <div className="whitespace-pre-wrap">{m.content}</div>
                                             )}

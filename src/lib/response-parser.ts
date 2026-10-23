@@ -31,6 +31,19 @@ function stripOpenAITokens(content: string): string {
         .replace(/^\s*\n+/, '');
 }
 
+/**
+ * Tool-result wrappers the app puts around results it feeds back to the model
+ * (`<tool_response>` for Hermes/Qwen, `<tool_result ...>`, `<function_response>`). A small
+ * model copies them into its own answer, where they show up as literal tags. Only the tags
+ * go: the text inside is usually the answer.
+ */
+const RESPONSE_WRAPPER_TAG = /<\/?(?:tool_response|tool_result|function_response)(?:\s[^>]*)?>/gi;
+
+export function stripResponseWrapperEcho(content: string): string {
+    if (!content.includes('<')) return content;
+    return content.replace(RESPONSE_WRAPPER_TAG, '').replace(/^\s*\n+/, '');
+}
+
 export type MessagePartType = 'text' | 'think' | 'tool_call';
 
 export interface MessagePart {
@@ -496,7 +509,7 @@ function extractToolCalls(parts: MessagePart[]): MessagePart[] {
  */
 export function parseMessageContent(content: string, modelFamily?: ModelFamily): MessagePart[] {
     // First, strip any leaked OpenAI special tokens
-    const cleanedContent = stripOpenAITokens(content);
+    const cleanedContent = stripResponseWrapperEcho(stripOpenAITokens(content));
     
     // Auto-detect format if not specified
     const format = modelFamily || detectResponseFormat(cleanedContent);
@@ -575,7 +588,7 @@ export function hasToolCallContent(content: string): boolean {
  */
 export function stripFormatMarkers(content: string): string {
     // First strip OpenAI special tokens
-    let result = stripOpenAITokens(content);
+    let result = stripResponseWrapperEcho(stripOpenAITokens(content));
     
     // Remove gpt-oss channel markers
     result = result.replace(/<\|channel\|>\w+<\|message\|>/g, '');

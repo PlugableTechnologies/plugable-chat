@@ -3,6 +3,8 @@
  * notices from older builds that were persisted as assistant turns) is dropped: a model
  * given "This model isn't compatible… Switching…" reasons about it as if the user said it.
  */
+import { stripResponseWrapperEcho } from '../../../lib/response-parser.ts';
+
 export interface HistoryMessage {
     role: string;
     content: string;
@@ -36,7 +38,8 @@ export function buildChatHistory(messages: HistoryMessage[]) {
         .filter((m) => !isAppNotice(m))
         .map((m) => ({
             role: m.role,
-            content: m.role === 'assistant' ? stripTrailingNotice(m.content) : m.content,
+            // A model that copied a tool-result wrapper into its answer would copy it again next turn.
+            content: m.role === 'assistant' ? stripResponseWrapperEcho(stripTrailingNotice(m.content)) : m.content,
             system_prompt: m.systemPromptText,
         }));
 }
