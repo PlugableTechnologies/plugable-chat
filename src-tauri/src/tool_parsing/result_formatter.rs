@@ -168,10 +168,42 @@ fn build_sql_error_recovery_guidance(
     )
 }
 
+lazy_static::lazy_static! {
+    static ref RESPONSE_WRAPPER_TAG: regex::Regex =
+        regex::Regex::new(r"(?i)</?(?:tool_response|tool_result|function_response)(?:\s[^>]*)?>").expect("valid regex");
+}
+
+/// A small model copies the wrapper the app puts around a tool result into its own answer. Only
+/// the tags are removed; the text inside is usually the answer. Used on model output before it is
+/// saved or sent back (the screen does the same, see response-parser.ts).
+pub fn strip_response_wrapper_echo(text: &str) -> String {
+    if !RESPONSE_WRAPPER_TAG.is_match(text) {
+        return text.to_string();
+    }
+    RESPONSE_WRAPPER_TAG.replace_all(text, "").trim_start().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn echoed_wrapper_tags_are_removed_and_the_text_kept() {
+        assert_eq!(
+            strip_response_wrapper_echo("<tool_response>\nI cannot write.\n</tool_response>"),
+            "I cannot write.\n"
+        );
+        assert_eq!(strip_response_wrapper_echo("<tool_response error=\"true\">x</tool_response>"), "x");
+        assert_eq!(strip_response_wrapper_echo("<function_response>ok</function_response>"), "ok");
+        assert_eq!(strip_response_wrapper_echo("no tags <b>here</b>"), "no tags <b>here</b>");
+    }
+
+    #[test]
+    fn a_tool_call_is_not_touched_by_the_echo_strip() {
+        let s = "<tool_call>{\"name\":\"ask\"}</tool_call>";
+        assert_eq!(strip_response_wrapper_echo(s), s);
+    }
 
     #[test]
     fn test_format_tool_result_hermes() {

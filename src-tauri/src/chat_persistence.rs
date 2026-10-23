@@ -285,6 +285,25 @@ mod tests {
     }
 
     #[test]
+    fn a_checkpoint_taken_after_a_tool_round_keeps_the_call_and_its_result() {
+        // What the agentic loop saves between rounds: no final reply yet, no embedding.
+        let h = vec![
+            msg("system", "SECRET"),
+            msg("user", "how many rows?"),
+            msg("assistant", "<tool_call>{\"name\":\"count\"}</tool_call>"),
+            msg("user", "<tool_response>\n3\n</tool_response>"),
+        ];
+        match build_upsert("c", "T", &h, "phi-4", None, None) {
+            VectorMsg::UpsertChatRecord { messages, embedding_vector, .. } => {
+                assert!(embedding_vector.is_none());
+                assert!(messages.contains("count") && messages.contains("<tool_response>"));
+                assert!(!messages.contains("SECRET"));
+            }
+            _ => panic!("wrong message"),
+        }
+    }
+
+    #[test]
     fn an_empty_model_name_keeps_the_stored_model() {
         match build_upsert("c", "T", &[], "", None, None) {
             VectorMsg::UpsertChatRecord { model, .. } => assert!(model.is_none()),

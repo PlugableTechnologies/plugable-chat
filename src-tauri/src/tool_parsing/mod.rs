@@ -57,7 +57,7 @@ use crate::settings::{ToolCallFormatConfig, ToolCallFormatName};
 // Re-export primary functions that were in tool_adapters.rs
 pub use common::parse_combined_tool_name;
 pub use python_detector::{detect_python_code, DetectedPythonCode};
-pub use result_formatter::format_tool_result;
+pub use result_formatter::{format_tool_result, strip_response_wrapper_echo};
 
 // Re-export parsers for direct use
 pub use hermes_parser::parse_hermes_tool_calls;

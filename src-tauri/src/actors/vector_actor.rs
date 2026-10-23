@@ -464,8 +464,20 @@ fn rows_from_batch(batch: &RecordBatch) -> Vec<ChatRow> {
 async fn read_all_rows(table: &Table) -> Vec<ChatRow> {
     let mut rows = Vec::new();
     if let Ok(mut stream) = table.query().execute().await {
-        while let Some(Ok(batch)) = stream.next().await {
-            rows.extend(rows_from_batch(&batch));
+        // A batch that cannot be read is skipped, not the end of the list: every chat after it
+        // would otherwise vanish from the sidebar.
+        let mut unreadable = 0;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(batch) => rows.extend(rows_from_batch(&batch)),
+                Err(e) => {
+                    println!("VectorActor WARNING: skipped an unreadable chat batch: {e}");
+                    unreadable += 1;
+                    if unreadable >= 3 {
+                        break; // a stream that keeps failing is not going to recover
+                    }
+                }
+            }
         }
     }
     rows
@@ -597,6 +609,15 @@ async fn upsert_chat_rows(chat_table: &Table, rows: &[ChatRow]) -> bool {
     };
 
     // delete-then-add: merge_insert is not used because of API issues in this lancedb version.
+    // What is replaced is read first, so a failed add can put the old chat back instead of
+    // leaving the user with none (the batch above is built before anything is deleted for the
+    // same reason).
+    let mut replaced = Vec::new();
+    for row in rows {
+        if let Some(old) = fetch_full_chat_record(chat_table.clone(), row.id.clone()).await {
+            replaced.push(old);
+        }
+    }
     for row in rows {
         if let Err(e) = chat_table.delete(&format!("id = '{}'", escape_sql(&row.id))).await {
             println!(
@@ -607,7 +628,7 @@ async fn upsert_chat_rows(chat_table: &Table, rows: &[ChatRow]) -> bool {
     }
 
     match chat_table
-        .add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
+        .add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema.clone())))
         .execute()
         .await
     {
@@ -617,8 +638,29 @@ async fn upsert_chat_rows(chat_table: &Table, rows: &[ChatRow]) -> bool {
         }
         Err(e) => {
             println!("VectorActor ERROR: Failed to add chat to LanceDB: {}", e);
+            restore_rows(chat_table, &schema, &replaced).await;
             false
         }
+    }
+}
+
+/// Put back rows an upsert deleted and could not replace. Best effort: the original error is
+/// what the caller sees.
+async fn restore_rows(chat_table: &Table, schema: &Arc<Schema>, old: &[ChatRow]) {
+    if old.is_empty() {
+        return;
+    }
+    let restored = match build_batch(schema.clone(), old) {
+        Ok(batch) => chat_table
+            .add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema.clone())))
+            .execute()
+            .await
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e),
+    };
+    match restored {
+        Ok(_) => println!("VectorActor: restored {} chat record(s) after a failed save", old.len()),
+        Err(e) => println!("VectorActor ERROR: could not restore {} chat record(s): {e}", old.len()),
     }
 }
 
@@ -694,6 +736,36 @@ mod tests {
         let all = read_all_rows(&table).await;
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].messages, "[1,2]");
+    }
+
+    #[tokio::test]
+    async fn rows_deleted_by_a_failed_upsert_are_put_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = new_table(dir.path()).await;
+        assert!(upsert_chat_rows(&table, &[row("c1", "[1,2,3]")]).await);
+        let before = fetch_full_chat_record(table.clone(), "c1".into()).await.unwrap();
+
+        // What upsert_chat_rows does between reading the old row and the add that failed.
+        table.delete("id = 'c1'").await.unwrap();
+        assert!(read_all_rows(&table).await.is_empty());
+        let schema = table.schema().await.unwrap();
+        restore_rows(&table, &schema, &[before]).await;
+
+        let all = read_all_rows(&table).await;
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].messages, "[1,2,3]");
+    }
+
+    #[tokio::test]
+    async fn a_save_that_replaces_a_chat_leaves_exactly_one_copy_with_the_new_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = new_table(dir.path()).await;
+        for n in 0..4 {
+            assert!(upsert_chat_rows(&table, &[row("c1", &format!("[{n}]"))]).await);
+        }
+        let all = read_all_rows(&table).await;
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].messages, "[3]");
     }
 
     #[test]

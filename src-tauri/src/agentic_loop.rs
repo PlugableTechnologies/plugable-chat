@@ -920,6 +920,10 @@ pub async fn run_agentic_loop(
             stream_elapsed.as_secs_f64()
         );
 
+        // A model that copies the tool-result wrapper into its answer must not have that saved
+        // and fed back to it next turn.
+        let model_response_text = crate::tool_parsing::strip_response_wrapper_echo(&model_response_text);
+
         // Always log the full response for debugging
         println!(
             "[AgenticLoop] Full model response:\n---\n{}\n---",
@@ -1043,6 +1047,9 @@ pub async fn run_agentic_loop(
             None,
         );
         full_history.push(assistant_msg);
+        // The model's side of this round is on disk before any tool runs (a tool that hangs or
+        // takes the app down no longer takes the round with it).
+        checkpoint_chat(&handles, &config, &full_history).await;
 
         // Execute each tool call
         let mut tool_results: Vec<(ParsedToolCall, String, bool)> = Vec::new();
@@ -1385,6 +1392,8 @@ pub async fn run_agentic_loop(
             });
         }
 
+        checkpoint_chat(&handles, &config, &full_history).await;
+
         // Check for repeated errors
         for (call, result, is_error) in &tool_results {
             if *is_error {
@@ -1512,6 +1521,23 @@ pub async fn run_agentic_loop(
     match app_handle.emit("chat-finished", ()) {
         Ok(_) => println!("[AgenticLoop] ✅ chat-finished event emitted successfully"),
         Err(e) => println!("[AgenticLoop] ❌ Failed to emit chat-finished: {}", e),
+    }
+}
+
+/// Save the transcript so far, without an embedding (the final save adds it). Called after each
+/// round of tool calls so a crash costs at most the reply being generated, not the whole turn.
+async fn checkpoint_chat(handles: &AgenticLoopHandles, config: &AgenticLoopConfig, full_history: &[ChatMessage]) {
+    let saved = crate::chat_persistence::save_chat(
+        &handles.vector_tx,
+        &config.chat_id,
+        &config.title,
+        full_history,
+        &config.model_name,
+        None,
+    )
+    .await;
+    if !saved {
+        println!("[AgenticLoop] WARNING: could not checkpoint chat {}", config.chat_id);
     }
 }
 
