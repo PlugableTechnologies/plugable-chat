@@ -371,6 +371,21 @@ async fn open_chats_table(db_path: &str, report_error: &StorageErrorReporter) ->
         Ok(table) => return Some(table),
         Err(e) => {
             println!("VectorActor ERROR: {e}");
+            // A damaged table in the real location would otherwise push every future chat into a
+            // temp folder. Move it aside (kept, never deleted) and start a fresh one in place.
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Ok(kept) = move_damaged_table_aside(std::path::Path::new(db_path), secs) {
+                if let Ok(table) = open_chats_table_at(db_path).await {
+                    report_error(format!(
+                        "Your saved chats could not be read ({e}). The old copy was kept at {} and a new chat history was started.",
+                        kept.display()
+                    ));
+                    return Some(table);
+                }
+            }
             let fallback = std::env::temp_dir().join("plugable-chat-lancedb");
             report_error(format!(
                 "Chat history could not be opened ({e}). Using a temporary location, so chats may not survive a restart."
@@ -395,6 +410,18 @@ async fn open_chats_table_at(db_path: &str) -> Result<Table, String> {
         .await
         .map_err(|e| format!("could not connect to chat storage at {db_path}: {e}"))?;
     ensure_chats_table_schema(&db_connection, std::path::Path::new(db_path)).await
+}
+
+/// Rename `<db_dir>/chats.lance` to `chats.lance.damaged-<secs>` so a fresh table can be created.
+/// Fails (leaving everything as it was) when there is nothing to move.
+fn move_damaged_table_aside(db_dir: &std::path::Path, unix_secs: u64) -> std::io::Result<std::path::PathBuf> {
+    let table_dir = db_dir.join("chats.lance");
+    let kept = db_dir.join(format!("chats.lance.damaged-{unix_secs}"));
+    if !table_dir.exists() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no chats table to move"));
+    }
+    std::fs::rename(&table_dir, &kept)?;
+    Ok(kept)
 }
 
 /// Name for the copy of an old table kept when its schema is replaced.
@@ -736,6 +763,23 @@ mod tests {
         let all = read_all_rows(&table).await;
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].messages, "[1,2]");
+    }
+
+    #[tokio::test]
+    async fn a_damaged_table_is_moved_aside_and_a_fresh_one_opens_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let table = new_table(dir.path()).await;
+            assert!(upsert_chat_rows(&table, &[row("c1", "[1]")]).await);
+        }
+        let kept = move_damaged_table_aside(dir.path(), 42).unwrap();
+        assert!(kept.ends_with("chats.lance.damaged-42") && kept.exists());
+        let fresh = new_table(dir.path()).await;
+        assert!(read_all_rows(&fresh).await.is_empty());
+        // Nothing left to move now that the fresh table is empty is still a real directory; a
+        // missing one is an error, not a panic.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(move_damaged_table_aside(empty.path(), 1).is_err());
     }
 
     #[tokio::test]
