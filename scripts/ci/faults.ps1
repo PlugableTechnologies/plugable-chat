@@ -302,7 +302,10 @@ Register "proxy-dead" "#1 #4" @("cpu") "HTTPS_PROXY points at a closed port: err
     $f += Get-RunFailures $run
     $f += Assert-Terminal $run.Records
     # Startup may end before the embedding step runs at all (see below), so only check it when it ran.
-    if (Get-LastPhase $run.Records "embedding") { $f += Assert-EmbeddingTruthful $run.Records (Get-EmbeddingFileCount) }
+    # Embedding now starts in parallel with startup and keeps retrying in the background, so the run may end
+    # with it still in progress; that is the intended behaviour (chat is usable), not a hang.
+    $emb = Get-LastPhase $run.Records "embedding"
+    if ($emb -and ((Test-StatusOk $emb) -or (Test-StatusError $emb))) { $f += Assert-EmbeddingTruthful $run.Records (Get-EmbeddingFileCount) }
     # With every outbound request refused the AI engine cannot fetch its catalog, so startup ends
     # on the "can't start" card before the embedding step; either record may carry the cause.
     # What matters: the text points at the network/proxy and never tells the user to reinstall.
