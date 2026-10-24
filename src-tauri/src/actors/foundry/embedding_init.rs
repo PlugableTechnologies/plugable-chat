@@ -155,7 +155,7 @@ pub fn describe_embedding_error(raw: &str) -> String {
         "A security certificate problem blocked the download (a proxy or firewall may be inspecting traffic)."
     } else if l.contains("proxy") {
         "The configured proxy could not be reached. Check the HTTPS_PROXY setting or your network."
-    } else if l.contains("dns") || l.contains("failed to lookup") || l.contains("resolve") || l.contains("os error 11001") || l.contains("no such host") {
+    } else if l.contains("dns error") || l.contains("failed to lookup") || l.contains("os error 11001") || l.contains("no such host") {
         "Could not reach huggingface.co: the name did not resolve. Check your internet connection or firewall."
     } else if l.contains("tls") || l.contains("ssl") || l.contains("handshake") {
         CONNECTION_INTERRUPTED_MESSAGE
@@ -463,6 +463,8 @@ mod tests {
         let d = |s: &str| describe_embedding_error(s);
         assert!(d("Failed to retrieve onnx/model.onnx: dns error: failed to lookup address").contains("did not resolve"));
         assert!(d("request error: Connection refused (os error 10061)").contains("Could not connect"));
+        // The model URL contains "resolve"; a refused connection must not be reported as a DNS failure.
+        assert!(d("Failed to retrieve onnx/model.onnx: request error: https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx: Connection Failed: Connect error: os error 10061").contains("Could not connect"));
         assert!(d("io error: There is not enough space on the disk. (os error 112)").contains("free disk space"));
         assert!(d("Access is denied. (os error 5)").contains("access denied"));
         assert!(d("invalid peer certificate: UnknownIssuer").contains("certificate"));

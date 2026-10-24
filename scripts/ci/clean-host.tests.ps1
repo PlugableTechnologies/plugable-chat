@@ -78,6 +78,7 @@ try {
     Check "embedding ok with model files passes" ((Assert-EmbeddingTruthful @((Rec "embedding" "ok")) 2).Count -eq 0)
     Check "embedding error with detail passes" ((Assert-EmbeddingTruthful @((Rec "embedding" "error" "boom")) 0).Count -eq 0)
     Check "embedding stuck in progress fails" ((Assert-EmbeddingTruthful @((Rec "embedding" "progress")) 0).Count -eq 1)
+    Check "embedding retrying after a reported error passes" ((Assert-EmbeddingTruthful @((Rec "embedding" "error" "boom"), (Rec "embedding" "started")) 0).Count -eq 0)
 
     # --- snapshots ---
     $d = Join-Path $tmp "snap"; New-Item -ItemType Directory -Path (Join-Path $d "sub") | Out-Null

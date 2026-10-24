@@ -105,7 +105,13 @@ function Assert-EmbeddingTruthful {
     if ($null -eq $e) { return @("phase 'embedding' never reported") }
     if ((Test-StatusOk $e) -and $ModelFileCount -lt 1) { return @("embedding reported ok but no model files exist in the cache (green check on a failure)") }
     if ((Test-StatusError $e) -and [string]::IsNullOrWhiteSpace([string]$e.detail)) { return @("embedding error has no detail") }
-    if (-not (Test-StatusOk $e) -and -not (Test-StatusError $e)) { return @("embedding ended in non-terminal status '$($e.status)'") }
+    if (-not (Test-StatusOk $e) -and -not (Test-StatusError $e)) {
+        # The app keeps retrying in the background after an error, so the last record can be a fresh
+        # attempt. That is fine when an earlier attempt reported an error with a cause (the user was told).
+        $failed = @($Records | Where-Object { $_.phase -eq "embedding" -and (Test-StatusError $_) -and -not [string]::IsNullOrWhiteSpace([string]$_.detail) })
+        if ($failed.Count -gt 0) { return @() }
+        return @("embedding ended in non-terminal status '$($e.status)'")
+    }
     return @()
 }
 
