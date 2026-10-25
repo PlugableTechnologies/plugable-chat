@@ -184,6 +184,22 @@ enum AttemptError {
     Fatal(String),
 }
 
+/// reqwest's Display stops at "error sending request for url (...)" and drops the cause (for example
+/// "os error 10054"), which is what tells a reset from a refusal; walk the source chain to keep it.
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(src) = cur {
+        let text = src.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cur = src.source();
+    }
+    out
+}
+
 fn status_is_retryable(status: reqwest::StatusCode) -> bool {
     status.is_server_error()
         || status == reqwest::StatusCode::REQUEST_TIMEOUT
@@ -206,7 +222,7 @@ async fn download_attempt(
     let mut response = request
         .send()
         .await
-        .map_err(|e| AttemptError::Retryable(format!("Toolbox download failed: {}", e)))?;
+        .map_err(|e| AttemptError::Retryable(format!("Toolbox download failed: {}", error_chain(&e))))?;
 
     let status = response.status();
     let (resume_from, total_bytes) = if status == reqwest::StatusCode::PARTIAL_CONTENT {
@@ -503,6 +519,23 @@ pub fn spawn_download_if_needed(app: &tauri::AppHandle, config: &crate::settings
 
 #[cfg(test)]
 mod tests {
+    #[derive(Debug)]
+    struct Outer(std::io::Error);
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "error sending request for url (https://huggingface.co/x)") }
+    }
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(&self.0) }
+    }
+
+    #[test]
+    fn error_chain_keeps_the_underlying_cause() {
+        let e = Outer(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "An existing connection was forcibly closed by the remote host. (os error 10054)"));
+        let text = super::error_chain(&e);
+        assert!(text.contains("os error 10054"), "{text}");
+        assert!(crate::actors::foundry::embedding_init::is_connection_reset(&text));
+    }
+
     use super::*;
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncReadExt;
