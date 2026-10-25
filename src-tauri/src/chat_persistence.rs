@@ -121,8 +121,45 @@ pub async fn embed_text(model: &SharedEmbeddingModel, text: String) -> Option<Ve
         .flatten()
 }
 
+/// How often the background loop looks for chats still waiting for an embedding.
+pub const BACKFILL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+static BACKFILL_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Embed each pending chat in turn and hand the vector to `store`. Stops at the first chat that
+/// cannot be embedded (the model went away) and reports how many were stored; the next pass
+/// picks up the rest.
+async fn backfill_pending<E, EF, S, SF>(pending: Vec<(String, String)>, mut embed: E, mut store: S) -> usize
+where
+    E: FnMut(String) -> EF,
+    EF: std::future::Future<Output = Option<Vec<f32>>>,
+    S: FnMut(String, Vec<f32>) -> SF,
+    SF: std::future::Future<Output = ()>,
+{
+    let mut stored = 0;
+    for (id, content) in pending {
+        match embed(content).await {
+            Some(vector) => {
+                store(id, vector).await;
+                stored += 1;
+            }
+            None => break,
+        }
+    }
+    stored
+}
+
 /// Fill in embeddings for chats that were saved while the embedding model was unavailable.
+/// Safe to call from several places (recovery, timer): overlapping calls do nothing.
 pub async fn backfill_embeddings(vector_tx: &mpsc::Sender<VectorMsg>, model: &SharedEmbeddingModel) {
+    if BACKFILL_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    backfill_embeddings_once(vector_tx, model).await;
+    BACKFILL_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+async fn backfill_embeddings_once(vector_tx: &mpsc::Sender<VectorMsg>, model: &SharedEmbeddingModel) {
     let (tx, rx) = oneshot::channel();
     if vector_tx
         .send(VectorMsg::ListChatsMissingEmbedding { respond_to: tx })
@@ -135,18 +172,37 @@ pub async fn backfill_embeddings(vector_tx: &mpsc::Sender<VectorMsg>, model: &Sh
     if pending.is_empty() {
         return;
     }
-    println!("[ChatPersistence] Backfilling embeddings for {} chat(s)", pending.len());
-    for (id, content) in pending {
-        match embed_text(model, content).await {
-            Some(vector) => {
-                let _ = vector_tx.send(VectorMsg::SetChatEmbedding { id, vector }).await;
-            }
-            None => {
-                println!("[ChatPersistence] embedder unavailable; stopping backfill");
-                return;
-            }
-        }
+    let total = pending.len();
+    println!("[ChatPersistence] Backfilling embeddings for {total} chat(s)");
+    let stored = backfill_pending(
+        pending,
+        |content| embed_text(model, content),
+        |id, vector| async move {
+            let _ = vector_tx.send(VectorMsg::SetChatEmbedding { id, vector }).await;
+        },
+    )
+    .await;
+    if stored < total {
+        println!("[ChatPersistence] embedder unavailable after {stored} of {total}; will retry");
     }
+}
+
+/// Keep trying to fill missing embeddings for the life of the app: a failed first pass, a model
+/// that arrives late (download finished, retry succeeded) and chats saved meanwhile are all
+/// picked up within `BACKFILL_INTERVAL`, without waiting for a restart.
+pub fn spawn_backfill_loop(app: tauri::AppHandle, model: SharedEmbeddingModel) {
+    use tauri::Manager;
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(BACKFILL_INTERVAL).await;
+            if model.read().await.is_none() {
+                continue;
+            }
+            let Some(handles) = app.try_state::<crate::app_state::ActorHandles>() else { continue };
+            let vector_tx = handles.vector_tx.clone();
+            backfill_embeddings(&vector_tx, &model).await;
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +266,44 @@ pub async fn flush_inflight(vector_tx: &mpsc::Sender<VectorMsg>, timeout: std::t
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc as TestArc, Mutex as TestMutex};
+
+    #[tokio::test]
+    async fn backfill_stops_at_first_failure_and_a_later_pass_finishes() {
+        let pending = vec![("a".to_string(), "x".to_string()), ("b".to_string(), "y".to_string()), ("c".to_string(), "z".to_string())];
+        let stored_ids = TestArc::new(TestMutex::new(Vec::<String>::new()));
+        let ids = stored_ids.clone();
+        // First pass: the model disappears after one chat.
+        let mut calls = 0;
+        let n = backfill_pending(
+            pending.clone(),
+            |_| {
+                calls += 1;
+                let ok = calls <= 1;
+                async move { ok.then(|| vec![1.0]) }
+            },
+            |id, _| {
+                let ids = ids.clone();
+                async move { ids.lock().unwrap().push(id) }
+            },
+        )
+        .await;
+        assert_eq!(n, 1);
+        // Second pass (timer / recovery): everything still missing is stored.
+        let ids = stored_ids.clone();
+        let n = backfill_pending(
+            pending[1..].to_vec(),
+            |_| async { Some(vec![1.0]) },
+            |id, _| {
+                let ids = ids.clone();
+                async move { ids.lock().unwrap().push(id) }
+            },
+        )
+        .await;
+        assert_eq!(n, 2);
+        assert_eq!(*stored_ids.lock().unwrap(), vec!["a", "b", "c"]);
+    }
+
     use super::*;
 
     fn msg(role: &str, content: &str) -> ChatMessage {

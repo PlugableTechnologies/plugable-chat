@@ -11,6 +11,7 @@ pub mod context_budget;
 pub mod download_cancel;
 pub mod failure_strikes;
 pub mod embedding_init;
+pub mod embedding_model_files;
 pub mod gpu_registration;
 mod model_gateway_actor;
 mod request_builder;

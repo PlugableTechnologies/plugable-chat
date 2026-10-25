@@ -125,12 +125,12 @@ interface SettingsState {
 
     // Modal state
     isSettingsOpen: boolean;
-    activeTab: 'models' | 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas' | 'files';
+    activeTab: 'models' | 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas' | 'files' | 'network';
 
     // Actions
     openSettings: () => void;
     closeSettings: () => void;
-    setActiveTab: (tab: 'models' | 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas' | 'files') => void;
+    setActiveTab: (tab: 'models' | 'system-prompt' | 'interfaces' | 'builtins' | 'tools' | 'databases' | 'schemas' | 'files' | 'network') => void;
 
     // Settings CRUD
     fetchSettings: () => Promise<void>;

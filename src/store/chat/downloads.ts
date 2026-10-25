@@ -18,6 +18,8 @@ export interface DownloadEntry {
     percent: number;
     error?: string;
     startTime: number;
+    /** When the percentage last went up (or the download started); drives stall detection. */
+    lastProgressAt?: number;
     cancelRequested?: boolean;
 }
 
@@ -54,6 +56,7 @@ export function reduceDownloads(map: DownloadsMap, action: DownloadAction, now: 
                     state: 'queued',
                     percent: 0,
                     startTime: now,
+                    lastProgressAt: now,
                 },
             };
         case 'started':
@@ -65,6 +68,7 @@ export function reduceDownloads(map: DownloadsMap, action: DownloadAction, now: 
                     state: prev.cancelRequested ? prev.state : 'active',
                     label: action.label ?? prev.label,
                     sizeBytes: action.sizeBytes ?? prev.sizeBytes,
+                    lastProgressAt: now,
                 },
             };
         case 'progress':
@@ -72,7 +76,12 @@ export function reduceDownloads(map: DownloadsMap, action: DownloadAction, now: 
             if (!prev || prev.state === 'done' || prev.state === 'cancelled' || prev.state === 'error') return map;
             return {
                 ...map,
-                [action.id]: { ...prev, state: 'active', percent: clamp(action.percent) },
+                [action.id]: {
+                    ...prev,
+                    state: 'active',
+                    percent: clamp(action.percent),
+                    lastProgressAt: clamp(action.percent) > prev.percent ? now : prev.lastProgressAt,
+                },
             };
         case 'done':
             return {
@@ -164,11 +173,11 @@ export function summarizeDownloads(map: DownloadsMap): OperationAction {
 }
 
 /** A download as a status-bar row (the row component is shared with the other operations). */
-export function downloadToOperationEntry(e: DownloadEntry): OperationEntry {
+export function downloadToOperationEntry(e: DownloadEntry, stalled = false): OperationEntry {
     const size = e.sizeBytes ? ` (${formatBytes(e.sizeBytes)})` : '';
     const message =
         e.state === 'queued' ? `Queued: ${e.label}${size}`
-        : e.state === 'active' ? `Downloading ${e.label}${size}`
+        : e.state === 'active' ? `Downloading ${e.label}${size}${stalled ? ' - no progress for a while' : ''}`
         : e.state === 'done' ? `${e.label} downloaded`
         : `Failed to download ${e.label}: ${e.error ?? 'unknown error'}`;
     return {
@@ -181,5 +190,6 @@ export function downloadToOperationEntry(e: DownloadEntry): OperationEntry {
         retryable: e.state === 'error',
         cancellable: e.state === 'queued' || e.state === 'active',
         cancelRequested: e.cancelRequested,
+        stalled,
     };
 }

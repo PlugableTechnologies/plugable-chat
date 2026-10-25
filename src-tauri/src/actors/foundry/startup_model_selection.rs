@@ -68,14 +68,15 @@ fn size_billions(id: &str) -> Option<f32> {
 
 /// Last resort: the best small model that is usable. Big models are never picked here (a 20B
 /// model on a small GPU is how this fallback once caused problems); CPU variants come first
-/// because they are what still works when the GPU runtime is the thing that broke.
+/// because they are what still works when the GPU runtime is the thing that broke. Models Plugable
+/// has verified (see `verified_models`) always come before untested ones.
 fn any_compatible<'a>(available: &'a [String], usable: &dyn Fn(&&'a String) -> bool) -> Option<&'a String> {
     let mut pool: Vec<&String> = available
         .iter()
         .filter(|m| usable(m))
         .filter(|m| size_billions(m).map(|b| b <= 12.0).unwrap_or(false))
         .collect();
-    pool.sort_by_key(|m| (!m.to_lowercase().contains("cpu"), size_billions(m).map(|b| (b * 10.0) as u32).unwrap_or(u32::MAX), m.to_lowercase()));
+    pool.sort_by_key(|m| (crate::verified_models::model_trust(m).rank(), !m.to_lowercase().contains("cpu"), size_billions(m).map(|b| (b * 10.0) as u32).unwrap_or(u32::MAX), m.to_lowercase()));
     pool.into_iter().next()
 }
 
@@ -246,6 +247,20 @@ mod tests {
         let blocked = |m: &str| m.contains("qwen3.5-4b") || m.contains("phi-4-mini");
         let sel = select_startup_model(None, None, &available, &blocked);
         assert_eq!(sel.selected_model, Some(("qwen3-1.7b-generic-cpu:2".to_string(), StartupModelSource::AnyCompatible)));
+    }
+
+    #[test]
+    fn the_last_resort_prefers_verified_models_over_untested_ones() {
+        let all_usable = |_: &&String| true;
+        // Untested CPU model vs a verified family (new build): verified wins despite being GPU.
+        let available = cached(&["qwen3-1.7b-generic-cpu:2", "qwen3.5-4b-generic-gpu:3"]);
+        assert_eq!(any_compatible(&available, &all_usable).map(String::as_str), Some("qwen3.5-4b-generic-gpu:3"));
+        // An exactly-tested build beats a new build of a verified family.
+        let available = cached(&["qwen3.5-4b-generic-cpu:3", "qwen3.5-4b-cuda-gpu:4"]);
+        assert_eq!(any_compatible(&available, &all_usable).map(String::as_str), Some("qwen3.5-4b-cuda-gpu:4"));
+        // With nothing verified the old order (CPU first, then smallest) still applies.
+        let available = cached(&["qwen3-4b-generic-gpu:1", "qwen3-1.7b-generic-cpu:2"]);
+        assert_eq!(any_compatible(&available, &all_usable).map(String::as_str), Some("qwen3-1.7b-generic-cpu:2"));
     }
 
     #[test]

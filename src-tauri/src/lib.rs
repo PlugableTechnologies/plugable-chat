@@ -20,9 +20,12 @@ pub mod chat_persistence;
 pub mod cli;
 pub mod crash_handler;
 pub mod demo_schema;
+pub mod download_guard;
 pub mod ep_probe;
 pub mod gpu_assessment;
 pub mod gpu_diagnostics;
+pub mod keyword_search;
+pub mod network_settings;
 pub mod preflight;
 pub mod message_builders;
 pub mod mid_turn_state;
@@ -49,6 +52,7 @@ pub mod tool_parsing;
 pub mod tool_capability;
 pub mod tool_registry;
 pub mod turn_record;
+pub mod verified_models;
 pub mod version_info;
 pub mod tools;
 pub mod commands;
@@ -600,6 +604,13 @@ async fn chat(
                         None
                     };
                     
+                    // Search model unavailable: pick columns by keyword instead of sending them all.
+                    let semantic_columns = match semantic_columns {
+                        None if user_prompt_embedding.is_none() => {
+                            crate::actors::schema_vector_actor::keyword_relevant_columns(&handles.schema_tx, &cached.fully_qualified_name, &message, SEMANTIC_COLUMN_SEARCH_LIMIT).await
+                        }
+                        other => other,
+                    };
                     // Use filtered schema to avoid overwhelming local models with massive column lists
                     let schema_text = build_filtered_schema_text(&cached, semantic_columns.as_ref());
                     
@@ -1573,6 +1584,13 @@ async fn get_system_prompt_preview(
                     None
                 };
                 
+                // Search model unavailable: pick columns by keyword instead of sending them all.
+                let semantic_columns = match semantic_columns {
+                    None if user_prompt_embedding.is_none() => {
+                        crate::actors::schema_vector_actor::keyword_relevant_columns(&handles.schema_tx, &cached.fully_qualified_name, &user_prompt, SEMANTIC_COLUMN_SEARCH_LIMIT).await
+                    }
+                    other => other,
+                };
                 // Use filtered schema to avoid overwhelming local models with massive column lists
                 let schema_text = build_filtered_schema_text(&cached, semantic_columns.as_ref());
                 
@@ -1865,6 +1883,24 @@ pub fn run() {
     if let Some(home) = cli_args.chat_home.as_deref().filter(|h| !h.is_empty()) {
         std::env::set_var(paths::HOME_OVERRIDE_ENV_VAR, home);
     }
+    // Proxy and Hugging Face mirror (Settings > Network, or --https-proxy / --hf-endpoint) reach the
+    // downloads through the environment, so they are set here, before any other thread exists.
+    {
+        let saved = network_settings::load_saved_blocking(&settings::get_settings_path());
+        let from_cli = network_settings::NetworkSettings {
+            https_proxy: cli_args.https_proxy.clone(),
+            hf_endpoint: cli_args.hf_endpoint.clone(),
+            offline_model_folder: cli_args.offline_model_folder.clone(),
+        }
+        .normalized();
+        let applied = network_settings::apply_launch_env(&saved.overlaid_with(&from_cli));
+        if let Some(folder) = &from_cli.offline_model_folder {
+            std::env::set_var(network_settings::OFFLINE_MODEL_FOLDER_ENV, folder);
+        }
+        if !applied.is_empty() {
+            app_log::log("launch", &format!("network settings applied: {}", applied.join(", ")));
+        }
+    }
     launch_marker::begin();
     run_state::begin();
     let cli_args_for_setup = cli_args.clone();
@@ -1936,6 +1972,8 @@ pub fn run() {
             let cpu_embedding_model_arc = embedding_model_state.cpu_model.clone();
             app.manage(embedding_model_state);
             let embedding_model_arc_for_python = cpu_embedding_model_arc.clone();
+            // Chats saved before the search model was ready get their embeddings later, on a timer.
+            chat_persistence::spawn_backfill_loop(app.handle().clone(), cpu_embedding_model_arc.clone());
 
             // Initialize shared tool registry
             let tool_registry = create_shared_registry();
@@ -2363,6 +2401,9 @@ pub fn run() {
             version_info::get_version_info,
             get_gpu_assessment,
             get_support_bundle,
+            get_network_settings,
+            save_network_settings,
+            test_network_connection,
             retry_gpu_registration,
             get_engine_health,
             repair_engine,

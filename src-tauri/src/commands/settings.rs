@@ -61,6 +61,9 @@ pub async fn save_app_settings(
     let mut guard = settings_state.settings.write().await;
     // One-way flag: a client that sends a stale copy of the settings must not un-complete it.
     normalized.first_run_completed = normalized.first_run_completed || guard.first_run_completed;
+    // Proxy, mirror and model folder change only through `save_network_settings`: a client that
+    // does not know these fields (an older copy of the settings) must not erase them.
+    normalized.network = guard.network.clone();
 
     // Save to file
     settings::save_settings(&normalized).await?;

@@ -3,6 +3,7 @@ import type { FoundryModelCardProps } from '../types';
 
 export function FoundryModelCard({
     model,
+    trustNote,
     isCached,
     isLoaded,
     isDownloading,
@@ -89,6 +90,12 @@ export function FoundryModelCard({
                     >
                         <AlertTriangle size={12} />
                         May not run here
+                    </span>
+                )}
+                {trustNote && (
+                    <span className="model-trust-note text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600 flex items-center gap-1" title={trustNote}>
+                        <AlertTriangle size={12} />
+                        {trustNote}
                     </span>
                 )}
                 {isCached && (

@@ -141,7 +141,7 @@ function ChatItem({
 export function Sidebar({ className = "" }: SidebarProps) {
     const {
         history, fetchHistory, loadChat, deleteChat, renameChat, togglePin, currentChatId,
-        relevanceResults, isSearchingRelevance, chatInputValue, streamingChatId, assistantStreamingActive
+        relevanceResults, relevanceSearchModeLabel, isSearchingRelevance, chatInputValue, streamingChatId, assistantStreamingActive
     } = useChatStore();
 
     const [editingId, setEditingId] = useState<string | null>(null);
@@ -267,6 +267,11 @@ export function Sidebar({ className = "" }: SidebarProps) {
                             <Search size={10} />
                             <span>Relevant</span>
                             {isSearchingRelevance && <Loader2 size={10} className="animate-spin" />}
+                        </div>
+                    )}
+                    {isShowingRelevance && relevanceSearchModeLabel && (
+                        <div className="sidebar-search-mode-label text-xs text-amber-700 mb-2 px-3" data-testid="sidebar-search-mode-label">
+                            {relevanceSearchModeLabel}
                         </div>
                     )}
                     <div className="space-y-0.5">

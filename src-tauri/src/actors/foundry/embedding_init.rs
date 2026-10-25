@@ -1,15 +1,17 @@
 //! CPU embedding model start-up, shared by the first-run path and the `retry_embedding_init`
 //! command.
 //!
-//! The model (BGE-Base-EN-v1.5, a few hundred MB) is downloaded from Hugging Face on first run.
-//! hf-hub honours `HTTPS_PROXY` / `ALL_PROXY` and `HF_ENDPOINT` from the environment, so a
-//! corporate proxy needs no extra code here.
+//! The model (BGE-Base-EN-v1.5, a few hundred MB) is loaded from pinned, SHA-256-verified files in
+//! the user's data folder. Missing files come from a folder the user chose, the project's GitHub
+//! release, or Hugging Face at the pinned revision, in that order (see `embedding_model_files`).
+//! `HTTPS_PROXY` and `HF_ENDPOINT` from the environment are honoured by the downloads.
 
 use crate::crash_handler::SuppressCrashDialogGuard;
 use crate::actors::startup_actor::StartupMsg;
 use crate::protocol::ResourceStatus;
 use crate::test_state::{self, Phase};
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use super::embedding_model_files as model_files;
+use fastembed::TextEmbedding;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -139,7 +141,7 @@ pub fn is_connection_reset(raw: &str) -> bool {
 }
 
 /// Message shown when the connection to Hugging Face is cut part-way.
-pub const CONNECTION_INTERRUPTED_MESSAGE: &str = "The connection to huggingface.co was interrupted - a firewall, antivirus or proxy may be blocking it (allow huggingface.co and cdn-lfs.huggingface.co).";
+pub const CONNECTION_INTERRUPTED_MESSAGE: &str = "The connection to huggingface.co was interrupted - a firewall, antivirus or proxy may be blocking it (allow huggingface.co, cdn-lfs.huggingface.co and github.com, or choose a mirror or model folder in Settings > Network).";
 
 /// Turn the raw download/initialisation error into a message that names the likely cause, then
 /// keeps the original text for support. The raw text alone ("Failed to retrieve
@@ -187,6 +189,22 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     } else {
         "Unknown panic".to_string()
     }
+}
+
+/// The model folder the user chose in Settings > Network (or `PLUGABLE_OFFLINE_MODEL_FOLDER`).
+async fn offline_model_folder(app: &AppHandle) -> Option<std::path::PathBuf> {
+    // The command line (which sets the environment variable at launch) beats the saved setting.
+    let from_env = std::env::var(crate::network_settings::OFFLINE_MODEL_FOLDER_ENV).ok();
+    let from_settings = match app.try_state::<crate::app_state::SettingsState>() {
+        Some(state) => state.settings.read().await.network.offline_model_folder.clone(),
+        None => None,
+    };
+    from_env
+        .into_iter()
+        .chain(from_settings)
+        .map(|v| v.trim().to_string())
+        .find(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 /// Load the CPU embedding model into `shared`. Returns the user-facing error on failure.
@@ -293,20 +311,26 @@ async fn init_inner(app: &AppHandle, shared: &SharedEmbeddingModel) -> Result<()
     emit_progress(app, "Initializing CPU embedding model...", false, false);
     test_state::record(Phase::Embedding, test_state::status::STARTED, "initializing");
 
-    // fastembed defaults to a cwd-relative `.fastembed_cache`; for a per-machine install cwd is
-    // Program Files, which a standard user cannot write, so the model download fails with
-    // "Failed to retrieve onnx/model.onnx". Pin it to a writable per-user dir.
+    // The cache folder must be writable per user (never Program Files); fall back if the preferred one is not.
     let cache = crate::paths::ensure_writable_dir(crate::paths::get_embedding_cache_dir(), "fastembed").await;
     let cache_path = cache.path.clone();
-    // hf-hub reads HF_HOME. It is set once at launch (see `lib.rs`), before any thread exists:
-    // changing the environment while other threads run is not safe. Only a fallback folder, chosen
-    // because the preferred one is not writable, differs from that and needs it set here.
+    // Kept for the earlier fastembed/hf-hub layout: its files are reused when their hashes match.
     let wanted_home = cache_path.join("hf");
     if std::env::var_os("HF_HOME").map(std::path::PathBuf::from).as_deref() != Some(wanted_home.as_path()) {
         std::env::set_var("HF_HOME", &wanted_home);
     }
 
+    let manifest = model_files::ModelManifest::pinned();
+    let model_dir = cache_path.join(manifest.dir_name());
+    // Read at every start of the load, so Retry picks up a folder the user has just chosen.
+    let offline_folder = offline_model_folder(app).await;
+    let restriction = model_files::test_restriction_from_env();
+    let endpoints = model_files::Endpoints::from_env();
+    let runtime = tokio::runtime::Handle::current();
+    let progress_app = app.clone();
+
     let attempt_cache = cache_path.clone();
+    let attempt_model_dir = model_dir.clone();
     let joined = tokio::task::spawn_blocking(move || {
         let _guard = SuppressCrashDialogGuard::new();
         run_attempts(ATTEMPTS, BASE_DELAY, |attempt| {
@@ -314,36 +338,52 @@ async fn init_inner(app: &AppHandle, shared: &SharedEmbeddingModel) -> Result<()
                 let n = clear_stale_download_files(&attempt_cache);
                 crate::app_log::log("embedding", &format!("cleared {n} lock/empty file(s) before attempt {} (partial downloads kept so they resume)", attempt + 1));
             }
-            let options = InitOptions::new(EmbeddingModel::BGEBaseENV15)
-                .with_cache_dir(attempt_cache.clone())
-                .with_show_download_progress(true);
-            // `{e:#}` includes the whole cause chain, which is where the real reason lives.
-            let model = TextEmbedding::try_new(options).map_err(|e| {
-                let raw = format!("{e:#}");
-                // Bad bytes (not a bad network) must not be resumed: start the download afresh.
+            let sources = model_files::plan_sources(
+                offline_folder.as_deref(),
+                &model_files::legacy_snapshot_dirs(&attempt_cache, manifest),
+                restriction.as_deref(),
+            );
+            let mut last_percent = u64::MAX;
+            let report = runtime.block_on(model_files::ensure_model_files(
+                manifest,
+                &attempt_model_dir,
+                &sources,
+                &endpoints,
+                &model_files::model_download_policy(),
+                &mut |file, done, total| {
+                    let percent = if total == 0 { 0 } else { done * 100 / total };
+                    if percent != last_percent {
+                        last_percent = percent;
+                        emit_progress(&progress_app, &format!("Downloading search model ({file}) {percent}%"), false, false);
+                    }
+                },
+            ))?;
+            crate::app_log::log("embedding", &format!("search model files ready: {}", report.summary()));
+            let model = model_files::load_text_embedding(manifest, &attempt_model_dir).map_err(|raw| {
+                // The files passed their checksums, so this is an engine problem, but start afresh anyway.
                 if error_means_corrupt_model(&raw) {
-                    let n = clear_model_cache(&attempt_cache);
-                    return format!("{raw}; the cached model looks corrupt, removed {n} cached item(s) to download it again");
+                    let n = clear_model_cache(&attempt_model_dir);
+                    return format!("{raw}; the model looks corrupt, removed {n} item(s) to fetch it again");
                 }
                 raw
             })?;
             // Loading is not working: embed a sentence before declaring success.
             let check = model.embed(vec!["plugable chat self-check"], None).map_err(|e| format!("{e:#}")).and_then(|out| validate_embeddings(&out));
             if let Err(why) = check {
-                let n = clear_model_cache(&attempt_cache);
-                return Err(format!("the downloaded model failed its self-check ({why}); removed {n} cached item(s) to download it again"));
+                let n = clear_model_cache(&attempt_model_dir);
+                return Err(format!("the search model failed its self-check ({why}); removed {n} item(s) to fetch it again"));
             }
-            Ok(model)
+            Ok((model, report.summary()))
         })
     })
     .await;
 
     let failure = match joined {
-        Ok(Ok(model)) => {
-            crate::app_log::log("embedding", "CPU embedding model loaded and verified");
+        Ok(Ok((model, origin))) => {
+            crate::app_log::log("embedding", &format!("CPU embedding model loaded and verified (files from: {origin})"));
             *shared.write().await = Some(Arc::new(model));
             emit_progress(app, ALREADY_LOADED_MESSAGE, true, false);
-            test_state::record(Phase::Embedding, test_state::status::OK, "loaded");
+            test_state::record(Phase::Embedding, test_state::status::OK, &format!("loaded from {origin}"));
             if let Some(handles) = app.try_state::<crate::app_state::ActorHandles>() {
                 let vector_tx = handles.vector_tx.clone();
                 let model = Arc::clone(shared);

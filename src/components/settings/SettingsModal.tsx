@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { X, Save, Loader2, RotateCcw, Cpu, Server, Code2, Wrench, MessageSquare, Database, HardDrive } from 'lucide-react';
+import { X, Save, Loader2, RotateCcw, Cpu, Server, Code2, Wrench, MessageSquare, Database, HardDrive, Wifi } from 'lucide-react';
 import { useSettingsStore } from '../../store/settings-store';
 import { ModelsTab } from './tabs/ModelsTab';
 import { SystemPromptTab } from './tabs/SystemPromptTab';
@@ -9,6 +9,7 @@ import { ToolsTab } from './tabs/ToolsTab';
 import { SchemasTab } from './tabs/SchemasTab';
 import { FilesTab } from './tabs/FilesTab';
 import { DatabasesTab } from './tabs/DatabasesTab';
+import { NetworkSettingsPanel } from './NetworkSettingsPanel';
 import { VersionFooter } from './common/VersionFooter';
 
 export function SettingsModal() {
@@ -149,7 +150,7 @@ export function SettingsModal() {
                                 Reset
                             </button>
                         )}
-                        {activeTab && (
+                        {activeTab && activeTab !== 'network' && (
                             <button
                                 onClick={handleHeaderSave}
                                 disabled={!isCurrentTabDirty || isCurrentTabSaving}
@@ -250,6 +251,16 @@ export function SettingsModal() {
                         <HardDrive size={16} />
                         Files
                     </button>
+                    <button
+                        onClick={() => setActiveTab('network')}
+                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'network'
+                            ? 'border-blue-500 text-blue-600'
+                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <Wifi size={16} />
+                        Network
+                    </button>
                 </div>
 
                 {/* Content */}
@@ -304,6 +315,9 @@ export function SettingsModal() {
                             )}
                             {activeTab === 'files' && (
                                 <FilesTab />
+                            )}
+                            {activeTab === 'network' && (
+                                <NetworkSettingsPanel />
                             )}
                         </>
                     )}

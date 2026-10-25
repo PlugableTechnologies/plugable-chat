@@ -10,6 +10,7 @@ import { AlertTriangle, X } from "lucide-react";
 import { formatBytes } from "./store/chat/operations";
 import { buildWelcomeMessage } from "./store/chat/welcome-message";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { groupByTrust, EXPERIMENTAL_SECTION_TITLE, VERIFIED_SECTION_TITLE } from "./lib/verified-models";
 
 // Full-pane card for catastrophic failures (the AI engine cannot start). The backend writes the
 // whole message in plain language, so this only renders it, makes links clickable and lets the
@@ -539,13 +540,22 @@ function App() {
                   title="Select a cached model"
                   disabled={operationStatus?.type === 'loading' || operationStatus?.type === 'downloading'}
                 >
-                  {cachedModels.map((model) => {
-                    return (
+                  {(() => {
+                    const { verified, experimental } = groupByTrust(cachedModels, (m) => m.model_id);
+                    const option = (model: (typeof cachedModels)[number]) => (
                       <option key={model.model_id} value={model.model_id}>
                         {model.alias}{currentModel === model.model_id ? ' ✓' : ''}
                       </option>
                     );
-                  })}
+                    // No grouping needed when every model is verified.
+                    if (experimental.length === 0) return verified.map(option);
+                    return (
+                      <>
+                        {verified.length > 0 && <optgroup label={VERIFIED_SECTION_TITLE}>{verified.map(option)}</optgroup>}
+                        <optgroup label={`${EXPERIMENTAL_SECTION_TITLE} - may be slow or unreliable`}>{experimental.map(option)}</optgroup>
+                      </>
+                    );
+                  })()}
                 </select>
                 {hasToolCalling && (
                   <button 

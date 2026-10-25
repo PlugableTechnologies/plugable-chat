@@ -22,6 +22,8 @@ export type ModelDeviceFilter = 'Auto' | 'CPU' | 'GPU' | 'NPU';
 // Props for the Foundry model card component
 export interface FoundryModelCardProps {
     model: FoundryCatalogModel;
+    /** Why this model is not on the verified list (see lib/verified-models); null when verified */
+    trustNote?: string | null;
     isCached: boolean;
     isLoaded: boolean;
     isDownloading: boolean;

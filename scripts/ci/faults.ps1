@@ -41,6 +41,9 @@ $Exe = Join-Path $InstallDir "plugable-chat.exe"
 $HostsFile = Join-Path $env:SystemRoot "System32\drivers\etc\hosts"
 $HfHosts = @("huggingface.co", "www.huggingface.co", "cdn-lfs.huggingface.co", "cdn-lfs-us-1.huggingface.co",
     "hf.co", "cdn-lfs.hf.co", "cas-bridge.xethub.hf.co", "transfer.xethub.hf.co") + $ExtraBlockHosts
+# Since the search model also ships as a GitHub release asset, the scenarios that are about huggingface.co
+# failing must leave Hugging Face as the only source (a test seam, honoured only under PLUGABLE_CHAT_TEST_STATE).
+$HfOnly = @{ PLUGABLE_CHAT_TEST_EMBEDDING_SOURCES = "huggingface" }
 
 # ------------------------------------------------------------------------------------------
 # host plumbing
@@ -284,12 +287,12 @@ Register "offline-hosts-block" "#1 #3" @("cpu") "huggingface.co blocked via the 
     param($ctx)
     $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
     $f += @(Invoke-WithHostsBlock $ctx {
-            $run = Invoke-Smoke $ctx
+            $run = Invoke-Smoke $ctx -EnvVars $HfOnly
             Get-RunFailures $run
             Assert-Terminal $run.Records
             Assert-EmbeddingTruthful $run.Records (Get-EmbeddingFileCount)
-            # With no model bundled this must be an error that names the cause. (If the embedding
-            # model is later bundled in the installer, flip this to Assert-PhaseOk.)
+            # Hugging Face is the only source here ($HfOnly), so this must be an error that names the cause.
+            # With the release copy allowed it loads instead: see embedding-no-huggingface.
             Assert-PhaseError $run.Records "embedding" "(?i)network|offline|connect|resolve|internet|huggingface|download"
         })
     return @{ Failures = $f }
@@ -570,7 +573,7 @@ Register "embedding-first-run-contention" "Bob: first-start embedding error (R6,
         Add-Content -LiteralPath $HostsFile -Value ($HfHosts | ForEach-Object { "127.0.0.1 $_" })
         ipconfig /flushdns | Out-Null
         # The hook runs once a second with the records so far: it lifts the block after 25 s and never kills the app.
-        $run = Invoke-Smoke $ctx -KillWhen {
+        $run = Invoke-Smoke $ctx -EnvVars $HfOnly -KillWhen {
             param($recs)
             if (-not $script:contentionUnblocked -and $script:contentionClock.Elapsed.TotalSeconds -gt 25) {
                 Copy-Item -LiteralPath $backup -Destination $HostsFile -Force
@@ -608,7 +611,7 @@ Register "embedding-tls-reset-recovers" "rc16 Bob: TLS connection resets (os err
         Add-Content -LiteralPath $HostsFile -Value ($HfHosts | ForEach-Object { "127.0.0.1 $_" })
         ipconfig /flushdns | Out-Null
         # Not --smoke: smoke ends at the first embedding failure, and this scenario is about what happens after it.
-        $run = Invoke-Smoke $ctx -NoSmoke -TimeoutSec 900 -KillWhen {
+        $run = Invoke-Smoke $ctx -NoSmoke -TimeoutSec 900 -EnvVars $HfOnly -KillWhen {
             param($recs)
             $emb = @($recs | Where-Object { $_.phase -eq "embedding" })
             $failedSeen = @($emb | Where-Object { "$($_.status)" -eq "failed" }).Count -gt 0
@@ -636,6 +639,40 @@ Register "embedding-tls-reset-recovers" "rc16 Bob: TLS connection resets (os err
     elseif ("$($failed[0].detail)" -match "(?i)certificate problem") { $f += "a connection reset was reported as a certificate problem: '$($failed[0].detail)'" }
     $f += Assert-PhaseOk $run.Records "embedding"
     if ((Get-EmbeddingFileCount) -lt 1) { $f += "no embedding model files under the user's data directory after recovery" }
+    return @{ Failures = $f }
+}
+
+Register "embedding-no-huggingface" "rc17 Bob: huggingface.co unreachable for good" @("cpu") "huggingface.co is blocked for the whole run (hosts file): the search model must load from the project's GitHub release asset, and, with the release also unavailable, from a folder the user chose; chat must be usable and embedding must end ok" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $modelRoot = Join-Path $env:LOCALAPPDATA "plugable-chat\data\models\fastembed"
+    $f += @(Invoke-WithHostsBlock $ctx {
+            # 1. Hugging Face blocked, the release reachable: the model comes from the GitHub release.
+            $run = Invoke-Smoke $ctx
+            Get-RunFailures $run
+            Assert-Terminal $run.Records
+            Assert-PhaseOk $run.Records "embedding"
+            Assert-PhaseOk $run.Records "ready"
+            $e = Get-LastPhase $run.Records "embedding"
+            if ($e -and ("$($e.detail)" -notmatch "(?i)release")) { "the search model loaded, but not from the release asset: '$($e.detail)'" }
+            if ((Get-EmbeddingFileCount) -lt 1) { "no embedding model files under the user's data directory after loading from the release" }
+
+            # 2. Only a local folder allowed (a user who copied the files by hand): same files, no network at all.
+            $pinned = Get-ChildItem -LiteralPath $modelRoot -Directory -Filter "bge-base-en-v1.5-*" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $pinned) { "no pinned model folder under $modelRoot to reuse as the user's folder"; return }
+            $userFolder = Join-Path $ctx.Dir "user-model-folder"
+            Copy-Item -LiteralPath $pinned.FullName -Destination $userFolder -Recurse -Force
+            Stop-App
+            Remove-Item -LiteralPath $modelRoot -Recurse -Force -ErrorAction SilentlyContinue
+            if ((Get-EmbeddingFileCount) -ne 0) { "could not remove the downloaded model before the folder test" ; return }
+            $run2 = Invoke-Smoke $ctx -EnvVars @{ PLUGABLE_CHAT_TEST_EMBEDDING_SOURCES = "local"; PLUGABLE_OFFLINE_MODEL_FOLDER = $userFolder }
+            Get-RunFailures $run2
+            Assert-Terminal $run2.Records
+            Assert-PhaseOk $run2.Records "embedding"
+            Assert-PhaseOk $run2.Records "ready"
+            $e2 = Get-LastPhase $run2.Records "embedding"
+            if ($e2 -and ("$($e2.detail)" -notmatch "(?i)folder you chose")) { "the search model did not come from the folder the user chose: '$($e2.detail)'" }
+        })
     return @{ Failures = $f }
 }
 

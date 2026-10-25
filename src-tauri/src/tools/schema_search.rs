@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
-use crate::actors::schema_vector_actor::{SchemaVectorMsg, SchemaStoreStats};
+use crate::actors::schema_vector_actor::{ColumnSearchResult, SchemaVectorMsg, SchemaStoreStats};
 use crate::settings::CachedColumnSchema;
 
 /// Returns true if the SQL data type is numeric.
@@ -230,24 +230,36 @@ impl SchemaSearchExecutor {
         }
 
         // Get the embedding model
+        // Without the embedding model (still downloading, or it failed to start) rank by words
+        // instead of failing; the answer says so.
         let model_guard = self.embedding_model.read().await;
-        let embedding_model = model_guard
-            .clone()
-            .ok_or_else(|| "Embedding model not initialized".to_string())?;
+        let embedding_model = model_guard.clone();
         drop(model_guard);
+        let keyword_only = embedding_model.is_none();
 
         // Generate embedding for the query
-        let query_embedding = self.embed_query(&input.query, &embedding_model)?;
+        let query_embedding: Option<Vec<f32>> = match &embedding_model {
+            Some(model) => Some(self.embed_query(&input.query, model)?),
+            None => None,
+        };
 
         // Search for matching tables
         let (table_tx, table_rx) = oneshot::channel();
-        self.schema_tx
-            .send(SchemaVectorMsg::SearchTables {
-                query_embedding: query_embedding.clone(),
+        let table_request = match &query_embedding {
+            Some(embedding) => SchemaVectorMsg::SearchTables {
+                query_embedding: embedding.clone(),
                 limit: input.max_tables,
                 min_score: min_relevance,
                 respond_to: table_tx,
-            })
+            },
+            None => SchemaVectorMsg::SearchTablesByKeyword {
+                query: input.query.clone(),
+                limit: input.max_tables,
+                respond_to: table_tx,
+            },
+        };
+        self.schema_tx
+            .send(table_request)
             .await
             .map_err(|e| format!("Failed to send search request: {}", e))?;
 
@@ -301,12 +313,13 @@ impl SchemaSearchExecutor {
                 if !numeric_cols.is_empty() {
                     let (col_tx, col_rx) = oneshot::channel();
                     self.schema_tx
-                        .send(SchemaVectorMsg::SearchColumns {
-                            query_embedding: query_embedding.clone(),
-                            table_fq_name: Some(table.table_fq_name.clone()),
-                            limit: input.max_columns_per_table,
-                            respond_to: col_tx,
-                        })
+                        .send(self.column_search_request(
+                            &query_embedding,
+                            &input.query,
+                            &table.table_fq_name,
+                            input.max_columns_per_table,
+                            col_tx,
+                        ))
                         .await
                         .map_err(|e| format!("Failed to search columns: {}", e))?;
 
@@ -349,12 +362,13 @@ impl SchemaSearchExecutor {
                 );
                 let (col_tx, col_rx) = oneshot::channel();
                 self.schema_tx
-                    .send(SchemaVectorMsg::SearchColumns {
-                        query_embedding: query_embedding.clone(),
-                        table_fq_name: Some(table.table_fq_name.clone()),
-                        limit: input.max_columns_per_table,
-                        respond_to: col_tx,
-                    })
+                    .send(self.column_search_request(
+                        &query_embedding,
+                        &input.query,
+                        &table.table_fq_name,
+                        input.max_columns_per_table,
+                        col_tx,
+                    ))
                     .await
                     .map_err(|e| format!("Failed to search columns: {}", e))?;
 
@@ -386,13 +400,41 @@ impl SchemaSearchExecutor {
         }
 
         // Generate summary
-        let summary = self.generate_summary(&output_tables, &input.query);
+        let mut summary = self.generate_summary(&output_tables, &input.query);
+        if keyword_only {
+            summary = format!("({}.)\n\n{}", crate::keyword_search::KEYWORD_ONLY_LABEL, summary);
+        }
 
         Ok(SchemaSearchOutput {
             tables: output_tables,
             query_used: input.query,
             summary,
         })
+    }
+
+    /// Column search by embedding when we have one, by words otherwise.
+    fn column_search_request(
+        &self,
+        query_embedding: &Option<Vec<f32>>,
+        query: &str,
+        table_fq_name: &str,
+        limit: usize,
+        respond_to: oneshot::Sender<Vec<ColumnSearchResult>>,
+    ) -> SchemaVectorMsg {
+        match query_embedding {
+            Some(embedding) => SchemaVectorMsg::SearchColumns {
+                query_embedding: embedding.clone(),
+                table_fq_name: Some(table_fq_name.to_string()),
+                limit,
+                respond_to,
+            },
+            None => SchemaVectorMsg::SearchColumnsByKeyword {
+                query: query.to_string(),
+                table_fq_name: Some(table_fq_name.to_string()),
+                limit,
+                respond_to,
+            },
+        }
     }
 
     /// Embed a query string

@@ -82,6 +82,10 @@ impl ChatVectorStoreActor {
                             search_chats_by_embedding(chat_table, query_vector, limit).await;
                         let _ = respond_to.send(search_results);
                     }
+                    VectorMsg::SearchChatsByKeyword { query, limit, respond_to } => {
+                        let rows = read_all_rows(&chat_table).await;
+                        let _ = respond_to.send(rank_chat_rows_by_keyword(&rows, &query, limit));
+                    }
                     VectorMsg::FetchAllChats { respond_to } => {
                         let zero_embedding_vector = vec![0.0; CHAT_VECTOR_DIM];
                         let search_results =
@@ -117,7 +121,9 @@ fn is_write(msg: &VectorMsg) -> bool {
 fn reply_unavailable(msg: VectorMsg) {
     println!("VectorActor ERROR: chat storage unavailable; request dropped");
     match msg {
-        VectorMsg::SearchChatsByEmbedding { respond_to, .. } | VectorMsg::FetchAllChats { respond_to } => {
+        VectorMsg::SearchChatsByEmbedding { respond_to, .. }
+        | VectorMsg::SearchChatsByKeyword { respond_to, .. }
+        | VectorMsg::FetchAllChats { respond_to } => {
             let _ = respond_to.send(Vec::new());
         }
         VectorMsg::FetchChatMessages { respond_to, .. } => {
@@ -720,9 +726,49 @@ async fn list_chats_missing_embedding(chat_table: &Table) -> Vec<(String, String
         .collect()
 }
 
+/// Keyword fallback for the sidebar search (used while the embedding model is unavailable).
+/// Title and content are both searched; the title counts twice so a title hit ranks higher.
+pub fn rank_chat_rows_by_keyword(rows: &[ChatRow], query: &str, limit: usize) -> Vec<ChatSummary> {
+    let docs: Vec<String> = rows.iter().map(|r| format!("{} {} {}", r.title, r.title, r.content)).collect();
+    crate::keyword_search::rank_by_keywords(&docs, query, limit)
+        .into_iter()
+        .map(|(i, score)| {
+            let r = &rows[i];
+            let preview = if r.content.chars().count() > 50 {
+                format!("{}...", r.content.chars().take(50).collect::<String>())
+            } else {
+                r.content.clone()
+            };
+            ChatSummary {
+                id: r.id.clone(),
+                title: r.title.clone(),
+                preview,
+                score,
+                pinned: r.pinned,
+                model: r.model.clone(),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyword_search_finds_chats_by_title_and_content() {
+        let mut a = row("a", "[]");
+        a.title = "Chicago arrests".into();
+        a.content = "User: how many arrests".into();
+        let mut b = row("b", "[]");
+        b.title = "Recipes".into();
+        b.content = "User: pasta with garlic".into();
+        let hits = rank_chat_rows_by_keyword(&[a, b], "garlic", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "b");
+        let hits = rank_chat_rows_by_keyword(&[row("x", "[]")], "nomatchword", 10);
+        assert!(hits.is_empty());
+    }
 
     fn row(id: &str, messages: &str) -> ChatRow {
         ChatRow {

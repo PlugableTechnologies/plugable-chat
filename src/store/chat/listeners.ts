@@ -21,6 +21,7 @@ import { parseFoundryModelStateEvent } from './helpers';
 import type { EpRegistrationProgressEvent } from './ep-registration-status';
 import type { GpuAssessment } from '../../lib/gpu-assessment';
 import { DEFAULT_MODEL_TO_DOWNLOAD } from './constants';
+import { searchModeLabel, type SearchModePayload } from '../../lib/search-mode';
 
 // Helper to log to backend terminal for debugging
 const logToBackend = (message: string) => {
@@ -106,6 +107,7 @@ interface ListenerSliceDeps {
     
     // History
     isSearchingRelevance: boolean;
+    relevanceSearchModeLabel: string | null;
     
     // Startup/handshake state
     handshakeComplete: boolean;
@@ -883,6 +885,11 @@ export const createListenerSlice: StateCreator<
                 }
             });
 
+            const sidebarSearchModeListener = await listen<SearchModePayload>('sidebar-search-mode', (event) => {
+                set({ relevanceSearchModeLabel: searchModeLabel(event.payload) } as any);
+            });
+            const unlistenSidebarSearch = () => { sidebarUpdateListener(); sidebarSearchModeListener(); };
+
             // Model stuck listener
             const modelStuckListener = await listen<{ pattern: string; repetitions: number; score: number }>('model-stuck', (event) => {
                 const { pattern, repetitions } = event.payload;
@@ -1223,7 +1230,7 @@ export const createListenerSlice: StateCreator<
                 chatNoticeListener();
                 toolBlockedListener();
                 chatSavedListener();
-                sidebarUpdateListener();
+                unlistenSidebarSearch();
                 toolCallsPendingListener();
                 toolExecutingListener();
                 toolResultListener();
@@ -1272,7 +1279,7 @@ export const createListenerSlice: StateCreator<
             unlistenToolLoopFinished = toolLoopFinishedListener;
             unlistenSystemPrompt = systemPromptListener;
             unlistenChatSaved = chatSavedListener;
-            unlistenSidebarUpdate = sidebarUpdateListener;
+            unlistenSidebarUpdate = unlistenSidebarSearch;
             unlistenModelStuck = modelStuckListener;
             unlistenModelFallback = modelFallbackListener;
             unlistenChatNotice = chatNoticeListener;

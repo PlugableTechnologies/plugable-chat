@@ -3,7 +3,8 @@ import { X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listOperations, formatBytes, describeOperationError, type OperationEntry } from '../store/chat/operations';
 import { startupBarModel, searchFeaturesUnavailable, SEARCH_UNAVAILABLE_CHIP_TEXT } from '../store/chat/startup-display';
-import { downloadToOperationEntry, listDownloads } from '../store/chat/downloads';
+import { downloadToOperationEntry, listDownloads, type DownloadEntry } from '../store/chat/downloads';
+import { isDownloadStalled, smallerModelButtonText, smallerModelOffer } from '../store/chat/download-recovery';
 import { fallbackQuestion, findCachedFallback } from '../store/chat/fallback';
 import { GpuAssessmentRow } from './GpuAssessmentRow';
 import { SupportCopyButton } from './SupportCopyButton';
@@ -159,11 +160,14 @@ const getModelStateColors = (modelState: ModelStateData) => {
     }
 };
 
-function OperationRow({ op, onRetry, onDismiss, onCancel }: {
+function OperationRow({ op, onRetry, onDismiss, onCancel, smallerModelText, onUseSmallerModel }: {
     op: OperationEntry;
     onRetry: () => void;
     onDismiss: () => void;
     onCancel: () => void;
+    /** A failed or stalled download also offers the smaller model, so the user is never left with only an error. */
+    smallerModelText?: string;
+    onUseSmallerModel?: () => void;
 }) {
     const [elapsed, setElapsed] = useState(0);
     useEffect(() => {
@@ -233,6 +237,15 @@ function OperationRow({ op, onRetry, onDismiss, onCancel }: {
                     {op.cancelRequested ? 'Cancelling…' : 'Cancel'}
                 </button>
             )}
+            {(isError || op.stalled) && onUseSmallerModel && (
+                <button
+                    onClick={onUseSmallerModel}
+                    className={`operation-smaller-model-button flex-shrink-0 ml-3 px-3 py-1 rounded-md text-sm font-medium border ${tone.border} ${tone.text} hover:bg-black/5`}
+                    title="Switch to a smaller model that is quicker to download and runs on more computers"
+                >
+                    {smallerModelText ?? 'Use smaller model'}
+                </button>
+            )}
             {isError && op.retryable && (
                 <button
                     onClick={onRetry}
@@ -276,9 +289,36 @@ export function StatusBar() {
         cancelModelDownload,
         downloadModel,
         retryOperation,
+        cachedModels,
     } = useChatStore();
     const [switchingToAlternative, setSwitchingToAlternative] = useState(false);
     const [elapsed, setElapsed] = useState(0);
+    // Re-evaluated every few seconds so a download that stops moving is noticed without any event.
+    const [stallClock, setStallClock] = useState(() => Date.now());
+    const anyDownloadActive = Object.values(downloads).some((d) => d.state === 'active');
+    useEffect(() => {
+        if (!anyDownloadActive) return;
+        const id = setInterval(() => setStallClock(Date.now()), 10_000);
+        setStallClock(Date.now());
+        return () => clearInterval(id);
+    }, [anyDownloadActive]);
+
+    const useSmallerModel = async (d: DownloadEntry) => {
+        const offer = smallerModelOffer(d.id, useChatStore.getState().cachedModels);
+        if (!offer) return;
+        if (d.state === 'active' || d.state === 'queued') await cancelModelDownload(d.id);
+        dispatchDownload({ type: 'clear', id: d.id });
+        let modelId: string | undefined;
+        if (offer.kind === 'switch') {
+            modelId = offer.modelId;
+        } else if (await downloadModel(offer.model, offer.label)) {
+            modelId = findCachedFallback(useChatStore.getState().cachedModels, offer.model)?.model_id;
+        }
+        if (modelId) {
+            await loadModel(modelId);
+            await invoke('set_model', { model: modelId });
+        }
+    };
     const [heartbeatElapsed, setHeartbeatElapsed] = useState(0);
     
     // Update elapsed time every second
@@ -465,15 +505,20 @@ export function StatusBar() {
                 />
             ))}
 
-            {downloadRows.map((d) => (
+            {downloadRows.map((d) => {
+                const offer = smallerModelOffer(d.id, cachedModels);
+                return (
                 <OperationRow
                     key={`download-${d.id}`}
-                    op={downloadToOperationEntry(d)}
+                    op={downloadToOperationEntry(d, isDownloadStalled(d, stallClock))}
+                    smallerModelText={offer ? smallerModelButtonText(offer) : undefined}
+                    onUseSmallerModel={offer ? () => void useSmallerModel(d) : undefined}
                     onRetry={() => { dispatchDownload({ type: 'clear', id: d.id }); void downloadModel(d.id, d.label); }}
                     onDismiss={() => dispatchDownload({ type: 'clear', id: d.id })}
                     onCancel={() => cancelModelDownload(d.id)}
                 />
-            ))}
+                );
+            })}
 
             <GpuAssessmentRow />
 

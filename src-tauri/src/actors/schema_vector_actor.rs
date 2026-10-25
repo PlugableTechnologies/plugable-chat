@@ -56,6 +56,19 @@ pub enum SchemaVectorMsg {
         limit: usize,
         respond_to: oneshot::Sender<Vec<ColumnSearchResult>>,
     },
+    /// Word-based table search, used while the embedding model is unavailable
+    SearchTablesByKeyword {
+        query: String,
+        limit: usize,
+        respond_to: oneshot::Sender<Vec<SchemaSearchResult>>,
+    },
+    /// Word-based column search, used while the embedding model is unavailable
+    SearchColumnsByKeyword {
+        query: String,
+        table_fq_name: Option<String>,
+        limit: usize,
+        respond_to: oneshot::Sender<Vec<ColumnSearchResult>>,
+    },
     /// Get all cached tables for a source
     GetTablesForSource {
         source_id: String,
@@ -200,7 +213,7 @@ impl SchemaVectorStoreActor {
                         respond_to,
                     } => {
                         let results =
-                            search_tables(&tables_table, query_embedding, limit, min_score).await;
+                            search_tables(&tables_table, Some(query_embedding), limit, min_score).await;
                         let _ = respond_to.send(results);
                     }
                     SchemaVectorMsg::SearchColumns {
@@ -211,12 +224,20 @@ impl SchemaVectorStoreActor {
                     } => {
                         let results = search_columns(
                             &columns_table,
-                            query_embedding,
+                            Some(query_embedding),
                             table_fq_name.as_deref(),
                             limit,
                         )
                         .await;
                         let _ = respond_to.send(results);
+                    }
+                    SchemaVectorMsg::SearchTablesByKeyword { query, limit, respond_to } => {
+                        let all = search_tables(&tables_table, None, KEYWORD_SCAN_LIMIT, 0.0).await;
+                        let _ = respond_to.send(rank_tables_by_keyword(all, &query, limit));
+                    }
+                    SchemaVectorMsg::SearchColumnsByKeyword { query, table_fq_name, limit, respond_to } => {
+                        let all = search_columns(&columns_table, None, table_fq_name.as_deref(), KEYWORD_SCAN_LIMIT).await;
+                        let _ = respond_to.send(rank_columns_by_keyword(all, &query, limit));
                     }
                     SchemaVectorMsg::GetTablesForSource {
                         source_id,
@@ -577,29 +598,41 @@ async fn upsert_column_schema(
 
 // ========== Search Operations ==========
 
+/// Upper bound on rows read for a keyword scan (schemas are small; this is a safety cap).
+const KEYWORD_SCAN_LIMIT: usize = 20_000;
+
+/// `query_embedding: None` reads every enabled table unranked (score 1.0) for the keyword fallback.
 async fn search_tables(
     table: &Table,
-    query_embedding: Vec<f32>,
+    query_embedding: Option<Vec<f32>>,
     limit: usize,
     min_score: f32,
 ) -> Vec<SchemaSearchResult> {
-    let mut query_builder = match table.query().nearest_to(query_embedding) {
-        Ok(q) => q,
-        Err(e) => {
-            println!("[SchemaVectorActor] Failed to create vector query: {}", e);
-            return vec![];
-        }
-    };
-
-    query_builder = query_builder.only_if("enabled = true");
-
     let mut results = vec![];
-    let mut stream = match query_builder.limit(limit).execute().await {
-        Ok(s) => s,
-        Err(e) => {
-            println!("[SchemaVectorActor] Failed to execute query: {}", e);
-            return vec![];
+    let mut stream = match query_embedding {
+        Some(embedding) => {
+            let query_builder = match table.query().nearest_to(embedding) {
+                Ok(q) => q.only_if("enabled = true"),
+                Err(e) => {
+                    println!("[SchemaVectorActor] Failed to create vector query: {}", e);
+                    return vec![];
+                }
+            };
+            match query_builder.limit(limit).execute().await {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("[SchemaVectorActor] Failed to execute query: {}", e);
+                    return vec![];
+                }
+            }
         }
+        None => match table.query().only_if("enabled = true").limit(limit).execute().await {
+            Ok(s) => s,
+            Err(e) => {
+                println!("[SchemaVectorActor] Failed to execute keyword scan: {}", e);
+                return vec![];
+            }
+        },
     };
 
     while let Some(batch_result) = stream.next().await {
@@ -691,30 +724,46 @@ async fn search_tables(
     results
 }
 
+/// `query_embedding: None` reads the columns unranked (score 1.0) for the keyword fallback.
 async fn search_columns(
     table: &Table,
-    query_embedding: Vec<f32>,
+    query_embedding: Option<Vec<f32>>,
     table_fq_name: Option<&str>,
     limit: usize,
 ) -> Vec<ColumnSearchResult> {
-    let mut query_builder = match table.query().nearest_to(query_embedding) {
-        Ok(q) => q,
-        Err(e) => {
-            println!("[SchemaVectorActor] Failed to create column vector query: {}", e);
-            return vec![];
+    let filter = table_fq_name.map(|fq| format!("table_fq_name = '{}'", fq.replace('\'', "''")));
+    let mut stream = match query_embedding {
+        Some(embedding) => {
+            let mut query_builder = match table.query().nearest_to(embedding) {
+                Ok(q) => q,
+                Err(e) => {
+                    println!("[SchemaVectorActor] Failed to create column vector query: {}", e);
+                    return vec![];
+                }
+            };
+            if let Some(f) = &filter {
+                query_builder = query_builder.only_if(f.clone());
+            }
+            match query_builder.limit(limit).execute().await {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("[SchemaVectorActor] Failed to execute column query: {}", e);
+                    return vec![];
+                }
+            }
         }
-    };
-
-    // Add filter if table specified
-    if let Some(fq) = table_fq_name {
-        query_builder = query_builder.only_if(format!("table_fq_name = '{}'", fq));
-    }
-
-    let mut stream = match query_builder.limit(limit).execute().await {
-        Ok(s) => s,
-        Err(e) => {
-            println!("[SchemaVectorActor] Failed to execute column query: {}", e);
-            return vec![];
+        None => {
+            let mut query_builder = table.query();
+            if let Some(f) = &filter {
+                query_builder = query_builder.only_if(f.clone());
+            }
+            match query_builder.limit(limit).execute().await {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("[SchemaVectorActor] Failed to execute column keyword scan: {}", e);
+                    return vec![];
+                }
+            }
         }
     };
 
@@ -771,6 +820,72 @@ async fn search_columns(
     }
 
     results
+}
+
+/// Column names for `table_fq_name` that match the words in `query`, or `None` when nothing
+/// matches (callers then keep every column). Used while the embedding model is unavailable.
+pub async fn keyword_relevant_columns(
+    schema_tx: &mpsc::Sender<SchemaVectorMsg>,
+    table_fq_name: &str,
+    query: &str,
+    limit: usize,
+) -> Option<std::collections::HashSet<String>> {
+    if query.trim().is_empty() {
+        return None;
+    }
+    let (tx, rx) = oneshot::channel();
+    schema_tx
+        .send(SchemaVectorMsg::SearchColumnsByKeyword {
+            query: query.to_string(),
+            table_fq_name: Some(table_fq_name.to_string()),
+            limit,
+            respond_to: tx,
+        })
+        .await
+        .ok()?;
+    let names: std::collections::HashSet<String> =
+        rx.await.ok()?.into_iter().map(|c| c.column_name).collect();
+    (!names.is_empty()).then_some(names)
+}
+
+/// Rank scanned tables by words in name, description and key columns; scores replace the placeholder 1.0.
+pub fn rank_tables_by_keyword(all: Vec<SchemaSearchResult>, query: &str, limit: usize) -> Vec<SchemaSearchResult> {
+    let docs: Vec<String> = all
+        .iter()
+        .map(|t| {
+            format!(
+                "{} {} {} {}",
+                t.table_fq_name,
+                t.description.clone().unwrap_or_default(),
+                t.key_columns.join(" "),
+                t.table_fq_name
+            )
+        })
+        .collect();
+    crate::keyword_search::rank_by_keywords(&docs, query, limit)
+        .into_iter()
+        .map(|(i, score)| {
+            let mut t = all[i].clone();
+            t.relevance_score = score;
+            t
+        })
+        .collect()
+}
+
+/// Rank scanned columns by words in name, description and type.
+pub fn rank_columns_by_keyword(all: Vec<ColumnSearchResult>, query: &str, limit: usize) -> Vec<ColumnSearchResult> {
+    let docs: Vec<String> = all
+        .iter()
+        .map(|c| format!("{} {} {} {}", c.column_name, c.column_name, c.description.clone().unwrap_or_default(), c.data_type))
+        .collect();
+    crate::keyword_search::rank_by_keywords(&docs, query, limit)
+        .into_iter()
+        .map(|(i, score)| {
+            let mut c = all[i].clone();
+            c.relevance_score = score;
+            c
+        })
+        .collect()
 }
 
 async fn set_table_enabled(
@@ -1212,6 +1327,49 @@ async fn clear_all(tables: &Table, columns: &Table) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn table_result(name: &str, description: &str) -> SchemaSearchResult {
+        SchemaSearchResult {
+            table_fq_name: name.to_string(),
+            source_id: "s".to_string(),
+            database_kind: SupportedDatabaseKind::Sqlite,
+            sql_dialect: "SQLite".to_string(),
+            relevance_score: 1.0,
+            description: Some(description.to_string()),
+            key_columns: vec![],
+            partition_columns: vec![],
+            cluster_columns: vec![],
+        }
+    }
+
+    #[test]
+    fn keyword_table_search_ranks_by_name_and_description() {
+        let all = vec![
+            table_result("main.chicago_crimes", "Reported incidents"),
+            table_result("main.weather", "Daily temperature"),
+        ];
+        let hits = rank_tables_by_keyword(all.clone(), "crimes", 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].table_fq_name, "main.chicago_crimes");
+        assert!(hits[0].relevance_score < 1.0);
+        assert_eq!(rank_tables_by_keyword(all, "temperature", 5)[0].table_fq_name, "main.weather");
+    }
+
+    #[test]
+    fn keyword_column_search_matches_name_and_description() {
+        let col = |name: &str, desc: &str| ColumnSearchResult {
+            table_fq_name: "t".into(),
+            column_name: name.into(),
+            data_type: "TEXT".into(),
+            relevance_score: 1.0,
+            description: Some(desc.into()),
+            special_attributes: vec![],
+            top_values: vec![],
+        };
+        let hits = rank_columns_by_keyword(vec![col("arrest", "was an arrest made"), col("beat", "police beat")], "arrest", 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].column_name, "arrest");
+    }
 
     #[test]
     fn test_schema_search_result_serde() {

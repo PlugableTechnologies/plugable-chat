@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Database, X, Loader2, AlertCircle, Layout, Check, ChevronRight } from 'lucide-react';
 import { invoke } from '../../../lib/api';
 import { useChatStore } from '../../../store/chat-store';
+import { tableSearchLabel } from '../../../lib/search-mode';
 
 interface DatabaseAttachmentModalProps {
     isOpen: boolean;
@@ -73,6 +74,12 @@ export const DatabaseAttachmentModal = ({
                         <div className="text-xs text-gray-500 bg-amber-50 px-3 py-2 rounded-lg border border-amber-100">
                             <span className="font-medium text-amber-700">Ordered by relevance to:</span>{' '}
                             <span className="italic">"{chatPrompt.length > 60 ? chatPrompt.slice(0, 60) + '...' : chatPrompt}"</span>
+                        </div>
+                    )}
+
+                    {tableSearchLabel(results) && (
+                        <div className="text-xs text-amber-700 bg-amber-50 px-3 py-2 rounded-lg border border-amber-100" data-testid="table-search-mode-label">
+                            {tableSearchLabel(results)}
                         </div>
                     )}
 

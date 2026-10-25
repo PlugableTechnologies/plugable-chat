@@ -7,19 +7,52 @@
 //! due to their extensive dependencies on the agentic loop. This module
 //! contains the simpler chat-related commands.
 
-use crate::app_state::{ActorHandles, CancellationState, TurnProgress, TurnTrackerState};
+use crate::app_state::{ActorHandles, CancellationState, EmbeddingModelState, TurnProgress, TurnTrackerState};
 use crate::protocol::{FoundryMsg, VectorMsg};
 use std::io::Write;
 use tauri::{Emitter, State};
 use tokio::sync::oneshot;
 
-/// Search chat history by semantic similarity
+/// Which kind of search produced the sidebar results (sent as `sidebar-search-mode`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SidebarSearchMode {
+    /// `"semantic"` or `"keyword"`.
+    pub mode: &'static str,
+    /// Text for the UI; `None` for semantic search (nothing to explain).
+    pub label: Option<&'static str>,
+}
+
+pub fn sidebar_search_mode(embedding_ready: bool) -> SidebarSearchMode {
+    if embedding_ready {
+        SidebarSearchMode { mode: "semantic", label: None }
+    } else {
+        SidebarSearchMode { mode: "keyword", label: Some(crate::keyword_search::KEYWORD_ONLY_LABEL) }
+    }
+}
+
+/// Search chat history by semantic similarity, or by keywords while the search model is unavailable
 #[tauri::command]
 pub async fn search_history(
     query: String,
     handles: State<'_, ActorHandles>,
+    embedding_state: State<'_, EmbeddingModelState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    let embedding_ready = embedding_state.cpu_model.read().await.is_some();
+    let mode = sidebar_search_mode(embedding_ready);
+    if !embedding_ready {
+        let (search_tx, search_rx) = oneshot::channel();
+        handles
+            .vector_tx
+            .send(VectorMsg::SearchChatsByKeyword { query, limit: 10, respond_to: search_tx })
+            .await
+            .map_err(|e| e.to_string())?;
+        let results = search_rx.await.map_err(|_| "Vector actor died")?;
+        app_handle.emit("sidebar-search-mode", mode).map_err(|e| e.to_string())?;
+        app_handle.emit("sidebar-update", results).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    app_handle.emit("sidebar-search-mode", mode).map_err(|e| e.to_string())?;
     // Ask Foundry Actor for embedding (use CPU to avoid evicting LLM from GPU)
     let (emb_tx, emb_rx) = oneshot::channel();
     handles
@@ -207,4 +240,18 @@ pub async fn heartbeat_ping(
     *logged = false;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_search_mode_labels_keyword_fallback_only() {
+        assert_eq!(sidebar_search_mode(true).mode, "semantic");
+        assert!(sidebar_search_mode(true).label.is_none());
+        let kw = sidebar_search_mode(false);
+        assert_eq!(kw.mode, "keyword");
+        assert_eq!(kw.label, Some("Keyword search only (search model unavailable)"));
+    }
 }

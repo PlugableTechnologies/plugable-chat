@@ -21,6 +21,8 @@ export interface OperationEntry {
     retryable?: boolean;
     cancellable?: boolean;
     cancelRequested?: boolean;
+    /** Active but making no progress; the row offers a way out besides waiting */
+    stalled?: boolean;
 }
 
 export type OperationsMap = Partial<Record<OperationKey, OperationEntry>>;

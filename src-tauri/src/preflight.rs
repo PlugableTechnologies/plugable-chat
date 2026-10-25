@@ -296,7 +296,7 @@ pub fn dir_is_writable(dir: &std::path::Path) -> bool {
 }
 
 #[cfg(windows)]
-fn free_disk_mb(dir: &std::path::Path) -> Option<u64> {
+pub(crate) fn free_disk_mb(dir: &std::path::Path) -> Option<u64> {
     // `dir` may not exist yet; ask about the drive instead.
     let drive = dir.components().next()?.as_os_str().to_string_lossy().trim_end_matches('\\').to_string();
     let script = format!("(Get-PSDrive -Name '{}' ).Free", drive.trim_end_matches(':'));
@@ -308,9 +308,41 @@ fn free_disk_mb(dir: &std::path::Path) -> Option<u64> {
     String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok().map(|b| b / (1024 * 1024))
 }
 
+/// Free megabytes on the volume holding `dir` (asks `df` about the nearest folder that exists).
 #[cfg(not(windows))]
-fn free_disk_mb(_dir: &std::path::Path) -> Option<u64> {
-    None
+pub(crate) fn free_disk_mb(dir: &std::path::Path) -> Option<u64> {
+    let existing = dir.ancestors().find(|p| p.exists())?;
+    let out = crate::process_utils::output_with_timeout(
+        std::process::Command::new("df").args(["-Pk"]).arg(existing),
+        PROBE_TIMEOUT,
+    )
+    .ok()?;
+    parse_df_available_mb(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `df -Pk` output: header line, then `fs blocks used available capacity mount`.
+#[cfg(not(windows))]
+fn parse_df_available_mb(output: &str) -> Option<u64> {
+    let line = output.lines().nth(1)?;
+    let kb: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+    Some(kb / 1024)
+}
+
+#[cfg(all(test, not(windows)))]
+mod df_tests {
+    use super::*;
+
+    #[test]
+    fn parses_available_kilobytes() {
+        let out = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3s5 971350180 500000000 20971520 96% /System/Volumes/Data\n";
+        assert_eq!(parse_df_available_mb(out), Some(20480));
+        assert_eq!(parse_df_available_mb("garbage"), None);
+    }
+
+    #[test]
+    fn reports_something_for_the_temp_dir() {
+        assert!(free_disk_mb(&std::env::temp_dir().join("does-not-exist-yet")).is_some());
+    }
 }
 
 fn folder_facts(path: std::path::PathBuf) -> FolderFacts {

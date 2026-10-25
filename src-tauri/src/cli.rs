@@ -19,6 +19,15 @@ use std::path::Path;
 #[derive(Parser, Debug, Clone)]
 #[command(name = "plugable-chat", about = "Plugable Chat desktop app", version = crate::version_info::cli_version())]
 pub struct CliArgs {
+    /// HTTPS proxy for downloads, e.g. http://proxy.example.com:8080 (non-persistent; Settings > Network saves one)
+    #[arg(long, value_name = "URL", env = "PLUGABLE_HTTPS_PROXY")]
+    pub https_proxy: Option<String>,
+    /// Hugging Face mirror address used if the model has to come from Hugging Face (non-persistent)
+    #[arg(long, value_name = "URL", env = "PLUGABLE_HF_ENDPOINT")]
+    pub hf_endpoint: Option<String>,
+    /// Folder holding the search model's files, used instead of downloading them (non-persistent)
+    #[arg(long, value_name = "FOLDER", env = "PLUGABLE_OFFLINE_MODEL_FOLDER")]
+    pub offline_model_folder: Option<String>,
     /// Optional model to load on launch (non-persistent)
     #[arg(long, value_name = "MODEL", env = "PLUGABLE_MODEL")]
     pub model: Option<String>,

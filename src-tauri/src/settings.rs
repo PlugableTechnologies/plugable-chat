@@ -777,6 +777,9 @@ pub struct AppSettings {
     /// false by a settings save (see `save_app_settings`).
     #[serde(default)]
     pub first_run_completed: bool,
+    /// Optional proxy, Hugging Face mirror and offline model folder (Settings > Network).
+    #[serde(default)]
+    pub network: crate::network_settings::NetworkSettings,
 
     // NOTE: native_tool_calling_enabled has been removed.
     // Native tool calling is now controlled via tool_call_formats (Native format).
@@ -1002,6 +1005,7 @@ impl Default for AppSettings {
             always_on_tables: Vec::new(),
             always_on_rag_paths: Vec::new(),
             first_run_completed: false,
+            network: crate::network_settings::NetworkSettings::default(),
         }
     }
 }

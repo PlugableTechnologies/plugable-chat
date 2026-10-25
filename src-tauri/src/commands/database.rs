@@ -51,6 +51,9 @@ pub struct SchemaRefreshProgress {
 pub struct TableSearchResult {
     pub table: SchemaTableStatus,
     pub relevance_score: f32,
+    /// True when ranked by words because the search model is unavailable.
+    #[serde(default)]
+    pub keyword_only: bool,
 }
 
 /// Status of a database source in the schema cache
@@ -648,34 +651,39 @@ pub async fn search_database_tables(
         return get_all_tables_alphabetically(&handles, &settings_state, limit).await;
     }
 
-    // Use CPU model for schema search during chat (avoids evicting LLM from GPU)
-    let model_guard = embedding_state.cpu_model.read().await;
-    let embedding_model = model_guard
-        .clone()
-        .ok_or_else(|| "CPU embedding model not initialized".to_string())?;
-    drop(model_guard);
+    // Use CPU model for schema search during chat (avoids evicting LLM from GPU).
+    // Without it, rank by words instead of failing.
+    let embedding_model = embedding_state.cpu_model.read().await.clone();
+    let keyword_only = embedding_model.is_none();
 
-    // Embed the query
-    let query_embeddings = embedding_model
-        .embed(vec![query], None)
-        .map_err(|e| format!("Failed to embed query: {}", e))?;
-    let query_vector = query_embeddings
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No embedding returned".to_string())?;
-
-    // Search for tables
     let (tx, rx) = oneshot::channel();
-    handles
-        .schema_tx
-        .send(SchemaVectorMsg::SearchTables {
-            query_embedding: query_vector,
-            limit,
-            min_score: 0.0, // Return all results up to limit, let UI filter if needed
-            respond_to: tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+    match embedding_model {
+        Some(model) => {
+            let query_vector = model
+                .embed(vec![query], None)
+                .map_err(|e| format!("Failed to embed query: {}", e))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| "No embedding returned".to_string())?;
+            handles
+                .schema_tx
+                .send(SchemaVectorMsg::SearchTables {
+                    query_embedding: query_vector,
+                    limit,
+                    min_score: 0.0, // Return all results up to limit, let UI filter if needed
+                    respond_to: tx,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        None => {
+            handles
+                .schema_tx
+                .send(SchemaVectorMsg::SearchTablesByKeyword { query, limit, respond_to: tx })
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
 
     let search_results = rx
         .await
@@ -710,6 +718,7 @@ pub async fn search_database_tables(
                     description: res.description.clone(),
                 },
                 relevance_score: res.relevance_score,
+                keyword_only,
             });
         }
     }
@@ -761,6 +770,7 @@ async fn get_all_tables_alphabetically(
                     description: table.description,
                 },
                 relevance_score: 0.0, // No relevance when not searching
+                keyword_only: false,
             });
         }
     }

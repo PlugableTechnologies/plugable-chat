@@ -50,7 +50,7 @@ writes no file, so it reads as red.
 |---|---|---|---|---|
 | `baseline` | none | #1 #2 | hook registry key present; embedding and ready ok | CI, box |
 | `readonly-nonadmin` | standard user, read-only install dir, cwd = install dir | #1 | embedding ok, models under the user profile, install dir unchanged | CI, box |
-| `offline-hosts-block` | huggingface hosts -> 127.0.0.1 | #1 #3 | embedding is an explicit error naming the network, never ok without model files | CI, box |
+| `offline-hosts-block` | huggingface hosts -> 127.0.0.1 | #1 #3 | embedding is an explicit error naming the network, never ok without model files (Hugging Face is the only model source in this run; the release copy is covered by `embedding-no-huggingface`) | CI, box |
 | `proxy-dead` | `HTTPS_PROXY` at a closed port | #1 #4 | error names the proxy/connection, no hang | CI, box |
 | `proxy-tls-intercept` | mitmproxy, untrusted CA | #1 #4 | error names the certificate (skipped without `mitmdump`) | CI, box |
 | `no-vcredist` | VC++ absent before install | #7 #3 | hook installs it (`installed`/`installed-reboot`), ep-registration ok | clean Server image only |
@@ -65,7 +65,8 @@ writes no file, so it reads as red.
 | `egpu-late-arrival` | staged: no adapter at launch, an NVIDIA adapter appears at 20 s, the engine lists CUDA after a retry | Pat R2, R4 | the app notices by itself, retries GPU setup, and the assessment moves on from "no GPU" | CI, box |
 | `engine-declined` | staged: NVIDIA adapter, engine lists CUDA and WebGpu (twice) as not registered and answers registration with `success:false` and empty lists | Pat E1, E2, E4 (rc12) | the card names the engine's refusal, not the hardware; each provider reported once; a hint points to the engine log; a CPU model runs | CI, box |
 | `embedding-first-run-contention` | huggingface unreachable for the first 25 s of a first start | Bob R6, R10 | the embedding model still loads (5 attempts over about 45 s); a final failure would carry attempts and cause | CI, box |
-| `embedding-tls-reset-recovers` | every HTTPS connection to huggingface.co is reset (os error 10054) until the quick retries are spent, then the resets stop | rc16 Bob | the error says the connection was interrupted (never "certificate"); the background retry loads the model by itself | CI (new, never run), box |
+| `embedding-tls-reset-recovers` | every HTTPS connection to huggingface.co is reset (os error 10054) until the quick retries are spent, then the resets stop | rc16 Bob | the error says the connection was interrupted (never "certificate"); the background retry loads the model by itself | CI (new, never run), box; runs with Hugging Face as the only model source (`PLUGABLE_CHAT_TEST_EMBEDDING_SOURCES=huggingface`) |
+| `embedding-no-huggingface` | huggingface.co blocked in the hosts file for the whole run; part 2 also allows only a local folder | rc17 Bob | the search model loads from the project's GitHub release asset (detail says "release"); after removing it, from a folder the user chose (`PLUGABLE_OFFLINE_MODEL_FOLDER`, detail says "folder you chose"); `ready` and `embedding` end ok | CI (new, never run), box |
 | `version-visible` | none | Bob R12, Pat R13 | `--version` prints the release label and commit, and matches the installer file name | CI, box |
 | `gpu-baseline` | none, NVIDIA driver present | #3 | ep-registration and model-download ok | GPU box only |
 

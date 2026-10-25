@@ -10,6 +10,7 @@ import { SupportCopyButton } from '../../SupportCopyButton';
 import { matchesModelQuery } from '../../../lib/model-filter';
 import { isDownloadPending, type DownloadEntry } from '../../../store/chat/downloads';
 import { engineNotice, type EngineHealth } from '../../../lib/engine-health';
+import { groupByTrust, trustNote, EXPERIMENTAL_SECTION_TITLE, EXPERIMENTAL_WARNING, VERIFIED_SECTION_TITLE } from '../../../lib/verified-models';
 
 function downloadProgressFor(d: DownloadEntry | undefined) {
     if (!isDownloadPending(d)) return undefined;
@@ -393,29 +394,48 @@ export function ModelsTab() {
                     );
                 })()}
 
-                {/* Model Cards Grid */}
-                {!isLoading && (
-                    <div className="model-card-grid grid grid-cols-1 gap-4">
-                        {filteredModels.map((model) => (
-                            <FoundryModelCard
-                                key={model.name}
-                                model={model}
-                                isCached={isModelCached(model)}
-                                isLoaded={isModelLoaded(model)}
-                                isDownloading={isDownloadPending(downloads[model.name])}
-                                downloadProgress={downloadProgressFor(downloads[model.name])}
-                                onCancelDownload={() => cancelModelDownload(model.name)}
-                                onClearWarning={async () => {
-                                    await invoke('clear_model_incompatible', { modelName: model.name });
-                                    await fetchAllData();
-                                }}
-                                onDownload={() => handleDownload(model)}
-                                onUnload={() => handleUnload(model)}
-                                onRemove={() => handleRemove(model)}
-                            />
-                        ))}
-                    </div>
-                )}
+                {/* Model cards: models Plugable has tested first, the rest under a warning */}
+                {!isLoading && (() => {
+                    const { verified, experimental } = groupByTrust(filteredModels, (m) => m.name);
+                    const renderCard = (model: FoundryCatalogModel) => (
+                        <FoundryModelCard
+                            key={model.name}
+                            model={model}
+                            trustNote={trustNote(model.name)}
+                            isCached={isModelCached(model)}
+                            isLoaded={isModelLoaded(model)}
+                            isDownloading={isDownloadPending(downloads[model.name])}
+                            downloadProgress={downloadProgressFor(downloads[model.name])}
+                            onCancelDownload={() => cancelModelDownload(model.name)}
+                            onClearWarning={async () => {
+                                await invoke('clear_model_incompatible', { modelName: model.name });
+                                await fetchAllData();
+                            }}
+                            onDownload={() => handleDownload(model)}
+                            onUnload={() => handleUnload(model)}
+                            onRemove={() => handleRemove(model)}
+                        />
+                    );
+                    return (
+                        <>
+                            {verified.length > 0 && (
+                                <section className="verified-models-section mb-6" aria-label={VERIFIED_SECTION_TITLE}>
+                                    <h3 className="text-xs font-semibold text-green-700 uppercase tracking-wider mb-2">{VERIFIED_SECTION_TITLE}</h3>
+                                    <div className="model-card-grid grid grid-cols-1 gap-4">{verified.map(renderCard)}</div>
+                                </section>
+                            )}
+                            {experimental.length > 0 && (
+                                <section className="experimental-models-section" aria-label={EXPERIMENTAL_SECTION_TITLE}>
+                                    <h3 className="text-xs font-semibold text-amber-700 uppercase tracking-wider mb-1">{EXPERIMENTAL_SECTION_TITLE}</h3>
+                                    <p className="experimental-models-warning text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3" role="note">
+                                        {EXPERIMENTAL_WARNING}
+                                    </p>
+                                    <div className="model-card-grid grid grid-cols-1 gap-4">{experimental.map(renderCard)}</div>
+                                </section>
+                            )}
+                        </>
+                    );
+                })()}
 
                 {/* Empty state */}
                 {!isLoading && filteredModels.length === 0 && (

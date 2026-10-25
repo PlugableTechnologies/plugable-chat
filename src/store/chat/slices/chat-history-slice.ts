@@ -43,6 +43,8 @@ export interface ChatHistorySlice {
     
     // Relevance search (embedding-based autocomplete)
     relevanceResults: ChatSummary[] | null;
+    /** Set when the results came from the keyword fallback (search model unavailable). */
+    relevanceSearchModeLabel: string | null;
     isSearchingRelevance: boolean;
     triggerRelevanceSearch: (query: string) => void;
     clearRelevanceSearch: () => void;
@@ -229,6 +231,7 @@ export const createChatHistorySlice: StateCreator<
     // Relevance search (embedding-based autocomplete)
     relevanceResults: null,
     isSearchingRelevance: false,
+    relevanceSearchModeLabel: null,
     triggerRelevanceSearch: (query: string) => {
         // Cancel any pending search
         if (relevanceSearchTimeout) {
@@ -238,7 +241,7 @@ export const createChatHistorySlice: StateCreator<
 
         // If query is too short, clear results and return to normal history
         if (query.trim().length < RELEVANCE_SEARCH_MIN_LENGTH) {
-            set({ relevanceResults: null, isSearchingRelevance: false });
+            set({ relevanceResults: null, relevanceSearchModeLabel: null, isSearchingRelevance: false });
             return;
         }
 
@@ -258,7 +261,7 @@ export const createChatHistorySlice: StateCreator<
                 console.error("Failed to search history:", e);
                 // On error, fall back to regular history
                 if (relevanceSearchGeneration === myGeneration) {
-                    set({ relevanceResults: null, isSearchingRelevance: false });
+                    set({ relevanceResults: null, relevanceSearchModeLabel: null, isSearchingRelevance: false });
                 }
             }
         }, RELEVANCE_SEARCH_DEBOUNCE_MS);
@@ -269,6 +272,6 @@ export const createChatHistorySlice: StateCreator<
             relevanceSearchTimeout = null;
         }
         relevanceSearchGeneration++; // Cancel any in-flight requests
-        set({ relevanceResults: null, isSearchingRelevance: false });
+        set({ relevanceResults: null, relevanceSearchModeLabel: null, isSearchingRelevance: false });
     },
 });

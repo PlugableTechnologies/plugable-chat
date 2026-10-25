@@ -278,6 +278,19 @@ pub async fn download_toolbox_with_policy(
     expected_sha256_hex: &str,
     destination: &Path,
     policy: &DownloadPolicy,
+    on_progress: impl FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    download_verified_with_policy(url, expected_sha256_hex, destination, policy, true, on_progress).await
+}
+
+/// The same resumable, checksum-verified download for any file (the search model's files use it).
+/// `executable` marks the finished file executable on Unix; data files pass `false`.
+pub async fn download_verified_with_policy(
+    url: &str,
+    expected_sha256_hex: &str,
+    destination: &Path,
+    policy: &DownloadPolicy,
+    executable: bool,
     mut on_progress: impl FnMut(u64, u64),
 ) -> Result<PathBuf, String> {
     if let Some(parent) = destination.parent() {
@@ -300,7 +313,7 @@ pub async fn download_toolbox_with_policy(
             Ok(()) => {
                 let actual_sha256_hex = sha256_hex_of_file(&partial_path).await?;
                 if actual_sha256_hex.eq_ignore_ascii_case(expected_sha256_hex) {
-                    return install_verified_file(&partial_path, destination).await;
+                    return install_verified_file(&partial_path, destination, executable).await;
                 }
                 let _ = tokio::fs::remove_file(&partial_path).await;
                 last_error = format!(
@@ -315,15 +328,17 @@ pub async fn download_toolbox_with_policy(
     Err(last_error)
 }
 
-async fn install_verified_file(partial_path: &Path, destination: &Path) -> Result<PathBuf, String> {
+async fn install_verified_file(partial_path: &Path, destination: &Path, executable: bool) -> Result<PathBuf, String> {
     #[cfg(unix)]
-    {
+    if executable {
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(partial_path, std::fs::Permissions::from_mode(0o755))
             .await
             .map_err(|e| format!("Failed to mark toolbox executable: {}", e))?;
     }
 
+    #[cfg(not(unix))]
+    let _ = executable;
     // Windows cannot rename over an existing file
     let _ = tokio::fs::remove_file(destination).await;
     tokio::fs::rename(partial_path, destination)

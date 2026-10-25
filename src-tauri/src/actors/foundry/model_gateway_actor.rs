@@ -3122,6 +3122,10 @@ impl ModelGatewayActor {
             Some(sdk) => sdk.download_info(model_name).await,
             None => (model_name.to_string(), None),
         };
+        // A full disk is told up front, in plain words, instead of failing part-way through.
+        if let Some(cache) = dirs::home_dir().map(|h| h.join(".foundry").join("cache")) {
+            crate::download_guard::check_before_download(&resolved_name, size_bytes, &cache)?;
+        }
         let _ = self.app_handle.emit(
             "model-download-started",
             // `id` is the name the UI asked for; progress events carry the same name in `file`.

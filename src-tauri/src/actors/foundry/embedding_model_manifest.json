@@ -1,0 +1,14 @@
+{
+  "name": "bge-base-en-v1.5",
+  "upstream_repo": "Xenova/bge-base-en-v1.5",
+  "revision": "4d6cd88e18e51a5e020c2c305726d76ada9c03cf",
+  "license": "MIT",
+  "release_tag": "embedding-models-bge-base-en-v1.5-r1",
+  "files": [
+    { "path": "onnx/model.onnx", "asset": "model.onnx", "sha256": "9bc579acdba21c253c62a9bf866891355a63ffa3442b52c8a37d75b2ccb91848", "size": 435811539 },
+    { "path": "tokenizer.json", "asset": "tokenizer.json", "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66", "size": 711396 },
+    { "path": "config.json", "asset": "config.json", "sha256": "d83c21fa7366994560727112ef0a31d8a2ec1c280c2a3e66326fdb877f64c91e", "size": 717 },
+    { "path": "special_tokens_map.json", "asset": "special_tokens_map.json", "sha256": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3", "size": 125 },
+    { "path": "tokenizer_config.json", "asset": "tokenizer_config.json", "sha256": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3", "size": 366 }
+  ]
+}

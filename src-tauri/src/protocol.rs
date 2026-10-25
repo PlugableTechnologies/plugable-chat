@@ -973,6 +973,12 @@ pub enum VectorMsg {
         // Channel to send results back to the caller (Orchestrator)
         respond_to: oneshot::Sender<Vec<ChatSummary>>,
     },
+    /// Word-based chat search, used while the embedding model is unavailable
+    SearchChatsByKeyword {
+        query: String,
+        limit: usize,
+        respond_to: oneshot::Sender<Vec<ChatSummary>>,
+    },
     /// Get all chats
     FetchAllChats {
         respond_to: oneshot::Sender<Vec<ChatSummary>>,
