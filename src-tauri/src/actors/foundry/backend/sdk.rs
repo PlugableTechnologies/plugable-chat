@@ -24,6 +24,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
 use super::super::context_budget;
+use super::super::memory_budget;
 use super::{
     BackendError, ChatStreamOutcome, ChatStreamRequest, ConnectionInfo, FoundryBackend, ProgressSink,
     RawModel,
@@ -964,12 +965,14 @@ impl SdkBackend {
         // misread as "model incompatible".
         // `budget.scale` < 1 on the retry after the core still rejected the size; `budget.input_ceiling`
         // is set after an out-of-memory failure.
-        let context_length = model.context_length();
+        // Free memory is read again for every request, so a long chat asks for less as memory runs down (issue 38).
+        let memory = tokio::task::spawn_blocking(memory_budget::probe).await.unwrap_or_default();
+        let context_length = memory_budget::effective_context(model.context_length(), &memory);
         let plan = context_budget::plan_request(&req.messages, context_length, family_cap, budget.scale, budget.input_ceiling);
         outcome.input_tokens = plan.input_tokens;
         let (messages_in, max_tokens) = (plan.messages, plan.max_tokens);
         println!(
-            "[SdkBackend] max_tokens={max_tokens} (cap {family_cap}, input ~{}, dropped {}, context {:?}, scale {}, ceiling {:?})",
+            "[SdkBackend] free memory {memory:?}; max_tokens={max_tokens} (cap {family_cap}, input ~{}, dropped {}, context {:?}, scale {}, ceiling {:?})",
             plan.input_tokens, plan.dropped, context_length, budget.scale, budget.input_ceiling
         );
         crate::run_state::note_request(plan.input_tokens, max_tokens);

@@ -362,6 +362,12 @@ pub fn parse_http_reply(content_type: &str, body: &str, expected_id: u64) -> Res
     Err(format!("The server's reply held no response to request {}", expected_id))
 }
 
+/// `serverInfo.name` from an `initialize` result; blank counts as absent.
+pub fn server_name_from_initialize(init: &Value) -> Option<String> {
+    let name = init.get("serverInfo")?.get("name")?.as_str()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 enum Link {
     Stdio(StdioLink),
     Http(HttpLink),
@@ -373,6 +379,8 @@ struct McpServerConnection {
     link: Link,
     tools: Vec<McpTool>,
     request_id: u64,
+    /// `serverInfo.name` from the `initialize` reply, when the server sent one.
+    server_info_name: Option<String>,
 }
 
 impl McpServerConnection {
@@ -501,6 +509,7 @@ impl McpServerConnection {
             )
             .await
             .map_err(|e| format!("Failed to initialize MCP server: {}", e))?;
+        self.server_info_name = server_name_from_initialize(&init);
         if let (Link::Http(link), Some(version)) = (&mut self.link, init.get("protocolVersion").and_then(|v| v.as_str())) {
             link.protocol_version = Some(version.to_string());
         }
@@ -525,6 +534,7 @@ impl McpServerConnection {
 struct McpServerEntry {
     config: McpServerConfig,
     tools: Vec<McpTool>,
+    server_info_name: Option<String>,
     connection: Arc<tokio::sync::Mutex<McpServerConnection>>,
 }
 
@@ -533,6 +543,7 @@ impl McpServerEntry {
         Self {
             config: connection.config.clone(),
             tools: connection.tools.clone(),
+            server_info_name: connection.server_info_name.clone(),
             connection: Arc::new(tokio::sync::Mutex::new(connection)),
         }
     }
@@ -542,6 +553,8 @@ impl McpServerEntry {
 pub struct McpToolRouterActor {
     mcp_tool_msg_rx: mpsc::Receiver<McpHostMsg>,
     connections: Arc<RwLock<HashMap<String, McpServerEntry>>>,
+    /// Called after a server connects or disconnects, so the screen can refresh its list of direct tools.
+    on_servers_changed: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl McpToolRouterActor {
@@ -549,7 +562,36 @@ impl McpToolRouterActor {
         Self {
             mcp_tool_msg_rx,
             connections: Arc::new(RwLock::new(HashMap::new())),
+            on_servers_changed: None,
         }
+    }
+
+    pub fn with_servers_changed_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.on_servers_changed = Some(hook);
+        self
+    }
+
+    fn notify_servers_changed(&self) {
+        if let Some(hook) = &self.on_servers_changed {
+            hook();
+        }
+    }
+
+    /// What the connected servers offer for a direct call (see `mcp_direct_tools`). Database sources are
+    /// the app's own plumbing, not servers the user configured, so they are not offered.
+    async fn direct_tools(&self) -> Vec<crate::mcp_direct_tools::DirectTool> {
+        let connections = self.connections.read().await;
+        let sources: Vec<crate::mcp_direct_tools::DirectToolSource> = connections
+            .iter()
+            .filter(|(_, entry)| entry.config.enabled && !entry.config.is_database_source)
+            .map(|(id, entry)| crate::mcp_direct_tools::DirectToolSource {
+                server_id: id.clone(),
+                configured_name: entry.config.name.clone(),
+                reported_name: entry.server_info_name.clone(),
+                tools: entry.tools.clone(),
+            })
+            .collect();
+        crate::mcp_direct_tools::qualifying_direct_tools(&sources)
     }
 
     pub async fn run(mut self) {
@@ -587,6 +629,9 @@ impl McpToolRouterActor {
                         let result = execute_tool_on(&connections, &server_id, &tool_name, arguments).await;
                         let _ = respond_to.send(result);
                     });
+                }
+                McpHostMsg::ListDirectTools { respond_to } => {
+                    let _ = respond_to.send(self.direct_tools().await);
                 }
                 McpHostMsg::GetAllToolDescriptions { respond_to } => {
                     let result = self.get_all_tool_descriptions().await;
@@ -657,6 +702,7 @@ impl McpToolRouterActor {
             link: Link::Http(HttpLink::new(&url)?),
             tools: Vec::new(),
             request_id: 0,
+            server_info_name: None,
         };
         let tools = connection.handshake("plugable-chat").await?;
         let mode = if config.defer_tools { "DEFERRED" } else { "ACTIVE" };
@@ -668,6 +714,7 @@ impl McpToolRouterActor {
             .await
             .insert(server_id.clone(), McpServerEntry::new(connection));
         println!("McpHostActor: Server {} connected successfully", server_id);
+        self.notify_servers_changed();
         Ok(())
     }
 
@@ -760,6 +807,7 @@ impl McpToolRouterActor {
             link: Link::Stdio(StdioLink { process: child, stdin, stdout_lines }),
             tools: Vec::new(),
             request_id: 0,
+            server_info_name: None,
         };
 
         // Wait for server to be ready
@@ -844,6 +892,7 @@ impl McpToolRouterActor {
                     "McpHostActor: Server {} initialized: {:?}",
                     server_id, response
                 );
+                connection.server_info_name = server_name_from_initialize(&response);
 
                 // Send initialized notification
                 if let Err(e) = connection
@@ -915,6 +964,7 @@ impl McpToolRouterActor {
         }
 
         println!("McpHostActor: Server {} connected successfully", server_id);
+        self.notify_servers_changed();
         Ok(())
     }
 
@@ -926,6 +976,7 @@ impl McpToolRouterActor {
 
         if let Some(entry) = removed {
             println!("McpHostActor: Disconnecting server: {}", server_id);
+            self.notify_servers_changed();
             if let Ok(mut conn) = entry.connection.try_lock() {
                 conn.kill().await?;
             }
@@ -1115,6 +1166,7 @@ impl McpToolRouterActor {
             link: Link::Http(HttpLink::new(url)?),
             tools: Vec::new(),
             request_id: 0,
+            server_info_name: None,
         };
         let result = connection.handshake("plugable-chat-test").await;
         let _ = connection.kill().await;
@@ -1199,6 +1251,7 @@ impl McpToolRouterActor {
             link: Link::Stdio(StdioLink { process: child, stdin, stdout_lines }),
             tools: Vec::new(),
             request_id: 0,
+            server_info_name: None,
         };
 
         // Wait for server to start

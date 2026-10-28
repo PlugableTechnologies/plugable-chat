@@ -11,15 +11,20 @@ import { formatBytes } from "./store/chat/operations";
 import { buildWelcomeMessage } from "./store/chat/welcome-message";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { groupByTrust, EXPERIMENTAL_SECTION_TITLE, VERIFIED_SECTION_TITLE } from "./lib/verified-models";
+import { listen } from "@tauri-apps/api/event";
+import { directToolOptionValue, modelDropdownLabel, parseDirectToolOptionValue } from "./lib/direct-tools";
 
 // Full-pane card for catastrophic failures (the AI engine cannot start). The backend writes the
 // whole message in plain language, so this only renders it, makes links clickable and lets the
 // user copy it for support.
 function StartupFailureCard() {
   const { modelState, retryConnection } = useChatStore();
+  const directToolChosen = useChatStore((s) => s.getActiveDirectTool() !== null);
   const [dismissedAt, setDismissedAt] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // The card is about the local model engine. A tool chosen in the drop-down needs no engine, so it must not be covered.
+  if (directToolChosen) return null;
   if (modelState.state !== 'service_unavailable' || !modelState.errorMessage) return null;
   if (dismissedAt !== null && dismissedAt === modelState.timestamp) return null;
   const text = modelState.errorMessage;
@@ -106,6 +111,17 @@ function ErrorBanner() {
 function App() {
   const { currentModel, cachedModels, modelInfo, reasoningEffort, setReasoningEffort, isConnecting, retryConnection, fetchCachedModels, startSystemChat, chatMessages, hasFetchedCachedModels, loadModel, operationStatus, startupState, handshakeComplete, operations, downloadingModelName, downloadingModelSizeBytes } = useChatStore();
   const launchState = useChatStore((s) => s.modelState.state);
+  const directTools = useChatStore((s) => s.directTools);
+  const activeDirectTool = useChatStore((s) => s.getActiveDirectTool());
+  const fetchDirectTools = useChatStore((s) => s.fetchDirectTools);
+  const chooseDirectTool = useChatStore((s) => s.chooseDirectTool);
+  // MCP tools that take one text field appear in the drop-down as soon as their server connects, whatever
+  // state the local model is in: ask again now, and again whenever a server connects or disconnects.
+  useEffect(() => {
+    void fetchDirectTools();
+    const unlistenToolsChanged = listen("mcp-tools-changed", () => { void fetchDirectTools(); });
+    return () => { void unlistenToolsChanged.then((unlisten) => unlisten()).catch(() => {}); };
+  }, [fetchDirectTools]);
   // Startup counts as finished once the model is ready or a failure card is showing; until then a
   // vanished window is reported at the next launch (see launch_marker.rs).
   useEffect(() => {
@@ -122,6 +138,10 @@ function App() {
   const hasToolCalling = currentModelInfo?.tool_calling ?? false;
   const hasReasoning = currentModelInfo?.reasoning ?? currentModel.toLowerCase().includes('reasoning');
   const supportsReasoningEffort = currentModelInfo?.supports_reasoning_effort ?? false;
+  const modelStarting = isConnecting || !handshakeComplete || startupState === 'initializing' || startupState === 'connecting_to_foundry';
+  // The drop-down lists models when there are some to choose from; tools are listed whatever the model's state.
+  const modelsSelectable = cachedModels.length > 0 && !modelStarting
+    && currentModel !== 'Unavailable' && currentModel !== 'No models' && currentModel !== 'Downloading...';
   
   // Detect when startup is fully complete but no models are available
   // Show help chat to guide user on loading models
@@ -498,90 +518,114 @@ function App() {
           </div>
           <div className="flex-1" />
           <div className="app-model-controls flex items-center gap-2 text-sm text-gray-500">
-            <span className="app-model-label">Model:</span>
-            {(isConnecting || !handshakeComplete || startupState === 'initializing' || startupState === 'connecting_to_foundry') ? (
-              <span className="app-model-status text-gray-500 flex items-center gap-1.5">
-                <span className="inline-block w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></span>
-                {startupState === 'connecting_to_foundry' ? 'Connecting to Foundry...' : 'Starting...'}
-              </span>
-            ) : currentModel === 'Unavailable' ? (
-              <button onClick={retryConnection} className="app-model-unavailable text-red-600 hover:text-red-800 underline underline-offset-2 transition-colors" title="Click to retry connection">
-                Unavailable (retry)
-              </button>
-            ) : currentModel === 'No models' ? (
-              <button 
-                onClick={handleRefreshModels}
-                className="app-model-refresh text-amber-600 hover:text-amber-800 text-[11px] font-semibold underline underline-offset-2 transition-colors"
-                title={operations['model-download']?.state === 'error'
-                  ? 'The model download failed. See the red row at the top for details and Retry.'
-                  : 'No chat model is installed. Click to check again.'}
-              >
-                {operations['model-download']?.state === 'error' ? 'Download failed (see status)' : 'No model installed (click to check)'}
-              </button>
-            ) : currentModel === 'Downloading...' ? (
-              <span className="app-model-downloading text-blue-600 flex items-center gap-1.5 text-[11px] font-semibold">
-                <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></span>
-                {downloadingModelName
-                  ? `Downloading ${downloadingModelName}${downloadingModelSizeBytes ? ` (${formatBytes(downloadingModelSizeBytes)})` : ''}${operations['model-download']?.percent !== undefined ? ` ${operations['model-download']!.percent}%` : ''}`
-                  : 'Preparing model download...'}
-              </span>
-            ) : cachedModels.length > 0 ? (
-              <div className="app-model-selector flex items-center gap-1.5">
-                <select 
-                  value={currentModel} 
-                  onChange={(e) => {
-                    const newModel = e.target.value;
-                    if (newModel !== currentModel) {
-                      // Load the new model into VRAM (shows status bar)
-                      loadModel(newModel);
-                    }
-                  }} 
-                  className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none max-w-[240px]" 
-                  title="Select a cached model"
-                  disabled={operationStatus?.type === 'loading' || operationStatus?.type === 'downloading'}
+            <span className="app-model-label">{modelDropdownLabel(directTools)}</span>
+            {(() => {
+              const modelStatusNode = modelStarting ? (
+                <span className="app-model-status text-gray-500 flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></span>
+                  {startupState === 'connecting_to_foundry' ? 'Connecting to Foundry...' : 'Starting...'}
+                </span>
+              ) : currentModel === 'Unavailable' ? (
+                <button onClick={retryConnection} className="app-model-unavailable text-red-600 hover:text-red-800 underline underline-offset-2 transition-colors" title="Click to retry connection">
+                  Unavailable (retry)
+                </button>
+              ) : currentModel === 'No models' ? (
+                <button 
+                  onClick={handleRefreshModels}
+                  className="app-model-refresh text-amber-600 hover:text-amber-800 text-[11px] font-semibold underline underline-offset-2 transition-colors"
+                  title={operations['model-download']?.state === 'error'
+                    ? 'The model download failed. See the red row at the top for details and Retry.'
+                    : 'No chat model is installed. Click to check again.'}
                 >
-                  {(() => {
-                    const { verified, experimental } = groupByTrust(cachedModels, (m) => m.model_id);
-                    const option = (model: (typeof cachedModels)[number]) => (
-                      <option key={model.model_id} value={model.model_id}>
-                        {model.alias}{currentModel === model.model_id ? ' ✓' : ''}
-                      </option>
-                    );
-                    // No grouping needed when every model is verified.
-                    if (experimental.length === 0) return verified.map(option);
-                    return (
-                      <>
-                        {verified.length > 0 && <optgroup label={VERIFIED_SECTION_TITLE}>{verified.map(option)}</optgroup>}
-                        <optgroup label={`${EXPERIMENTAL_SECTION_TITLE} - may be slow or unreliable`}>{experimental.map(option)}</optgroup>
-                      </>
-                    );
-                  })()}
-                </select>
-                {hasToolCalling && (
-                  <button 
-                    onClick={() => {
-                      useSettingsStore.getState().setActiveTab('tools');
-                      useSettingsStore.getState().openSettings();
-                    }}
-                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 transition-colors cursor-pointer" 
-                    title="This model supports native tool calling. Click to configure tools."
+                  {operations['model-download']?.state === 'error' ? 'Download failed (see status)' : 'No model installed (click to check)'}
+                </button>
+              ) : currentModel === 'Downloading...' ? (
+                <span className="app-model-downloading text-blue-600 flex items-center gap-1.5 text-[11px] font-semibold">
+                  <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></span>
+                  {downloadingModelName
+                    ? `Downloading ${downloadingModelName}${downloadingModelSizeBytes ? ` (${formatBytes(downloadingModelSizeBytes)})` : ''}${operations['model-download']?.percent !== undefined ? ` ${operations['model-download']!.percent}%` : ''}`
+                    : 'Preparing model download...'}
+                </span>
+              ) : currentModel === 'Loading...' ? (
+                <span className="text-gray-500">Loading...</span>
+              ) : (
+                <button 
+                  onClick={handleRefreshModels}
+                  className="text-amber-600 hover:text-amber-800 text-[11px] font-semibold underline underline-offset-2 transition-colors"
+                  title="No models cached. Click to check for newly installed models."
+                >
+                  No models (click to refresh)
+                </button>
+              );
+              if (!modelsSelectable && directTools.length === 0) return modelStatusNode;
+              const selectValue = activeDirectTool ? directToolOptionValue(activeDirectTool) : modelsSelectable ? currentModel : '';
+              const modelSelector = (
+                <div className="app-model-selector flex items-center gap-1.5">
+                  <select 
+                    data-testid="model-tool-select"
+                    value={selectValue} 
+                    onChange={(e) => {
+                      const chosenTool = parseDirectToolOptionValue(e.target.value);
+                      if (chosenTool) {
+                        void chooseDirectTool(chosenTool);
+                        return;
+                      }
+                      const newModel = e.target.value;
+                      // Choosing a model ends a tool choice, even when it is the model already loaded.
+                      if (activeDirectTool) void chooseDirectTool(null);
+                      if (newModel !== currentModel) {
+                        // Load the new model into VRAM (shows status bar)
+                        loadModel(newModel);
+                      }
+                    }} 
+                    className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none max-w-[240px]" 
+                    title={directTools.length > 0 ? "Select a cached model, or an MCP tool to call directly" : "Select a cached model"}
+                    disabled={operationStatus?.type === 'loading' || operationStatus?.type === 'downloading'}
                   >
-                    🔧 Tools
-                  </button>
-                )}
-              </div>
-            ) : currentModel === 'Loading...' ? (
-              <span className="text-gray-500">Loading...</span>
-            ) : (
-              <button 
-                onClick={handleRefreshModels}
-                className="text-amber-600 hover:text-amber-800 text-[11px] font-semibold underline underline-offset-2 transition-colors"
-                title="No models cached. Click to check for newly installed models."
-              >
-                No models (click to refresh)
-              </button>
-            )}
-            {hasReasoning && supportsReasoningEffort && (
+                    {selectValue === '' && <option value="" disabled>Select a tool</option>}
+                    {modelsSelectable && (() => {
+                      const { verified, experimental } = groupByTrust(cachedModels, (m) => m.model_id);
+                      const option = (model: (typeof cachedModels)[number]) => (
+                        <option key={model.model_id} value={model.model_id}>
+                          {model.alias}{currentModel === model.model_id ? ' ✓' : ''}
+                        </option>
+                      );
+                      // No grouping needed when every model is verified.
+                      if (experimental.length === 0) return verified.map(option);
+                      return (
+                        <>
+                          {verified.length > 0 && <optgroup label={VERIFIED_SECTION_TITLE}>{verified.map(option)}</optgroup>}
+                          <optgroup label={`${EXPERIMENTAL_SECTION_TITLE} - may be slow or unreliable`}>{experimental.map(option)}</optgroup>
+                        </>
+                      );
+                    })()}
+                    {directTools.length > 0 && (
+                      <optgroup label="Tools (no model is used)">
+                        {directTools.map((tool) => (
+                          <option key={directToolOptionValue(tool)} value={directToolOptionValue(tool)} title={tool.description ?? undefined}>
+                            {tool.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                  {hasToolCalling && !activeDirectTool && modelsSelectable && (
+                    <button 
+                      onClick={() => {
+                        useSettingsStore.getState().setActiveTab('tools');
+                        useSettingsStore.getState().openSettings();
+                      }}
+                      className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 transition-colors cursor-pointer" 
+                      title="This model supports native tool calling. Click to configure tools."
+                    >
+                      🔧 Tools
+                    </button>
+                  )}
+                </div>
+              );
+              return modelsSelectable ? modelSelector : <>{modelSelector}{modelStatusNode}</>;
+            })()}
+            {hasReasoning && supportsReasoningEffort && !activeDirectTool && (
               <>
                 <span style={{ marginLeft: '24px' }}>Reasoning:</span>
                 <select value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-semibold text-gray-700 focus:border-gray-500 focus:outline-none">
@@ -591,7 +635,7 @@ function App() {
                 </select>
               </>
             )}
-            {hasReasoning && !supportsReasoningEffort && (
+            {hasReasoning && !supportsReasoningEffort && !activeDirectTool && (
               <span 
                 className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-yellow-100 text-yellow-700 border border-yellow-200"
                 title="This model has built-in reasoning capabilities"

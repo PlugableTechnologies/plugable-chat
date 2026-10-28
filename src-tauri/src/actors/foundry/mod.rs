@@ -14,6 +14,7 @@ pub mod failure_strikes;
 pub mod embedding_init;
 pub mod embedding_model_files;
 pub mod gpu_registration;
+pub mod memory_budget;
 mod model_gateway_actor;
 mod request_builder;
 mod service_manager;

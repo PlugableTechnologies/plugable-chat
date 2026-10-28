@@ -22,6 +22,7 @@ pub mod cli;
 pub mod crash_capture;
 pub mod crash_handler;
 pub mod demo_schema;
+pub mod direct_tool_turn;
 pub mod download_guard;
 pub mod ep_probe;
 pub mod gpu_assessment;
@@ -29,6 +30,7 @@ pub mod gpu_diagnostics;
 pub mod keyword_search;
 pub mod network_settings;
 pub mod preflight;
+pub mod mcp_direct_tools;
 pub mod message_builders;
 pub mod mid_turn_state;
 pub mod model_profiles;
@@ -2268,8 +2270,11 @@ pub fn run() {
             });
 
             // Spawn MCP Host Actor
+            let mcp_changed_app_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                let actor = McpToolRouterActor::new(mcp_host_rx);
+                let actor = McpToolRouterActor::new(mcp_host_rx).with_servers_changed_hook(Arc::new(move || {
+                    let _ = mcp_changed_app_handle.emit(commands::mcp::MCP_TOOLS_CHANGED_EVENT, ());
+                }));
                 actor.run().await;
             });
 
@@ -2393,6 +2398,10 @@ pub fn run() {
             connect_mcp_server,
             disconnect_mcp_server,
             list_mcp_tools,
+            list_direct_mcp_tools,
+            get_selected_direct_tool,
+            set_selected_direct_tool,
+            call_mcp_tool_directly,
             execute_mcp_tool,
             get_mcp_server_status,
             get_all_mcp_tool_descriptions,

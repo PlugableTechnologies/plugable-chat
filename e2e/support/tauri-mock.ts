@@ -26,7 +26,30 @@ export interface DatabaseSourceFixture {
     project_id?: string;
 }
 
+export interface McpToolFixture {
+    name: string;
+    description?: string;
+    inputSchema?: unknown;
+}
+
+/** A connected server and the tools it reported; the mock picks out the ones the drop-down offers. */
+export interface ConnectedServerFixture {
+    server_id: string;
+    /** `serverInfo.name`, the short name shown in the drop-down. */
+    server_name: string;
+    tools: McpToolFixture[];
+}
+
+/** What `call_mcp_tool_directly` does for a tool: answer with text, or fail the turn the way the backend reports it. */
+export type DirectToolBehavior = { reply: string } | { failure: string };
+
 export interface MockOptions {
+    /** Servers that are connected; `setConnectedServers` changes them while the app runs. */
+    connectedServers?: ConnectedServerFixture[];
+    /** By tool name; a tool without an entry answers "(no reply scripted)". */
+    directToolBehavior?: Record<string, DirectToolBehavior>;
+    /** The tool remembered from the last launch. */
+    selectedDirectTool?: { server_id: string; tool_name: string } | null;
     mcpServers?: McpServerFixture[];
     databaseToolbox?: { enabled: boolean; sources: DatabaseSourceFixture[] };
     /** Answers by command name; an `{ __error: text }` object rejects instead. */
@@ -47,6 +70,7 @@ declare global {
     interface Window {
         __mockEmit: (event: string, payload: unknown) => void;
         __mockCalls: MockCall[];
+        __mockSetConnectedServers: (servers: ConnectedServerFixture[]) => void;
     }
 }
 
@@ -83,6 +107,25 @@ function installMock(opts: MockOptions) {
         first_run_completed: true,
     };
     let tables: unknown[] = [];
+    let connectedServers: ConnectedServerFixture[] = clone(opts.connectedServers ?? []);
+    let selectedDirectTool = clone(opts.selectedDirectTool ?? null);
+    window.__mockSetConnectedServers = (servers) => { connectedServers = clone(servers); };
+    // The same rule as src-tauri/src/mcp_direct_tools.rs (single_text_field). That file's Rust tests are the proof of the
+    // rule; this copy only lets a screen test see a list the way the backend would send it.
+    const singleTextField = (schema: any): string | null => {
+        const props = schema && schema.type === 'object' ? schema.properties : null;
+        const names = props && typeof props === 'object' ? Object.keys(props) : [];
+        return names.length === 1 && props[names[0]]?.type === 'string' ? names[0] : null;
+    };
+    const offeredDirectTools = () =>
+        connectedServers.flatMap((server) =>
+            server.tools.flatMap((tool) => {
+                const field = singleTextField(tool.inputSchema);
+                return field
+                    ? [{ server_id: server.server_id, server_name: server.server_name, tool_name: tool.name, field_name: field, label: `${server.server_name} - ${tool.name}`, description: tool.description ?? null }]
+                    : [];
+            }),
+        );
     let network = { https_proxy: null, hf_endpoint: null, offline_model_folder: null };
     const failedWhileDownloading = opts.startup === 'failed-while-downloading';
     const ok = (status: string) => ({ status });
@@ -131,6 +174,31 @@ function installMock(opts: MockOptions) {
         get_python_allowed_imports: () => ['math', 'json'],
         get_version_info: () => ({ version: '0.0.0-test' }),
         sync_mcp_servers: () => [],
+        list_direct_mcp_tools: () => offeredDirectTools(),
+        get_selected_direct_tool: () => selectedDirectTool,
+        set_selected_direct_tool: ({ tool }) => {
+            selectedDirectTool = tool;
+            return null;
+        },
+        // The backend answers on the events a model turn uses; these are the same events, a moment after the command returns.
+        call_mcp_tool_directly: ({ chatId, serverId, toolName }) => {
+            const behavior = opts.directToolBehavior?.[toolName] ?? { reply: '(no reply scripted)' };
+            setTimeout(() => {
+                if ('reply' in behavior) {
+                    window.__mockEmit('chat-token', behavior.reply);
+                } else {
+                    window.__mockEmit('chat-error', {
+                        error: `The tool did not give an answer, so this turn failed. Your message is saved. ${serverId} - ${toolName}: ${behavior.failure} Press Retry to send it again.`,
+                        kind: 'tool_error',
+                        retryable: true,
+                        offerRepair: false,
+                    });
+                }
+                window.__mockEmit('chat-saved', chatId);
+                window.__mockEmit('chat-finished', null);
+            }, 20);
+            return chatId;
+        },
         list_mcp_tools: () => [],
         test_mcp_server_config: ({ config }) => {
             const failure = opts.mcpStartFailures?.[config.id];
@@ -202,6 +270,12 @@ export async function openApp(page: Page, opts: MockOptions = {}) {
 }
 
 export const emit = (page: Page, event: string, payload: unknown) => page.evaluate(([e, p]) => window.__mockEmit(e as string, p), [event, payload] as const);
+
+/** A server connects (or goes away): the backend says so, and the screen asks for the tools again. */
+export async function setConnectedServers(page: Page, servers: ConnectedServerFixture[]) {
+    await page.evaluate((t) => window.__mockSetConnectedServers(t), servers);
+    await emit(page, 'mcp-tools-changed', null);
+}
 
 export const callsTo = async (page: Page, cmd: string): Promise<MockCall[]> =>
     (await page.evaluate(() => window.__mockCalls)).filter((c) => c.cmd === cmd);

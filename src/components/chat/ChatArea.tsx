@@ -71,11 +71,13 @@ export function ChatArea() {
     // Check if streaming is active in a different chat (input should be blocked)
     const isStreamingInOtherChat = streamingChatId !== null && streamingChatId !== currentChatId;
     
+    // A tool chosen in the model drop-down is called directly, so the local model's state does not matter to it.
+    const activeDirectTool = useChatStore((s) => s.getActiveDirectTool());
     // Model state blocking: block prompts when model is not ready (loading, switching, etc.)
-    const isModelBlocking = !isModelReady;
+    const isModelBlocking = !isModelReady && !activeDirectTool;
     const inputBlockReason = inputDisabledReason({
         streamingInOtherChat: isStreamingInOtherChat,
-        isModelReady,
+        isModelReady: isModelReady || !!activeDirectTool,
         modelState,
         downloads,
         operations,
@@ -294,7 +296,7 @@ export function ChatArea() {
         const chatId = isNewChat ? generateClientChatIdentifier() : currentChatId!;
         if (isNewChat) {
             storeState.setCurrentChatId(chatId);
-            if (storeState.currentModel === 'Loading...') {
+            if (storeState.currentModel === 'Loading...' && !activeDirectTool) {
                 try {
                     await storeState.fetchModels();
                 } catch (error) {
@@ -317,7 +319,7 @@ export function ChatArea() {
             preview,
             score: summaryScore,
             pinned: summaryPinned,
-            model: storeState.currentModel
+            model: activeDirectTool ? existingSummary?.model : storeState.currentModel
         });
 
         // Add user message (show original text to user)
@@ -350,7 +352,7 @@ export function ChatArea() {
             role: 'assistant',
             content: '',
             timestamp: Date.now(),
-            model: storeState.currentModel
+            model: activeDirectTool ? activeDirectTool.label : storeState.currentModel
         });
         
         // Log state after setup - check that assistant placeholder was added
@@ -359,6 +361,23 @@ export function ChatArea() {
         logToBackend(`[FRONTEND] 📤 handleSend setup complete | chatId=${chatId.slice(0,8)} | msgCount=${afterState.chatMessages.length} | lastRole=${lastMsg?.role} | streaming=${afterState.assistantStreamingActive}`);
 
         try {
+            if (activeDirectTool) {
+                // The tool answers on the same events a model turn does; the message goes to it as its one text field.
+                // No RAG context or system prompt is built: no model reads them.
+                const returnedChatId = await invoke<string>('call_mcp_tool_directly', {
+                    chatId,
+                    title: isNewChat ? derivedTitle : undefined,
+                    message: text,
+                    history: buildChatHistory(chatMessages),
+                    serverId: activeDirectTool.server_id,
+                    toolName: activeDirectTool.tool_name,
+                });
+                if (returnedChatId && returnedChatId !== chatId) {
+                    storeState.setCurrentChatId(returnedChatId);
+                }
+                return;
+            }
+
             // Check if we have RAG context to search (files are indexed immediately on attach)
             let messageToSend = text;
             const hasRagContext = storeState.ragIndexedFiles.length > 0;

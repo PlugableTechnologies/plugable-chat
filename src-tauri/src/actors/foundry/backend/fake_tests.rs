@@ -197,7 +197,6 @@ fn an_allocation_failure_is_a_client_problem_not_a_bad_model() {
 
 #[tokio::test]
 async fn a_long_conversation_that_runs_out_of_memory_is_retried_smaller_and_answers() {
-    super::forget_memory_ceilings();
     let model = "qwen3.5-oom-retry:1";
     let b = FakeBackend::new().with_context(model, 262_144);
     *b.oom_above_input_tokens.lock().unwrap() = Some(20_000);
@@ -213,7 +212,6 @@ async fn a_long_conversation_that_runs_out_of_memory_is_retried_smaller_and_answ
 
 #[tokio::test]
 async fn once_a_memory_limit_is_found_later_turns_stay_under_it_without_a_failed_attempt() {
-    super::forget_memory_ceilings();
     let model = "qwen3.5-oom-remembered:1";
     let b = FakeBackend::new().with_context(model, 262_144);
     *b.oom_above_input_tokens.lock().unwrap() = Some(20_000);
@@ -227,7 +225,6 @@ async fn once_a_memory_limit_is_found_later_turns_stay_under_it_without_a_failed
 
 #[tokio::test]
 async fn if_even_the_smaller_request_runs_out_of_memory_the_user_gets_a_plain_message_and_the_model_is_not_blamed() {
-    super::forget_memory_ceilings();
     let model = "qwen3.5-oom-hopeless:1";
     let b = FakeBackend::new().with_context(model, 262_144);
     *b.oom_above_input_tokens.lock().unwrap() = Some(50); // nothing realistic fits
@@ -241,7 +238,6 @@ async fn if_even_the_smaller_request_runs_out_of_memory_the_user_gets_a_plain_me
 
 #[tokio::test]
 async fn a_request_that_fits_in_memory_is_untouched() {
-    super::forget_memory_ceilings();
     let model = "qwen3.5-oom-fits:1";
     let b = FakeBackend::new().with_context(model, 262_144);
     *b.oom_above_input_tokens.lock().unwrap() = Some(6_000);
@@ -249,4 +245,69 @@ async fn a_request_that_fits_in_memory_is_untouched() {
     assert!(out.error.is_none());
     assert_eq!(b.received.lock().unwrap().len(), 1);
     assert!(super::memory_ceiling(model).is_none());
+}
+
+// ---- issue 38: the key-value cache is sized for input + output, and free memory was never asked ----
+
+use crate::actors::foundry::memory_budget::MemoryReading;
+
+const KV_TEXT: &str = "command execution error: Error: Microsoft.ML.OnnxRuntimeGenAI.OnnxRuntimeGenAIException: Could not allocate the key-value cache buffer";
+
+#[test]
+fn the_key_value_cache_failure_is_an_out_of_memory_client_problem() {
+    let e = BackendError::classify_generation(KV_TEXT);
+    assert!(matches!(e, BackendError::Client(_)), "{e:?}");
+    assert!(e.is_out_of_memory() && !e.is_server(), "must not blocklist the model");
+}
+
+#[tokio::test]
+async fn free_memory_shrinks_what_is_asked_for_before_the_engine_is_called() {
+    let model = "qwen3.5-kv-preflight:1";
+    let b = FakeBackend::new().with_context(model, 262_144);
+    // A 24 GB card, 19 GB commit limit with about 12 GB free: the box that failed at max_length 29,590.
+    *b.memory.lock().unwrap() = MemoryReading { free_gpu_mb: Some(20_000), free_commit_mb: Some(12_000) };
+    *b.kv_cache_fails_above_max_length.lock().unwrap() = Some(25_000);
+    // About 8,700 input tokens, like prompt 14 of the soak.
+    let history = vec![msg("system", 400), msg("user", 15_000), msg("assistant", 15_000), msg("user", 40)];
+    let out = run(&b, req(model, history)).await;
+    assert!(out.error.is_none(), "{:?}", out.error);
+    let seen = b.received.lock().unwrap();
+    assert_eq!(seen.len(), 1, "no failed attempt first: {:?}", seen.iter().map(|s| (s.1.len(), s.2)).collect::<Vec<_>>());
+    let max_length = seen[0].2 + super::super::context_budget::input_tokens(&seen[0].1);
+    assert!(max_length < 29_590, "{max_length}");
+}
+
+#[tokio::test]
+async fn a_chat_that_grows_is_trimmed_each_turn_as_free_memory_falls() {
+    let model = "qwen3.5-kv-falling:1";
+    let b = FakeBackend::new().with_context(model, 262_144);
+    let history = || vec![msg("system", 400), msg("user", 20_000), msg("assistant", 20_000), msg("user", 20_000), msg("assistant", 20_000), msg("user", 40)];
+    *b.memory.lock().unwrap() = MemoryReading { free_gpu_mb: Some(20_000), free_commit_mb: Some(40_000) };
+    run(&b, req(model, history())).await;
+    *b.memory.lock().unwrap() = MemoryReading { free_gpu_mb: Some(20_000), free_commit_mb: Some(3_000) };
+    run(&b, req(model, history())).await;
+    let seen = b.received.lock().unwrap();
+    assert!(seen[1].1.len() < seen[0].1.len(), "the second turn keeps less history: {} vs {}", seen[1].1.len(), seen[0].1.len());
+}
+
+#[tokio::test]
+async fn a_cache_allocation_failure_the_preflight_missed_ends_the_turn_as_a_plain_failure_and_retry_trims_more() {
+    let model = "qwen3.5-kv-reactive:1";
+    let b = FakeBackend::new().with_context(model, 262_144);
+    // Memory is unreadable here (no pre-flight), and the engine refuses anything above 6,000 tokens in total.
+    *b.kv_cache_fails_above_max_length.lock().unwrap() = Some(6_000);
+    let history = || vec![msg("system", 400), msg("user", 15_000), msg("assistant", 15_000), msg("user", 40)];
+    let out = run(&b, req(model, history())).await;
+    // 8,700 input + 16,384 output, then 60% of the input: still too much. A normal failed turn, not a panic.
+    let err = out.error.expect("both attempts fail");
+    assert!(err.is_out_of_memory() && !err.is_server(), "{err:?}");
+    assert!(err.message().contains("Retry"), "{}", err.message());
+    let after_first_turn = b.received.lock().unwrap().len();
+    // Pressing Retry sends the same chat again; it must now be trimmed below what just failed.
+    let again = run(&b, req(model, history())).await;
+    let seen = b.received.lock().unwrap();
+    let first_sizes = super::super::context_budget::input_tokens(&seen[0].1);
+    let retry_size = super::super::context_budget::input_tokens(&seen[after_first_turn].1);
+    assert!(retry_size < first_sizes, "{retry_size} vs {first_sizes}");
+    drop(again);
 }

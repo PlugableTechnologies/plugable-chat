@@ -456,6 +456,12 @@ export const createListenerSlice: StateCreator<
                 // Retry (and Repair); the words written so far are already in the chat and saved.
                 const stopped = failedTurnNotice(event.payload);
                 if (stopped) {
+                    // A tool that failed never wrote a word: drop the empty answer so Retry does not stack a second one.
+                    if (event.payload.kind === 'tool_error') {
+                        const messages = get().chatMessages;
+                        const last = messages[messages.length - 1];
+                        if (last?.role === 'assistant' && !last.content) set({ chatMessages: messages.slice(0, -1) } as any);
+                    }
                     set({ assistantStreamingActive: false } as any);
                     get().setChatNotice(stopped);
                     return;

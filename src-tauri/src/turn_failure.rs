@@ -139,6 +139,8 @@ pub fn tool_needs_network(transport: &Transport) -> bool {
 pub enum TurnFailureKind {
     NetworkDropped,
     EngineError,
+    /// A tool called straight from the model drop-down (no model involved) failed or timed out.
+    ToolError,
 }
 
 impl TurnFailureKind {
@@ -146,6 +148,7 @@ impl TurnFailureKind {
         match self {
             Self::NetworkDropped => "network_dropped",
             Self::EngineError => "engine_error",
+            Self::ToolError => "tool_error",
         }
     }
 
@@ -159,6 +162,10 @@ impl TurnFailureKind {
             Self::EngineError => (
                 format!("The model engine reported an error and this answer was stopped. Everything written so far is saved. {detail}"),
                 true,
+            ),
+            Self::ToolError => (
+                format!("The tool did not give an answer, so this turn failed. Your message is saved. {detail} Press Retry to send it again."),
+                false,
             ),
         };
         json!({ "error": error.trim(), "kind": self.as_str(), "retryable": true, "offerRepair": offer_repair })
@@ -243,6 +250,15 @@ pub fn history_after_failed_turn(history: &[ChatMessage], partial_reply: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_direct_tool_call_stops_the_turn_with_a_retry_and_no_repair_button() {
+        let payload = TurnFailureKind::ToolError.event_payload("plugableiq - ask: Request timed out after 30s");
+        assert_eq!(payload["kind"], "tool_error");
+        assert_eq!(payload["retryable"], true);
+        assert_eq!(payload["offerRepair"], false);
+        assert!(payload["error"].as_str().unwrap().contains("Request timed out after 30s"));
+    }
     use crate::protocol::OpenAIToolCallFunction;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;

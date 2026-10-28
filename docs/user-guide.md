@@ -54,6 +54,20 @@ correctly. **Phi-4-mini** is a lighter alternative that answered six of the seve
 3. Earlier conversations are listed in the left panel. Click one to reopen it. **Not yet tested:** renaming, pinning and
    deleting conversations from the **...** menu next to each one, and searching them.
 
+## 4a. Ask a tool directly, without the model
+
+**Not yet tested** on a real machine.
+
+When Plugable Chat is connected to a tool server (**Settings > Tools**), some of its tools take a single piece of text, such as a question. Those tools appear in the box at the top of the window, which then says **Model / Tool:** instead of **Model:**. Each one is listed as the server's name, a dash and the tool's name, for example **plugableiq - ask**, below the models.
+
+1. Open the box at the top and choose a tool, for example **plugableiq - ask**.
+2. Type your message and send it. Your words go to the tool exactly as typed, and the tool's reply appears as the answer. No AI model on your computer reads or rewrites either one, so this works even while the model is still downloading or could not start.
+3. Each message is a separate request: the tool does not see your earlier messages. The conversation is saved and reopens like any other.
+4. If the tool does not answer in time or reports an error, the message says so and offers **Retry**. How long the app waits is set per server in **Settings > Tools**.
+5. To go back to the model, choose a model in the same box. The app remembers your last choice.
+
+Tools that need more than one piece of text, or something other than text, are not listed.
+
 ## 5. Ask questions about the demo database
 
 **Tested.** Plugable Chat includes a sample database of Chicago crime reports (about 227,000 rows) so you can see how it answers

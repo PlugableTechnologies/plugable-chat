@@ -4,7 +4,7 @@ import { isToolResultMessage } from '../../components/chat/utils/tool-result-mes
 
 export interface ChatErrorPayload {
     error: string;
-    kind?: 'network_dropped' | 'engine_error';
+    kind?: 'network_dropped' | 'engine_error' | 'tool_error';
     retryable?: boolean;
     offerRepair?: boolean;
 }

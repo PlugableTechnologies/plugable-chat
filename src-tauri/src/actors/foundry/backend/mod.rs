@@ -158,6 +158,9 @@ fn is_out_of_memory(lower: &str) -> bool {
         "e_outofmemory",
         "memory allocation",
         "cudaerrormemoryallocation",
+        // The engine's own wording when the key-value cache for input + output does not fit (issue 38).
+        "key-value cache",
+        "could not allocate",
         OOM_MARKER,
     ]
     .iter()
@@ -247,7 +250,8 @@ fn note_memory_ceiling(model: &str, failed_input_tokens: u64) -> u64 {
     ceiling
 }
 
-/// Forget what a run learned (tests, and after a model is unloaded).
+/// Forget what a run learned. Clears every model, so a test that runs beside others must not call it:
+/// the tests give each case its own model id instead.
 pub fn forget_memory_ceilings() {
     if let Some(m) = MEMORY_CEILINGS.get() {
         if let Ok(mut m) = m.lock() {
@@ -280,7 +284,15 @@ where
         );
         let mut second = attempt(Budget { scale: OVERFLOW_RETRY_SCALES[0], input_ceiling: Some(ceiling) }).await;
         if let Some(e) = second.error.take() {
-            second.error = Some(if e.is_out_of_memory() { oom_message(&e, first.input_tokens) } else { e });
+            second.error = Some(if e.is_out_of_memory() {
+                // Retry must send less than this attempt did, or it would fail the same way.
+                if second.input_tokens > 0 {
+                    note_memory_ceiling(model, second.input_tokens);
+                }
+                oom_message(&e, first.input_tokens)
+            } else {
+                e
+            });
         }
         return second;
     }
@@ -289,7 +301,7 @@ where
 
 fn oom_message(original: &BackendError, input_tokens: u64) -> BackendError {
     BackendError::Client(format!(
-        "This conversation is {OOM_MARKER} (about {input_tokens} tokens of history). Start a new chat to continue, or ask in a shorter chat. Details: {}",
+        "This conversation is {OOM_MARKER} (about {input_tokens} tokens of history). Press Retry to try again with the oldest messages left out. Start a new chat if it keeps failing. Details: {}",
         original.message()
     ))
 }

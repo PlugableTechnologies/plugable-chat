@@ -11,6 +11,7 @@ import { createStreamingSlice, type StreamingSlice } from './slices/streaming-sl
 import { createChatHistorySlice, type ChatHistorySlice } from './slices/chat-history-slice';
 import { createModelSlice, type ModelSlice } from './slices/model-slice';
 import { createStartupSlice, type StartupSlice } from './slices/startup-slice';
+import { createDirectToolSlice, type DirectToolSlice } from './slices/direct-tool-slice';
 import { createListenerSlice, type ListenerSlice } from './listeners';
 import { createSendMessageSlice, type SendMessageSlice } from './actions/send-message';
 
@@ -25,6 +26,7 @@ export type ChatStoreState =
     & StreamingSlice
     & ChatHistorySlice
     & ModelSlice
+    & DirectToolSlice
     & StartupSlice
     & ListenerSlice
     & SendMessageSlice
@@ -62,6 +64,9 @@ export const useChatStore = create<ChatStoreState>()((...a) => ({
     // Model slice
     ...createModelSlice(...(a as Parameters<typeof createModelSlice>)),
     
+    // Direct tool slice (MCP tools offered in the model drop-down)
+    ...createDirectToolSlice(...(a as Parameters<typeof createDirectToolSlice>)),
+
     // Startup slice
     ...createStartupSlice(...(a as Parameters<typeof createStartupSlice>)),
     

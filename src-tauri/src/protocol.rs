@@ -1475,6 +1475,10 @@ pub enum McpHostMsg {
         arguments: serde_json::Value,
         respond_to: oneshot::Sender<Result<McpToolResult, String>>,
     },
+    /// The tools of connected servers that take one text field, for the model drop-down
+    ListDirectTools {
+        respond_to: oneshot::Sender<Vec<crate::mcp_direct_tools::DirectTool>>,
+    },
     /// Get all tool descriptions from enabled servers (for system prompt)
     GetAllToolDescriptions {
         respond_to: oneshot::Sender<Vec<(String, Vec<McpTool>)>>,

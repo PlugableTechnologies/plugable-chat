@@ -47,6 +47,11 @@ pub struct FakeBackend {
     /// When set, the fake engine runs out of memory ("bad allocation", the real A10G text) building any request
     /// whose input is larger than this many core tokens, whatever the model's context window says.
     pub oom_above_input_tokens: Mutex<Option<u64>>,
+    /// Free memory the fake machine reports before each request (None = unreadable, no memory limit).
+    pub memory: Mutex<crate::actors::foundry::memory_budget::MemoryReading>,
+    /// When set, the fake engine fails with the real 'key-value cache' text for any request whose
+    /// input + max_tokens (its `max_length`) exceeds this many core tokens.
+    pub kv_cache_fails_above_max_length: Mutex<Option<u64>>,
 }
 
 impl FakeBackend {
@@ -99,7 +104,8 @@ impl FakeBackend {
             ModelFamily::Gemma | ModelFamily::Granite => 8192,
             _ => 16384,
         };
-        let plan = context_budget::plan_request(&req.messages, ctx, cap, budget.scale, budget.input_ceiling);
+        let planned_ctx = crate::actors::foundry::memory_budget::effective_context(ctx, &self.memory.lock().unwrap());
+        let plan = context_budget::plan_request(&req.messages, planned_ctx, cap, budget.scale, budget.input_ceiling);
         outcome.input_tokens = plan.input_tokens;
         self.received
             .lock()
@@ -110,6 +116,14 @@ impl FakeBackend {
             if self.core_tokens(&plan.messages) > limit {
                 outcome.error = Some(BackendError::classify_generation(
                     "command execution error: Error: Microsoft.ML.OnnxRuntimeGenAI.OnnxRuntimeGenAIException: Non-zero status code returned while running SimplifiedLayerNormalization node. Name:'/model/layers.3/attn/k_norm/SimplifiedLayerNormalization' Status Message: bad allocation",
+                ));
+                return outcome;
+            }
+        }
+        if let Some(limit) = *self.kv_cache_fails_above_max_length.lock().unwrap() {
+            if self.core_tokens(&plan.messages) + plan.max_tokens > limit {
+                outcome.error = Some(BackendError::classify_generation(
+                    "command execution error: Error: Microsoft.ML.OnnxRuntimeGenAI.OnnxRuntimeGenAIException: Could not allocate the key-value cache buffer",
                 ));
                 return outcome;
             }

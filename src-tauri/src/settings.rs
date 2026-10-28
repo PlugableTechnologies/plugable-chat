@@ -677,6 +677,13 @@ pub struct AlwaysOnTableConfig {
     pub table_fq_name: String,
 }
 
+/// A tool of a connected MCP server that is chosen in the model drop-down.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectedDirectTool {
+    pub server_id: String,
+    pub tool_name: String,
+}
+
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -685,6 +692,10 @@ pub struct AppSettings {
     /// Persisted model selection - applied on app startup
     #[serde(default)]
     pub selected_model: Option<String>,
+    /// The MCP tool chosen in the model drop-down, when one is chosen instead of a model. Kept apart from
+    /// `selected_model` because the engine loads `selected_model` at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_direct_tool: Option<SelectedDirectTool>,
     /// Models known to be incompatible with the installed Foundry runtime.
     /// Maps model_id -> the Foundry version under which the model failed to load.
     /// Re-evaluated (pruned) whenever the detected Foundry version changes, so a
@@ -998,6 +1009,7 @@ impl AppSettings {
         Self {
             system_prompt: default_system_prompt(),
             selected_model: None,
+            selected_direct_tool: None,
             incompatible_models: HashMap::new(),
             incompatible_model_reasons: HashMap::new(),
             native_crash_counts: HashMap::new(),
@@ -1741,6 +1753,18 @@ mod demo_data_lookup_tests {
         done.first_run_completed = true;
         let round: AppSettings = serde_json::from_str(&serde_json::to_string(&done).unwrap()).unwrap();
         assert!(round.first_run_completed);
+    }
+
+    #[test]
+    fn the_tool_chosen_in_the_drop_down_survives_a_save_and_an_old_config_without_it_still_loads() {
+        let old: AppSettings = serde_json::from_str(r#"{"selected_model": "phi-4-mini"}"#).unwrap();
+        assert_eq!(old.selected_direct_tool, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("selected_direct_tool"), "nothing is written until a tool is chosen");
+        let mut chosen = old.clone();
+        chosen.selected_direct_tool = Some(SelectedDirectTool { server_id: "iq".into(), tool_name: "ask".into() });
+        let round: AppSettings = serde_json::from_str(&serde_json::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!(round.selected_direct_tool, chosen.selected_direct_tool);
+        assert_eq!(round.selected_model.as_deref(), Some("phi-4-mini"), "choosing a tool leaves the model selection alone");
     }
 }
 
