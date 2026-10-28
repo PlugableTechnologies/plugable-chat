@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::FoundryBackend;
 
-/// Set to `0`, `false`, `off` or `no` to never reload.
+/// Set to `1`, `true`, `on` or `yes` to reload (off by default: it crashed the app in the rc19 box run).
 pub const RELOAD_ENABLE_ENV: &str = "PLUGABLE_RELOAD_ON_LOW_MEMORY";
 /// Reload when free graphics memory is below this many MB (overrides the derived threshold).
 pub const RELOAD_FREE_GPU_MB_ENV: &str = "PLUGABLE_RELOAD_FREE_GPU_MB";
@@ -38,9 +38,11 @@ pub struct ReloadConfig {
 
 impl ReloadConfig {
     pub fn from_values(enable: Option<&str>, threshold_mb: Option<&str>) -> Self {
-        let enabled = !matches!(
+        // Opt-in: on the rc19 box run a reload after an early-stopped request crashed the app in
+        // onnxruntime-genai.dll (twice) and gave back only part of the memory.
+        let enabled = matches!(
             enable.map(|v| v.trim().to_lowercase()).as_deref(),
-            Some("0") | Some("false") | Some("off") | Some("no")
+            Some("1") | Some("true") | Some("on") | Some("yes")
         );
         let threshold_override_mb = threshold_mb.and_then(|v| v.trim().parse::<u64>().ok()).filter(|v| *v > 0);
         Self { enabled, threshold_override_mb }
@@ -177,7 +179,7 @@ mod tests {
     }
 
     fn cfg() -> ReloadConfig {
-        ReloadConfig::from_values(None, None)
+        ReloadConfig::from_values(Some("1"), None)
     }
 
     fn loaded_backend() -> FakeBackend {
@@ -265,6 +267,7 @@ mod tests {
         let b = loaded_backend();
         let st = Mutex::new(vec![]);
         let off = ReloadConfig::from_values(Some("0"), None);
+        assert!(!ReloadConfig::from_values(None, None).enabled);
         assert_eq!(go(&b, &ReloadGovernor::default(), true, &off, readings(&[Some(100)]), &st).await, ReloadOutcome::Skipped(SkipReason::Disabled));
         assert_eq!(go(&b, &ReloadGovernor::default(), true, &cfg(), readings(&[None]), &st).await, ReloadOutcome::Skipped(SkipReason::Unreadable));
         assert!(b.unloads.lock().unwrap().is_empty());
@@ -275,10 +278,10 @@ mod tests {
         assert_eq!(threshold_mb(Some(4_500), &cfg()), 9_000);
         assert_eq!(threshold_mb(Some(300), &cfg()), RELOAD_MIN_THRESHOLD_MB);
         assert_eq!(threshold_mb(None, &cfg()), RELOAD_DEFAULT_THRESHOLD_MB);
-        let c = ReloadConfig::from_values(None, Some(" 12000 "));
+        let c = ReloadConfig::from_values(Some("1"), Some(" 12000 "));
         assert_eq!(threshold_mb(Some(4_500), &c), 12_000);
         assert_eq!(ReloadConfig::from_values(Some("OFF"), Some("junk")), ReloadConfig { enabled: false, threshold_override_mb: None });
-        assert!(ReloadConfig::from_values(Some("1"), None).enabled && ReloadConfig::from_values(None, None).enabled);
+        assert!(ReloadConfig::from_values(Some("1"), None).enabled && !ReloadConfig::from_values(None, None).enabled);
         assert_eq!(RELOAD_FREE_GPU_MB_ENV, "PLUGABLE_RELOAD_FREE_GPU_MB");
     }
 }
