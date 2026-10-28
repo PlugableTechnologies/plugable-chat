@@ -38,6 +38,8 @@ pub struct EngineHealthView {
     pub gpu_off_reason: Option<String>,
     pub unclean_deaths: u32,
     pub last_quarantine: Option<String>,
+    /// How the previous run died, when it did; `in_ep` says the faulting module was a downloaded provider.
+    pub last_crash: Option<crate::crash_capture::CrashMarker>,
 }
 
 /// Whether the engine's downloaded parts were set aside, or GPU acceleration was switched off,
@@ -50,6 +52,7 @@ pub fn get_engine_health() -> EngineHealthView {
         gpu_off_reason: h.gpu_off_reason,
         unclean_deaths: h.unclean_deaths,
         last_quarantine: h.last_quarantine,
+        last_crash: crate::crash_capture::last_crash(),
     }
 }
 
@@ -100,19 +103,36 @@ pub async fn get_gpu_assessment(refresh: Option<bool>) -> Result<crate::gpu_asse
     .map_err(|e| format!("GPU assessment failed: {e}"))
 }
 
-/// Hosts the app must reach, found in the code and scripts: the search model (Hugging Face and its
-/// file CDN), provider packages (NuGet), the database toolbox, and the Visual C++ runtime link. The
-/// model engine's own catalog host lives inside the Foundry SDK and is not named in this repo.
-pub const REACHABILITY_HOSTS: [&str; 7] = [
-    "huggingface.co",
-    "cdn-lfs.huggingface.co",
+/// Hosts the app must reach, each with what it is for, so a failing row says what stops working.
+/// Hugging Face serves large files from Xet hosts (`*.xethub.hf.co`), not the old `cdn-lfs` name.
+/// Core's own catalog host is inside the native engine and not named in this repo; `ai.azure.com` is
+/// the catalog address Foundry Local uses as far as its public documentation shows, so a failure
+/// there is worth a look but is not proof on its own.
+pub const REACHABILITY_TARGETS: [(&str, &str); 9] = [
+    ("huggingface.co", "Search model: file list and small files"),
+    ("cas-bridge.xethub.hf.co", "Search model: large files (Hugging Face Xet storage)"),
+    ("transfer.xethub.hf.co", "Search model: large-file transfer (Hugging Face Xet storage)"),
     // The search model's release copy: github.com redirects to the release-assets host.
-    "github.com",
-    "release-assets.githubusercontent.com",
-    "api.nuget.org",
-    "storage.googleapis.com",
-    "aka.ms",
+    ("github.com", "Search model: Plugable Chat release copy"),
+    ("release-assets.githubusercontent.com", "Search model: release copy download"),
+    ("ai.azure.com", "Chat models: Foundry Local catalog (which models can be downloaded)"),
+    ("api.nuget.org", "GPU components: provider packages"),
+    ("storage.googleapis.com", "Database toolbox download"),
+    ("aka.ms", "Visual C++ runtime download link"),
 ];
+
+pub fn reachability_hosts() -> impl Iterator<Item = &'static str> {
+    REACHABILITY_TARGETS.iter().map(|(host, _)| *host)
+}
+
+/// What a host is for; the Hugging Face mirror (or any other host typed on the screen) has its own line.
+pub fn purpose_for_host(host: &str) -> String {
+    REACHABILITY_TARGETS
+        .iter()
+        .find(|(h, _)| *h == host)
+        .map(|(_, purpose)| purpose.to_string())
+        .unwrap_or_else(|| "Your Hugging Face mirror".to_string())
+}
 
 /// Result of trying one host: either an HTTP status (any answer proves the path works) or why not.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,13 +165,23 @@ pub fn describe_host_failure(raw: &str) -> String {
     format!("{cause}: {raw}")
 }
 
+/// Asking a site's home page often gets a 4xx; that still shows the name resolved and TLS worked,
+/// which is all this check can show.
+pub fn status_note(status: u16) -> Option<&'static str> {
+    (400..500).contains(&status).then_some("expected for a home page; the name resolved and a secure connection was made")
+}
+
 /// One line per host for the support bundle.
 pub fn format_host_checks(checks: &[HostCheck]) -> String {
     let mut out = String::from("Network reachability (HTTPS, this machine, this moment):");
     for c in checks {
+        let purpose = purpose_for_host(&c.host);
         match &c.outcome {
-            HostOutcome::Reachable { status, millis } => out.push_str(&format!("\n  {}: reachable (HTTP {status}, {millis} ms)", c.host)),
-            HostOutcome::Failed { reason } => out.push_str(&format!("\n  {}: FAILED - {reason}", c.host)),
+            HostOutcome::Reachable { status, millis } => {
+                let note = status_note(*status).map(|n| format!("; {n}")).unwrap_or_default();
+                out.push_str(&format!("\n  {}: reachable (HTTP {status}, {millis} ms{note}) - {purpose}", c.host));
+            }
+            HostOutcome::Failed { reason } => out.push_str(&format!("\n  {}: FAILED - {reason} - {purpose}", c.host)),
         }
     }
     out
@@ -174,7 +204,7 @@ async fn check_one_host(client: reqwest::Client, host: String) -> HostCheck {
     HostCheck { host, outcome }
 }
 
-/// Try every host in `REACHABILITY_HOSTS` at the same time, each bounded to 6 seconds. Uses the same
+/// Try every host in `REACHABILITY_TARGETS` at the same time, each bounded to 6 seconds. Uses the same
 /// proxy and certificate settings the app's own downloads use.
 pub async fn check_host_reachability() -> Vec<HostCheck> {
     check_host_reachability_with(None, Vec::new()).await
@@ -196,7 +226,7 @@ pub async fn check_host_reachability_with(proxy: Option<String>, extra_hosts: Ve
             return vec![HostCheck { host: "(http client)".to_string(), outcome: HostOutcome::Failed { reason: e.to_string() } }];
         }
     };
-    let mut hosts: Vec<String> = REACHABILITY_HOSTS.iter().map(|h| h.to_string()).collect();
+    let mut hosts: Vec<String> = reachability_hosts().map(|h| h.to_string()).collect();
     for h in extra_hosts {
         if !hosts.contains(&h) {
             hosts.push(h);
@@ -214,6 +244,8 @@ pub async fn check_host_reachability_with(proxy: Option<String>, extra_hosts: Ve
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HostCheckView {
     pub host: String,
+    /// What the address is for, so a failure says what stops working.
+    pub purpose: String,
     pub ok: bool,
     pub status: Option<u16>,
     pub millis: Option<u128>,
@@ -224,8 +256,8 @@ pub fn host_check_views(checks: &[HostCheck]) -> Vec<HostCheckView> {
     checks
         .iter()
         .map(|c| match &c.outcome {
-            HostOutcome::Reachable { status, millis } => HostCheckView { host: c.host.clone(), ok: true, status: Some(*status), millis: Some(*millis), reason: None },
-            HostOutcome::Failed { reason } => HostCheckView { host: c.host.clone(), ok: false, status: None, millis: None, reason: Some(reason.clone()) },
+            HostOutcome::Reachable { status, millis } => HostCheckView { host: c.host.clone(), purpose: purpose_for_host(&c.host), ok: true, status: Some(*status), millis: Some(*millis), reason: None },
+            HostOutcome::Failed { reason } => HostCheckView { host: c.host.clone(), purpose: purpose_for_host(&c.host), ok: false, status: None, millis: None, reason: Some(reason.clone()) },
         })
         .collect()
 }
@@ -321,13 +353,38 @@ mod reachability_tests {
     use super::*;
 
     #[test]
-    fn the_hosts_checked_include_the_search_model_and_its_cdn() {
-        assert!(REACHABILITY_HOSTS.contains(&"huggingface.co") && REACHABILITY_HOSTS.contains(&"cdn-lfs.huggingface.co"));
+    fn the_hosts_checked_include_the_search_model_host() {
+        assert!(reachability_hosts().any(|h| h == "huggingface.co"));
+    }
+
+    // rc18 (Pat): "cdn-lfs.huggingface.co does not resolve". Hugging Face moved large files to Xet hosts, so the
+    // old name is no longer where downloads go and the probe reported a host the app never needs.
+    #[test]
+    fn the_hosts_checked_are_the_ones_hugging_face_serves_large_files_from_now() {
+        assert!(!reachability_hosts().any(|h| h == "cdn-lfs.huggingface.co"), "stale host still probed");
+        assert!(reachability_hosts().any(|h| h == "cas-bridge.xethub.hf.co") && reachability_hosts().any(|h| h == "transfer.xethub.hf.co"));
+    }
+
+    #[test]
+    fn the_chat_model_catalog_host_is_probed_and_every_target_says_what_it_is_for() {
+        assert!(reachability_hosts().any(|h| h == "ai.azure.com"));
+        assert!(REACHABILITY_TARGETS.iter().all(|(_, purpose)| purpose.len() > 10));
+        assert_eq!(purpose_for_host("mirror.example.test"), "Your Hugging Face mirror");
+    }
+
+    // rc18 (Bob): HTTP 400/404 showed as plain "reachable". It is, but only as far as DNS and TLS.
+    #[test]
+    fn a_4xx_answer_to_the_home_page_is_reachable_and_the_bundle_says_why_it_is_expected() {
+        let text = format_host_checks(&[HostCheck { host: "api.nuget.org".into(), outcome: HostOutcome::Reachable { status: 404, millis: 9 } }]);
+        assert!(text.contains("api.nuget.org: reachable (HTTP 404, 9 ms;"), "{text}");
+        assert!(text.contains("expected") && text.contains("name resolved"), "{text}");
+        let ok = format_host_checks(&[HostCheck { host: "aka.ms".into(), outcome: HostOutcome::Reachable { status: 200, millis: 9 } }]);
+        assert!(!ok.contains("expected"), "{ok}");
     }
 
     #[test]
     fn the_release_copy_of_the_model_is_checked_too() {
-        assert!(REACHABILITY_HOSTS.contains(&"github.com") && REACHABILITY_HOSTS.contains(&"release-assets.githubusercontent.com"));
+        assert!(reachability_hosts().any(|h| h == "github.com") && reachability_hosts().any(|h| h == "release-assets.githubusercontent.com"));
     }
 
     #[test]
@@ -336,8 +393,8 @@ mod reachability_tests {
             HostCheck { host: "a".into(), outcome: HostOutcome::Reachable { status: 200, millis: 7 } },
             HostCheck { host: "b".into(), outcome: HostOutcome::Failed { reason: "timed out: x".into() } },
         ]);
-        assert_eq!(rows[0], HostCheckView { host: "a".into(), ok: true, status: Some(200), millis: Some(7), reason: None });
-        assert_eq!(rows[1], HostCheckView { host: "b".into(), ok: false, status: None, millis: None, reason: Some("timed out: x".into()) });
+        assert_eq!(rows[0], HostCheckView { host: "a".into(), purpose: "Your Hugging Face mirror".into(), ok: true, status: Some(200), millis: Some(7), reason: None });
+        assert_eq!(rows[1], HostCheckView { host: "b".into(), purpose: "Your Hugging Face mirror".into(), ok: false, status: None, millis: None, reason: Some("timed out: x".into()) });
     }
 
     #[test]
@@ -357,7 +414,7 @@ mod reachability_tests {
     async fn a_dead_proxy_fails_every_host_quickly_and_the_mirror_is_added() {
         let started = std::time::Instant::now();
         let rows = check_host_reachability_with(Some("http://127.0.0.1:9".to_string()), vec!["mirror.example.test".to_string(), "huggingface.co".to_string()]).await;
-        assert_eq!(rows.len(), REACHABILITY_HOSTS.len() + 1, "the duplicate is not added twice");
+        assert_eq!(rows.len(), REACHABILITY_TARGETS.len() + 1, "the duplicate is not added twice");
         assert!(rows.iter().any(|r| r.host == "mirror.example.test"));
         assert!(rows.iter().all(|r| matches!(r.outcome, HostOutcome::Failed { .. })), "{rows:?}");
         assert!(started.elapsed() < Duration::from_secs(10));

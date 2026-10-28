@@ -47,6 +47,36 @@ try {
     $winConf = Get-Content (Join-Path $repo "src-tauri/tauri.windows.conf.json") -Raw | ConvertFrom-Json
     Check "windows config bundles windows-redist as redist/" ($winConf.bundle.resources.'windows-redist/*' -eq "redist/")
 
+    # --- network-drop and crash-capture helpers ---
+    Check "Wait-Until returns true as soon as the condition holds" (Wait-Until -Condition { $true } -TimeoutSec 5)
+    Check "Wait-Until gives up false at the limit" (-not (Wait-Until -Condition { $false } -TimeoutSec 1 -PollSec 0.2))
+    $xet = Get-XetHosts
+    $blockLines = New-HostsBlockLines -Hosts $xet
+    Check "the Xet block names exactly the two Xet hosts" (($blockLines.Count -eq 2) -and ($blockLines -contains "127.0.0.1 cas-bridge.xethub.hf.co") -and ($blockLines -contains "127.0.0.1 transfer.xethub.hf.co"))
+    Check "the Xet block leaves huggingface.co and the old cdn-lfs name alone" (-not ($blockLines -match "huggingface\.co|cdn-lfs"))
+    $rf = Join-Path $tmp "replies.jsonl"
+    @('{"prompt_index":0,"outcome":"ok","detail":"","reply":"three rows","tool_calls":[]}',
+      '{"prompt_index":1,"outcome":"error","detail":"network_dropped: the network connection was lost while a tool was running","reply":"","tool_calls":[{"tool":"slow_lookup","is_error":true,"result_summary":"Interrupted: the network connection was lost before this tool finished."}]}',
+      '{"prompt_index":2,"outcome":"error","detail":"engine_error: boom","reply":"","tool_calls":[]}',
+      'garbage') | Set-Content $rf
+    $reps = Read-ReplyRecords $rf
+    Check "reply records parse (garbage kept as unparseable)" (($reps.Count -eq 4) -and ($reps[3].outcome -eq "unparseable"))
+    Check "a network-drop failure passes the drop assertion" ((Assert-TurnStoppedByNetworkDrop $reps 1).Count -eq 0)
+    Check "an ok turn fails the drop assertion" ((Assert-TurnStoppedByNetworkDrop $reps 0).Count -eq 1)
+    Check "an engine error is not accepted as a network drop" ((Assert-TurnStoppedByNetworkDrop $reps 2).Count -eq 1)
+    Check "a missing turn record fails the drop assertion (the app hung or died)" ((Assert-TurnStoppedByNetworkDrop $reps 9).Count -eq 1)
+    Check "Assert-TurnOk passes an ok turn and fails an error turn" (((Assert-TurnOk $reps 0).Count -eq 0) -and ((Assert-TurnOk $reps 1).Count -eq 1))
+    Check "an interrupted tool call is recognised" ((Assert-ToolCallInterrupted $reps 1).Count -eq 0)
+    Check "a turn with no tool call cannot prove an interrupted one" ((Assert-ToolCallInterrupted $reps 0).Count -eq 1)
+    $okRec = { param($i, $o) [pscustomobject]@{ prompt_index = $i; outcome = $o } }
+    Check "a failure followed by an ok turn is a recovery" ((Assert-TurnsRecoverAfterFailure @((& $okRec 0 "ok"), (& $okRec 1 "error"), (& $okRec 2 "ok"))).Count -eq 0)
+    Check "two failures in a row mean the app did not recover" ((Assert-TurnsRecoverAfterFailure @((& $okRec 0 "error"), (& $okRec 1 "error"))).Count -eq 1)
+    Check "a failure with prompts still due and none run is reported" ((Assert-TurnsRecoverAfterFailure @((& $okRec 0 "ok"), (& $okRec 1 "error")) 5).Count -eq 1)
+    Check "a failure on the last due prompt is not" ((Assert-TurnsRecoverAfterFailure @((& $okRec 0 "ok"), (& $okRec 1 "error")) 1).Count -eq 0)
+    $nshText = Get-Content (Join-Path $repo "src-tauri/windows/hooks.nsh") -Raw
+    Check "the installer turns on WER minidumps for plugable-chat.exe" (($nshText -match "LocalDumps") -and ($nshText -match "DumpType" ) -and ($nshText -match "NSIS_HOOK_POSTINSTALL[\s\S]*Call PcEnableCrashDumps"))
+    Check "the installer removes the WER key on uninstall" ($nshText -match "NSIS_HOOK_POSTUNINSTALL[\s\S]*DeleteRegKey HKLM `"\$\{PC_WER_KEY\}`"")
+
     # --- signer ---
     Check "Microsoft signer accepted" (Test-SignerSubject "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond" "Microsoft Corporation")
     Check "other signer rejected" (-not (Test-SignerSubject "CN=LEANCODE, INC." "Microsoft Corporation"))

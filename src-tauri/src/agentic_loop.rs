@@ -704,6 +704,14 @@ pub async fn run_agentic_loop(
     // Track if previous iteration had errors - allows tool retry even if state machine would block
     let mut previous_iteration_had_errors = false;
 
+    // A confirmed network drop ends this turn cleanly (see turn_failure.rs); stopped when the turn ends.
+    let drop_watch = crate::turn_failure::DropWatch::start(
+        || crate::actors::foundry::gpu_registration::online(),
+        crate::turn_failure::CHECK_EVERY,
+    );
+    let mut turn_failure: Option<(crate::turn_failure::TurnFailureKind, String)> = None;
+    let mut failed_partial_reply = String::new();
+
     let verbose_logging = crate::is_verbose_logging_enabled();
     
     // Test emit to verify app_handle works in spawned task
@@ -775,6 +783,14 @@ pub async fn run_agentic_loop(
             }
         });
 
+        // A confirmed network drop stops the stream the same way a user cancel does.
+        let iter_cancel_drop = iter_cancel_tx.clone();
+        let drop_signal = drop_watch.signal.clone();
+        tokio::spawn(async move {
+            crate::turn_failure::wait_until_true(drop_signal).await;
+            let _ = iter_cancel_drop.send(true);
+        });
+
         // Clone iter_cancel_rx before moving into the request
         let iter_cancel_for_stream = iter_cancel_rx.clone();
         
@@ -794,6 +810,7 @@ pub async fn run_agentic_loop(
         println!("[AgenticLoop] Sending chat request to Foundry...");
         let _ = std::io::stdout().flush();
 
+        crate::turn_failure::clear_engine_error();
         if handles.foundry_tx.send(chat_request).await.is_err() {
             println!("[AgenticLoop] ERROR: Failed to send to Foundry");
             turn_outcome = crate::turn_record::TurnOutcome::Error;
@@ -827,6 +844,8 @@ pub async fn run_agentic_loop(
                             println!("[AgenticLoop] User cancellation received!");
                             turn_outcome = crate::turn_record::TurnOutcome::Cancelled;
                             turn_detail = "cancelled by the user".to_string();
+                        } else if drop_watch.has_dropped() {
+                            println!("[AgenticLoop] Network drop confirmed, stopping the stream.");
                         } else {
                             println!("[AgenticLoop] Internal early-stop cancellation triggered.");
                             // Note: early_stopped_for_tool not set here since we break immediately
@@ -919,6 +938,23 @@ pub async fn run_agentic_loop(
             model_response_text.len(),
             stream_elapsed.as_secs_f64()
         );
+
+        // The engine reports its errors out of band; a stream that ended because of one, or because
+        // the network went away, is a failed turn, not a short answer.
+        if turn_outcome != crate::turn_record::TurnOutcome::Cancelled {
+            if drop_watch.has_dropped() {
+                turn_failure = Some((
+                    crate::turn_failure::TurnFailureKind::NetworkDropped,
+                    "the network connection was lost while the answer was being written".to_string(),
+                ));
+            } else if let Some(engine_error) = crate::turn_failure::take_engine_error() {
+                turn_failure = Some((crate::turn_failure::TurnFailureKind::EngineError, engine_error));
+            }
+            if turn_failure.is_some() {
+                failed_partial_reply = model_response_text.clone();
+                break;
+            }
+        }
 
         // A model that copies the tool-result wrapper into its answer must not have that saved
         // and fed back to it next turn.
@@ -1056,6 +1092,30 @@ pub async fn run_agentic_loop(
         let mut executed_any = false;
 
         for (idx, resolved_tool_call) in resolved_tool_calls.iter().enumerate() {
+            // The network went away while an earlier call in this round ran: the rest are not started,
+            // but each still gets a result so the saved transcript pairs every call with an answer.
+            if drop_watch.has_dropped() {
+                tool_trace.push(crate::turn_record::ToolTraceEntry::new(
+                    &resolved_tool_call.server,
+                    &resolved_tool_call.tool,
+                    resolved_tool_call.arguments.clone(),
+                    crate::turn_failure::INTERRUPTED_TOOL_RESULT,
+                    true,
+                    Duration::ZERO,
+                ));
+                let _ = app_handle.emit(
+                    "tool-result",
+                    ToolResultEvent {
+                        server: resolved_tool_call.server.clone(),
+                        tool: resolved_tool_call.tool.clone(),
+                        result: crate::turn_failure::INTERRUPTED_TOOL_RESULT.to_string(),
+                        is_error: true,
+                    },
+                );
+                tool_results.push((resolved_tool_call.clone(), crate::turn_failure::INTERRUPTED_TOOL_RESULT.to_string(), true));
+                executed_any = true;
+                continue;
+            }
             // Check if blocked by state machine
             // EXCEPTION: If previous iteration had errors, allow the tool to retry
             // This prevents the state machine from blocking error recovery
@@ -1223,8 +1283,24 @@ pub async fn run_agentic_loop(
                 )
                 .await
             } else {
-                // MCP tool execution
-                match dispatch_tool_call_to_executor(&handles.mcp_host_tx, resolved_tool_call).await
+                // MCP tool execution. A server reached over the network is not waited on once the
+                // network is gone (its request would only time out much later).
+                let needs_network = config
+                    .server_configs
+                    .iter()
+                    .find(|c| c.id == resolved_tool_call.server)
+                    .map(|c| crate::turn_failure::tool_needs_network(&c.transport))
+                    .unwrap_or(false);
+                let dispatched = async { dispatch_tool_call_to_executor(&handles.mcp_host_tx, resolved_tool_call).await };
+                let mcp_outcome = if needs_network {
+                    tokio::select! {
+                        r = dispatched => Some(r),
+                        _ = crate::turn_failure::wait_until_true(drop_watch.signal.clone()) => None,
+                    }
+                } else {
+                    Some(dispatched.await)
+                };
+                match mcp_outcome.unwrap_or_else(|| Err(crate::turn_failure::INTERRUPTED_TOOL_RESULT.to_string()))
                 {
                     Ok(result) => {
                         println!(
@@ -1394,6 +1470,14 @@ pub async fn run_agentic_loop(
 
         checkpoint_chat(&handles, &config, &full_history).await;
 
+        if drop_watch.has_dropped() {
+            turn_failure = Some((
+                crate::turn_failure::TurnFailureKind::NetworkDropped,
+                "the network connection was lost while a tool was running".to_string(),
+            ));
+            break;
+        }
+
         // Check for repeated errors
         for (call, result, is_error) in &tool_results {
             if *is_error {
@@ -1471,10 +1555,22 @@ pub async fn run_agentic_loop(
         },
     );
 
+    // A failed turn keeps what it produced: the partial words and every tool result, nothing invented.
+    if let Some((kind, detail)) = &turn_failure {
+        full_history = crate::turn_failure::history_after_failed_turn(&full_history, &failed_partial_reply);
+        turn_outcome = crate::turn_record::TurnOutcome::Error;
+        turn_detail = format!("{}: {}", kind.as_str(), detail);
+        crate::app_log::log("turn", &format!("turn failed ({}): {detail}", kind.as_str()));
+    }
+
     // Save the full conversation (messages and model) so it reopens after a restart. The
     // embedding is best-effort: without it the chat is stored with a placeholder vector and
     // filled in once the embedding model is ready.
     save_finished_chat(&handles, &config, &full_history, &final_response).await;
+
+    if let Some((kind, detail)) = &turn_failure {
+        let _ = app_handle.emit("chat-error", kind.event_payload(detail));
+    }
 
     // Emit chat-saved event for frontend
     let _ = app_handle.emit("chat-saved", &config.chat_id);

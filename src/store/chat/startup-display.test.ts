@@ -47,3 +47,17 @@ test('embedding-failed-but-chat-ready shows the amber search chip and a ready ba
     assert.equal(searchFeaturesUnavailable(sub({})), false);
     assert.equal(searchFeaturesUnavailable(null), false);
 });
+
+// rc18 (Bob, Pat): "Startup failed (1/2)" in red while the chat model was still downloading.
+test('a failed model is not a red failure while a model download or GPU setup is still moving', () => {
+    const failed = sub({ model: 'failed' });
+    assert.equal(startupBarModel('failed', failed, true).tone, 'amber');
+    assert.match(startupBarModel('failed', failed, true).message, /download or setup is in progress/i);
+    assert.equal(startupBarModel('failed', failed, false).tone, 'red');
+    assert.equal(startupBarModel('failed', failed).tone, 'red', 'no activity argument keeps the old verdict');
+    assert.equal(startupBarModel('failed', sub({ foundry_service: 'failed' }), true).tone, 'amber');
+});
+
+test('a ready start-up is green whatever is downloading', () => {
+    assert.equal(startupBarModel('ready', sub({}), true).tone, 'green');
+});

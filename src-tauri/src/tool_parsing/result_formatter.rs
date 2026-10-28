@@ -25,7 +25,11 @@ pub fn format_tool_result(
     original_user_prompt: Option<&str>,
     schema_context: Option<&str>,
 ) -> String {
-    let guidance = if is_error {
+    // A call cut short by a network drop did not fail on its own terms: telling the model to retry at
+    // once would have it hammer a connection that is still down.
+    let guidance = if is_error && result == crate::turn_failure::INTERRUPTED_TOOL_RESULT {
+        String::new()
+    } else if is_error {
         // For SQL errors with schema context, use enhanced recovery prompt
         if call.tool == "sql_select" && schema_context.is_some() {
             build_sql_error_recovery_guidance(result, original_user_prompt, schema_context)

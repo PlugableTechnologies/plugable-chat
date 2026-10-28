@@ -689,6 +689,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 settings: currentSettings,
                 error: `Failed to update server: ${e.message || e}`
             });
+            // The card has to know the save failed (a server that would not start is not "on").
+            throw e;
         }
     },
 

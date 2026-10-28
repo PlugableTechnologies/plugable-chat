@@ -31,6 +31,11 @@
 ; Minimum VC++ build number (the registry "Bld" value, 14.38 = 33135). Keep equal to "minBld" in
 ; scripts/ci/vcredist.pin.json; scripts/ci/clean-host.tests.ps1 fails when they differ.
 !define PC_VCREDIST_MIN_BLD 33135
+; Windows Error Reporting writes a minidump of a crashed plugable-chat.exe when this key exists. A
+; fast-fail crash (0xc0000409) skips every in-process handler, so this is the only way to get one.
+; No DumpFolder on purpose: the default is per user (%LOCALAPPDATA%\CrashDumps), which the crashing
+; user can write to; a folder created here by the installer would not be.
+!define PC_WER_KEY "SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\${MAINBINARYNAME}.exe"
 !define PC_WEBVIEW2_GUID "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 !define PC_VCREDIST_URL "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 !define PC_WEBVIEW2_URL "https://developer.microsoft.com/microsoft-edge/webview2/"
@@ -254,7 +259,15 @@ FunctionEnd
   Call PcCleanStaleLibs
 !macroend
 
+Function PcEnableCrashDumps
+  SetRegView 64
+  WriteRegDWORD HKLM "${PC_WER_KEY}" "DumpType" 1
+  WriteRegDWORD HKLM "${PC_WER_KEY}" "DumpCount" 5
+  !insertmacro PcLog "enabled Windows Error Reporting minidumps for ${MAINBINARYNAME}.exe"
+FunctionEnd
+
 !macro NSIS_HOOK_POSTINSTALL
+  Call PcEnableCrashDumps
   Call PcVcRedistEnsure
   Call PcWebView2Check
   !insertmacro PcLog "---- install end"
@@ -280,6 +293,7 @@ FunctionEnd
     pc_keep_ep:
   ${EndIf}
   SetRegView 64
+  DeleteRegKey HKLM "${PC_WER_KEY}"
   DeleteRegKey HKLM "${PC_REG_KEY}"
   DeleteRegKey /ifempty HKLM "SOFTWARE\Plugable\plugable-chat"
   DeleteRegKey /ifempty HKLM "SOFTWARE\Plugable"

@@ -38,6 +38,8 @@ pub struct FakeBackend {
     /// Every attempt the "core" received: (model, messages, max_tokens)
     pub received: Mutex<Vec<(String, Vec<ChatMessage>, u64)>>,
     pub downloads: Mutex<Vec<String>>,
+    /// Errors the next downloads fail with, after reporting some progress (a connection cut mid-download).
+    pub download_failures: Mutex<VecDeque<String>>,
     pub loads: Mutex<Vec<String>>,
     pub catalog: Mutex<Vec<CatalogModel>>,
     /// Tokens per character the fake core uses (the estimator assumes ~0.29).
@@ -57,6 +59,13 @@ impl FakeBackend {
     pub fn with_context(self, model: &str, ctx: u64) -> Self {
         self.contexts.lock().unwrap().insert(model.to_string(), ctx);
         self
+    }
+
+    pub fn fail_next_downloads(&self, times: usize, error: &str) {
+        let mut q = self.download_failures.lock().unwrap();
+        for _ in 0..times {
+            q.push_back(error.to_string());
+        }
     }
 
     pub fn push(&self, s: Script) {
@@ -142,11 +151,15 @@ impl FoundryBackend for FakeBackend {
         mut progress: ProgressSink,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<(), String> {
+        let cut = self.download_failures.lock().unwrap().pop_front();
         for p in [10.0, 50.0, 100.0] {
             if cancel.as_ref().map_or(false, |c| c.load(Ordering::SeqCst)) {
                 return Err("The operation was canceled.".to_string());
             }
             progress(p);
+            if let (Some(e), true) = (&cut, p >= 50.0) {
+                return Err(e.clone());
+            }
         }
         self.downloads.lock().unwrap().push(model.to_string());
         Ok(())

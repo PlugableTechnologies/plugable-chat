@@ -975,8 +975,26 @@ pub fn default_mcp_test_server() -> McpServerConfig {
     base
 }
 
+/// Dev-only servers put in a fresh config. A release build has none: the test server runs through
+/// `cargo`, which a tester's machine does not have (rc18: "cargo: program not found"). A dev build
+/// keeps it; `--enable-mcp-test` adds it on request in any build (see `ensure_dev_test_server`).
+pub fn seeded_dev_servers(release_build: bool) -> Vec<McpServerConfig> {
+    if release_build {
+        Vec::new()
+    } else {
+        vec![default_mcp_test_server()]
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
+        Self::defaults_for_build(!cfg!(debug_assertions))
+    }
+}
+
+impl AppSettings {
+    /// `Default` with the build kind spelled out, so the release choice can be tested from a debug build.
+    pub fn defaults_for_build(release_build: bool) -> Self {
         Self {
             system_prompt: default_system_prompt(),
             selected_model: None,
@@ -984,7 +1002,7 @@ impl Default for AppSettings {
             incompatible_model_reasons: HashMap::new(),
             native_crash_counts: HashMap::new(),
             foundry_backend: FoundryBackendKind::default(),
-            mcp_servers: vec![default_mcp_test_server()],
+            mcp_servers: seeded_dev_servers(release_build),
             chat_format_default: default_chat_format(),
             chat_format_overrides: HashMap::new(),
             tool_call_formats: ToolCallFormatConfig::default(),
@@ -1304,17 +1322,29 @@ pub fn regenerate_demo_source_args() -> Option<Vec<String>> {
     ])
 }
 
-/// Ensure the default MCP test server and demo database exist in settings (for migration)
-pub fn ensure_default_servers(settings: &mut AppSettings) {
-    // Check if mcp-test-server already exists
-    let has_test_server = settings
-        .mcp_servers
-        .iter()
-        .any(|s| s.id == "mcp-test-server");
-
-    if !has_test_server {
+/// Add the dev MCP test server if it is missing. `--enable-mcp-test` asks for it by name, so it
+/// works in a release build too.
+pub fn ensure_dev_test_server(settings: &mut AppSettings) {
+    if !settings.mcp_servers.iter().any(|s| s.id == DEV_TEST_SERVER_ID) {
         println!("Adding default MCP test server to settings");
         settings.mcp_servers.insert(0, default_mcp_test_server());
+    }
+}
+
+const DEV_TEST_SERVER_ID: &str = "mcp-test-server";
+
+/// Ensure the default demo database exists in settings (for migration), and that the dev test
+/// server is present in dev builds only.
+pub fn ensure_default_servers(settings: &mut AppSettings) {
+    ensure_default_servers_for(settings, !cfg!(debug_assertions));
+}
+
+pub fn ensure_default_servers_for(settings: &mut AppSettings, release_build: bool) {
+    if release_build {
+        // An earlier install may have saved the seeded server; drop it unless the user turned it on.
+        settings.mcp_servers.retain(|s| s.id != DEV_TEST_SERVER_ID || s.enabled);
+    } else {
+        ensure_dev_test_server(settings);
     }
 
     // Check if embedded-demo database source already exists
@@ -1746,5 +1776,55 @@ mod backend_choice_tests {
         assert_eq!(CliHttp.effective(true), (CliHttp, None));
         assert_eq!(Sdk.effective(true), (Sdk, None));
         assert_eq!(Sdk.effective(false), (Sdk, None));
+    }
+}
+
+// rc18 (Pat): a fresh install listed a dev-only MCP server ("mcp_test_server", command `cargo`), and enabling it
+// failed with "cargo: program not found" on a machine that has no Rust toolchain.
+#[cfg(test)]
+mod dev_server_seed_tests {
+    use super::*;
+
+    fn dev_ids(settings: &AppSettings) -> Vec<String> {
+        settings.mcp_servers.iter().filter(|s| s.id == "mcp-test-server").map(|s| s.id.clone()).collect()
+    }
+
+    #[test]
+    fn a_release_build_seeds_no_dev_servers_and_a_dev_build_seeds_the_test_server() {
+        assert!(seeded_dev_servers(true).is_empty());
+        assert_eq!(seeded_dev_servers(false).iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["mcp-test-server"]);
+    }
+
+    #[test]
+    fn release_defaults_have_no_dev_servers() {
+        let mut settings = AppSettings::defaults_for_build(true);
+        assert!(settings.mcp_servers.is_empty());
+        ensure_default_servers_for(&mut settings, true);
+        assert!(dev_ids(&settings).is_empty(), "{:?}", settings.mcp_servers.iter().map(|s| &s.id).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_release_build_removes_the_unused_dev_server_that_an_earlier_install_saved() {
+        let mut settings = AppSettings::default();
+        settings.mcp_servers = seeded_dev_servers(false);
+        ensure_default_servers_for(&mut settings, true);
+        assert!(dev_ids(&settings).is_empty());
+    }
+
+    #[test]
+    fn a_dev_server_the_user_turned_on_is_left_alone_in_a_release_build() {
+        let mut settings = AppSettings::default();
+        settings.mcp_servers = seeded_dev_servers(false);
+        settings.mcp_servers[0].enabled = true;
+        ensure_default_servers_for(&mut settings, true);
+        assert_eq!(dev_ids(&settings).len(), 1);
+    }
+
+    #[test]
+    fn a_dev_build_still_adds_the_test_server_when_missing() {
+        let mut settings = AppSettings::defaults_for_build(false);
+        settings.mcp_servers.clear();
+        ensure_default_servers_for(&mut settings, false);
+        assert_eq!(dev_ids(&settings).len(), 1);
     }
 }

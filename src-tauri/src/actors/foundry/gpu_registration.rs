@@ -252,9 +252,16 @@ pub fn spawn_retry(app: AppHandle) -> bool {
     true
 }
 
+/// Test seam: while the named file exists, the connectivity probe says there is no network.
+pub const OFFLINE_FILE_ENV: &str = "PLUGABLE_CHAT_TEST_OFFLINE_FILE";
+
 /// True when a network connection can be made. Uses literal addresses so a dead DNS cannot stall it.
 pub async fn online() -> bool {
     if crate::engine_health::test_fault("offline") {
+        return false;
+    }
+    // A harness that cannot unplug a cable creates this file mid-run and deletes it to restore the network.
+    if std::env::var_os(OFFLINE_FILE_ENV).map(std::path::PathBuf::from).map_or(false, |p| p.exists()) {
         return false;
     }
     tokio::task::spawn_blocking(|| {

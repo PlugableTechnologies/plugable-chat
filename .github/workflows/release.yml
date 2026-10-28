@@ -78,9 +78,28 @@ jobs:
             exit 1
           fi
 
+  # A release is built and signed only when a recorded passing GPU-matrix run and a passing Windows fresh-host
+  # CPU set exist for the commit being tagged (release-evidence/<tag>.json, see docs/testing-ladder.md). Checked
+  # before any build, so a tag without the evidence never reaches the signing approval or ten minutes of runner time.
+  release-evidence:
+    name: Release evidence (GPU matrix and fresh-host CPU set)
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the evidence for this tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/ci/check-release-evidence.mjs --tag "$TAG"
+
   build-windows:
     name: Build and sign (Windows)
-    needs: verify-tag
+    needs: [verify-tag, release-evidence]
     runs-on: windows-latest
     timeout-minutes: 180
     environment: release-signing
@@ -278,7 +297,7 @@ jobs:
   # which of the two it did, in the job summary.
   build-macos:
     name: Build and sign (macOS)
-    needs: verify-tag
+    needs: [verify-tag, release-evidence]
     runs-on: macos-latest
     timeout-minutes: 180
     environment: release-signing
@@ -425,7 +444,7 @@ jobs:
 
   build-linux:
     name: Build and sign (Linux)
-    needs: verify-tag
+    needs: [verify-tag, release-evidence]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -510,7 +529,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [verify-tag, build-windows, build-macos, build-linux]
+    needs: [verify-tag, release-evidence, build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

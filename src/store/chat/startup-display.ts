@@ -12,15 +12,21 @@ export interface StartupBarModel {
 /**
  * Red "Startup failed" is only for a failure that stops chat: the engine or the chat model failed.
  * A stalled start-up with both of those still working, a failed search model, or a GPU setup that
- * has not finished never turn the bar red (rc16: a slow first-run download did).
+ * has not finished never turn the bar red (rc16: a slow first-run download did). `workInProgress` is true
+ * while a model download or GPU setup is still advancing.
  */
-export function startupBarModel(state: StartupStateType, subsystems: SubsystemStatusData | null): StartupBarModel {
+export function startupBarModel(state: StartupStateType, subsystems: SubsystemStatusData | null, workInProgress = false): StartupBarModel {
     const essential = subsystems ? [subsystems.foundry_service?.status, subsystems.model?.status] : [];
     const readyCount = essential.filter((s) => s === 'ready').length;
     const totalCount = essential.length;
     const chatBlocked = essential.some((s) => s === 'failed' || s === 'unavailable');
     if (state === 'ready') return { tone: 'green', message: 'Ready', readyCount, totalCount };
     if (state === 'failed') {
+        // rc18 (Bob, Pat): the engine gave up connecting after 45 s while the first-run model download was still
+        // moving. A download or GPU setup that is advancing is not a failure, so the bar stays amber until it stops.
+        if (chatBlocked && workInProgress) {
+            return { tone: 'amber', message: 'Still starting up - a download or setup is in progress', readyCount, totalCount };
+        }
         return chatBlocked
             ? { tone: 'red', message: 'Startup failed', readyCount, totalCount }
             : { tone: 'amber', message: 'Still starting up - this is taking longer than usual', readyCount, totalCount };

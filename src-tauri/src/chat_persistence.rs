@@ -398,6 +398,32 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_cut_off_by_a_network_drop_saves_the_words_and_every_tool_result_in_the_shape_the_screen_reads() {
+        use crate::protocol::{ParsedToolCall, ToolFormat};
+        let call = |tool: &str| ParsedToolCall { server: "box".into(), tool: tool.into(), arguments: serde_json::json!({}), raw: String::new(), id: None };
+        let done = crate::tool_parsing::format_tool_result(&call("count_rows"), "{\"rows\":3}", false, ToolFormat::Hermes, None, None);
+        let cut = crate::tool_parsing::format_tool_result(&call("slow_lookup"), crate::turn_failure::INTERRUPTED_TOOL_RESULT, true, ToolFormat::Hermes, None, None);
+        let history = vec![
+            msg("system", "SECRET"),
+            msg("user", "how many rows, and what about the lookup?"),
+            msg("assistant", "<tool_call>{\"name\":\"count_rows\"}</tool_call>"),
+            msg("user", &done),
+            msg("assistant", "<tool_call>{\"name\":\"slow_lookup\"}</tool_call>"),
+            msg("user", &cut),
+        ];
+        let saved = crate::turn_failure::history_after_failed_turn(&history, "There are 3 rows. For the lookup I was about to <tool_call>{\"na");
+        let json = messages_json(&saved);
+        let back: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 6, "system prompt dropped, nothing else lost: {json}");
+        assert_eq!(back[5]["role"], "assistant");
+        assert_eq!(back[5]["content"], "There are 3 rows. For the lookup I was about to");
+        assert!(back[4]["content"].as_str().unwrap().contains("Interrupted"));
+        assert!(!json.contains("SECRET"));
+        assert!(!json.contains("RETRY REQUIRED"), "an interrupted call must not tell the model to retry at once");
+        println!("FAILED_TURN_SAVED_JSON={json}");
+    }
+
+    #[test]
     fn an_empty_model_name_keeps_the_stored_model() {
         match build_upsert("c", "T", &[], "", None, None) {
             VectorMsg::UpsertChatRecord { model, .. } => assert!(model.is_none()),

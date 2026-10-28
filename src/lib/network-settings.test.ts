@@ -6,6 +6,7 @@ import {
     loadNetworkForm,
     networkFormIsDirty,
     networkSettingsToForm,
+    REACHABLE_MEANS,
     saveNetworkForm,
     summarizeHostRows,
     testNetworkForm,
@@ -60,6 +61,17 @@ test('host rows read as one line each and the summary counts failures', () => {
     assert.deepEqual({ allOk: s.allOk, failed: s.failed, lines: s.lines.length }, { allOk: false, failed: 1, lines: 2 });
     assert.equal(summarizeHostRows([]).allOk, false, 'no results is not a pass');
     assert.equal(summarizeHostRows([rows[1]]).allOk, true);
+});
+
+// rc18 (Bob): HTTP 400/404 read as plain "reachable". It is, but a home page that answers 404 only proves the
+// name resolved and a secure connection was made, and the screen has to say so.
+test('a 4xx answer is reachable and described as expected; a 5xx is not called expected', () => {
+    const row = (status: number) => ({ host: 'api.nuget.org', ok: true, status, millis: 9, reason: null });
+    assert.equal(describeHostRow(row(404)), 'api.nuget.org: reachable (HTTP 404 is expected here, 9 ms)');
+    assert.equal(describeHostRow(row(400)), 'api.nuget.org: reachable (HTTP 400 is expected here, 9 ms)');
+    assert.equal(describeHostRow(row(200)), 'api.nuget.org: reachable (HTTP 200, 9 ms)');
+    assert.equal(describeHostRow(row(503)), 'api.nuget.org: reachable (HTTP 503, 9 ms)');
+    assert.match(REACHABLE_MEANS, /name resolved and a secure connection/);
 });
 
 test('load, save and test talk to the backend commands with the settings keys', async () => {

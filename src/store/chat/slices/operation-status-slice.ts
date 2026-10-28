@@ -43,6 +43,8 @@ export interface PendingFallbackDownload {
 export interface ChatNotice {
     level: 'warning' | 'error';
     text: string;
+    /** Buttons that fit: Retry sends the last question again, Repair engine is the one-click engine repair. */
+    actions?: Array<'retry' | 'repair'>;
 }
 
 export interface OperationStatusSlice {

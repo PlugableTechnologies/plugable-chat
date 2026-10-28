@@ -1,3 +1,4 @@
+import { failedTurnNotice, type ChatErrorPayload } from './failed-turn';
 import { appendTokenToBuffer } from './streaming-buffer';
 import { embeddingEventToAction, epEventToAction } from './operations';
 import { planFallback } from './fallback';
@@ -89,7 +90,7 @@ interface ListenerSliceDeps {
     downloadModel: (modelName: string, label?: string) => Promise<boolean>;
     operations: import('./operations').OperationsMap;
     setModelIncompatibleNotice: (notice: ModelIncompatibleNotice | null) => void;
-    setChatNotice: (notice: { level: 'warning' | 'error'; text: string } | null) => void;
+    setChatNotice: (notice: { level: 'warning' | 'error'; text: string; actions?: Array<'retry' | 'repair'> } | null) => void;
     setGpuAssessment: (a: GpuAssessment | null) => void;
     
     // Model state
@@ -447,10 +448,18 @@ export const createListenerSlice: StateCreator<
             });
 
             // Chat error listener - fatal errors during chat
-            const chatErrorListener = await listen<{ error: string }>('chat-error', (event) => {
+            const chatErrorListener = await listen<ChatErrorPayload>('chat-error', (event) => {
                 const { error } = event.payload;
                 console.error(`[ChatStore] ❌ chat-error: ${error}`);
                 logToBackend(`[FRONTEND] ❌ chat-error: ${error}`);
+                // A turn the backend stopped on purpose (network drop, engine error) has its own notice with
+                // Retry (and Repair); the words written so far are already in the chat and saved.
+                const stopped = failedTurnNotice(event.payload);
+                if (stopped) {
+                    set({ assistantStreamingActive: false } as any);
+                    get().setChatNotice(stopped);
+                    return;
+                }
                 set({
                     assistantStreamingActive: false,
                     operationStatus: {

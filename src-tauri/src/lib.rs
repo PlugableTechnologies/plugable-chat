@@ -16,8 +16,10 @@ pub mod agentic_state;
 pub mod sql_tables;
 pub mod app_state;
 pub mod auto_discovery;
+pub mod chat_dump;
 pub mod chat_persistence;
 pub mod cli;
+pub mod crash_capture;
 pub mod crash_handler;
 pub mod demo_schema;
 pub mod download_guard;
@@ -51,6 +53,7 @@ pub mod tool_execution;
 pub mod tool_parsing;
 pub mod tool_capability;
 pub mod tool_registry;
+pub mod turn_failure;
 pub mod turn_record;
 pub mod verified_models;
 pub mod version_info;
@@ -1903,6 +1906,10 @@ pub fn run() {
     }
     launch_marker::begin();
     run_state::begin();
+    // Fault harness: die the way rc15 did, before anything else runs, to check that a crash leaves a dump and a marker.
+    if engine_health::test_fault("crash-at-launch") {
+        crash_capture::die_like_a_native_fault();
+    }
     let cli_args_for_setup = cli_args.clone();
     let launch_filter = parse_tool_filter(&cli_args);
 
@@ -1945,6 +1952,11 @@ pub fn run() {
             // Create GPU resource guard for serializing GPU operations
             let gpu_guard = Arc::new(GpuResourceGuard::new());
             let gpu_guard_for_foundry = gpu_guard.clone();
+
+            // `--dump-chats`: read the chat store back out and exit (the soak test's integrity check).
+            if let Some(path) = cli_args_for_setup.dump_chats.clone() {
+                chat_dump::spawn(app.handle().clone(), vector_tx.clone(), std::path::PathBuf::from(path));
+            }
 
             // Store handles in state
             app.manage(ActorHandles {

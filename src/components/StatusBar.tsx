@@ -422,6 +422,32 @@ export function StatusBar() {
                         <span className="text-lg">{chatNotice.level === 'error' ? '❌' : '⚠️'}</span>
                         <span className="text-sm">{chatNotice.text}</span>
                     </div>
+                    {chatNotice.actions?.includes('retry') && (
+                        <button
+                            onClick={() => {
+                                setChatNotice(null);
+                                useChatStore.getState().requestRetryOfLastTurn();
+                            }}
+                            className="chat-notice-retry flex-shrink-0 ml-3 px-3 py-1 rounded-md text-sm font-medium bg-amber-600 text-white hover:bg-amber-700 transition-colors"
+                        >
+                            Retry
+                        </button>
+                    )}
+                    {chatNotice.actions?.includes('repair') && (
+                        <button
+                            onClick={async () => {
+                                try {
+                                    await invoke('repair_engine');
+                                    setChatNotice({ level: 'warning', text: 'Engine repaired. GPU components are downloading again; press Retry on your question when it finishes.' });
+                                } catch (e) {
+                                    setChatNotice({ level: 'error', text: `Repair failed: ${e instanceof Error ? e.message : e}` });
+                                }
+                            }}
+                            className="chat-notice-repair flex-shrink-0 ml-2 px-3 py-1 rounded-md text-sm font-medium border border-amber-300 hover:bg-black/5 transition-colors"
+                        >
+                            Repair engine
+                        </button>
+                    )}
                     <button
                         onClick={() => setChatNotice(null)}
                         className="flex-shrink-0 ml-3 p-1 rounded-full hover:bg-black/5 transition-colors text-amber-600"
@@ -642,9 +668,18 @@ const getStartupToneColors = (tone: 'red' | 'amber' | 'blue' | 'green') => {
 
 // Status bar showing startup state (only during initialization)
 export function StartupStateBar() {
-    const { startupState, subsystemStatus, handshakeComplete } = useChatStore();
+    const { startupState, subsystemStatus, handshakeComplete, downloads, operations } = useChatStore();
     const [elapsed, setElapsed] = useState(0);
     const [startTime] = useState(Date.now());
+    const [activityClock, setActivityClock] = useState(() => Date.now());
+    const downloadMoving = Object.values(downloads).some((d) => d.state === 'active' && !isDownloadStalled(d, activityClock));
+    const workInProgress = downloadMoving || operations['ep-registration']?.state === 'active';
+    // A download that stops moving must turn the bar red without any event arriving.
+    useEffect(() => {
+        if (!downloadMoving) return;
+        const id = setInterval(() => setActivityClock(Date.now()), 5000);
+        return () => clearInterval(id);
+    }, [downloadMoving]);
     
     // Track elapsed time since startup began
     useEffect(() => {
@@ -668,7 +703,7 @@ export function StartupStateBar() {
     }
     
     // Red only when chat itself is blocked; the search model is not counted (see startupBarModel).
-    const barModel = startupBarModel(startupState, subsystemStatus);
+    const barModel = startupBarModel(startupState, subsystemStatus, workInProgress);
     const colors = getStartupToneColors(barModel.tone);
     const message = barModel.message;
     const readyCount = barModel.readyCount;

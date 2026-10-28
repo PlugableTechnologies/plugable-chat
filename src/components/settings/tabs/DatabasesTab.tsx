@@ -4,6 +4,7 @@ import { useSettingsStore, type DatabaseSourceConfig, type SupportedDatabaseKind
 import { invoke, listen } from '../../../lib/api';
 import { SettingsTagInput } from '../common/SettingsTagInput';
 import { SettingsEnvVarInput } from '../common/SettingsEnvVarInput';
+import { SettingsSwitch } from '../common/SettingsSwitch';
 import { SchemaRefreshStatusBar } from '../preview/SchemaRefreshStatusBar';
 import { useChatStore } from '../../../store/chat-store';
 import { describeDatabaseError } from '../../../store/chat/operations';
@@ -138,7 +139,7 @@ export function DatabasesTab({
         onDirtyChange?.(isDirty);
     }, [isDirty, onDirtyChange]);
 
-    const handleSave = useCallback(async () => {
+    const handleSave = useCallback(async (): Promise<boolean> => {
         onSavingChange?.(true);
         setSaveError(null);
         const validationErrors: string[] = [];
@@ -183,7 +184,7 @@ export function DatabasesTab({
         if (validationErrors.length > 0) {
             setSaveError(validationErrors.join(' '));
             onSavingChange?.(false);
-            return;
+            return false;
         }
 
         const sanitizedConfig: DatabaseToolboxConfig = {
@@ -193,19 +194,27 @@ export function DatabasesTab({
         try {
             setToolboxConfig(sanitizedConfig);
             await updateDatabaseToolboxConfig(sanitizedConfig);
+            return true;
         } catch (err: any) {
             const message = err?.message || String(err);
             setSaveError(message);
+            return false;
         } finally {
             onSavingChange?.(false);
         }
     }, [toolboxConfig, updateDatabaseToolboxConfig, onSavingChange]);
 
     useEffect(() => {
-        onRegisterSave?.(handleSave);
+        onRegisterSave?.(async () => { await handleSave(); });
     }, [handleSave, onRegisterSave]);
 
     const handleRefreshSchemas = async (sourceId: string) => {
+        // The backend refreshes what is saved, not what is on screen (rc18, Bob: toolbox switched on but not saved).
+        // Saving also refreshes every enabled source, so a second call here would do the same work twice.
+        if (isDirty) {
+            await handleSave();
+            return;
+        }
         setRefreshingSources(prev => ({ ...prev, [sourceId]: true }));
         setSaveError(null);
         // Clear any previous error for this source
@@ -309,11 +318,10 @@ export function DatabasesTab({
             )}
 
             <div className="database-toolbox-toggle flex items-start gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3">
-                <input
-                    type="checkbox"
-                    className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                <SettingsSwitch
+                    label="Enable Database Toolbox"
                     checked={toolboxConfig.enabled}
-                    onChange={(e) => setToolboxConfig(prev => ({ ...prev, enabled: e.target.checked }))}
+                    onChange={(enabled) => setToolboxConfig(prev => ({ ...prev, enabled }))}
                 />
                 <div>
                     <div className="text-sm font-medium text-gray-900">Enable Database Toolbox</div>
@@ -361,21 +369,20 @@ export function DatabasesTab({
                                 )}
                             </div>
                             <div className="flex items-center gap-3">
-                                <label className="flex items-center gap-2 text-sm text-gray-600">
-                                    <input
-                                        type="checkbox"
+                                <div className="flex items-center gap-2 text-sm text-gray-600">
+                                    <span>Enabled</span>
+                                    <SettingsSwitch
+                                        label={`Enable ${source.name}`}
                                         checked={source.enabled}
-                                        onChange={(e) => updateSource(idx, { enabled: e.target.checked })}
-                                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        onChange={(enabled) => updateSource(idx, { enabled })}
                                     />
-                                    Enabled
-                                </label>
+                                </div>
                                 {source.enabled && (
                                     <button
                                         onClick={() => handleRefreshSchemas(source.id)}
-                                        disabled={refreshingSources[source.id]}
+                                        disabled={refreshingSources[source.id] || !toolboxConfig.enabled}
                                         className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50 transition-colors"
-                                        title="Refresh table schemas from this database"
+                                        title={toolboxConfig.enabled ? 'Refresh table schemas from this database' : 'Turn on the Database Toolbox first'}
                                     >
                                         {refreshingSources[source.id] ? (
                                             <Loader2 size={12} className="animate-spin" />
@@ -392,6 +399,10 @@ export function DatabasesTab({
                                 )}
                             </div>
                         </div>
+
+                        {source.enabled && !toolboxConfig.enabled && (
+                            <p className="text-xs text-amber-700">The Database Toolbox is off, so this source cannot be refreshed or queried. Turn it on above and save.</p>
+                        )}
 
                         {/* Per-source error display */}
                         {sourceErrors[source.id] && (

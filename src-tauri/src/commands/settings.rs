@@ -122,6 +122,22 @@ pub async fn add_mcp_server(
     Ok(())
 }
 
+/// If the server being saved is enabled and failed to start, mark it off in `servers` and return why.
+/// A failure of some other server in the same sync is not this server's error.
+pub fn turn_off_if_start_failed(
+    servers: &mut [McpServerConfig],
+    server_id: &str,
+    sync_results: &[(String, Result<(), String>)],
+) -> Option<String> {
+    let error = sync_results.iter().find_map(|(id, r)| match r {
+        Err(e) if id == server_id => Some(e.clone()),
+        _ => None,
+    })?;
+    let server = servers.iter_mut().find(|s| s.id == server_id && s.enabled)?;
+    server.enabled = false;
+    Some(error)
+}
+
 /// Update an existing MCP server configuration
 #[tauri::command]
 pub async fn update_mcp_server(
@@ -132,6 +148,7 @@ pub async fn update_mcp_server(
     handles: State<'_, ActorHandles>,
 ) -> Result<(), String> {
     enforce_python_name(&mut config);
+    let saved_server_id = config.id.clone();
 
     let all_configs_for_sync;
     {
@@ -162,11 +179,26 @@ pub async fn update_mcp_server(
         .map_err(|e| e.to_string())?;
 
     let results = rx.await.map_err(|_| "MCP Host actor died".to_string())?;
-    for (server_id, result) in results {
+    for (server_id, result) in &results {
         match result {
             Ok(()) => println!("[Settings] Server {} sync successful", server_id),
             Err(e) => println!("[Settings] Server {} sync failed: {}", server_id, e),
         }
+    }
+
+    // A server that would not start must not stay saved as enabled: the screen would show it on.
+    let failure = {
+        let mut guard = settings_state.settings.write().await;
+        let failure = turn_off_if_start_failed(&mut guard.mcp_servers, &saved_server_id, &results);
+        if failure.is_some() {
+            settings::save_settings(&guard).await?;
+            let mut sm_guard = settings_sm_state.machine.write().await;
+            sm_guard.refresh(&guard, &launch_config.tool_filter);
+        }
+        failure
+    };
+    if let Some(error) = failure {
+        return Err(error);
     }
 
     Ok(())
@@ -597,4 +629,40 @@ pub struct LaunchOverridesPayload {
     pub initial_prompt: Option<String>,
     pub queued_prompts: Vec<String>,
     pub same_chat: bool,
+}
+
+#[cfg(test)]
+mod failed_enable_tests {
+    use super::*;
+
+    fn server(id: &str, enabled: bool) -> McpServerConfig {
+        McpServerConfig { id: id.into(), name: id.into(), enabled, ..crate::settings::default_mcp_test_server() }
+    }
+
+    // rc18: update_mcp_server saved `enabled: true`, logged the failed start, and returned Ok, so the
+    // server showed as on and stayed saved as on.
+    #[test]
+    fn a_server_that_failed_to_start_is_saved_as_off_and_the_error_is_returned() {
+        let mut servers = vec![server("a", true), server("b", true)];
+        let results = vec![("a".to_string(), Err("Could not start 'cargo': program not found".to_string())), ("b".to_string(), Ok(()))];
+        let err = turn_off_if_start_failed(&mut servers, "a", &results).expect("failure reported");
+        assert!(err.contains("program not found"), "{err}");
+        assert!(!servers[0].enabled, "a failed start must not stay enabled");
+        assert!(servers[1].enabled, "other servers are untouched");
+    }
+
+    #[test]
+    fn a_failure_of_a_different_server_is_not_this_servers_error() {
+        let mut servers = vec![server("a", true), server("b", true)];
+        let results = vec![("b".to_string(), Err("boom".to_string()))];
+        assert_eq!(turn_off_if_start_failed(&mut servers, "a", &results), None);
+        assert!(servers[0].enabled && servers[1].enabled);
+    }
+
+    #[test]
+    fn a_successful_start_changes_nothing() {
+        let mut servers = vec![server("a", true)];
+        assert_eq!(turn_off_if_start_failed(&mut servers, "a", &[("a".to_string(), Ok(()))]), None);
+        assert!(servers[0].enabled);
+    }
 }

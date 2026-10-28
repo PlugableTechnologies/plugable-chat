@@ -46,7 +46,7 @@ function Get-Local($src, $name) {
 }
 
 $raw = "https://raw.githubusercontent.com/PlugableTechnologies/plugable-chat/$Sha/scripts/ci"
-foreach ($f in "faults.ps1", "CleanHost.psm1") { Invoke-WebRequest -UseBasicParsing "$raw/$f" -OutFile (Join-Path $ci $f) }
+foreach ($f in "faults.ps1", "CleanHost.psm1", "check-chat-store-integrity.mjs") { Invoke-WebRequest -UseBasicParsing "$raw/$f" -OutFile (Join-Path $ci $f) }
 
 $args2 = @{
     Installer = (Get-Local $Installer "setup.exe")

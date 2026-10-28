@@ -68,9 +68,21 @@ writes no file, so it reads as red.
 | `embedding-tls-reset-recovers` | every HTTPS connection to huggingface.co is reset (os error 10054) until the quick retries are spent, then the resets stop | rc16 Bob | the error says the connection was interrupted (never "certificate"); the background retry loads the model by itself | CI (new, never run), box; runs with Hugging Face as the only model source (`PLUGABLE_CHAT_TEST_EMBEDDING_SOURCES=huggingface`) |
 | `embedding-no-huggingface` | huggingface.co blocked in the hosts file for the whole run; part 2 also allows only a local folder | rc17 Bob | the search model loads from the project's GitHub release asset (detail says "release"); after removing it, from a folder the user chose (`PLUGABLE_OFFLINE_MODEL_FOLDER`, detail says "folder you chose"); `ready` and `embedding` end ok | CI (new, never run), box |
 | `version-visible` | none | Bob R12, Pat R13 | `--version` prints the release label and commit, and matches the installer file name | CI, box |
+| `crash-capture` | the app dies at launch the way rc15 did (`PLUGABLE_CHAT_TEST_FAULT=crash-at-launch`), then relaunches told the death was in a GPU provider (`ep-fault`) | rc15 David | the installer enabled WER LocalDumps, a `plugable-chat.exe` minidump exists, `last-crash.json` says `inEp`, provider `webgpu-ep`, and its dump path exists (written, **not run**) | CI, box |
+| `xet-hosts-blocked` | only `cas-bridge.xethub.hf.co` and `transfer.xethub.hf.co` blocked; huggingface.co stays up; the block is lifted after the first failure | rc18 Pat | the failure never blames `cdn-lfs`, names the Xet hosts or Hugging Face, and the background retry loads the model (written, **not run**) | CI, box |
+| `network-drop-mid-turn` | firewall block on the app plus the offline file while an answer is being written, restored 20 s later | rc15 David | turn 0 is an `error` record starting `network_dropped`, turn 1 answers, no Application Error event, no `run-state.json` left, `--dump-chats` read back by `check-chat-store-integrity.mjs` is whole (written, **not run**; needs a model, set `FAULTS_CHAT_MODEL`) | GPU box |
+| `network-drop-mid-tool-call` | the same drop while a call to a slow HTTP MCP server (started by the scenario) is running | rc15 David | the tool call is in the record as an error starting `Interrupted`, then as for the previous row (written, **not run**; the model must choose to call the tool or the scenario says so) | GPU box |
+| `foundry-download-resume` | the app is blocked from the network for 40 s while a chat model downloads (`FAULTS_DOWNLOAD_MODEL`) | rc18 | no `failed` model-download record, the download finishes after the restore, every `retrying` record says which attempt it is (written, **not run**) | GPU box |
 | `gpu-baseline` | none, NVIDIA driver present | #3 | ep-registration and model-download ok | GPU box only |
 
 Rows that cannot be set up on the current host are reported as skipped with the reason, never as passed.
+
+Scenarios tagged `net` (`-Scenario net`) are the ones that drop the network during real use. The drop is a Windows
+Firewall block on the app's own program plus the `PLUGABLE_CHAT_TEST_OFFLINE_FILE` seam (see "Engine-health fault
+injection" in `testing-ladder.md`), because the AWS box's management channel must stay up. The 20-prompt soak with
+network flaps and one app kill is `infra/aws-gpu/soak-run.ps1` (`run-soak.sh` runs it on the box); both judge the
+chat store with `scripts/ci/check-chat-store-integrity.mjs`. A release also needs the recorded results of the `gpu`
+scenarios and the default `cpu` set: see "Release gate" in `testing-ladder.md`.
 
 ### Run it
 

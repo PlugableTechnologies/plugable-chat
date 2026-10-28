@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Database, X, Loader2, AlertCircle, Layout, Check, ChevronRight } from 'lucide-react';
+import { Database, X, Loader2, AlertCircle, Layout, Check, ChevronRight, RefreshCw } from 'lucide-react';
 import { invoke } from '../../../lib/api';
 import { useChatStore } from '../../../store/chat-store';
 import { tableSearchLabel } from '../../../lib/search-mode';
+import { explainEmptyTables } from '../../../lib/empty-tables';
+import { useSettingsStore } from '../../../store/settings-store';
 
 interface DatabaseAttachmentModalProps {
     isOpen: boolean;
@@ -22,6 +24,29 @@ export const DatabaseAttachmentModal = ({
     const [results, setResults] = useState<any[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const { settings, fetchSettings } = useSettingsStore();
+    const [refreshing, setRefreshing] = useState(false);
+    const [refreshKey, setRefreshKey] = useState(0);
+
+    // The explanation for an empty list reads the saved settings, which are not loaded until Settings has been opened once.
+    useEffect(() => {
+        if (isOpen && !settings) void fetchSettings();
+    }, [isOpen, settings, fetchSettings]);
+
+    const onRefreshTables = async () => {
+        setRefreshing(true);
+        setError(null);
+        try {
+            const result = await invoke<{ errors?: Array<{ source_name: string; error: string }> }>('refresh_database_schemas');
+            const failed = result?.errors?.[0];
+            if (failed) setError(`Refresh failed for '${failed.source_name}': ${failed.error}`);
+            setRefreshKey((k) => k + 1);
+        } catch (err: any) {
+            setError(err?.message || String(err));
+        } finally {
+            setRefreshing(false);
+        }
+    };
 
     // Fetch tables when modal opens, ordered by relevance to chat prompt (if any)
     useEffect(() => {
@@ -46,7 +71,7 @@ export const DatabaseAttachmentModal = ({
         };
 
         fetchTables();
-    }, [isOpen, chatPrompt]);
+    }, [isOpen, chatPrompt, refreshKey]);
 
     if (!isOpen) return null;
 
@@ -54,6 +79,7 @@ export const DatabaseAttachmentModal = ({
         attachedDatabaseTables.some(t => t.tableFqName === fqName);
 
     const hasPrompt = chatPrompt.trim().length > 0;
+    const emptyExplanation = explainEmptyTables(settings?.database_toolbox);
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
@@ -97,8 +123,18 @@ export const DatabaseAttachmentModal = ({
                                 <p className="text-sm">Loading tables...</p>
                             </div>
                         ) : results.length === 0 ? (
-                            <div className="text-center py-12 text-gray-500 italic">
-                                No database tables available. Configure database sources in Settings.
+                            <div className="database-attachment-empty text-center py-12 px-4 text-gray-500 space-y-3">
+                                <p>{emptyExplanation.reason}</p>
+                                {emptyExplanation.canRefresh && (
+                                    <button
+                                        onClick={onRefreshTables}
+                                        disabled={refreshing}
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                                    >
+                                        {refreshing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                                        Refresh
+                                    </button>
+                                )}
                             </div>
                         ) : (
                             results.map((res) => {

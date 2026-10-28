@@ -8,6 +8,7 @@ import {
 } from '../helpers';
 import { buildFollowUp, takeNextLaunchPrompt } from '../launch-queue';
 import { buildChatHistory } from '../../../components/chat/utils/history';
+import { lastUserQuestion } from '../failed-turn';
 
 // Dependencies from other slices
 interface SendMessageSliceDeps {
@@ -50,6 +51,11 @@ export interface SendMessageSlice {
     
     // Start a system-initiated chat (for help messages)
     startSystemChat: (assistantMessage: string, title?: string) => void;
+
+    // "Retry" on a stopped turn: puts the last question back and asks the chat screen to send it.
+    // Nothing is ever re-sent without this explicit request.
+    retryRequestId: number;
+    requestRetryOfLastTurn: () => void;
 }
 
 export const createSendMessageSlice: StateCreator<
@@ -58,6 +64,13 @@ export const createSendMessageSlice: StateCreator<
     [],
     SendMessageSlice
 > = (set, get) => ({
+    retryRequestId: 0,
+    requestRetryOfLastTurn: () => {
+        const question = lastUserQuestion(get().chatMessages);
+        if (!question) return;
+        set({ chatInputValue: question, retryRequestId: get().retryRequestId + 1 } as any);
+    },
+
     sendLaunchPrompt: async () => {
         const state = get();
         const rawPrompt = state.launchInitialPrompt;

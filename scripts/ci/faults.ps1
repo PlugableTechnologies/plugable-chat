@@ -17,11 +17,17 @@
 # uninstalls VC++. Refuses to run unless GITHUB_ACTIONS=true, CLEAN_HOST_DISPOSABLE=1 or
 # -AllowDestructive is given. Never run it on a machine you care about.
 #
+# Network-drop, crash-capture and download scenarios (tags net, gpu) run the installed app for real turns, so they
+# need a model: FAULTS_CHAT_MODEL (default qwen3.5-4b) and FAULTS_DOWNLOAD_MODEL (default a CPU build) choose them.
+# They drop the network the way a cable pull looks to the app: a Windows Firewall block on the app's own
+# program (the management channel of the AWS box must stay up) plus the PLUGABLE_CHAT_TEST_OFFLINE_FILE seam,
+# which makes the app's own connectivity probe agree. JUnit goes to <OutDir>\clean-host-junit.xml as for every scenario.
+#
 # Written on macOS and validated there only by a PowerShell parse and -List; see
 # docs/clean-host-testing.md for what has actually been exercised on Windows.
 param(
     [Parameter(Mandatory)][string]$Installer,
-    [string[]]$Scenario = @("cpu"),            # names, or "cpu" (runnable on windows-latest), "gpu", "all"
+    [string[]]$Scenario = @("cpu"),            # names, or "cpu" (runnable on windows-latest), "gpu", "net" (network drops during use), "all"
     [string]$OldInstaller = "",                # an older rc setup.exe, for upgrade-over-old
     [string]$VcRedist = "",                    # a vc_redist.x64.exe, lets no-vcredist uninstall the runtime
     [string]$OutDir = (Join-Path (Get-Location) "clean-host-out"),
@@ -237,6 +243,119 @@ function Invoke-WithHostsBlock($ctx, [scriptblock]$Action) {
         Copy-Item -LiteralPath $backup -Destination $HostsFile -Force
         ipconfig /flushdns | Out-Null
     }
+}
+
+# ------------------------------------------------------------------------------------------
+# network drops, real turns and crash capture (scenarios tagged net / gpu)
+# ------------------------------------------------------------------------------------------
+$NetDropRule = "faults-netdrop"
+$ChatModel = if ($env:FAULTS_CHAT_MODEL) { $env:FAULTS_CHAT_MODEL } else { "qwen3.5-4b" }
+$DownloadModel = if ($env:FAULTS_DOWNLOAD_MODEL) { $env:FAULTS_DOWNLOAD_MODEL } else { "qwen3.5-4b-generic-cpu:3" }
+$CheckStore = Join-Path $PSScriptRoot "check-chat-store-integrity.mjs"
+
+# The network goes away for the app only: outbound and inbound blocked for its program, and the offline file
+# makes the app's connectivity probe say so. Loopback is not filtered by Windows Firewall, so a local server stays reachable.
+function Start-NetworkDrop([string]$FlagFile = "") {
+    Remove-NetFirewallRule -DisplayName "$NetDropRule*" -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName "$NetDropRule-out" -Direction Outbound -Action Block -Program $Exe | Out-Null
+    New-NetFirewallRule -DisplayName "$NetDropRule-in" -Direction Inbound -Action Block -Program $Exe | Out-Null
+    if ($FlagFile) { Set-Content -LiteralPath $FlagFile -Value "offline" }
+}
+
+function Stop-NetworkDrop([string]$FlagFile = "") {
+    Remove-NetFirewallRule -DisplayName "$NetDropRule*" -ErrorAction SilentlyContinue
+    if ($FlagFile) { Remove-Item -LiteralPath $FlagFile -Force -ErrorAction SilentlyContinue }
+}
+
+# Starts the installed app for a run of prompts in one chat, reading and writing under the scenario's own
+# chat home so a relaunch sees the same chat store. Returns what the scenario needs to watch and assert on.
+function Start-TurnApp {
+    param($Ctx, [string[]]$Prompts = @(), [hashtable]$EnvVars = @{}, [string[]]$ExtraArgs = @(), [string]$Name = "run")
+    $Ctx.Runs++
+    $chatHome = Join-Path $Ctx.Dir "chat-home"
+    New-Item -ItemType Directory -Force -Path $chatHome | Out-Null
+    $promptFile = Join-Path $Ctx.Dir "prompts-$Name.json"
+    $replyFile = Join-Path $Ctx.Dir "replies-$Name.jsonl"
+    $out = Join-Path $Ctx.Dir "app-$Name.out.txt"
+    Remove-Item -LiteralPath $replyFile -Force -ErrorAction SilentlyContinue
+    $appArgs = @("--hidden", "--ephemeral", "--chat-home", $chatHome)
+    if ($Prompts.Count) {
+        ConvertTo-Json -InputObject @($Prompts) | Out-File -LiteralPath $promptFile -Encoding ascii
+        $appArgs += @("--same-chat", "--prompts-file", $promptFile, "--reply-file", $replyFile, "--exit-after-reply", "--reply-timeout-secs", "1500")
+    }
+    $appArgs += $ExtraArgs
+    $vars = @{ PLUGABLE_CHAT_TEST_STATE = (Join-Path $Ctx.Dir "state-$Name.jsonl"); PLUGABLE_MODEL = $ChatModel }
+    foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
+    $saved = @{}
+    foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k, "Process"); [Environment]::SetEnvironmentVariable($k, [string]$vars[$k], "Process") }
+    try { $proc = Start-Process $Exe -ArgumentList $appArgs -WorkingDirectory $InstallDir -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err" }
+    finally { foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], "Process") } }
+    $null = $proc.Handle
+    return [pscustomobject]@{ Process = $proc; Home = $chatHome; ReplyFile = $replyFile; Out = $out; StartedAt = Get-Date
+        RunStateFile = (Join-Path $chatHome "config\run-state.json"); StateFile = $vars.PLUGABLE_CHAT_TEST_STATE }
+}
+
+function Get-RunPhase($App) {
+    if (-not (Test-Path -LiteralPath $App.RunStateFile)) { return "" }
+    try { return [string](Get-Content -LiteralPath $App.RunStateFile -Raw | ConvertFrom-Json).phase } catch { return "" }
+}
+
+function Wait-AppExit($App, [int]$TimeoutSec) {
+    if ($App.Process.WaitForExit($TimeoutSec * 1000)) { return $true }
+    taskkill /F /T /PID $App.Process.Id 2>&1 | Out-Null
+    return $false
+}
+
+# "Application Error" events naming plugable-chat since the app started: a clean stop must leave none.
+function Get-AppCrashEvents($App) {
+    @(Get-WinEvent -FilterHashtable @{ LogName = "Application"; ProviderName = "Application Error"; StartTime = $App.StartedAt } -ErrorAction SilentlyContinue |
+        Where-Object { $_.Message -match "plugable-chat" })
+}
+
+# The chat store, read back through the app itself (--dump-chats), then judged by the same checker the soak test uses.
+function Get-ChatStoreFailures($Ctx, $App, [string[]]$AllowedFailure = @("network_dropped"), [string]$Name = "dump") {
+    $dump = Join-Path $Ctx.Dir "chats-$Name.json"
+    Remove-Item -LiteralPath $dump -Force -ErrorAction SilentlyContinue
+    $d = Start-TurnApp $Ctx -ExtraArgs @("--dump-chats", $dump) -Name "dump-$Name"
+    if (-not (Wait-AppExit $d 180)) { return @("the app did not finish reading the chat store back within 180 s") }
+    if ($d.Process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $dump)) { return @("--dump-chats failed (exit $($d.Process.ExitCode)): the chat store could not be read") }
+    $node = (Get-Command node -ErrorAction SilentlyContinue).Source
+    if (-not $node) { $node = "C:\Program Files\nodejs\node.exe" }
+    if (-not (Test-Path -LiteralPath $node)) { return @("node is not installed on this host, so the chat store could not be checked") }
+    $checkArgs = @($CheckStore, $dump, $App.ReplyFile)
+    foreach ($a in $AllowedFailure) { $checkArgs += @("--allow-failed-turns-with", $a) }
+    $res = & $node @checkArgs 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { return @("chat store check failed: " + ($res.Trim() -replace "\r?\n", " | ")) }
+    return @()
+}
+
+# A one-tool MCP server over HTTP whose tool takes $SleepSeconds to answer, so a drop can land mid-call. It writes
+# $StartedFile when a call begins. Returns the config file to pass as --mcp-server @file.
+function Start-SlowMcpServer($Ctx, [string]$StartedFile, [int]$SleepSeconds = 60) {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop()
+    $job = Start-Job -ArgumentList $port, $StartedFile, $SleepSeconds -ScriptBlock {
+        param($port, $started, $sleep)
+        $l = [Net.HttpListener]::new(); $l.Prefixes.Add("http://127.0.0.1:$port/"); $l.Start()
+        while ($l.IsListening) {
+            $c = $l.GetContext()
+            $body = [IO.StreamReader]::new($c.Request.InputStream).ReadToEnd()
+            $msg = $body | ConvertFrom-Json
+            $result = $null
+            switch ($msg.method) {
+                "initialize" { $result = @{ protocolVersion = $msg.params.protocolVersion; capabilities = @{ tools = @{} }; serverInfo = @{ name = "slow"; version = "1" } } }
+                "tools/list" { $result = @{ tools = @(@{ name = "slow_lookup"; description = "Looks up the value stored under a key. Use it whenever the user asks for the value of a key."; inputSchema = @{ type = "object"; properties = @{ key = @{ type = "string" } }; required = @("key") } }) } }
+                "tools/call" { Set-Content -LiteralPath $started -Value "started"; Start-Sleep -Seconds $sleep; $result = @{ content = @(@{ type = "text"; text = "value-42" }) } }
+            }
+            if ($null -eq $msg.id -or $null -eq $result) { $c.Response.StatusCode = 202; $c.Response.Close(); continue }
+            $bytes = [Text.Encoding]::UTF8.GetBytes((@{ jsonrpc = "2.0"; id = $msg.id; result = $result } | ConvertTo-Json -Depth 8 -Compress))
+            $c.Response.ContentType = "application/json"; $c.Response.OutputStream.Write($bytes, 0, $bytes.Length); $c.Response.Close()
+        }
+    }
+    $cfg = Join-Path $Ctx.Dir "slow-mcp.json"
+    (@{ id = "slow"; name = "slow"; enabled = $true; transport = @{ type = "http"; url = "http://127.0.0.1:$port/" }; auto_approve_tools = $true; defer_tools = $false; request_timeout_secs = 300 } | ConvertTo-Json -Depth 5 -Compress) |
+        Out-File -LiteralPath $cfg -Encoding ascii
+    return [pscustomobject]@{ Job = $job; Config = $cfg; Port = $port }
 }
 
 # ------------------------------------------------------------------------------------------
@@ -709,6 +828,156 @@ Register "gpu-baseline" "#3" @("gpu") "NVIDIA host with a current driver: the GP
 }
 
 # ------------------------------------------------------------------------------------------
+# rc18 Phase B: crash capture, Xet hosts, network drops during use, download recovery
+# ------------------------------------------------------------------------------------------
+Register "crash-capture" "rc15 David: native crash left no evidence" @("cpu") "the app is killed the way rc15 died (fast-fail at launch): Windows keeps a minidump, and the next launch (told the death was in a GPU provider) writes a last-crash marker that says so and points at the dump" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $werKey = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\plugable-chat.exe"
+    if (-not (Test-Path $werKey)) { return @{ Failures = @("the installer did not enable WER LocalDumps for plugable-chat.exe ($werKey is missing)") } }
+    $dumpDir = Join-Path $env:LOCALAPPDATA "CrashDumps"
+    Get-ChildItem -LiteralPath $dumpDir -Filter "plugable-chat.exe*.dmp" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    $marker = Join-Path $env:APPDATA "plugable-chat\last-crash.json"
+    Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+
+    $first = Start-TurnApp $ctx -EnvVars @{ PLUGABLE_CHAT_TEST_FAULT = "crash-at-launch" } -Name "crash"
+    if (-not (Wait-AppExit $first 120)) { return @{ Failures = @("the app did not die at launch with the crash fault set") } }
+    # 0xC0000409 is the fast-fail code (-1073740791 as a signed exit code)
+    if ($first.Process.ExitCode -ne -1073740791) { $f += "the forced crash exited with $($first.Process.ExitCode), expected the fast-fail code 0xC0000409" }
+    $dumpSeen = Wait-Until -TimeoutSec 90 -Condition { @(Get-ChildItem -LiteralPath $dumpDir -Filter "plugable-chat.exe*.dmp" -ErrorAction SilentlyContinue).Count -gt 0 }
+    if (-not $dumpSeen) { $f += "no plugable-chat.exe minidump appeared under $dumpDir within 90 s of the crash" }
+
+    $second = Start-TurnApp $ctx -EnvVars @{ PLUGABLE_CHAT_TEST_FAULT = "ep-fault" } -Name "after-crash"
+    $written = Wait-Until -TimeoutSec 120 -Condition { Test-Path -LiteralPath $marker }
+    taskkill /F /T /PID $second.Process.Id 2>&1 | Out-Null
+    if (-not $written) { return @{ Failures = @($f + "the launch after the crash wrote no last-crash.json at $marker") } }
+    $m = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+    if (-not $m.inEp) { $f += "the marker does not say the crash was inside a GPU provider (inEp=$($m.inEp))" }
+    if ($m.provider -ne "webgpu-ep") { $f += "the marker names provider '$($m.provider)', expected webgpu-ep" }
+    if ($m.diedIn -ne "startup") { $f += "the marker says the run died in '$($m.diedIn)', expected startup" }
+    if (-not $m.dumpPath -or -not (Test-Path -LiteralPath $m.dumpPath)) { $f += "the marker's dump path does not exist: '$($m.dumpPath)'" }
+    return @{ Failures = $f }
+}
+
+Register "xet-hosts-blocked" "rc18 Pat: cdn-lfs DNS failure advice; the real large-file hosts are the Xet hosts" @("cpu") "only cas-bridge.xethub.hf.co and transfer.xethub.hf.co are blocked (huggingface.co stays reachable): the search model's failure names the Xet hosts, never cdn-lfs, chat stays usable, and once the block is lifted the background retry loads the model" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $backup = Join-Path $ctx.Dir "hosts.backup"
+    Copy-Item -LiteralPath $HostsFile -Destination $backup -Force
+    $script:xetLifted = $false
+    try {
+        Add-Content -LiteralPath $HostsFile -Value (New-HostsBlockLines -Hosts (Get-XetHosts))
+        ipconfig /flushdns | Out-Null
+        $run = Invoke-Smoke $ctx -NoSmoke -TimeoutSec 900 -EnvVars $HfOnly -KillWhen {
+            param($recs)
+            $emb = @($recs | Where-Object { $_.phase -eq "embedding" })
+            if (-not $script:xetLifted -and @($emb | Where-Object { "$($_.status)" -eq "failed" }).Count -gt 0) {
+                Copy-Item -LiteralPath $backup -Destination $HostsFile -Force
+                ipconfig /flushdns | Out-Null
+                $script:xetLifted = $true
+            }
+            return ($script:xetLifted -and @($emb | Where-Object { "$($_.status)" -eq "ok" }).Count -gt 0)
+        }
+    }
+    finally { Copy-Item -LiteralPath $backup -Destination $HostsFile -Force; ipconfig /flushdns | Out-Null }
+    if (-not $script:xetLifted) { $f += "the search model never reported a failure while only the Xet hosts were blocked" }
+    if ($run.TimedOut) { $f += "the search model did not load after the Xet block was lifted ($($run.Seconds) s)" }
+    $failed = @($run.Records | Where-Object { $_.phase -eq "embedding" -and "$($_.status)" -eq "failed" })
+    if ($failed.Count -gt 0) {
+        if ("$($failed[0].detail)" -match "cdn-lfs") { $f += "the failure still blames the retired cdn-lfs host: '$($failed[0].detail)'" }
+        if ("$($failed[0].detail)" -notmatch "(?i)xethub|hugging ?face|interrupted|reach") { $f += "the failure names neither a Xet host nor Hugging Face: '$($failed[0].detail)'" }
+    }
+    $f += Assert-PhaseOk $run.Records "embedding"
+    return @{ Failures = $f }
+}
+
+Register "network-drop-mid-turn" "rc15 David: network drop while answering, then every prompt crashed" @("gpu", "net") "the network drops while an answer is being written: that turn ends as a clean network-drop failure (not a crash), the app is still running, the next prompt in the same chat answers, and the chat store reads back whole with the words so far" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $flag = Join-Path $ctx.Dir "offline.flag"
+    $long = "Write a very long story, at least 1500 words, about a lighthouse keeper. Do not stop early."
+    $app = Start-TurnApp $ctx -Prompts @($long, "Reply with exactly one word: ready") -EnvVars @{ PLUGABLE_CHAT_TEST_OFFLINE_FILE = $flag } -Name "drop"
+    try {
+        if (-not (Wait-Until -TimeoutSec 1200 -Condition { (Get-RunPhase $app) -eq "chatting" -or $app.Process.HasExited })) { return @{ Failures = @("the app never started answering the first prompt") } }
+        if ($app.Process.HasExited) { return @{ Failures = @("the app exited before the drop, code $($app.Process.ExitCode)") } }
+        Start-Sleep -Seconds 10   # let some words stream first
+        Start-NetworkDrop -FlagFile $flag
+        $null = Wait-Until -TimeoutSec 120 -Condition { (Read-ReplyRecords $app.ReplyFile).Count -ge 1 -or $app.Process.HasExited }
+        Start-Sleep -Seconds 20
+    }
+    finally { Stop-NetworkDrop -FlagFile $flag }
+    $exited = Wait-AppExit $app 1500
+    if (-not $exited) { $f += "the app did not finish the run after the network came back (hung)" }
+    $recs = Read-ReplyRecords $app.ReplyFile
+    $f += Assert-TurnStoppedByNetworkDrop $recs 0
+    $f += Assert-TurnOk $recs 1
+    if ($exited -and $app.Process.ExitCode -notin 0, 1) { $f += "the app exited with $($app.Process.ExitCode): a crash, not a clean failed turn" }
+    $crashes = Get-AppCrashEvents $app
+    if ($crashes.Count -gt 0) { $f += "the app crashed during the drop ($($crashes.Count) Application Error event(s) naming plugable-chat)" }
+    if (Test-Path -LiteralPath $app.RunStateFile) { $f += "run-state.json was left behind: the app did not exit cleanly" }
+    $f += Get-ChatStoreFailures $ctx $app
+    return @{ Failures = $f }
+}
+
+Register "network-drop-mid-tool-call" "rc15 David: tool responses lost after a network drop" @("gpu", "net") "the network drops while a tool on a network server is running: the call is recorded as interrupted (not lost, not left as raw text), the turn ends as a clean network-drop failure, the next prompt answers, and the saved chat holds the call and its result" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $flag = Join-Path $ctx.Dir "offline.flag"
+    $started = Join-Path $ctx.Dir "tool-started.flag"
+    $srv = Start-SlowMcpServer $ctx $started -SleepSeconds 60
+    try {
+        $app = Start-TurnApp $ctx -Prompts @("Use the slow_lookup tool to look up the key 'alpha' and tell me the value it returns.", "Reply with exactly one word: ready") `
+            -EnvVars @{ PLUGABLE_CHAT_TEST_OFFLINE_FILE = $flag } -ExtraArgs @("--mcp-server", "@$($srv.Config)", "--tools", "slow", "--tool-search", "false") -Name "toolcall"
+        try {
+            if (-not (Wait-Until -TimeoutSec 1200 -Condition { (Test-Path -LiteralPath $started) -or $app.Process.HasExited })) { return @{ Failures = @("the model never called the slow tool") } }
+            if ($app.Process.HasExited) { return @{ Failures = @("the app exited before calling the tool, code $($app.Process.ExitCode)") } }
+            Start-NetworkDrop -FlagFile $flag
+            $null = Wait-Until -TimeoutSec 120 -Condition { (Read-ReplyRecords $app.ReplyFile).Count -ge 1 -or $app.Process.HasExited }
+            Start-Sleep -Seconds 15
+        }
+        finally { Stop-NetworkDrop -FlagFile $flag }
+        $exited = Wait-AppExit $app 1500
+        if (-not $exited) { $f += "the app did not finish the run after the network came back (hung)" }
+        $recs = Read-ReplyRecords $app.ReplyFile
+        $f += Assert-TurnStoppedByNetworkDrop $recs 0
+        $f += Assert-ToolCallInterrupted $recs 0
+        $f += Assert-TurnOk $recs 1
+        if (@(Get-AppCrashEvents $app).Count -gt 0) { $f += "the app crashed during the drop" }
+        $f += Get-ChatStoreFailures $ctx $app
+    }
+    finally { Stop-Job $srv.Job -ErrorAction SilentlyContinue; Remove-Job $srv.Job -Force -ErrorAction SilentlyContinue }
+    return @{ Failures = $f }
+}
+
+Register "foundry-download-resume" "rc18 Foundry model download: a drop mid-download ended it" @("gpu", "net") "the network is blocked for the app for 40 s while a chat model downloads: the download never ends as a failure, and completes after the network is back (retries with backoff; whether bytes already fetched are reused is up to the engine)" {
+    param($ctx)
+    $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
+    $script:dlBlocked = $false
+    try {
+        $run = Invoke-Smoke $ctx -NoSmoke -TimeoutSec 2400 -EnvVars @{ PLUGABLE_MODEL = $DownloadModel } -KillWhen {
+            param($recs)
+            $dl = @($recs | Where-Object { $_.phase -eq "model-download" })
+            if (-not $script:dlBlocked -and @($dl | Where-Object { "$($_.status)" -in @("started", "progress") }).Count -gt 0) {
+                Start-Sleep -Seconds 10   # some bytes first
+                Start-NetworkDrop
+                $script:dlBlocked = $true
+                $script:dlBlockedAt = Get-Date
+            }
+            if ($script:dlBlocked -and ((Get-Date) - $script:dlBlockedAt).TotalSeconds -gt 40) { Stop-NetworkDrop; $script:dlBlockedAt = [datetime]::MaxValue }
+            return (@($dl | Where-Object { "$($_.status)" -eq "ok" }).Count -gt 0)
+        }
+    }
+    finally { Stop-NetworkDrop }
+    if (-not $script:dlBlocked) { $f += "never saw the model download start, so nothing was interrupted" }
+    if ($run.TimedOut) { $f += "the download did not complete after the network came back ($($run.Seconds) s)" }
+    $dl = @($run.Records | Where-Object { $_.phase -eq "model-download" })
+    if (@($dl | Where-Object { "$($_.status)" -eq "failed" }).Count -gt 0) { $f += "the download was reported as failed instead of being retried: '$((@($dl | Where-Object { "$($_.status)" -eq "failed" }))[0].detail)'" }
+    if (@($dl | Where-Object { "$($_.status)" -eq "ok" }).Count -eq 0) { $f += "the download never finished" }
+    $f += @($dl | Where-Object { "$($_.status)" -eq "retrying" } | ForEach-Object { if ("$($_.detail)" -notmatch "attempt \d+ of \d+") { "a retry record does not say which attempt it is: '$($_.detail)'" } })
+    return @{ Failures = $f }
+}
+
+# ------------------------------------------------------------------------------------------
 # driver
 # ------------------------------------------------------------------------------------------
 if ($List) {
@@ -726,6 +995,7 @@ foreach ($n in $Scenario) {
         "all" { foreach ($s in $Scenarios.Values) { [void]$wanted.Add($s.Name) } }
         "cpu" { foreach ($s in $Scenarios.Values) { if ($s.Tags -contains "cpu") { [void]$wanted.Add($s.Name) } } }
         "gpu" { foreach ($s in $Scenarios.Values) { if ($s.Tags -contains "gpu") { [void]$wanted.Add($s.Name) } } }
+        "net" { foreach ($s in $Scenarios.Values) { if ($s.Tags -contains "net") { [void]$wanted.Add($s.Name) } } }
         default { if (-not $Scenarios.Contains($n)) { throw "unknown scenario '$n'; see -List" }; [void]$wanted.Add($n) }
     }
 }
@@ -765,6 +1035,7 @@ try {
 }
 finally {
     Set-Content -LiteralPath $HostsFile -Value $hostsOriginal -NoNewline   # belt and braces for an aborted run
+    Remove-NetFirewallRule -DisplayName "$NetDropRule*" -ErrorAction SilentlyContinue   # never leave the app blocked
     Stop-App
 }
 

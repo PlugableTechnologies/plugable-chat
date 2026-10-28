@@ -45,6 +45,15 @@ pub fn test_fault(name: &str) -> bool {
     std::env::var(TEST_FAULT_ENV).map(|v| v.split(',').any(|p| p.trim() == name)).unwrap_or(false)
 }
 
+/// The crash `ep-fault` pretends the previous run died of.
+pub fn test_ep_fault() -> NativeFault {
+    NativeFault {
+        code: "0xc0000409".into(),
+        module_path: "C:\\Users\\test\\.plugable-chat\\ep\\webgpu-ep\\onnxruntime_providers_webgpu.dll".into(),
+        report_id: format!("test-{}", stamp()),
+    }
+}
+
 // ---------- persisted state ----------
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,7 +425,7 @@ pub fn apply_at_launch(last: &LastRun, settings: &mut crate::settings::AppSettin
     let marker = ep.as_deref().map(check_marker).unwrap_or(MarkerCheck::NoEp);
     let marker = if test_fault("ep-mismatch") { MarkerCheck::Mismatch } else { marker };
     let fault = if test_fault("ep-fault") && !matches!(last, LastRun::Clean) {
-        Some(NativeFault { code: "0xc0000409".into(), module_path: "C:\\Users\\test\\.plugable-chat\\ep\\webgpu-ep\\onnxruntime_providers_webgpu.dll".into(), report_id: format!("test-{}", stamp()) })
+        Some(test_ep_fault())
     } else if !matches!(last, LastRun::Clean) {
         newest_unseen_fault(&health.seen_report_ids)
     } else {
@@ -431,6 +440,17 @@ pub fn apply_at_launch(last: &LastRun, settings: &mut crate::settings::AppSettin
         crate::app_log::log("crash", &format!("native fault {} in {}", f.code, f.module_path));
     }
     let plan = decide_launch(last, fault.as_ref(), &marker, &mut health);
+    let now_unix = stamp().parse().unwrap_or(0);
+    if let Some(m) = crate::crash_capture::record_previous_death_in(
+        &dir,
+        crate::crash_capture::default_dump_dir().as_deref(),
+        last,
+        fault.as_ref(),
+        crate::run_state::previous().as_ref(),
+        now_unix,
+    ) {
+        crate::app_log::log("crash", &format!("last-crash marker: in_ep={} dump={:?}", m.in_ep, m.dump_path));
+    }
     if let (Some(scope), Some(ep)) = (&plan.quarantine, ep.as_deref()) {
         let line = apply_quarantine(ep, scope);
         crate::app_log::log("crash", &line);
@@ -445,17 +465,21 @@ pub fn apply_at_launch(last: &LastRun, settings: &mut crate::settings::AppSettin
 /// Settings > Models > "Repair": set the engine's downloaded parts aside, forget crash history and
 /// the GPU-off switch, and clear engine-blamed model blocks. Models themselves are left alone.
 pub fn repair(settings: &mut crate::settings::AppSettings) -> String {
-    let dir = crate::paths::get_config_dir();
-    let mut health = health_in(&dir);
+    repair_in(&crate::paths::get_config_dir(), ep_root().as_deref(), settings)
+}
+
+pub fn repair_in(dir: &Path, ep: Option<&Path>, settings: &mut crate::settings::AppSettings) -> String {
+    let mut health = health_in(dir);
     let mut lines = Vec::new();
-    if let Some(ep) = ep_root() {
-        lines.push(apply_quarantine(&ep, &QuarantineScope::All));
+    if let Some(ep) = ep {
+        lines.push(apply_quarantine(ep, &QuarantineScope::All));
     }
     health.unclean_deaths = 0;
     health.gpu_off = false;
     health.gpu_off_reason = None;
-    save_health_in(&dir, &health);
+    save_health_in(dir, &health);
     set_gpu_off(false);
+    crate::crash_capture::clear_marker_in(dir);
     clear_engine_blame(settings);
     lines.push("crash history, GPU-off switch and engine-blamed model blocks cleared".into());
     lines.join("; ")
@@ -651,6 +675,50 @@ mod tests {
         let m = vec![("a".to_string(), vec!["t".to_string()])];
         save_last_known_models_in(&d, &m);
         assert_eq!(last_known_models_in(&d), m);
+    }
+
+    #[test]
+    fn repeated_deaths_in_a_provider_dll_quarantine_once_then_leave_the_gpu_path_and_stay_off() {
+        let chatting = || LastRun::DiedWhileChatting { model: "m".into(), turn: 2, input_tokens: None, max_tokens: None };
+        let mut h = EngineHealth::default();
+        let first = decide_launch(&chatting(), Some(&ep_fault()), &MarkerCheck::Valid, &mut h);
+        assert_eq!(first.quarantine, Some(QuarantineScope::Provider("webgpu-ep".into())));
+        assert!(!first.gpu_off && first.spare_the_model);
+        // the provider came back (or was re-downloaded) and killed the app again with no good session between
+        let second = decide_launch(&chatting(), Some(&ep_fault()), &MarkerCheck::Valid, &mut h);
+        assert!(second.gpu_off, "the second death in a row must switch the failing GPU path off by itself");
+        assert!(second.notice.unwrap().contains("Try GPU again"));
+        assert!(second.spare_the_model, "the model is not blamed for the provider's crash");
+        // a clean launch afterwards stays on the CPU path and does not quarantine again
+        let third = decide_launch(&LastRun::Clean, None, &MarkerCheck::Valid, &mut h);
+        assert!(third.gpu_off && third.quarantine.is_none());
+    }
+
+    #[test]
+    fn repair_sets_the_bad_cache_aside_and_clears_every_switch_a_crash_set() {
+        let d = temp("repair");
+        let ep = d.join("ep");
+        std::fs::create_dir_all(ep.join("webgpu-ep")).unwrap();
+        std::fs::write(ep.join("webgpu-ep").join("onnxruntime_providers_webgpu.dll"), "damaged").unwrap();
+        let cfg = d.join("cfg");
+        save_health_in(&cfg, &EngineHealth { unclean_deaths: 2, gpu_off: true, gpu_off_reason: Some("twice".into()), ..Default::default() });
+        crate::crash_capture::write_marker_in(
+            &cfg,
+            &crate::crash_capture::build_marker(&LastRun::DiedIdle, Some(&ep_fault()), None, 1).unwrap(),
+        );
+        let mut st = crate::settings::AppSettings::default();
+        st.incompatible_models.insert("a".into(), "k".into());
+        st.incompatible_model_reasons.insert("a".into(), "It closed Plugable Chat unexpectedly 2 times while answering (a crash inside the GPU runtime).".into());
+        set_gpu_off(true);
+        let line = repair_in(&cfg, Some(&ep), &mut st);
+        assert!(line.contains("quarantined"), "{line}");
+        assert!(!ep.exists(), "the bad cache must not be where the engine looks any more");
+        assert!(std::fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("ep.quarantine-")));
+        let h = health_in(&cfg);
+        assert!(!h.gpu_off && h.unclean_deaths == 0 && h.gpu_off_reason.is_none());
+        assert!(!gpu_off());
+        assert_eq!(crate::crash_capture::read_marker_in(&cfg), None);
+        assert!(st.incompatible_models.is_empty());
     }
 
     #[test]

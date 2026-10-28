@@ -70,3 +70,7 @@ src-tauri/data/
 src/components/plugable-chat.code-workspace
 assets/*
 plugable-chat.code-workspace
+
+# Playwright
+e2e-results
+playwright-report

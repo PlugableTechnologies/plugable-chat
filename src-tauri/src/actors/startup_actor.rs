@@ -32,7 +32,8 @@ pub const STARTUP_HARD_CEILING: Duration = Duration::from_secs(2 * 60 * 60);
 const _: () = assert!(STARTUP_STALL_DEADLINE.as_secs() > EP_REGISTRATION_LIMIT_SECS);
 
 /// Decides whether start-up should be declared failed. Pure so the rules are tested.
-/// `model_failure` is the message of a failed model subsystem and how long it has been failed.
+/// `model_failure` is the message of a failed model subsystem and how long it has been failed; progress
+/// reported since then (a download moving) holds the verdict back.
 /// `since_progress` is the time since anything last reported progress; `elapsed` is the time since
 /// launch. Only the model (or engine) failing, a stall, or the hard ceiling fail start-up: a missing
 /// search model or a slow GPU setup never does.
@@ -46,7 +47,9 @@ pub fn startup_verdict(
         return None;
     }
     if let Some((message, failed_for)) = model_failure {
-        if failed_for >= MODEL_FAILURE_GRACE {
+        // The gateway gives up connecting after about 45 s, but a first-run download keeps going and keeps
+        // reporting; only a failure with no progress behind it for the grace period ends start-up.
+        if failed_for >= MODEL_FAILURE_GRACE && since_progress >= MODEL_FAILURE_GRACE {
             return Some(message.to_string());
         }
     }
@@ -376,9 +379,23 @@ mod tests {
     #[test]
     fn a_model_failure_ends_the_spinner_after_the_grace_period() {
         let m = Some(("No compatible model available.", Duration::from_secs(20)));
-        assert_eq!(startup_verdict(true, m, FRESH, Duration::from_secs(30)).as_deref(), Some("No compatible model available."));
+        let quiet = MODEL_FAILURE_GRACE + Duration::from_secs(5);
+        assert_eq!(startup_verdict(true, m, quiet, Duration::from_secs(30)).as_deref(), Some("No compatible model available."));
         let fresh = Some(("x", Duration::from_secs(3)));
-        assert_eq!(startup_verdict(true, fresh, FRESH, Duration::from_secs(30)), None);
+        assert_eq!(startup_verdict(true, fresh, quiet, Duration::from_secs(30)), None);
+    }
+
+    // rc18 (Bob, Pat): the gateway gave up connecting after about 45 s and the red "Startup failed (1/2)"
+    // followed 15 s later, while the first-run model download was still moving.
+    #[test]
+    fn a_model_failure_is_not_a_start_up_failure_while_a_download_is_still_reporting_progress() {
+        let failed_a_minute = Some(("model not ready", Duration::from_secs(60)));
+        assert_eq!(startup_verdict(true, failed_a_minute, Duration::from_secs(2), Duration::from_secs(120)), None);
+        // Progress that stops brings the verdict back after the same grace period.
+        assert_eq!(
+            startup_verdict(true, failed_a_minute, MODEL_FAILURE_GRACE, Duration::from_secs(120)).as_deref(),
+            Some("model not ready")
+        );
     }
 
     #[test]

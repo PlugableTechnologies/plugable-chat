@@ -24,6 +24,8 @@ export interface HostCheckRow {
     status: number | null;
     millis: number | null;
     reason: string | null;
+    /** What the address is for, so a failing row says what stops working. */
+    purpose?: string;
 }
 
 export const EMPTY_NETWORK_FORM: NetworkForm = { httpsProxy: '', hfEndpoint: '', offlineModelFolder: '' };
@@ -79,11 +81,16 @@ export function validateNetworkForm(form: NetworkForm): { httpsProxy?: string; h
     return errors;
 }
 
+/** What "reachable" proves; shown with the results because a download can still fail after it. */
+export const REACHABLE_MEANS = 'Reachable means the name resolved and a secure connection was made. It does not prove a download will succeed.';
+
 /** One plain line per host: "huggingface.co: reachable (41 ms)" or "huggingface.co: blocked - <why>". */
 export function describeHostRow(row: HostCheckRow): string {
     if (row.ok) {
         const timing = row.millis === null ? '' : `, ${row.millis} ms`;
-        return `${row.host}: reachable (HTTP ${row.status ?? '?'}${timing})`;
+        // The check asks for each site's home page, which many of them answer with a 4xx.
+        const expected = row.status !== null && row.status >= 400 && row.status < 500 ? ' is expected here' : '';
+        return `${row.host}: reachable (HTTP ${row.status ?? '?'}${expected}${timing})`;
     }
     return `${row.host}: not reachable - ${row.reason ?? 'unknown reason'}`;
 }

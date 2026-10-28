@@ -32,6 +32,11 @@ run "version-check tests (LF and CRLF lockfiles)" node --test scripts/ci/check-t
 run "release file naming (rc10 and rc11 must differ)" node --test scripts/ci/release-names.test.mjs
 run "release.yml build environment matches ci.yml" python3 scripts/ci/check-workflow-parity.py
 run "download page matches the release files" node scripts/ci/check-download-page.mjs
+run "every escape in docs/testing-ladder.md names a test that exists" node scripts/ci/check-escapes-have-tests.mjs
+run "escape-gate tests (missing test fails, named test passes)" node --test scripts/ci/check-escapes-have-tests.test.mjs
+run "release gate tests (a tag without evidence is blocked)" node --test scripts/ci/check-release-evidence.test.mjs
+run "soak verdict tests (lost message, raw tool wrapper, orphan tool call)" node --test scripts/ci/check-chat-store-integrity.test.mjs
+run "fault-harness logic tests (helpers, installer hook, JUnit)" pwsh -NoProfile -File scripts/ci/clean-host.tests.ps1
 run "build.rs does not start a nested cargo build (release deadlock)" bash -c '! grep -q "Command::new(\"cargo\")" src-tauri/build.rs'
 run "npm audit (0 vulnerabilities)" npm audit
 run "cargo lockfile is consistent" bash -c "cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml --no-deps >/dev/null"
@@ -41,6 +46,15 @@ run "cargo lockfile is consistent" bash -c "cargo metadata --locked --format-ver
 run "TypeScript check" npx tsc
 run "frontend production build" npx vite build
 run "frontend unit tests" npm run test:unit
+run "browser tests type-check" npx tsc -p e2e
+# Needs a browser: a Playwright download or an installed Chrome (PW_CHANNEL=chrome). CI always runs it.
+if [ -n "${PW_CHANNEL:-}" ] || [ -d "$HOME/Library/Caches/ms-playwright" ] || [ -d "$HOME/.cache/ms-playwright" ]; then
+  run "Settings-screen browser tests (Playwright, mocked backend)" npx playwright test
+else
+  step "Settings-screen browser tests (Playwright, mocked backend)"
+  echo "SKIP  (no browser: run 'npx playwright install chromium' or set PW_CHANNEL=chrome)"
+  SKIPPED+=("Playwright browser tests (no browser)")
+fi
 
 # 3. Signing script (fake smctl, no Windows or DigiCert needed).
 run "signing script tests" node --test scripts/sign-windows.test.mjs

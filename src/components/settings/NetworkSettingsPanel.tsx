@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { CheckCircle2, FolderOpen, Loader2, RefreshCw, Save, Wifi, XCircle } from 'lucide-react';
 import { invoke } from '../../lib/api';
+import { useChatStore } from '../../store/chat-store';
 import {
     EMPTY_NETWORK_FORM,
     loadNetworkForm,
     networkFormIsDirty,
+    REACHABLE_MEANS,
     saveNetworkForm,
     summarizeHostRows,
     testNetworkForm,
@@ -27,6 +29,7 @@ export function NetworkSettingsPanel() {
     const [testing, setTesting] = useState(false);
     const [rows, setRows] = useState<HostCheckRow[] | null>(null);
     const [retrying, setRetrying] = useState(false);
+    const searchModelLoaded = useChatStore((st) => st.isEmbeddingReady);
 
     useEffect(() => {
         loadNetworkForm(invoke)
@@ -65,6 +68,8 @@ export function NetworkSettingsPanel() {
     const onTestNetworkConnection = async () => {
         setTesting(true);
         setRows(null);
+        // A "search model loaded" line left from Retry would sit next to the results and look like a verdict on them.
+        setMessage(null);
         try {
             setRows(await testNetworkForm(form, invoke));
         } catch (e) {
@@ -190,17 +195,26 @@ export function NetworkSettingsPanel() {
 
             {rows && summary && (
                 <div id="network-test-results" className="rounded-lg border border-gray-200 p-3">
-                    <p className="text-sm font-medium text-gray-700 mb-2">
+                    <p className="text-sm font-medium text-gray-700">
                         {summary.allOk ? 'Every address answered.' : `${summary.failed} of ${rows.length} addresses did not answer.`}
                     </p>
+                    <p className="text-xs text-gray-500 mb-2">{REACHABLE_MEANS}</p>
                     <ul className="space-y-1">
                         {rows.map((row, i) => (
                             <li key={row.host} className="flex items-start gap-2 text-xs text-gray-700">
                                 {row.ok ? <CheckCircle2 size={14} className="text-green-600 mt-0.5 shrink-0" /> : <XCircle size={14} className="text-red-600 mt-0.5 shrink-0" />}
-                                <span className="break-all">{summary.lines[i]}</span>
+                                <span className="break-all">
+                                    {summary.lines[i]}
+                                    {row.purpose && <span className="block text-gray-500">{row.purpose}</span>}
+                                </span>
                             </li>
                         ))}
                     </ul>
+                    {summary.failed > 0 && searchModelLoaded && (
+                        <p className="text-xs text-gray-600 mt-2">
+                            The search model is already loaded from files on this computer, so a blocked address only matters when something has to be downloaded again.
+                        </p>
+                    )}
                 </div>
             )}
         </div>

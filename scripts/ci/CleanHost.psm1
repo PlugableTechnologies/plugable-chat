@@ -115,6 +115,92 @@ function Assert-EmbeddingTruthful {
     return @()
 }
 
+function Wait-Until {
+    param([Parameter(Mandatory)][scriptblock]$Condition, [int]$TimeoutSec = 60, [double]$PollSec = 1)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+        if (& $Condition) { return $true }
+        Start-Sleep -Milliseconds ([int]($PollSec * 1000))
+    }
+    return [bool](& $Condition)
+}
+
+# --- hosts-file blocks ------------------------------------------------------------------------
+# Hugging Face serves large files from these two Xet hosts (cdn-lfs.huggingface.co is gone). Blocking only
+# them leaves huggingface.co (the file list, small files) reachable, which is the field failure: the list
+# loads, the big file does not.
+function Get-XetHosts { return @("cas-bridge.xethub.hf.co", "transfer.xethub.hf.co") }
+
+function New-HostsBlockLines {
+    param([Parameter(Mandatory)][string[]]$Hosts)
+    return @($Hosts | ForEach-Object { "127.0.0.1 $_" })
+}
+
+# --- turn records (--reply-file, one JSON line per finished turn) -----------------------------
+function Read-ReplyRecords {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return , @() }
+    $out = New-Object System.Collections.ArrayList
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { [void]$out.Add(($line | ConvertFrom-Json)) } catch { [void]$out.Add([pscustomobject]@{ prompt_index = -1; outcome = "unparseable"; detail = $line; reply = ""; tool_calls = @() }) }
+    }
+    return , @($out.ToArray())
+}
+
+# The turn that was running when the network dropped must end as a clean failure of its own kind: an
+# "error" record whose detail names the drop, with no made-up reply.
+function Assert-TurnStoppedByNetworkDrop {
+    param($Records, [int]$Index)
+    $r = @($Records | Where-Object { $_.prompt_index -eq $Index }) | Select-Object -First 1
+    if ($null -eq $r) { return @("no turn record for prompt $Index (the app died or hung instead of ending the turn)") }
+    $f = @()
+    if ($r.outcome -ne "error") { $f += "prompt $Index ended '$($r.outcome)', expected a clean 'error'" }
+    elseif (([string]$r.detail) -notmatch "^network_dropped") { $f += "prompt $Index failed, but not as a network drop: '$($r.detail)'" }
+    return $f
+}
+
+function Assert-TurnOk {
+    param($Records, [int]$Index)
+    $r = @($Records | Where-Object { $_.prompt_index -eq $Index }) | Select-Object -First 1
+    if ($null -eq $r) { return @("no turn record for prompt $Index") }
+    if ($r.outcome -ne "ok") { return @("prompt $Index ended '$($r.outcome)' ($($r.detail)), expected 'ok'") }
+    if ([string]::IsNullOrWhiteSpace([string]$r.reply)) { return @("prompt $Index was 'ok' with an empty reply") }
+    return @()
+}
+
+# A tool call the drop cut short is still in the record, as an error that says it was interrupted.
+function Assert-ToolCallInterrupted {
+    param($Records, [int]$Index)
+    $r = @($Records | Where-Object { $_.prompt_index -eq $Index }) | Select-Object -First 1
+    if ($null -eq $r) { return @("no turn record for prompt $Index") }
+    $calls = @($r.tool_calls)
+    if ($calls.Count -eq 0) { return @("prompt $Index made no tool call, so nothing was interrupted (the model did not use the tool)") }
+    $cut = @($calls | Where-Object { $_.is_error -eq $true -and ([string]$_.result_summary) -match "^Interrupted" })
+    if ($cut.Count -eq 0) { return @("no tool call in prompt $Index was recorded as interrupted: " + (($calls | ForEach-Object { "$($_.tool)=$($_.result_summary)" }) -join "; ")) }
+    return @()
+}
+
+# After a turn that failed (the network was dropped on purpose), the next prompt in the chat must work: a failed
+# turn that is followed by another failure, or by nothing when more prompts were due, means the app stayed broken.
+# $LastIndexDue is the highest prompt index that should have a record (null: the last record may be a failure).
+function Assert-TurnsRecoverAfterFailure {
+    param($Records, $LastIndexDue = $null)
+    $sorted = @($Records | Sort-Object { [int]$_.prompt_index })
+    $out = @()
+    for ($i = 0; $i -lt $sorted.Count; $i++) {
+        if ($sorted[$i].outcome -eq "ok") { continue }
+        $idx = [int]$sorted[$i].prompt_index
+        if ($i + 1 -lt $sorted.Count) {
+            if ($sorted[$i + 1].outcome -ne "ok") { $out += "prompt $idx failed and so did the next one ($($sorted[$i + 1].outcome)): the app did not recover" }
+        }
+        elseif ($null -ne $LastIndexDue -and $idx -lt [int]$LastIndexDue) {
+            $out += "prompt $idx failed and no later prompt ran, though prompts up to $LastIndexDue were due"
+        }
+    }
+    return $out
+}
+
 # --- directory snapshots (nothing may be written under the install dir by running the app) ----
 function Get-DirSnapshot {
     param([Parameter(Mandatory)][string]$Path)

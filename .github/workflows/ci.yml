@@ -74,6 +74,14 @@ jobs:
       - name: Check the download page names the files the release produces
         run: node scripts/ci/check-download-page.mjs
 
+      - name: Check every escape in the testing ladder names a test that exists
+        run: |
+          node --test scripts/ci/check-escapes-have-tests.test.mjs
+          node scripts/ci/check-escapes-have-tests.mjs
+
+      - name: Release gate and soak verdict tests (a tag without evidence is blocked)
+        run: node --test scripts/ci/check-release-evidence.test.mjs scripts/ci/check-chat-store-integrity.test.mjs
+
       - name: Type-check and build the frontend
         run: npm run build
 
@@ -86,6 +94,41 @@ jobs:
 
       - name: Rust unit tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+  e2e-settings:
+    # The Settings screens rendered in a real browser against a mocked Tauri backend (e2e/support/tauri-mock.ts).
+    # rc18's tester-found bugs were all things the unit tests could not see: a screen showing the wrong thing.
+    name: Settings screens (Playwright, Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Install JavaScript dependencies (locked)
+        run: npm ci
+
+      - name: Type-check the end-to-end tests
+        run: npx tsc -p e2e
+
+      - name: Install the browser Playwright drives
+        run: npx playwright install --with-deps chromium
+
+      - name: Run the Settings-screen tests
+        run: npx playwright test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: e2e-results-${{ github.sha }}
+          path: e2e-results/
+          if-no-files-found: ignore
 
   build-windows:
     name: Build and unit tests (Windows)

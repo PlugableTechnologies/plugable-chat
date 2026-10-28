@@ -5,7 +5,7 @@
 
 use crate::app_state::LaunchOverrides;
 use crate::settings::{
-    enforce_python_name, ensure_default_servers, AlwaysOnTableConfig, AppSettings, McpServerConfig, ToolCallFormatName,
+    enforce_python_name, ensure_default_servers, ensure_dev_test_server, AlwaysOnTableConfig, AppSettings, McpServerConfig, ToolCallFormatName,
 };
 use crate::tool_capability::ToolLaunchFilter;
 use clap::Parser;
@@ -175,6 +175,10 @@ pub struct CliArgs {
     /// blocks. The same thing Settings > Models > Repair does; for support and unattended tests.
     #[arg(long, env = "PLUGABLE_REPAIR_ENGINE")]
     pub repair_engine: bool,
+    /// Write every saved chat (id, title, messages) to this JSON file and exit; exit code 1 when the
+    /// chat store cannot be read. Shows what a reload would show, e.g. after the app was killed.
+    #[arg(long, value_name = "FILE", env = "PLUGABLE_DUMP_CHATS")]
+    pub dump_chats: Option<String>,
     /// Start with the main window hidden (for unattended runs).
     #[arg(long, env = "PLUGABLE_HIDDEN")]
     pub hidden: bool,
@@ -559,7 +563,7 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
     // Enable default dev MCP test server when requested
     let mut enable_mcp_prompt: Option<String> = None;
     if args.enable_mcp_test == Some(true) {
-        ensure_default_servers(settings);
+        ensure_dev_test_server(settings);
         if let Some(test_server) = settings
             .mcp_servers
             .iter_mut()
@@ -673,6 +677,12 @@ mod tests {
         assert_eq!(args.prompts_file.as_deref(), Some("/t/p.json"));
         assert_eq!(args.chat_home.as_deref(), Some("/t/home"));
         assert_eq!(args.mcp_timeout_secs, Some(900));
+    }
+
+    #[test]
+    fn dump_chats_takes_a_file_and_is_off_by_default() {
+        assert_eq!(parse(&["--dump-chats", "/t/chats.json"]).dump_chats.as_deref(), Some("/t/chats.json"));
+        assert!(parse(&[]).dump_chats.is_none());
     }
 
     #[test]

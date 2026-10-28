@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { X, Save, Loader2, RotateCcw, Cpu, Server, Code2, Wrench, MessageSquare, Database, HardDrive, Wifi } from 'lucide-react';
 import { useSettingsStore } from '../../store/settings-store';
 import { ModelsTab } from './tabs/ModelsTab';
@@ -30,6 +30,17 @@ export function SettingsModal() {
     const [databasesDirty, setDatabasesDirty] = useState(false);
     const [databasesSaving, setDatabasesSaving] = useState(false);
     const databasesSaveHandlerRef = useRef<(() => Promise<void>) | null>(null);
+
+    // The tabs report their own dirty state while mounted; a tab that was unmounted by closing the window cannot
+    // clear it, and a stale flag would put a Save button on the next visit.
+    useEffect(() => {
+        if (isSettingsOpen) return;
+        setSystemDirty(false);
+        setToolsDirty(false);
+        setInterfacesDirty(false);
+        setBuiltinsDirty(false);
+        setDatabasesDirty(false);
+    }, [isSettingsOpen]);
 
     const handleRegisterSystemSave = useCallback((handler: () => Promise<void>) => {
         systemSaveHandlerRef.current = handler;
@@ -150,7 +161,7 @@ export function SettingsModal() {
                                 Reset
                             </button>
                         )}
-                        {activeTab && activeTab !== 'network' && (
+                        {activeTab && activeTab !== 'network' && (isCurrentTabDirty || isCurrentTabSaving) && (
                             <button
                                 onClick={handleHeaderSave}
                                 disabled={!isCurrentTabDirty || isCurrentTabSaving}
@@ -170,10 +181,10 @@ export function SettingsModal() {
                 </div>
 
                 {/* Tabs */}
-                <div className="settings-tablist flex items-center border-b border-gray-100 overflow-x-auto min-h-[56px] pb-2">
+                <div className="settings-tablist flex flex-wrap items-center border-b border-gray-100">
                     <button
                         onClick={() => setActiveTab('models')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'models'
+                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'models'
                             ? 'border-blue-500 text-blue-600'
                             : 'border-transparent text-gray-500 hover:text-gray-700'
                             }`}
@@ -183,7 +194,7 @@ export function SettingsModal() {
                     </button>
                     <button
                         onClick={() => setActiveTab('databases')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'databases'
+                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'databases'
                             ? 'border-blue-500 text-blue-600'
                             : 'border-transparent text-gray-500 hover:text-gray-700'
                             }`}
@@ -193,7 +204,7 @@ export function SettingsModal() {
                     </button>
                     <button
                         onClick={() => setActiveTab('builtins')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'builtins'
+                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'builtins'
                             ? 'border-blue-500 text-blue-600'
                             : 'border-transparent text-gray-500 hover:text-gray-700'
                             }`}
@@ -203,7 +214,7 @@ export function SettingsModal() {
                     </button>
                     <button
                         onClick={() => setActiveTab('tools')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'tools'
+                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'tools'
                             ? 'border-blue-500 text-blue-600'
                             : 'border-transparent text-gray-500 hover:text-gray-700'
                             }`}
@@ -213,7 +224,7 @@ export function SettingsModal() {
                     </button>
                     <button
                         onClick={() => setActiveTab('system-prompt')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'system-prompt'
+                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'system-prompt'
                             ? 'border-blue-500 text-blue-600'
                             : 'border-transparent text-gray-500 hover:text-gray-700'
                             }`}
@@ -223,7 +234,7 @@ export function SettingsModal() {
                     </button>
                     <button
                         onClick={() => setActiveTab('interfaces')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'interfaces'
+                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'interfaces'
                             ? 'border-blue-500 text-blue-600'
                             : 'border-transparent text-gray-500 hover:text-gray-700'
                             }`}
@@ -233,7 +244,7 @@ export function SettingsModal() {
                     </button>
                     <button
                         onClick={() => setActiveTab('schemas')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'schemas'
+                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'schemas'
                             ? 'border-blue-500 text-blue-600'
                             : 'border-transparent text-gray-500 hover:text-gray-700'
                             }`}
@@ -243,7 +254,7 @@ export function SettingsModal() {
                     </button>
                     <button
                         onClick={() => setActiveTab('files')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'files'
+                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'files'
                             ? 'border-blue-500 text-blue-600'
                             : 'border-transparent text-gray-500 hover:text-gray-700'
                             }`}
@@ -253,7 +264,7 @@ export function SettingsModal() {
                     </button>
                     <button
                         onClick={() => setActiveTab('network')}
-                        className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'network'
+                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === 'network'
                             ? 'border-blue-500 text-blue-600'
                             : 'border-transparent text-gray-500 hover:text-gray-700'
                             }`}

@@ -47,6 +47,8 @@ export function McpServerCard({
     // Test connection state
     const [isTesting, setIsTesting] = useState(false);
     const [testResult, setTestResult] = useState<McpServerTestResult | null>(null);
+    // Why the last attempt to turn the server on or save it failed; shown on the card header, so it is seen with the card closed.
+    const [startError, setStartError] = useState<string | null>(null);
     const [tools, setTools] = useState<McpTool[]>([]);
     const [loadingTools, setLoadingTools] = useState(false);
     const [toolsError, setToolsError] = useState<string | null>(null);
@@ -105,7 +107,13 @@ export function McpServerCard({
     }, [updateField]);
 
     const handleSave = useCallback(async () => {
-        await onSave(localConfig);
+        setStartError(null);
+        try {
+            await onSave(localConfig);
+        } catch (e: any) {
+            setStartError(e?.message || String(e));
+            return;
+        }
         setIsDirty(false);
 
         // Only test the connection if the server is enabled
@@ -180,42 +188,54 @@ export function McpServerCard({
             .finally(() => setLoadingTools(false));
     }, [expanded, localConfig.enabled, localConfig.id, tools.length, toolsError]);
 
-    // Toggle enabled state and auto-save immediately
+    // Turning a server on tries to start it first and saves "enabled" only if that worked, so a server that
+    // cannot start (rc18: `cargo` not installed) never shows as on or stays saved as on.
     const handleToggleEnabled = useCallback(async () => {
         const previousConfig = localConfig;
         const newEnabled = !localConfig.enabled;
         const newConfig = { ...localConfig, enabled: newEnabled };
+        setStartError(null);
 
-        // Update local state immediately
+        if (!newEnabled) {
+            setLocalConfig(newConfig);
+            try {
+                await onSave(newConfig);
+            } catch (e: any) {
+                console.error('[McpServerCard] Failed to save server toggle:', e);
+                setLocalConfig(previousConfig);
+                setStartError(e?.message || String(e));
+                return;
+            }
+            setTestResult(null);
+            setTools([]);
+            return;
+        }
+
+        setIsTesting(true);
+        setTestResult(null);
+        let startedTools: McpTool[];
+        try {
+            startedTools = await invoke<McpTool[]>('test_mcp_server_config', { config: newConfig });
+        } catch (e: any) {
+            const message = e?.message || String(e);
+            setTestResult({ success: false, error: message });
+            setStartError(message);
+            setIsTesting(false);
+            return;
+        }
+        setIsTesting(false);
+
         setLocalConfig(newConfig);
-        // Don't mark as dirty since we're saving immediately
-
-        // Save to backend
         try {
             await onSave(newConfig);
         } catch (e: any) {
             console.error('[McpServerCard] Failed to save server toggle:', e);
             setLocalConfig(previousConfig);
+            setStartError(e?.message || String(e));
             return;
         }
-
-        // Test connection if enabling
-        if (newEnabled) {
-            setIsTesting(true);
-            setTestResult(null);
-            try {
-                const tools = await invoke<McpTool[]>('test_mcp_server_config', { config: newConfig });
-                setTestResult({ success: true, tools });
-                setTools(tools);
-            } catch (e: any) {
-                setTestResult({ success: false, error: e.message || String(e) });
-            } finally {
-                setIsTesting(false);
-            }
-        } else {
-            setTestResult(null);
-            setTools([]);
-        }
+        setTestResult({ success: true, tools: startedTools });
+        setTools(startedTools);
     }, [localConfig, onSave]);
 
     const toolPromptKey = useCallback((toolName: string) => `${localConfig.id}::${toolName}`, [localConfig.id]);
@@ -243,6 +263,11 @@ export function McpServerCard({
 
                 {/* Enable toggle - auto-saves on change */}
                 <button
+                    type="button"
+                    role="switch"
+                    aria-checked={localConfig.enabled}
+                    aria-label={`Enable ${localConfig.name || 'MCP server'}`}
+                    disabled={isTesting}
                     onClick={(e) => { e.stopPropagation(); handleToggleEnabled(); }}
                     className={`relative w-10 h-5 rounded-full transition-colors ${localConfig.enabled ? 'bg-blue-500' : 'bg-gray-300'
                         }`}
@@ -267,6 +292,10 @@ export function McpServerCard({
                 {/* Expand/collapse */}
                 {expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
             </div>
+
+            {startError && (
+                <p role="alert" className="px-4 pb-3 text-xs text-red-700 break-words">{startError}</p>
+            )}
 
             {/* Expanded details */}
             {expanded && (

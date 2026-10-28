@@ -486,6 +486,17 @@ export function ChatArea() {
         }
     };
 
+    // "Retry" on a stopped turn puts the question back in the box and bumps retryRequestId; send it once per request.
+    const retryRequestId = useChatStore((s) => s.retryRequestId);
+    const lastHandledRetryId = useRef(0);
+    useEffect(() => {
+        if (retryRequestId === 0 || retryRequestId === lastHandledRetryId.current) return;
+        if (assistantStreamingActive || !chatInputValue.trim()) return;
+        lastHandledRetryId.current = retryRequestId;
+        void handleSend();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [retryRequestId, chatInputValue, assistantStreamingActive]);
+
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();

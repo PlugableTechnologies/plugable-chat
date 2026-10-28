@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       scenarios:
-        description: "Comma-separated scenario names, or cpu / gpu / all (see scripts/ci/faults.ps1 -List)"
+        description: "Comma-separated scenario names, or cpu / gpu / net / all (see scripts/ci/faults.ps1 -List)"
         default: "cpu"
       installer_release_tag:
         description: "Test the setup.exe from this GitHub release tag instead of the latest main CI build (e.g. v0.1.0-rc9)"
@@ -50,7 +50,7 @@ jobs:
           # unicode-username, proxy-tls-intercept and no-vcredist always skip on a hosted runner
           # (no interactive second user, no mitmproxy, no redistributable pin), so they only run
           # when named explicitly or on the AWS box.
-          default='["baseline","readonly-nonadmin","offline-hosts-block","proxy-dead","driver-absent","kill-mid-download","low-disk","quarantined-dll","upgrade-over-old","nvidia-present-no-providers","egpu-thunderbolt-hint","egpu-late-arrival","engine-declined","embedding-first-run-contention","embedding-tls-reset-recovers","embedding-no-huggingface","version-visible"]'
+          default='["baseline","readonly-nonadmin","offline-hosts-block","proxy-dead","driver-absent","kill-mid-download","low-disk","quarantined-dll","upgrade-over-old","nvidia-present-no-providers","egpu-thunderbolt-hint","egpu-late-arrival","engine-declined","embedding-first-run-contention","embedding-tls-reset-recovers","embedding-no-huggingface","version-visible","crash-capture","xet-hosts-blocked"]'
           if [ -z "$INPUT_SCENARIOS" ] || [ "$INPUT_SCENARIOS" = "cpu" ]; then
             echo "scenarios=$default" >> "$GITHUB_OUTPUT"
           else

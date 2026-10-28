@@ -9,6 +9,7 @@
 pub mod backend;
 pub mod context_budget;
 pub mod download_cancel;
+pub mod download_retry;
 pub mod failure_strikes;
 pub mod embedding_init;
 pub mod embedding_model_files;

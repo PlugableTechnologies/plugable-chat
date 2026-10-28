@@ -109,6 +109,27 @@ pub fn server_originated_request(line: &str) -> Option<ServerOriginatedMessage> 
     Some(ServerOriginatedMessage { method, reply })
 }
 
+/// Why a stdio server could not start. A missing program names what usually provides it, because
+/// "program not found" alone does not tell a tester what to install (rc18: `cargo`).
+pub fn describe_spawn_error(command: &str, error: &std::io::Error) -> String {
+    if error.kind() != std::io::ErrorKind::NotFound {
+        return format!("Failed to spawn MCP server process '{command}': {error}");
+    }
+    let program = std::path::Path::new(command)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    let install = match program.as_str() {
+        "cargo" | "rustc" => "Install the Rust toolchain (https://rustup.rs)",
+        "npx" | "npm" | "node" => "Install Node.js (https://nodejs.org)",
+        "uvx" | "uv" => "Install uv (https://docs.astral.sh/uv)",
+        "python" | "python3" | "pip" | "pipx" => "Install Python (https://python.org)",
+        _ => "Install it and make sure it is on your PATH",
+    };
+    format!("Could not start '{command}': program not found. {install}, or change the command in Settings > Tools.")
+}
+
 /// A spawned stdio server and its pipes.
 struct StdioLink {
     process: Child,
@@ -682,7 +703,7 @@ impl McpToolRouterActor {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| format!("Failed to spawn MCP server process '{}': {}", command, e))?;
+            .map_err(|e| describe_spawn_error(&command, &e))?;
 
         let stdin = child
             .stdin
@@ -1137,7 +1158,7 @@ impl McpToolRouterActor {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| format!("Failed to spawn MCP server process '{}': {}", command, e))?;
+            .map_err(|e| describe_spawn_error(&command, &e))?;
 
         let stdin = child
             .stdin
@@ -1691,5 +1712,30 @@ for line in sys.stdin:
         assert!(started.elapsed() < Duration::from_secs(2));
         let slow = slow_rx.await.unwrap().expect("the slow call still completes");
         assert_eq!(crate::tool_execution::mcp_result_text(&slow), "Slept 3 seconds");
+    }
+}
+
+#[cfg(test)]
+mod spawn_error_tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    // rc18 (Pat): "cargo: program not found" named the program but not what to install.
+    #[test]
+    fn a_missing_program_says_what_to_install_for_the_common_launchers() {
+        let missing = Error::from(ErrorKind::NotFound);
+        let cargo = describe_spawn_error("cargo", &missing);
+        assert!(cargo.contains("'cargo'") && cargo.contains("not found") && cargo.contains("Rust"), "{cargo}");
+        assert!(describe_spawn_error("npx", &missing).contains("Node.js"));
+        assert!(describe_spawn_error("C:\\tools\\uvx.exe", &missing).contains("uv"));
+        assert!(describe_spawn_error("python3", &missing).contains("Python"));
+        let other = describe_spawn_error("my-server", &missing);
+        assert!(other.contains("'my-server'") && other.contains("Settings > Tools"), "{other}");
+    }
+
+    #[test]
+    fn other_spawn_failures_keep_the_operating_system_reason() {
+        let denied = describe_spawn_error("tool", &Error::from(ErrorKind::PermissionDenied));
+        assert!(denied.contains("Failed to spawn MCP server process 'tool'") && denied.to_lowercase().contains("permission denied"), "{denied}");
     }
 }

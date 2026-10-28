@@ -232,6 +232,14 @@ pub fn schema_refresh_failure_message(reason: &str) -> String {
     format!("{}: {}", SCHEMA_REFRESH_FAILED_PREFIX, reason)
 }
 
+/// Refusal to refresh while the Database Toolbox switch in Settings is off. A source's own "enabled"
+/// box is not enough: the switch is what the user turned off, and the toolbox must not start behind it.
+pub fn refresh_blocked_by_settings(config: &DatabaseToolboxConfig) -> Option<String> {
+    (!config.enabled).then(|| {
+        schema_refresh_failure_message("the Database Toolbox is turned off. Turn it on in Settings > Databases and save, then refresh.")
+    })
+}
+
 /// Decide whether a toolbox start error means the binary is absent or the binary ran and failed.
 pub fn classify_toolbox_start_error(error: &str, toolbox_present: bool) -> RefreshBlocker {
     if !toolbox_present
@@ -374,6 +382,10 @@ async fn refresh_database_schemas_inner(
     toolbox_config: &DatabaseToolboxConfig,
     allow_auto_retry: bool,
 ) -> Result<SchemaRefreshSummary, String> {
+    if let Some(message) = refresh_blocked_by_settings(toolbox_config) {
+        println!("[SchemaRefresh] Blocked: {message}");
+        return Err(message);
+    }
     let sources: Vec<DatabaseSourceConfig> = toolbox_config
         .sources
         .iter()
@@ -1723,5 +1735,45 @@ mod refresh_blocker_tests {
         assert!(RefreshBlocker::ToolboxNotDownloaded.clears_by_waiting());
         assert!(!RefreshBlocker::ToolboxFailedToStart("x".into()).clears_by_waiting());
         assert!(!RefreshBlocker::DemoDataMissing("x".into()).clears_by_waiting());
+    }
+}
+
+// rc18 (Bob): Refresh worked with the Database Toolbox switched off, because the check looked only at the
+// source's own "enabled" box, and the backend then started the toolbox anyway.
+#[cfg(test)]
+mod toolbox_gate_tests {
+    use super::*;
+
+    fn source(enabled: bool) -> DatabaseSourceConfig {
+        DatabaseSourceConfig {
+            id: "s".into(),
+            name: "Sales".into(),
+            kind: crate::settings::SupportedDatabaseKind::Bigquery,
+            enabled,
+            transport: crate::settings::Transport::Stdio,
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            auto_approve_tools: true,
+            defer_tools: true,
+            project_id: None,
+            sql_dialect: None,
+            dataset_allowlist: None,
+            table_allowlist: None,
+        }
+    }
+
+    #[test]
+    fn refresh_is_refused_while_the_toolbox_is_off_even_when_a_source_is_on() {
+        let off = DatabaseToolboxConfig { enabled: false, sources: vec![source(true)] };
+        let message = refresh_blocked_by_settings(&off).expect("refused");
+        assert!(message.starts_with(SCHEMA_REFRESH_FAILED_PREFIX), "{message}");
+        assert!(message.contains("Database Toolbox is turned off"), "{message}");
+    }
+
+    #[test]
+    fn refresh_is_allowed_when_the_toolbox_is_on() {
+        let on = DatabaseToolboxConfig { enabled: true, sources: vec![source(true)] };
+        assert_eq!(refresh_blocked_by_settings(&on), None);
     }
 }

@@ -1441,6 +1441,9 @@ impl ModelGatewayActor {
                             };
                             // Leaves a trace that survives a native crash (see run_state.rs).
                             crate::run_state::mark_chatting(&model);
+                            if crate::engine_health::test_fault("crash-mid-turn") {
+                                crate::crash_capture::die_like_a_native_fault();
+                            }
                             let outcome = sdk
                                 .chat_stream(req, respond_to.clone(), stream_cancel_rx)
                                 .await;
@@ -1459,6 +1462,10 @@ impl ModelGatewayActor {
                             if let Some(be) = outcome.error {
                                 let msg = be.message().to_string();
                                 println!("[FoundryActor] SDK chat error: {}", msg);
+                                // The loop reads this when the stream closes: the turn failed, it did not just end.
+                                if !be.is_cancelled() {
+                                    crate::turn_failure::note_engine_error(&msg);
+                                }
                                 // Notices go out-of-band (`chat-notice`): anything sent through
                                 // `respond_to` is saved as an assistant message and replayed to
                                 // the next model as history.
@@ -3136,7 +3143,21 @@ impl ModelGatewayActor {
             crate::test_state::status::STARTED,
             &resolved_name,
         );
-        let result = self.download_model_inner(client, port, model_name).await;
+        // The download runs inside the engine, so all that can be done about a network drop is to call it
+        // again after a wait (download_retry.rs); the failing host is named when the engine's error names one.
+        let result = super::download_retry::run_with_retries(
+            &resolved_name,
+            &super::download_retry::BACKOFF,
+            || super::download_cancel::download_cancels().is_cancelled(model_name),
+            |_attempt| self.download_model_inner(client, port, model_name),
+            |notice| {
+                println!("FoundryActor: {} ({})", notice.text(), notice.error);
+                crate::app_log::log("download", &format!("{} Error: {}", notice.text(), notice.error));
+                crate::test_state::record(crate::test_state::Phase::ModelDownload, "retrying", &notice.text());
+                self.emit_chat_notice("warning", &notice.text());
+            },
+        )
+        .await;
         match &result {
             Ok(()) => crate::test_state::record(
                 crate::test_state::Phase::ModelDownload,
@@ -3163,11 +3184,21 @@ impl ModelGatewayActor {
         if let Some(sdk) = &self.sdk {
             let app = self.app_handle.clone();
             let file = model_name.to_string();
+            let startup_tx = self.startup_tx.clone();
+            let last_reported_percent = std::sync::atomic::AtomicI64::new(-1);
             let progress: super::backend::ProgressSink = Box::new(move |p: f64| {
                 let _ = app.emit(
                     "model-download-progress",
                     serde_json::json!({ "file": file, "progress": p }),
                 );
+                // A moving download is start-up progress: without this the start-up watchdog sees silence and a
+                // slow first-run download ends in a red failure (rc18). Once per percent keeps the channel quiet.
+                let whole = p.floor() as i64;
+                if last_reported_percent.swap(whole, std::sync::atomic::Ordering::Relaxed) != whole {
+                    if let Some(tx) = &startup_tx {
+                        let _ = tx.try_send(StartupMsg::ReportProgressHeartbeat);
+                    }
+                }
             });
             let cancel = super::download_cancel::download_cancels().flag(model_name);
             return sdk.download(model_name, progress, cancel).await;
@@ -3363,7 +3394,14 @@ impl ModelGatewayActor {
 
         // Use bytes_stream for better streaming handling
         let mut stream = response;
-        while let Ok(Some(chunk)) = stream.chunk().await {
+        loop {
+            // A connection cut mid-download is an error, not the end of the stream: treating it as the
+            // end reported a half-downloaded model as complete.
+            let chunk = match stream.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(e) => return Err(format!("Download stream was interrupted: {e:?}")),
+            };
             chunk_count += 1;
             if let Ok(s) = String::from_utf8(chunk.to_vec()) {
                 buffer.push_str(&s);
