@@ -35,6 +35,7 @@ run "download page matches the release files" node scripts/ci/check-download-pag
 run "every escape in docs/testing-ladder.md names a test that exists" node scripts/ci/check-escapes-have-tests.mjs
 run "escape-gate tests (missing test fails, named test passes)" node --test scripts/ci/check-escapes-have-tests.test.mjs
 run "release gate tests (a tag without evidence is blocked)" node --test scripts/ci/check-release-evidence.test.mjs
+run "installer hook registry keys name the real exe" node --test scripts/ci/hooks-nsh.test.mjs
 run "soak verdict tests (lost message, raw tool wrapper, orphan tool call)" node --test scripts/ci/check-chat-store-integrity.test.mjs
 run "fault-harness logic tests (helpers, installer hook, JUnit)" pwsh -NoProfile -File scripts/ci/clean-host.tests.ps1
 run "build.rs does not start a nested cargo build (release deadlock)" bash -c '! grep -q "Command::new(\"cargo\")" src-tauri/build.rs'

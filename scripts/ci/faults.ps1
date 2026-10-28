@@ -866,7 +866,8 @@ Register "xet-hosts-blocked" "rc18 Pat: cdn-lfs DNS failure advice; the real lar
     Copy-Item -LiteralPath $HostsFile -Destination $backup -Force
     $script:xetLifted = $false
     try {
-        Add-Content -LiteralPath $HostsFile -Value (New-HostsBlockLines -Hosts (Get-XetHosts))
+        # huggingface.co now redirects model.onnx to us.aws.cdn.hf.co (xet-bridge-us), not only to the two *.xethub.hf.co hosts (checked on the GPU box 2026-10-28)
+        Add-Content -LiteralPath $HostsFile -Value (New-HostsBlockLines -Hosts ((Get-XetHosts) + "us.aws.cdn.hf.co"))
         ipconfig /flushdns | Out-Null
         $run = Invoke-Smoke $ctx -NoSmoke -TimeoutSec 900 -EnvVars $HfOnly -KillWhen {
             param($recs)
@@ -953,8 +954,11 @@ Register "foundry-download-resume" "rc18 Foundry model download: a drop mid-down
     param($ctx)
     $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
     $script:dlBlocked = $false
+    # A launch model override never downloads ("Requested model ... is not downloaded"); the first-run download of the default model is
+    # what emits model-download, so the cached models from earlier scenarios must go (checked on the GPU box 2026-10-28)
+    Remove-Item -LiteralPath (Join-Path $env:USERPROFILE ".foundry") -Recurse -Force -ErrorAction SilentlyContinue
     try {
-        $run = Invoke-Smoke $ctx -NoSmoke -TimeoutSec 2400 -EnvVars @{ PLUGABLE_MODEL = $DownloadModel } -KillWhen {
+        $run = Invoke-Smoke $ctx -NoSmoke -TimeoutSec 2400 -KillWhen {
             param($recs)
             $dl = @($recs | Where-Object { $_.phase -eq "model-download" })
             if (-not $script:dlBlocked -and @($dl | Where-Object { "$($_.status)" -in @("started", "progress") }).Count -gt 0) {

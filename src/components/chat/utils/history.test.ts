@@ -43,3 +43,23 @@ test('carries the system prompt text through', () => {
     const h = buildChatHistory([{ role: 'assistant', content: 'ok', systemPromptText: 'sp' }]);
     assert.equal(h[0].system_prompt, 'sp');
 });
+
+test('a finished tool turn is sent as call, result, answer, so no raw call is left without its result', () => {
+    const h = buildChatHistory([
+        { role: 'user', content: 'how many?' },
+        {
+            role: 'assistant',
+            content: 'One moment.<tool_call>{"name":"count"}</tool_call>There are 3.',
+            toolCalls: [{ result: '{"rows":3}', isError: false }],
+        },
+    ]);
+    assert.deepEqual(h.map((m) => m.role), ['user', 'assistant', 'user', 'assistant']);
+    assert.ok(h[1].content.endsWith('</tool_call>'));
+    assert.equal(h[2].content, '<tool_response>\n{"rows":3}\n</tool_response>');
+    assert.equal(h[3].content, 'There are 3.');
+});
+
+test('a half-written tool call at the end of a cut-off reply is not sent', () => {
+    const h = buildChatHistory([{ role: 'assistant', content: 'Looking.<tool_call>{"na' }]);
+    assert.deepEqual(h.map((m) => m.content), ['Looking.']);
+});

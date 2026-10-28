@@ -104,14 +104,15 @@ pub async fn get_gpu_assessment(refresh: Option<bool>) -> Result<crate::gpu_asse
 }
 
 /// Hosts the app must reach, each with what it is for, so a failing row says what stops working.
-/// Hugging Face serves large files from Xet hosts (`*.xethub.hf.co`), not the old `cdn-lfs` name.
+/// Hugging Face serves large files from Xet hosts (`*.xethub.hf.co`) and a CDN host (`us.aws.cdn.hf.co`), not the old `cdn-lfs` name.
 /// Core's own catalog host is inside the native engine and not named in this repo; `ai.azure.com` is
 /// the catalog address Foundry Local uses as far as its public documentation shows, so a failure
 /// there is worth a look but is not proof on its own.
-pub const REACHABILITY_TARGETS: [(&str, &str); 9] = [
+pub const REACHABILITY_TARGETS: [(&str, &str); 10] = [
     ("huggingface.co", "Search model: file list and small files"),
     ("cas-bridge.xethub.hf.co", "Search model: large files (Hugging Face Xet storage)"),
     ("transfer.xethub.hf.co", "Search model: large-file transfer (Hugging Face Xet storage)"),
+    ("us.aws.cdn.hf.co", "Search model: the model file itself (huggingface.co redirects to this Hugging Face CDN host)"),
     // The search model's release copy: github.com redirects to the release-assets host.
     ("github.com", "Search model: Plugable Chat release copy"),
     ("release-assets.githubusercontent.com", "Search model: release copy download"),
@@ -363,6 +364,14 @@ mod reachability_tests {
     fn the_hosts_checked_are_the_ones_hugging_face_serves_large_files_from_now() {
         assert!(!reachability_hosts().any(|h| h == "cdn-lfs.huggingface.co"), "stale host still probed");
         assert!(reachability_hosts().any(|h| h == "cas-bridge.xethub.hf.co") && reachability_hosts().any(|h| h == "transfer.xethub.hf.co"));
+    }
+
+    // rc18 (GPU box, 2026-10-28): huggingface.co redirects the search model file to us.aws.cdn.hf.co, a host
+    // that is not under xethub.hf.co, so a firewall that allowed only the two Xet names still broke the download.
+    #[test]
+    fn the_cdn_host_the_search_model_file_is_redirected_to_is_probed_with_a_purpose() {
+        let (_, purpose) = REACHABILITY_TARGETS.iter().find(|(h, _)| *h == "us.aws.cdn.hf.co").expect("us.aws.cdn.hf.co is not probed");
+        assert!(purpose.starts_with("Search model:"), "{purpose}");
     }
 
     #[test]

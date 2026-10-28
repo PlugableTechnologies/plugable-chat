@@ -222,8 +222,20 @@ pub fn history_after_failed_turn(history: &[ChatMessage], partial_reply: &str) -
     let mut out = history.to_vec();
     close_dangling_tool_calls(&mut out);
     let kept = salvage_partial_reply(partial_reply);
+    // A call the model finished writing but the drop kept from running would sit in the saved chat
+    // with nothing after it (and a reload shows it as raw text); answer it like any interrupted call.
+    let ends_in_unanswered_call = kept.ends_with("</tool_call>");
     if !kept.is_empty() {
         out.push(ChatMessage { role: "assistant".to_string(), content: kept, system_prompt: None, tool_calls: None, tool_call_id: None });
+    }
+    if ends_in_unanswered_call {
+        out.push(ChatMessage {
+            role: "user".to_string(),
+            content: format!("<tool_response error=\"true\">\n{INTERRUPTED_TOOL_RESULT}\n</tool_response>"),
+            system_prompt: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
     }
     out
 }

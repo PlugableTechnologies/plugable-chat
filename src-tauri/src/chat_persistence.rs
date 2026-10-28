@@ -423,6 +423,77 @@ mod tests {
         println!("FAILED_TURN_SAVED_JSON={json}");
     }
 
+    /// The rules of scripts/ci/check-chat-store-integrity.mjs for one saved chat, as that script applies
+    /// them to the `--dump-chats` shape: no raw tool wrapper in an assistant message, and every text
+    /// tool call (not the chat's very last message) is followed by a tool-result message.
+    fn soak_integrity_problems(messages_json: &str) -> Vec<String> {
+        let wrapper = regex::Regex::new(r"(?i)</?(?:tool_response|tool_result|function_response)(?:\s[^>]*)?>").unwrap();
+        let wrapper_open = regex::Regex::new(r"(?i)^\s*<(tool_response|tool_result|function_response)(\s[^>]*)?>").unwrap();
+        let tool_call_text = regex::Regex::new(r"(?s)<tool_call>.*</tool_call>").unwrap();
+        let ms: Vec<serde_json::Value> = serde_json::from_str(messages_json).expect("saved messages are a JSON array");
+        let text = |m: &serde_json::Value| m["content"].as_str().unwrap_or("").to_string();
+        let is_result = |m: &serde_json::Value| m["role"] == "tool" || (m["role"] == "user" && wrapper_open.is_match(&text(m)));
+        let mut problems = Vec::new();
+        for (i, m) in ms.iter().enumerate() {
+            if m["role"] != "assistant" {
+                continue;
+            }
+            if wrapper.is_match(&text(m)) {
+                problems.push(format!("message {i}: an assistant message with a raw tool wrapper"));
+            }
+            if tool_call_text.is_match(&text(m)) && i != ms.len() - 1 && !ms.get(i + 1).map_or(false, |n| is_result(n)) {
+                problems.push(format!("message {i}: a tool call has no tool result after it"));
+            }
+        }
+        problems
+    }
+
+    #[test]
+    fn a_turn_dropped_mid_tool_call_is_saved_as_a_whole_chat_by_the_soak_rules() {
+        // Network gone right after the model finished writing a call: the call never ran. The next turn
+        // of the same chat is appended, as in the soak, so a call left without a result is no longer last.
+        let before = vec![msg("system", "SECRET"), msg("user", "look up the slow thing")];
+        let saved = crate::turn_failure::history_after_failed_turn(
+            &before,
+            "Let me check.\n<tool_call>{\"name\":\"slow_lookup\",\"arguments\":{}}</tool_call>",
+        );
+        let mut next_turn = saved.clone();
+        next_turn.push(msg("user", "try again please"));
+        next_turn.push(msg("assistant", "It is back."));
+        let json = messages_json(&next_turn);
+        assert_eq!(soak_integrity_problems(&json), Vec::<String>::new(), "{json}");
+        let back: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert!(back[1]["content"].as_str().unwrap().contains("<tool_call>"), "the call stays so the model sees what was asked: {json}");
+        assert!(back[1]["content"].as_str().unwrap().starts_with("Let me check."));
+        assert_eq!(back[2]["role"], "user");
+        assert!(back[2]["content"].as_str().unwrap().starts_with("<tool_response error=\"true\">"), "{json}");
+        assert!(back[2]["content"].as_str().unwrap().contains("Interrupted"));
+        assert!(!json.contains("SECRET"));
+
+        // The same rules still catch the bug they exist for.
+        let broken = messages_json(&[msg("user", "q"), msg("assistant", "<tool_call>{}</tool_call>"), msg("user", "again")]);
+        assert_eq!(soak_integrity_problems(&broken).len(), 1);
+    }
+
+    #[test]
+    fn a_drop_while_a_tool_ran_saves_the_call_and_its_interrupted_result_by_the_soak_rules() {
+        // What the loop itself holds when the drop lands during the tool: the call, then the result it gave.
+        use crate::protocol::{ParsedToolCall, ToolFormat};
+        let call = ParsedToolCall { server: "box".into(), tool: "slow_lookup".into(), arguments: serde_json::json!({}), raw: String::new(), id: None };
+        let cut = crate::tool_parsing::format_tool_result(&call, crate::turn_failure::INTERRUPTED_TOOL_RESULT, true, ToolFormat::Hermes, None, None);
+        let history = vec![
+            msg("system", "SECRET"),
+            msg("user", "look up the slow thing"),
+            msg("assistant", "<tool_call>{\"name\":\"slow_lookup\"}</tool_call>"),
+            msg("user", &cut),
+        ];
+        let mut next_turn = crate::turn_failure::history_after_failed_turn(&history, "");
+        next_turn.push(msg("user", "try again please"));
+        next_turn.push(msg("assistant", "It is back."));
+        let json = messages_json(&next_turn);
+        assert_eq!(soak_integrity_problems(&json), Vec::<String>::new(), "{json}");
+    }
+
     #[test]
     fn an_empty_model_name_keeps_the_stored_model() {
         match build_upsert("c", "T", &[], "", None, None) {

@@ -80,7 +80,7 @@ jobs:
           node scripts/ci/check-escapes-have-tests.mjs
 
       - name: Release gate and soak verdict tests (a tag without evidence is blocked)
-        run: node --test scripts/ci/check-release-evidence.test.mjs scripts/ci/check-chat-store-integrity.test.mjs
+        run: node --test scripts/ci/check-release-evidence.test.mjs scripts/ci/check-chat-store-integrity.test.mjs scripts/ci/hooks-nsh.test.mjs
 
       - name: Type-check and build the frontend
         run: npm run build

@@ -141,7 +141,7 @@ pub fn is_connection_reset(raw: &str) -> bool {
 }
 
 /// Message shown when the connection to Hugging Face is cut part-way.
-pub const CONNECTION_INTERRUPTED_MESSAGE: &str = "The connection to huggingface.co was interrupted - a firewall, antivirus or proxy may be blocking it (allow huggingface.co, cas-bridge.xethub.hf.co (and the other xethub.hf.co hosts) and github.com, or choose a mirror or model folder in Settings > Network).";
+pub const CONNECTION_INTERRUPTED_MESSAGE: &str = "The connection to huggingface.co was interrupted - a firewall, antivirus or proxy may be blocking it (allow huggingface.co, cas-bridge.xethub.hf.co (and the other xethub.hf.co hosts), us.aws.cdn.hf.co and github.com, or choose a mirror or model folder in Settings > Network).";
 
 /// Turn the raw download/initialisation error into a message that names the likely cause, then
 /// keeps the original text for support. The raw text alone ("Failed to retrieve
@@ -549,6 +549,7 @@ mod tests {
             let d = describe_embedding_error(r);
             assert!(d.contains("connection to huggingface.co was interrupted"), "{d}");
             assert!(d.contains("firewall, antivirus or proxy") && d.contains("xethub.hf.co"), "{d}");
+            assert!(d.contains("us.aws.cdn.hf.co"), "the advice must name the CDN host the file is redirected to: {d}");
             assert!(!d.contains("certificate"), "{d}");
             assert!(d.ends_with(&format!("Details: {r}")), "raw detail must be kept: {d}");
         }

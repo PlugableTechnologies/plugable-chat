@@ -35,7 +35,9 @@
 ; fast-fail crash (0xc0000409) skips every in-process handler, so this is the only way to get one.
 ; No DumpFolder on purpose: the default is per user (%LOCALAPPDATA%\CrashDumps), which the crashing
 ; user can write to; a folder created here by the installer would not be.
-!define PC_WER_KEY "SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\${MAINBINARYNAME}.exe"
+; The exe name is spelled out: ${MAINBINARYNAME} is not defined yet where this !define is read, so
+; it was written to the registry as that literal text and Windows never saw the right key.
+!define PC_WER_KEY "SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\plugable-chat.exe"
 !define PC_WEBVIEW2_GUID "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 !define PC_VCREDIST_URL "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 !define PC_WEBVIEW2_URL "https://developer.microsoft.com/microsoft-edge/webview2/"

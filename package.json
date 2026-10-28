@@ -9,7 +9,7 @@
     "dev": "vite",
     "build": "npm run generate-icons && tsc && vite build",
     "test:e2e": "playwright test",
-    "test:unit": "node --test src/store/chat/*.test.ts src/lib/*.test.ts src/components/chat/utils/*.test.ts src/components/chat/markdown/*.test.ts",
+    "test:unit": "node --test scripts/ci/chat-history-integrity.test.mjs src/store/chat/*.test.ts src/lib/*.test.ts src/components/chat/utils/*.test.ts src/components/chat/markdown/*.test.ts",
     "preview": "npm run generate-icons && vite preview",
     "tauri": "node scripts/tauri-offline.mjs",
     "tauri:dev": "node scripts/tauri-offline.mjs dev",
