@@ -6,14 +6,14 @@
 //! code and tables), so the estimator's margin and the overflow retry get exercised.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
 use super::{
-    with_overflow_retry, BackendError, Budget, ChatStreamOutcome, ChatStreamRequest, ConnectionInfo,
+    with_overflow_retry, NativeCancel, BackendError, Budget, ChatStreamOutcome, ChatStreamRequest, ConnectionInfo,
     FoundryBackend, ProgressSink, RawModel,
 };
 use crate::actors::foundry::context_budget;
@@ -28,6 +28,9 @@ pub enum Script {
     FailLoad(String),
     /// Answer after this text.
     Say(String),
+    /// The reader stops after the first chunk (a complete tool call was seen): the stream ends `cancelled`
+    /// and, like the real engine, the native decode behind it keeps running until it is told to stop.
+    EarlyStop,
 }
 
 #[derive(Default)]
@@ -52,6 +55,21 @@ pub struct FakeBackend {
     /// When set, the fake engine fails with the real 'key-value cache' text for any request whose
     /// input + max_tokens (its `max_length`) exceeds this many core tokens.
     pub kv_cache_fails_above_max_length: Mutex<Option<u64>>,
+    /// Native generations still decoding (an early-stopped stream leaves one behind until cancelled).
+    pub native_active: AtomicUsize,
+    /// Whether this fake can stop a native generation (the real SDK 1.2.3 cannot).
+    pub native_cancel_supported: AtomicBool,
+    pub native_cancel_calls: AtomicUsize,
+    /// `native_active` as each request began: must be 0 for every request after an early stop.
+    pub native_active_at_request_start: Mutex<Vec<usize>>,
+    /// Models the fake engine currently holds in memory.
+    pub resident: Mutex<std::collections::HashSet<String>>,
+    pub unloads: Mutex<Vec<String>>,
+    /// The next this-many `load` calls fail (a reload that cannot get the model back).
+    pub fail_next_loads: AtomicUsize,
+    pub fail_next_unloads: AtomicUsize,
+    /// Weights size the fake reports for every model.
+    pub footprint_mb: Mutex<Option<u64>>,
 }
 
 impl FakeBackend {
@@ -87,6 +105,7 @@ impl FakeBackend {
 
     async fn attempt(&self, req: ChatStreamRequest, sink: UnboundedSender<String>, budget: Budget) -> ChatStreamOutcome {
         let mut outcome = ChatStreamOutcome::default();
+        self.native_active_at_request_start.lock().unwrap().push(self.native_active.load(Ordering::SeqCst));
         let ctx = self.contexts.lock().unwrap().get(&req.model).copied();
         let next = self.script.lock().unwrap().pop_front();
         match next {
@@ -96,6 +115,12 @@ impl FakeBackend {
             }
             Some(Script::Fail(m)) => {
                 outcome.error = Some(BackendError::classify_generation(m));
+                return outcome;
+            }
+            Some(Script::EarlyStop) => {
+                let _ = sink.send("<tool_call>".to_string());
+                self.native_active.fetch_add(1, Ordering::SeqCst);
+                outcome.cancelled = true;
                 return outcome;
             }
             _ => {}
@@ -154,10 +179,33 @@ impl FoundryBackend for FakeBackend {
     async fn list_loaded(&self) -> Vec<String> { self.loads.lock().unwrap().clone() }
 
     async fn load(&self, model: &str) -> Result<(), BackendError> {
+        if self.fail_next_loads.load(Ordering::SeqCst) > 0 {
+            self.fail_next_loads.fetch_sub(1, Ordering::SeqCst);
+            return Err(BackendError::Server("fake: could not load the model".to_string()));
+        }
         self.loads.lock().unwrap().push(model.to_string());
+        self.resident.lock().unwrap().insert(model.to_string());
         Ok(())
     }
-    async fn unload(&self, _model: &str) -> Result<(), String> { Ok(()) }
+    async fn unload(&self, model: &str) -> Result<(), String> {
+        if self.fail_next_unloads.load(Ordering::SeqCst) > 0 {
+            self.fail_next_unloads.fetch_sub(1, Ordering::SeqCst);
+            return Err("fake: could not unload the model".to_string());
+        }
+        self.unloads.lock().unwrap().push(model.to_string());
+        self.resident.lock().unwrap().remove(model);
+        Ok(())
+    }
+    async fn cancel_native_generation(&self, _model: &str) -> NativeCancel {
+        self.native_cancel_calls.fetch_add(1, Ordering::SeqCst);
+        if self.native_cancel_supported.load(Ordering::SeqCst) {
+            self.native_active.store(0, Ordering::SeqCst);
+            NativeCancel::Cancelled
+        } else {
+            NativeCancel::Unsupported
+        }
+    }
+    async fn model_footprint_mb(&self, _model: &str) -> Option<u64> { *self.footprint_mb.lock().unwrap() }
 
     async fn download(
         &self,

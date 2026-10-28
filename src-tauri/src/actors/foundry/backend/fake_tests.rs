@@ -266,7 +266,8 @@ async fn free_memory_shrinks_what_is_asked_for_before_the_engine_is_called() {
     let b = FakeBackend::new().with_context(model, 262_144);
     // A 24 GB card, 19 GB commit limit with about 12 GB free: the box that failed at max_length 29,590.
     *b.memory.lock().unwrap() = MemoryReading { free_gpu_mb: Some(20_000), free_commit_mb: Some(12_000) };
-    *b.kv_cache_fails_above_max_length.lock().unwrap() = Some(25_000);
+    // The engine refuses a cache for more than 29,000 core tokens in total (the figure it failed at was 29,590).
+    *b.kv_cache_fails_above_max_length.lock().unwrap() = Some(29_000);
     // About 8,700 input tokens, like prompt 14 of the soak.
     let history = vec![msg("system", 400), msg("user", 15_000), msg("assistant", 15_000), msg("user", 40)];
     let out = run(&b, req(model, history)).await;
@@ -310,4 +311,48 @@ async fn a_cache_allocation_failure_the_preflight_missed_ends_the_turn_as_a_plai
     let retry_size = super::super::context_budget::input_tokens(&seen[after_first_turn].1);
     assert!(retry_size < first_sizes, "{retry_size} vs {first_sizes}");
     drop(again);
+}
+
+// ---- issue 38: an early-stopped stream must not leave its native generation decoding ----
+
+use std::sync::atomic::Ordering as AtomicOrdering;
+
+async fn run_ending_orphans(b: &FakeBackend, r: ChatStreamRequest) -> super::ChatStreamOutcome {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (_c, crx) = watch::channel(false);
+    super::chat_stream_ending_orphans(b, r, tx, crx).await
+}
+
+#[tokio::test]
+async fn an_early_stopped_request_is_cancelled_before_the_next_request_begins() {
+    let model = "qwen3.5-orphan-cancel:1";
+    let b = FakeBackend::new().with_context(model, 262_144);
+    b.native_cancel_supported.store(true, AtomicOrdering::SeqCst);
+    b.push(Script::EarlyStop);
+    let first = run_ending_orphans(&b, req(model, vec![msg("user", 200)])).await;
+    assert!(first.cancelled);
+    let second = run_ending_orphans(&b, req(model, vec![msg("user", 200)])).await;
+    assert!(second.error.is_none(), "{:?}", second.error);
+    assert_eq!(b.native_cancel_calls.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(*b.native_active_at_request_start.lock().unwrap(), vec![0, 0], "no orphan was decoding when request 2 began");
+}
+
+#[tokio::test]
+async fn a_stream_that_ended_normally_is_not_cancelled() {
+    let model = "qwen3.5-orphan-none:1";
+    let b = FakeBackend::new().with_context(model, 262_144);
+    b.native_cancel_supported.store(true, AtomicOrdering::SeqCst);
+    run_ending_orphans(&b, req(model, vec![msg("user", 200)])).await;
+    assert_eq!(b.native_cancel_calls.load(AtomicOrdering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_backend_that_cannot_cancel_is_reported_not_silently_assumed_clean() {
+    // This is the real SDK 1.2.3: the early stop is attempted, the backend says Unsupported, the orphan stays.
+    let model = "qwen3.5-orphan-unsupported:1";
+    let b = FakeBackend::new().with_context(model, 262_144);
+    b.push(Script::EarlyStop);
+    run_ending_orphans(&b, req(model, vec![msg("user", 200)])).await;
+    assert_eq!(b.native_cancel_calls.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(b.native_active.load(AtomicOrdering::SeqCst), 1, "the orphan is still counted, so the gap is visible");
 }

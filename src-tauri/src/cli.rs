@@ -170,6 +170,18 @@ pub struct CliArgs {
     /// instead of a fresh chat each. This is how a long conversation is reproduced unattended.
     #[arg(long, env = "PLUGABLE_SAME_CHAT")]
     pub same_chat: bool,
+    /// Send the launch prompts (--initial-prompt, --prompts-file) straight to this MCP tool instead of the model, named
+    /// as the Model / Tool drop-down shows it: "<server> - <tool>". Records the usual --reply-file lines and works when no
+    /// local model loads. The --model override is ignored so a missing model cannot end the run.
+    #[arg(long, value_name = "SERVER - TOOL", env = "PLUGABLE_DIRECT_TOOL")]
+    pub direct_tool: Option<String>,
+    /// Open Settings on this tab at launch (models, databases, builtins, tools, system-prompt, interfaces, schemas, files,
+    /// network), so a screenshot needs no input.
+    #[arg(long, value_name = "TAB", env = "PLUGABLE_OPEN_SETTINGS")]
+    pub open_settings: Option<String>,
+    /// Preselect this tool, "<server> - <tool>", in the Model / Tool drop-down at launch (not saved).
+    #[arg(long, value_name = "SERVER - TOOL", env = "PLUGABLE_SELECT_TOOL")]
+    pub select_tool: Option<String>,
     /// Repair the model engine before starting: set the downloaded GPU components aside (Core
     /// downloads them again), clear crash history, the GPU-off switch and engine-blamed model
     /// blocks. The same thing Settings > Models > Repair does; for support and unattended tests.
@@ -267,6 +279,22 @@ fn strip_bom(text: &str) -> &str {
 pub fn parse_prompts_json(text: &str) -> Result<Vec<String>, String> {
     let prompts: Vec<String> = serde_json::from_str(strip_bom(text)).map_err(|e| format!("expected a JSON array of strings: {e}"))?;
     Ok(prompts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+}
+
+/// The Settings tabs `--open-settings` can name (the ids of `settings-store.ts`'s `activeTab`).
+pub const SETTINGS_TAB_NAMES: [&str; 9] = ["models", "databases", "builtins", "tools", "system-prompt", "interfaces", "schemas", "files", "network"];
+
+/// The tab id a `--open-settings` value names: case and `_`/space are forgiven, anything else is `None`.
+pub fn normalize_settings_tab(raw: &str) -> Option<&'static str> {
+    let wanted = raw.trim().to_lowercase().replace(['_', ' '], "-");
+    SETTINGS_TAB_NAMES.iter().copied().find(|t| *t == wanted)
+}
+
+/// A tool label as the drop-down shows it, `server - tool`; blank or without the separator is `None`.
+pub fn normalize_tool_label(raw: &str) -> Option<String> {
+    let label = raw.trim();
+    let (server, tool) = label.rsplit_once(" - ")?;
+    (!server.trim().is_empty() && !tool.trim().is_empty()).then(|| format!("{} - {}", server.trim(), tool.trim()))
 }
 
 /// Read a value that may be either a literal string or a @path reference to a file
@@ -638,12 +666,44 @@ pub fn apply_cli_overrides(args: &CliArgs, settings: &mut AppSettings) -> Launch
         initial_prompt = Some(queued_prompts.remove(0));
     }
 
+    let direct_tool = args.direct_tool.as_deref().and_then(|raw| {
+        let label = normalize_tool_label(raw);
+        if label.is_none() {
+            println!("[Launch] --direct-tool \"{raw}\" ignored: use the drop-down's \"<server> - <tool>\"");
+        }
+        label
+    });
+    let select_tool = args.select_tool.as_deref().and_then(|raw| {
+        let label = normalize_tool_label(raw);
+        if label.is_none() {
+            println!("[Launch] --select-tool \"{raw}\" ignored: use the drop-down's \"<server> - <tool>\"");
+        }
+        label
+    });
+    let open_settings = args.open_settings.as_deref().and_then(|raw| {
+        let tab = normalize_settings_tab(raw);
+        if tab.is_none() {
+            println!("[Launch] --open-settings \"{raw}\" ignored: the tabs are {}", SETTINGS_TAB_NAMES.join(", "));
+        }
+        tab.map(str::to_string)
+    });
+    // A direct-tool run involves no model, so a model that cannot load must not end it (the gateway would record that failure).
+    let launch_model = if direct_tool.is_some() && launch_model.is_some() {
+        println!("[Launch] --model ignored: --direct-tool sends the launch prompts to a tool, not a model");
+        None
+    } else {
+        launch_model
+    };
+
     LaunchOverrides {
         model: launch_model,
         initial_prompt,
         queued_prompts,
         same_chat: args.same_chat,
         table_files,
+        direct_tool,
+        open_settings,
+        select_tool,
     }
 }
 
@@ -702,6 +762,56 @@ mod tests {
         let err = CliArgs::try_parse_from(["plugable-chat", "--help"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         assert!(err.to_string().contains("--reply-file"), "the help lists the unattended-run flags");
+    }
+
+    #[test]
+    fn the_unattended_ui_flags_parse_and_are_off_by_default() {
+        let args = parse(&["--direct-tool", "Echo - ask", "--open-settings", "Tools", "--select-tool", "Echo - ask"]);
+        assert_eq!(args.direct_tool.as_deref(), Some("Echo - ask"));
+        assert_eq!(args.open_settings.as_deref(), Some("Tools"));
+        assert_eq!(args.select_tool.as_deref(), Some("Echo - ask"));
+        let none = parse(&[]);
+        assert!(none.direct_tool.is_none() && none.open_settings.is_none() && none.select_tool.is_none());
+    }
+
+    #[test]
+    fn a_settings_tab_name_is_matched_forgivingly_and_unknown_names_are_refused() {
+        assert_eq!(normalize_settings_tab("models"), Some("models"));
+        assert_eq!(normalize_settings_tab(" System_Prompt "), Some("system-prompt"));
+        assert_eq!(normalize_settings_tab("system prompt"), Some("system-prompt"));
+        assert_eq!(normalize_settings_tab("Network"), Some("network"));
+        assert_eq!(normalize_settings_tab("nope"), None);
+        assert_eq!(normalize_settings_tab(""), None);
+        for tab in SETTINGS_TAB_NAMES {
+            assert_eq!(normalize_settings_tab(tab), Some(tab));
+        }
+    }
+
+    #[test]
+    fn a_tool_label_needs_a_server_and_a_tool_split_on_the_last_separator() {
+        assert_eq!(normalize_tool_label(" Echo  -  ask "), Some("Echo - ask".to_string()));
+        assert_eq!(normalize_tool_label("My - Server - ask"), Some("My - Server - ask".to_string()));
+        assert_eq!(normalize_tool_label("ask"), None);
+        assert_eq!(normalize_tool_label(" - ask"), None);
+        assert_eq!(normalize_tool_label(""), None);
+    }
+
+    #[test]
+    fn the_unattended_ui_flags_reach_the_overrides_and_a_bad_value_is_dropped() {
+        let o = apply_cli_overrides(&parse(&["--direct-tool", "Echo - ask", "--open-settings", "system prompt", "--select-tool", "Echo - ask"]), &mut AppSettings::default());
+        assert_eq!(o.direct_tool.as_deref(), Some("Echo - ask"));
+        assert_eq!(o.open_settings.as_deref(), Some("system-prompt"));
+        assert_eq!(o.select_tool.as_deref(), Some("Echo - ask"));
+        let bad = apply_cli_overrides(&parse(&["--direct-tool", "ask", "--open-settings", "zzz", "--select-tool", ""]), &mut AppSettings::default());
+        assert!(bad.direct_tool.is_none() && bad.open_settings.is_none() && bad.select_tool.is_none());
+    }
+
+    #[test]
+    fn a_direct_tool_run_ignores_the_model_override_but_a_model_run_keeps_it() {
+        let direct = apply_cli_overrides(&parse(&["--model", "qwen3.5-4b", "--direct-tool", "Echo - ask", "--initial-prompt", "hi"]), &mut AppSettings::default());
+        assert!(direct.model.is_none(), "a model that cannot load must not end a run that uses none");
+        let model = apply_cli_overrides(&parse(&["--model", "qwen3.5-4b", "--initial-prompt", "hi"]), &mut AppSettings::default());
+        assert_eq!(model.model.as_deref(), Some("qwen3.5-4b"));
     }
 
     #[test]

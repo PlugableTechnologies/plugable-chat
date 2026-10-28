@@ -67,6 +67,14 @@ export interface ModelSlice {
     /** --same-chat: queued prompts continue the current chat instead of starting a new one */
     launchSameChat: boolean;
     launchPromptApplied: boolean;
+    /** --direct-tool "server - tool": the launch prompts go to this MCP tool, not the model */
+    launchDirectToolLabel: string | null;
+    /** The tool launchDirectToolLabel resolved to (or a guess from the label when no server offers it) */
+    launchDirectToolRef: { server_id: string; tool_name: string } | null;
+    /** --open-settings: the Settings tab to open at launch */
+    launchOpenSettingsTab: string | null;
+    /** --select-tool "server - tool": preselect it in the Model / Tool drop-down */
+    launchSelectToolLabel: string | null;
     markLaunchPromptApplied: () => void;
     loadLaunchOverrides: () => Promise<void>;
     
@@ -343,17 +351,24 @@ export const createModelSlice: StateCreator<
     launchQueuedPrompts: [],
     launchSameChat: false,
     launchPromptApplied: false,
+    launchDirectToolLabel: null,
+    launchDirectToolRef: null,
+    launchOpenSettingsTab: null,
+    launchSelectToolLabel: null,
     markLaunchPromptApplied: () => set({ launchPromptApplied: true }),
     loadLaunchOverrides: async () => {
         if (get().launchOverridesLoaded) return;
         try {
-            const payload = await invoke<{ model?: string | null; initial_prompt?: string | null; queued_prompts?: string[] | null; same_chat?: boolean | null }>('get_launch_overrides');
+            const payload = await invoke<{ model?: string | null; initial_prompt?: string | null; queued_prompts?: string[] | null; same_chat?: boolean | null; direct_tool?: string | null; open_settings?: string | null; select_tool?: string | null }>('get_launch_overrides');
             set({
                 launchOverridesLoaded: true,
                 launchModelOverride: payload?.model ?? null,
                 launchInitialPrompt: payload?.initial_prompt ?? null,
                 launchQueuedPrompts: payload?.queued_prompts ?? [],
                 launchSameChat: payload?.same_chat ?? false,
+                launchDirectToolLabel: payload?.direct_tool ?? null,
+                launchOpenSettingsTab: payload?.open_settings ?? null,
+                launchSelectToolLabel: payload?.select_tool ?? null,
             });
             console.log('[ChatStore] Launch overrides loaded:', payload);
         } catch (e: any) {

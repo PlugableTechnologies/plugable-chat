@@ -1194,6 +1194,7 @@ impl ModelGatewayActor {
                     chat_format_overrides,
                     respond_to,
                     mut stream_cancel_rx,
+                    turn_start,
                 } => {
                     // Clone GPU guard to avoid borrow conflicts with self
                     let gpu_guard = self.gpu_guard.clone();
@@ -1424,6 +1425,29 @@ impl ModelGatewayActor {
                         // failures like qwen3.5's WebGPU bug) feeds the version-keyed blocklist
                         // and triggers fallback — mirroring the CLI 5xx behavior.
                         if let Some(sdk) = &self.sdk {
+                            // Between turns only (this holds the GPU lock, so nothing else is running): give back
+                            // the memory the engine kept. Falls back to the loaded model if the reload fails.
+                            {
+                                let app = self.app_handle.clone();
+                                let outcome = super::backend::reload_policy::reload_if_memory_low(
+                                    &**sdk,
+                                    &super::backend::reload_policy::process_governor(),
+                                    &model,
+                                    turn_start,
+                                    &super::backend::reload_policy::ReloadConfig::from_env(),
+                                    || super::memory_budget::probe().free_gpu_mb,
+                                    &move |text| {
+                                        let _ = app.emit(
+                                            "chat-stream-status",
+                                            json!({ "phase": "refreshing_model", "message": format!("{text}...") }),
+                                        );
+                                    },
+                                )
+                                .await;
+                                if let super::backend::reload_policy::ReloadOutcome::Failed { reason, model_usable } = &outcome {
+                                    println!("[FoundryActor] model reload did not complete (model still usable: {model_usable}): {reason}");
+                                }
+                            }
                             let _ = self.app_handle.emit(
                                 "chat-stream-status",
                                 json!({ "phase": "generating", "message": "Generating response..." }),
@@ -1444,9 +1468,13 @@ impl ModelGatewayActor {
                             if crate::engine_health::test_fault("crash-mid-turn") {
                                 crate::crash_capture::die_like_a_native_fault();
                             }
-                            let outcome = sdk
-                                .chat_stream(req, respond_to.clone(), stream_cancel_rx)
-                                .await;
+                            let outcome = super::backend::chat_stream_ending_orphans(
+                                &**sdk,
+                                req,
+                                respond_to.clone(),
+                                stream_cancel_rx,
+                            )
+                            .await;
                             crate::run_state::mark_idle();
                             if outcome.error.is_none() && !outcome.cancelled {
                                 self.forget_native_crashes(&model).await;

@@ -5,7 +5,7 @@
 #   soak-run.ps1 [-Model qwen3.5-4b] [-Prompts 20] [-KillAfter 12] [-FlapEverySec 120] [-FlapForSec 20]
 #
 # What a pass means: every prompt has a record or was the one the kill cut off; every failed turn is a clean
-# "network_dropped" and the turn after it answered; no raw tool wrapper in any reply or saved assistant message;
+# "network_dropped" the harness caused, and no turn that began with the network up failed; no raw tool wrapper in any reply or saved assistant message;
 # every tool call is paired with its result; the store still opens after the kill. The network drop is a firewall
 # block on the app's own program plus PLUGABLE_CHAT_TEST_OFFLINE_FILE (the box's management channel stays up).
 # One kill costs one "unclean death" in the app's crash counters (a notice, not yet a model block).
@@ -27,12 +27,21 @@ $ErrorActionPreference = "Continue"
 Import-Module (Join-Path $CiDir "CleanHost.psm1") -Force
 $exe = Join-Path $AppDir "plugable-chat.exe"
 $check = Join-Path $CiDir "check-chat-store-integrity.mjs"
+$verdictScript = Join-Path $CiDir "soak-verdict.mjs"
+$soakStartedAt = Get-Date   # the Application Error look-back starts here, not an arbitrary number of minutes ago
+$FlapSettleSec = 90         # no flap in the first 90 s after a (re)launch: the app is still loading its model
 $flag = Join-Path $Work "offline.flag"
 $rule = "soak-netdrop"
 New-Item -ItemType Directory -Force $Work | Out-Null
 Remove-Item "$Work\*" -Recurse -Force -ErrorAction SilentlyContinue
 $result = Join-Path $Work "soak-result.txt"
-function say($m) { "$(Get-Date -Format HH:mm:ss)  $m" | Tee-Object -FilePath $result -Append }
+$eventsFile = Join-Path $Work "events.jsonl"   # the harness's own timeline, judged by scripts/ci/soak-verdict.mjs
+function Add-SoakEvent([string]$Name, $PromptIndex = $null) {
+    $e = @{ t = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); event = $Name }
+    if ($null -ne $PromptIndex) { $e.prompt_index = [int]$PromptIndex }
+    ($e | ConvertTo-Json -Compress) | Out-File $eventsFile -Append -Encoding ascii
+}
+function say($m) { "$(Get-Date -Format HH:mm:ss)  $m" | Tee-Object -FilePath $result -Append | Out-Null; "$(Get-Date -Format HH:mm:ss)  $m" | Out-Host }   # not on the pipeline: Watch-App's return value must stay the bool
 
 # 20 prompts: the ten linked Chicago questions, then the same ten again prefixed so the chat keeps growing.
 $base = @(Get-Content $FollowUps -Raw | ConvertFrom-Json)
@@ -62,17 +71,24 @@ function Start-App([string[]]$PromptList, [string]$Tag) {
     return [pscustomobject]@{ Process = $p; ReplyFile = $rf; Tag = $Tag }
 }
 
-# Runs one app until it exits or $StopWhen says to kill it; flaps the network on a timer meanwhile.
-function Watch-App($App, [scriptblock]$StopWhen = { $false }, [datetime]$Deadline) {
-    $nextFlap = (Get-Date).AddSeconds($FlapEverySec); $flapEnd = $null; $killed = $false
+# Runs one app until it exits or $StopWhen says to kill it; flaps the network on a timer meanwhile, never in the
+# first $FlapSettleSec after the launch. $Offset turns this launch's record numbers into run-wide ones.
+function Watch-App($App, [scriptblock]$StopWhen = { $false }, [datetime]$Deadline, [int]$Offset = 0) {
+    $launchedAt = Get-Date
+    Add-SoakEvent "launch"
+    $nextFlap = $launchedAt.AddSeconds([Math]::Max($FlapEverySec, $FlapSettleSec)); $flapEnd = $null; $killed = $false; $seen = 0
     while (-not $App.Process.HasExited -and (Get-Date) -lt $Deadline) {
         Start-Sleep -Seconds 2
-        if ($flapEnd -and (Get-Date) -ge $flapEnd) { Stop-Drop; $flapEnd = $null; say "network restored"; $nextFlap = (Get-Date).AddSeconds($FlapEverySec) }
-        elseif (-not $flapEnd -and (Get-Date) -ge $nextFlap) { Start-Drop; $script:flaps++; $flapEnd = (Get-Date).AddSeconds($FlapForSec); say "network dropped (flap $script:flaps)" }
-        if (& $StopWhen (Read-ReplyRecords $App.ReplyFile)) { $killed = $true; break }
+        $recs = Read-ReplyRecords $App.ReplyFile
+        while ($seen -lt $recs.Count) { Add-SoakEvent "record" ($Offset + $seen); $seen++ }
+        if ($flapEnd -and (Get-Date) -ge $flapEnd) { Stop-Drop; Add-SoakEvent "flap_end"; $flapEnd = $null; say "network restored"; $nextFlap = (Get-Date).AddSeconds($FlapEverySec) }
+        elseif (-not $flapEnd -and (Get-Date) -ge $nextFlap -and (Get-Date) -ge $launchedAt.AddSeconds($FlapSettleSec)) { Start-Drop; Add-SoakEvent "flap_start"; $script:flaps++; $flapEnd = (Get-Date).AddSeconds($FlapForSec); say "network dropped (flap $script:flaps)" }
+        if (& $StopWhen $recs) { $killed = $true; break }
     }
-    Stop-Drop
-    if (-not $App.Process.HasExited) { taskkill /F /T /PID $App.Process.Id 2>&1 | Out-Null; Start-Sleep 2 }
+    if ($flapEnd) { Stop-Drop; Add-SoakEvent "flap_end" } else { Stop-Drop }
+    $recs = Read-ReplyRecords $App.ReplyFile
+    while ($seen -lt $recs.Count) { Add-SoakEvent "record" ($Offset + $seen); $seen++ }
+    if (-not $App.Process.HasExited) { if ($killed) { Add-SoakEvent "kill" }; taskkill /F /T /PID $App.Process.Id 2>&1 | Out-Null; Start-Sleep 2 }
     return $killed
 }
 
@@ -102,7 +118,7 @@ try {
     if ($rest.Count -gt 0) {
         say "phase 2: relaunch for the remaining $($rest.Count) prompts"
         $two = Start-App $rest "2"
-        $null = Watch-App $two { $false } $deadline
+        $null = Watch-App $two { $false } $deadline $done
         if (-not $two.Process.HasExited) { $failures += "phase 2 did not finish within $MaxMinutes minutes" }
     }
 }
@@ -114,10 +130,7 @@ $recs2 = Read-ReplyRecords (Join-Path $Work "replies-2.jsonl")
 $allRecs = @($recs1) + @($recs2)
 $offset = $recs1.Count
 $renumbered = @(); foreach ($r in $recs1) { $renumbered += $r }; foreach ($r in $recs2) { $r.prompt_index = [int]$r.prompt_index + $offset; $renumbered += $r }
-$failedByDrop = @($renumbered | Where-Object { $_.outcome -eq "error" -and ([string]$_.detail) -match "^network_dropped" }).Count
-say "records=$($renumbered.Count) of $Prompts, flaps=$script:flaps, turns stopped by a drop=$failedByDrop"
-if ($script:flaps -gt 0 -and $failedByDrop -eq 0) { $failures += "$script:flaps flaps never landed on a running turn: the soak did not exercise a drop (shorten -FlapEverySec)" }
-$failures += Assert-TurnsRecoverAfterFailure $renumbered ($Prompts - 1)
+say "records=$($renumbered.Count) of $Prompts, flaps=$script:flaps"
 $allFile = Join-Path $Work "replies-all.jsonl"
 $renumbered | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 8 } | Out-File $allFile -Encoding ascii
 $dump2 = Join-Path $Work "chats-final.json"
@@ -127,8 +140,16 @@ else {
     $out2 = & node $check $dump2 $allFile --expect-prompts $Prompts --allow-failed-turns-with network_dropped 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { $failures += "final chat store: " + ($out2.Trim() -replace "\r?\n", " | ") }
 }
-$crashes = @(Get-WinEvent -FilterHashtable @{ LogName = "Application"; ProviderName = "Application Error" } -MaxEvents 20 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match "plugable-chat" -and $_.TimeCreated -gt (Get-Date).AddMinutes(-$MaxMinutes) })
-if ($crashes.Count -gt 0) { $failures += "$($crashes.Count) Application Error event(s) naming plugable-chat (the kill itself does not create one)" }
+$crashTimes = @(Get-WinEvent -FilterHashtable @{ LogName = "Application"; ProviderName = "Application Error"; StartTime = $soakStartedAt } -ErrorAction SilentlyContinue | Where-Object { $_.Message -match "plugable-chat" } | ForEach-Object { [DateTimeOffset]::new($_.TimeCreated).ToUnixTimeMilliseconds() })
+$crashFile = Join-Path $Work "crashes.json"
+ConvertTo-Json -InputObject @($crashTimes) | Out-File $crashFile -Encoding ascii
+# Which failed turns are expected (the harness had the network down), which are not, and which crashes are the deliberate kill.
+$verdictJson = (& node $verdictScript --replies $allFile --events $eventsFile --crashes $crashFile --prompts $Prompts 2>$null) -join ""
+try {
+    $verdict = $verdictJson | ConvertFrom-Json
+    foreach ($n in @($verdict.notes)) { say "note: $n" }
+    foreach ($f in @($verdict.failures)) { $failures += [string]$f }
+} catch { $failures += "soak-verdict.mjs produced no readable verdict: $verdictJson" }
 
 if ($failures.Count) { $failures | ForEach-Object { say "FAIL: $_" }; say "soak: FAILED"; "soak=FAILED" | Out-File (Join-Path $Work "verdict.txt"); exit 1 }
 say "soak: passed"; "soak=PASSED" | Out-File (Join-Path $Work "verdict.txt")

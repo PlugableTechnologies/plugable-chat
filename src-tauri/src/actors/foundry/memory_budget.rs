@@ -20,24 +20,49 @@ pub const FLOOR_TOTAL_TOKENS: u64 = 2_048;
 /// Never plan for more than this, however much memory looks free. The failing request was 29,590.
 pub const CEILING_TOTAL_TOKENS: u64 = 24_576;
 
-/// Key-value cache cost per token, in KB, assumed for a 4 to 9 billion parameter model in FP16
-/// (36 layers x 2 x 8 heads x 128 x 2 bytes = 144 KB), rounded up.
-const GPU_KB_PER_TOKEN: u64 = 160;
-/// Host-side cost per token. The engine builds and copies the buffer in system memory too, so assume more.
-const COMMIT_KB_PER_TOKEN: u64 = 256;
+/// Key-value cache cost per token, in KB. Measured from qwen3.5-4b's real shape (the default model; the
+/// numbers are in its `genai_config.json` and the engine log of the A10G soak, issue 38): 8 full-attention
+/// layers x 4 key-value heads x head size 256 x 2 (keys and values) x 2 bytes (FP16) = 32 KB a token.
+/// The earlier 160 KB was an estimate for a 36-layer, 8-head model and was 5x too high for this one.
+const KV_LAYERS: u64 = 8;
+const KV_HEADS: u64 = 4;
+const KV_HEAD_SIZE: u64 = 256;
+const GPU_KB_PER_TOKEN: u64 = KV_LAYERS * KV_HEADS * KV_HEAD_SIZE * 2 * 2 / 1024;
+/// Host-side cost per token: the engine stages the buffer in system memory too. Assumed twice the card cost
+/// (an estimate, not a measurement).
+const COMMIT_KB_PER_TOKEN: u64 = GPU_KB_PER_TOKEN * 2;
 /// Share of the free figure one request may claim. Weights, the next request and other programs need the rest.
 const GPU_SHARE_PCT: u64 = 60;
 const COMMIT_SHARE_PCT: u64 = 40;
+/// Card memory the engine needs besides the cache (activations, workspace). Taken off the free figure first, so
+/// a card with under this much free floors the request instead of promising it a cache it cannot have.
+const GPU_WORKING_RESERVE_MB: u64 = 1_024;
+/// Free commit below this says nothing about what a request may use: in the soak it sat at 500 to 800 MB for
+/// many turns while requests kept working (Windows grows the page file, so the limit moves). Commit only caps
+/// a request when it is above this headroom and still the tighter of the two.
+const MIN_INFORMATIVE_COMMIT_MB: u64 = 1_024;
+/// What a request may still ask for while commit is that low. The reading proves nothing about the limit, but
+/// the rc19 box run died asking for ~29,600 tokens with commit nearly gone, so the ceiling is not safe either:
+/// 8,192 tokens is about 256 MB of cache.
+const LOW_COMMIT_TOTAL_TOKENS: u64 = 8_192;
 
 /// The most input + output tokens one request may ask for, or `None` when nothing could be read.
 pub fn total_token_cap(r: &MemoryReading) -> Option<u64> {
-    let from_gpu = r.free_gpu_mb.map(|mb| mb * 1024 * GPU_SHARE_PCT / 100 / GPU_KB_PER_TOKEN);
-    let from_commit = r.free_commit_mb.map(|mb| mb * 1024 * COMMIT_SHARE_PCT / 100 / COMMIT_KB_PER_TOKEN);
+    let from_gpu = r.free_gpu_mb.map(|mb| {
+        mb.saturating_sub(GPU_WORKING_RESERVE_MB) * 1024 * GPU_SHARE_PCT / 100 / GPU_KB_PER_TOKEN
+    });
+    let from_commit = r
+        .free_commit_mb
+        .filter(|mb| *mb >= MIN_INFORMATIVE_COMMIT_MB)
+        .map(|mb| mb * 1024 * COMMIT_SHARE_PCT / 100 / COMMIT_KB_PER_TOKEN);
+    let commit_is_low = r.free_commit_mb.is_some_and(|mb| mb < MIN_INFORMATIVE_COMMIT_MB);
     let tightest = match (from_gpu, from_commit) {
         (Some(a), Some(b)) => a.min(b),
         (Some(a), None) | (None, Some(a)) => a,
+        // A commit reading too low to be informative, and nothing else readable: no limit from memory.
         (None, None) => return None,
     };
+    let tightest = if commit_is_low { tightest.min(LOW_COMMIT_TOTAL_TOKENS) } else { tightest };
     Some(tightest.clamp(FLOOR_TOTAL_TOKENS, CEILING_TOTAL_TOKENS))
 }
 
@@ -133,16 +158,17 @@ mod tests {
 
     #[test]
     fn the_tighter_of_the_two_memories_decides() {
-        let gpu_bound = total_token_cap(&r(Some(4_000), Some(60_000))).unwrap();
-        let commit_bound = total_token_cap(&r(Some(40_000), Some(4_000))).unwrap();
+        let gpu_bound = total_token_cap(&r(Some(1_500), Some(60_000))).unwrap();
+        let commit_bound = total_token_cap(&r(Some(40_000), Some(1_500))).unwrap();
         assert!(gpu_bound < total_token_cap(&r(Some(40_000), Some(60_000))).unwrap());
         assert!(commit_bound < total_token_cap(&r(Some(40_000), Some(60_000))).unwrap());
     }
 
     #[test]
     fn a_6gb_machine_gets_a_small_but_usable_window() {
+        // At 32 KB a token, 4 GB of card and 3 GB of commit really do hold a long window.
         let cap = total_token_cap(&r(Some(4_000), Some(3_000))).unwrap();
-        assert!((FLOOR_TOTAL_TOKENS..8_000).contains(&cap), "{cap}");
+        assert!((4_096..=CEILING_TOTAL_TOKENS).contains(&cap), "{cap}");
     }
 
     #[test]
@@ -168,6 +194,38 @@ mod tests {
     fn the_window_is_the_models_own_unless_memory_is_tighter() {
         assert_eq!(effective_context(Some(8_192), &r(Some(40_000), Some(40_000))), Some(8_192));
         assert!(effective_context(Some(262_144), &r(Some(20_000), Some(12_000))).unwrap() <= CEILING_TOTAL_TOKENS);
+    }
+
+    #[test]
+    fn the_soak_evidence_case_no_longer_pins_the_request_to_a_tiny_window() {
+        // A10G soak, prompt ~14: 11,866 MB of the card free, only 803 MB of commit free, input ~2,129 tokens.
+        // The old per-token costs gave a total of 2,876 (max_tokens 747); that commit reading had stopped
+        // being informative (the commit limit grows), and the cache really costs 32 KB a token.
+        let cap = total_token_cap(&r(Some(11_866), Some(803))).unwrap();
+        assert!(cap >= 4_096, "{cap}");
+        let max_tokens = cap.saturating_sub(2_129);
+        assert!(max_tokens >= 2_048, "max_tokens would be {max_tokens}");
+    }
+
+    #[test]
+    fn a_truly_tiny_free_card_still_floors_whatever_the_commit_says() {
+        assert_eq!(total_token_cap(&r(Some(800), Some(60_000))), Some(FLOOR_TOTAL_TOKENS));
+        assert_eq!(total_token_cap(&r(Some(1_024), None)), Some(FLOOR_TOTAL_TOKENS));
+    }
+
+    #[test]
+    fn low_commit_is_ignored_below_the_minimum_headroom_and_binds_above_it() {
+        let ignored = total_token_cap(&r(Some(40_000), Some(MIN_INFORMATIVE_COMMIT_MB - 1))).unwrap();
+        assert_eq!(ignored, LOW_COMMIT_TOTAL_TOKENS, "below the headroom commit no longer sizes the request, but it still holds it to a modest one");
+        let binding = total_token_cap(&r(Some(40_000), Some(MIN_INFORMATIVE_COMMIT_MB + 200))).unwrap();
+        assert!(binding < CEILING_TOTAL_TOKENS && binding >= FLOOR_TOTAL_TOKENS, "{binding}");
+    }
+
+    #[test]
+    fn the_per_token_cost_is_the_real_cache_shape() {
+        // 4 KV heads x head size 256 x 8 full-attention layers x K and V x 2 bytes.
+        assert_eq!(GPU_KB_PER_TOKEN, 4 * 256 * 8 * 2 * 2 / 1024);
+        assert_eq!(GPU_KB_PER_TOKEN, 32);
     }
 
     #[test]

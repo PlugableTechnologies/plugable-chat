@@ -1044,6 +1044,9 @@ pub enum FoundryMsg {
         respond_to: tokio::sync::mpsc::UnboundedSender<String>,
         /// Cancellation signal - when true, abort the stream
         stream_cancel_rx: tokio::sync::watch::Receiver<bool>,
+        /// True for the first request of a turn. Between turns (and only then) the gateway may reload the
+        /// model to give the engine's memory back; never between the steps of one turn.
+        turn_start: bool,
     },
     /// Get available models from running service
     GetModels {

@@ -590,7 +590,8 @@ pub fn cancel_ep_registration() {
 pub async fn get_launch_overrides(
     launch_config: State<'_, LaunchConfigState>,
 ) -> Result<LaunchOverridesPayload, String> {
-    if launch_config.launch_overrides.initial_prompt.is_some() {
+    // A direct-tool run calls the tool, not the model: it needs no table index, so it does not wait for one.
+    if launch_config.launch_overrides.initial_prompt.is_some() && launch_config.launch_overrides.direct_tool.is_none() {
         // Give the launch-time schema index up to ten and a half minutes (it waits for the embedding
         // model, which starts after GPU provider registration) so the first prompt sees the tables.
         for _ in 0..2520 {
@@ -608,6 +609,9 @@ pub async fn get_launch_overrides(
         initial_prompt: launch_config.launch_overrides.initial_prompt.clone(),
         queued_prompts: launch_config.launch_overrides.queued_prompts.clone(),
         same_chat: launch_config.launch_overrides.same_chat,
+        direct_tool: launch_config.launch_overrides.direct_tool.clone(),
+        open_settings: launch_config.launch_overrides.open_settings.clone(),
+        select_tool: launch_config.launch_overrides.select_tool.clone(),
     })
 }
 
@@ -629,6 +633,9 @@ pub struct LaunchOverridesPayload {
     pub initial_prompt: Option<String>,
     pub queued_prompts: Vec<String>,
     pub same_chat: bool,
+    pub direct_tool: Option<String>,
+    pub open_settings: Option<String>,
+    pub select_tool: Option<String>,
 }
 
 #[cfg(test)]

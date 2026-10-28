@@ -74,7 +74,10 @@ export function problemsFor(evidence, ctx) {
     for (const name of ctx.required[key] ?? []) {
       const status = suite.results?.[name];
       if (status === undefined) problems.push(`${label}: scenario "${name}" has no result`);
-      else if (status !== 'passed') problems.push(`${label}: scenario "${name}" is "${status}", not passed`);
+      else if (status === 'skipped' && key === 'clean_host_cpu' && (ctx.required.gpu_matrix ?? []).includes(name) && evidence.gpu_matrix?.results?.[name] === 'passed') {
+        // A hosted runner may lack what the scenario needs (crash-capture: Windows Error Reporting dumps). The same
+        // scenario must then have passed in the GPU matrix, on a real Windows host.
+      } else if (status !== 'passed') problems.push(`${label}: scenario "${name}" is "${status}", not passed`);
     }
   }
   return problems;

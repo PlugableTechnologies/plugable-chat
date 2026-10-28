@@ -804,6 +804,7 @@ pub async fn run_agentic_loop(
             chat_format_overrides: config.chat_format_overrides.clone(),
             respond_to: token_tx,
             stream_cancel_rx: iter_cancel_for_stream,
+            turn_start: loop_iteration_index == 0,
         };
         let mut token_rx = token_rx;
 

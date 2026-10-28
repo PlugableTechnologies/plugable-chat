@@ -59,6 +59,16 @@ export interface MockOptions {
     /** Tables the table-search command returns once a schema refresh has run. */
     tablesAfterRefresh?: unknown[];
     startup?: 'ready' | 'failed-while-downloading';
+    /** What `get_launch_overrides` reports: the command-line flags of an unattended launch (--direct-tool, --open-settings, ...). */
+    launchOverrides?: {
+        model?: string | null;
+        initial_prompt?: string | null;
+        queued_prompts?: string[];
+        same_chat?: boolean;
+        direct_tool?: string | null;
+        open_settings?: string | null;
+        select_tool?: string | null;
+    };
 }
 
 export interface MockCall {
@@ -157,7 +167,7 @@ function installMock(opts: MockOptions) {
 
     const handlers: Record<string, (args: any) => unknown> = {
         frontend_ready: () => snapshot,
-        get_launch_overrides: () => ({}),
+        get_launch_overrides: () => clone(opts.launchOverrides ?? {}),
         get_settings: () => clone(settings),
         get_models: () => ['qwen3.5-4b'],
         get_all_chats: () => [],

@@ -23,6 +23,7 @@ import type { EpRegistrationProgressEvent } from './ep-registration-status';
 import type { GpuAssessment } from '../../lib/gpu-assessment';
 import { DEFAULT_MODEL_TO_DOWNLOAD } from './constants';
 import { searchModeLabel, type SearchModePayload } from '../../lib/search-mode';
+import { runDirectToolLaunch } from './launch-direct-tool';
 
 // Helper to log to backend terminal for debugging
 const logToBackend = (message: string) => {
@@ -126,6 +127,7 @@ interface ListenerSliceDeps {
     launchModelOverride: string | null;
     launchInitialPrompt: string | null;
     launchPromptApplied: boolean;
+    launchDirectToolLabel: string | null;
     sendLaunchPrompt: () => Promise<void>;
     advanceLaunchPromptQueue: () => Promise<void>;
     clearPendingSummary: (id: string) => void;
@@ -217,6 +219,13 @@ async function initializeModelsOnStartup<T extends ListenerSliceDeps>(
             await get().loadLaunchOverrides();
         }
 
+        // --direct-tool: the launch prompts go to an MCP tool, so they start as soon as that tool is connected, whatever
+        // state the local model is in (it may never load). The model steps below carry on for the screen's sake.
+        const directToolLaunch = !!get().launchDirectToolLabel;
+        if (directToolLaunch) {
+            void runDirectToolLaunch(get as any, set as any).catch((e) => console.error('[ChatStore] Direct-tool launch failed:', e));
+        }
+
         // Step 1: Fetch available/cached models
         console.log('[ChatStore] Fetching cached models...');
         await get().fetchCachedModels();
@@ -296,14 +305,14 @@ async function initializeModelsOnStartup<T extends ListenerSliceDeps>(
         // Launch model override: the backend applies it in its startup selection (ahead of
         // settings), so normally there is nothing to load here - we only wait until the backend
         // reports Ready on that model. The launch prompt must not run before that.
-        const launchModel = get().launchModelOverride;
+        const launchModel = directToolLaunch ? null : get().launchModelOverride;
         let launchModelReady = true;
         if (launchModel) {
             launchModelReady = await waitForLaunchModelReady(get, set, launchModel);
         }
 
         // Auto-send initial prompt if provided and not yet applied
-        if (get().launchInitialPrompt && !get().launchPromptApplied) {
+        if (!directToolLaunch && get().launchInitialPrompt && !get().launchPromptApplied) {
             if (!launchModelReady) {
                 // Visible message already set; do not run the prompt on some other model.
                 set({ launchPromptApplied: true } as any);

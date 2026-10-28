@@ -192,6 +192,12 @@ pub struct LaunchOverrides {
     pub same_chat: bool,
     /// Tabular data files to attach for Python analysis (from --table-file)
     pub table_files: Vec<String>,
+    /// Send the launch prompts to this MCP tool, "<server> - <tool>", instead of the model (from --direct-tool)
+    pub direct_tool: Option<String>,
+    /// Open Settings on this tab at launch (from --open-settings; already one of the tab ids)
+    pub open_settings: Option<String>,
+    /// Preselect this tool in the Model / Tool drop-down at launch (from --select-tool)
+    pub select_tool: Option<String>,
 }
 
 /// Global launch configuration state

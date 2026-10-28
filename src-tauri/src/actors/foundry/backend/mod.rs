@@ -12,6 +12,7 @@
 #![allow(dead_code)] // wired incrementally during the CLI→SDK migration (Phases 2–3)
 
 pub mod ep_ladder;
+pub mod reload_policy;
 pub mod sdk;
 
 #[cfg(test)]
@@ -315,6 +316,39 @@ pub struct ChatStreamOutcome {
     pub input_tokens: u64,
 }
 
+/// What a backend could do about the native generation behind a stream that was abandoned early (the agentic
+/// loop stops reading as soon as it has a complete tool call; the user can press Stop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCancel {
+    /// The native decode was told to stop (or had already ended).
+    Cancelled,
+    /// This backend has no way to stop it: the engine keeps decoding toward `max_tokens` unseen.
+    /// foundry-local-sdk 1.2.3 is this case (see `SdkBackend::cancel_native_generation`).
+    Unsupported,
+}
+
+/// Runs one chat turn and, when the stream was abandoned early, ends the native generation behind it before
+/// returning, so the next request never starts while an orphan is still decoding and holding cache memory
+/// (issue 38). Every caller that may stop reading early must go through this, not `chat_stream` directly.
+pub async fn chat_stream_ending_orphans<B: FoundryBackend + ?Sized>(
+    backend: &B,
+    req: ChatStreamRequest,
+    sink: UnboundedSender<String>,
+    cancel: watch::Receiver<bool>,
+) -> ChatStreamOutcome {
+    let model = req.model.clone();
+    let outcome = backend.chat_stream(req, sink, cancel).await;
+    if outcome.cancelled {
+        match backend.cancel_native_generation(&model).await {
+            NativeCancel::Cancelled => println!("[Backend] stopped the native generation behind an abandoned stream"),
+            NativeCancel::Unsupported => println!(
+                "[Backend] the stream was abandoned but this engine cannot cancel it: it may keep decoding toward max_tokens"
+            ),
+        }
+    }
+    outcome
+}
+
 /// Progress callback for downloads (percentage, 0.0..=100.0).
 pub type ProgressSink = Box<dyn FnMut(f64) + Send>;
 
@@ -356,6 +390,16 @@ pub trait FoundryBackend: Send + Sync {
         sink: UnboundedSender<String>,
         cancel: watch::Receiver<bool>,
     ) -> ChatStreamOutcome;
+
+    /// Stop the native generation of the stream just abandoned for `model`. Default: no way to.
+    async fn cancel_native_generation(&self, _model: &str) -> NativeCancel {
+        NativeCancel::Unsupported
+    }
+
+    /// Size of the model's weights on the card in MB, when known (feeds the reload threshold).
+    async fn model_footprint_mb(&self, _model: &str) -> Option<u64> {
+        None
+    }
 
     /// Key for the version-scoped incompatible-models blocklist
     /// (`CliHttp` → e.g. `"0.8.119"`; `Sdk` → e.g. `"sdk-1.2.0"`).

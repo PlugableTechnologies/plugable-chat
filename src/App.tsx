@@ -12,7 +12,7 @@ import { buildWelcomeMessage } from "./store/chat/welcome-message";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { groupByTrust, EXPERIMENTAL_SECTION_TITLE, VERIFIED_SECTION_TITLE } from "./lib/verified-models";
 import { listen } from "@tauri-apps/api/event";
-import { directToolOptionValue, modelDropdownLabel, parseDirectToolOptionValue } from "./lib/direct-tools";
+import { asSettingsTab, directToolOptionValue, modelDropdownLabel, parseDirectToolOptionValue, toolFromLabel } from "./lib/direct-tools";
 
 // Full-pane card for catastrophic failures (the AI engine cannot start). The backend writes the
 // whole message in plain language, so this only renders it, makes links clickable and lets the
@@ -122,6 +122,28 @@ function App() {
     const unlistenToolsChanged = listen("mcp-tools-changed", () => { void fetchDirectTools(); });
     return () => { void unlistenToolsChanged.then((unlisten) => unlisten()).catch(() => {}); };
   }, [fetchDirectTools]);
+  // --open-settings and --select-tool: a launch that arrives with the screen already in the state a screenshot needs,
+  // so nobody has to click on an unattended box. State only: neither is saved.
+  const launchOverridesLoaded = useChatStore((s) => s.launchOverridesLoaded);
+  const launchOpenSettingsTab = useChatStore((s) => s.launchOpenSettingsTab);
+  const launchSelectToolLabel = useChatStore((s) => s.launchSelectToolLabel);
+  const launchSettingsOpened = useRef(false);
+  useEffect(() => {
+    if (!launchOverridesLoaded || launchSettingsOpened.current) return;
+    launchSettingsOpened.current = true;
+    const tab = asSettingsTab(launchOpenSettingsTab);
+    if (!tab) return;
+    useSettingsStore.getState().setActiveTab(tab);
+    useSettingsStore.getState().openSettings();
+  }, [launchOverridesLoaded, launchOpenSettingsTab]);
+  const launchToolSelected = useRef(false);
+  useEffect(() => {
+    if (!launchOverridesLoaded || !launchSelectToolLabel || launchToolSelected.current) return;
+    const found = toolFromLabel(directTools, launchSelectToolLabel);
+    if (!found) return; // a server that connects later changes directTools and runs this again
+    launchToolSelected.current = true;
+    useChatStore.setState({ chosenDirectTool: { server_id: found.server_id, tool_name: found.tool_name } });
+  }, [launchOverridesLoaded, launchSelectToolLabel, directTools]);
   // Startup counts as finished once the model is ready or a failure card is showing; until then a
   // vanished window is reported at the next launch (see launch_marker.rs).
   useEffect(() => {

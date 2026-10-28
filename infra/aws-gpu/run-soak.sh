@@ -30,7 +30,7 @@ RAW="https://raw.githubusercontent.com/PlugableTechnologies/plugable-chat/$SHA"
 "$HERE/ssm.sh" "$IID" "
 \$ProgressPreference='SilentlyContinue'
 New-Item -ItemType Directory -Force C:\\gpu\\ci | Out-Null
-foreach (\$f in 'CleanHost.psm1','check-chat-store-integrity.mjs') { Invoke-WebRequest -UseBasicParsing -Uri ('$RAW/scripts/ci/' + \$f) -OutFile ('C:\\gpu\\ci\\' + \$f) }
+foreach (\$f in 'CleanHost.psm1','check-chat-store-integrity.mjs','soak-verdict.mjs') { Invoke-WebRequest -UseBasicParsing -Uri ('$RAW/scripts/ci/' + \$f) -OutFile ('C:\\gpu\\ci\\' + \$f) }
 foreach (\$f in 'soak-run.ps1','run-in-session.ps1') { Invoke-WebRequest -UseBasicParsing -Uri ('$RAW/infra/aws-gpu/' + \$f) -OutFile ('C:\\gpu\\' + \$f) }
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gpu\\run-in-session.ps1 -Script C:\\gpu\\soak-run.ps1 -Args '-Model $MODEL' -TimeoutSec $WAIT
 Compress-Archive -Path C:\\gpu\\soak\\* -DestinationPath C:\\gpu\\soak.zip -Force

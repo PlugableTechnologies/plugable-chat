@@ -48,3 +48,30 @@ export function activeDirectTool(tools: DirectTool[], chosen: DirectToolRef | nu
     if (!chosen) return null;
     return tools.find((t) => t.server_id === chosen.server_id && t.tool_name === chosen.tool_name) ?? null;
 }
+
+/** The offered tool whose drop-down text is `label` ("server - tool"); case and surrounding spaces are forgiven. */
+export function toolFromLabel(tools: DirectTool[], label: string): DirectTool | null {
+    const wanted = label.trim().toLowerCase();
+    if (!wanted) return null;
+    return tools.find((t) => t.label.trim().toLowerCase() === wanted) ?? null;
+}
+
+/**
+ * A tool named by a label no connected server offers (yet): the label split on its last " - ". The backend then
+ * reports "that tool is no longer connected" for the turn, so a mistyped name ends the run with a record instead of hanging.
+ */
+export function refFromLabel(label: string): DirectToolRef | null {
+    const at = label.lastIndexOf(' - ');
+    if (at <= 0) return null;
+    const server = label.slice(0, at).trim();
+    const tool = label.slice(at + 3).trim();
+    return server && tool ? { server_id: server, tool_name: tool } : null;
+}
+
+/** The Settings tabs a launch can open (same ids as settings-store's `activeTab`; src-tauri/src/cli.rs checks them first). */
+export const SETTINGS_TAB_IDS = ['models', 'databases', 'builtins', 'tools', 'system-prompt', 'interfaces', 'schemas', 'files', 'network'] as const;
+export type SettingsTabId = (typeof SETTINGS_TAB_IDS)[number];
+
+export function asSettingsTab(raw: string | null | undefined): SettingsTabId | null {
+    return SETTINGS_TAB_IDS.find((t) => t === raw) ?? null;
+}

@@ -835,6 +835,19 @@ impl FoundryBackend for SdkBackend {
         .await
     }
 
+    /// foundry-local-sdk 1.2.3 (and the 1.2.0 tree in Foundry-Local) gives `ChatClient` no cancel: its
+    /// `complete_streaming_chat` calls the crate-private `CoreInterop::execute_command_streaming_channel`,
+    /// whose callback ignores a closed receiver and returns 0 (continue). The cancellable variant
+    /// (`execute_command_streaming_cancellable`) exists but is not exported. So dropping the stream, as
+    /// `chat_stream_attempt` does on an early stop, cannot end the native decode. Reported, not faked.
+    async fn cancel_native_generation(&self, _model: &str) -> super::NativeCancel {
+        super::NativeCancel::Unsupported
+    }
+
+    async fn model_footprint_mb(&self, model: &str) -> Option<u64> {
+        self.download_info(model).await.1.map(|bytes| bytes / (1024 * 1024))
+    }
+
     fn runtime_version_key(&self) -> String {
         FOUNDRY_SDK_VERSION_KEY.to_string()
     }

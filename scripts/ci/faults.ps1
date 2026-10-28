@@ -830,27 +830,34 @@ Register "gpu-baseline" "#3" @("gpu") "NVIDIA host with a current driver: the GP
 # ------------------------------------------------------------------------------------------
 # rc18 Phase B: crash capture, Xet hosts, network drops during use, download recovery
 # ------------------------------------------------------------------------------------------
-Register "crash-capture" "rc15 David: native crash left no evidence" @("cpu") "the app is killed the way rc15 died (fast-fail at launch): Windows keeps a minidump, and the next launch (told the death was in a GPU provider) writes a last-crash marker that says so and points at the dump" {
+Register "crash-capture" "rc15 David: native crash left no evidence" @("cpu", "gpu") "the app is killed the way rc15 died (fast-fail at launch): Windows keeps a minidump, and the next launch (told the death was in a GPU provider) writes a last-crash marker that says so and points at the dump" {
     param($ctx)
     $f = @(Start-Fresh $ctx); if ($f.Count) { return @{ Failures = $f } }
     $werKey = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\plugable-chat.exe"
     if (-not (Test-Path $werKey)) { return @{ Failures = @("the installer did not enable WER LocalDumps for plugable-chat.exe ($werKey is missing)") } }
     $dumpDir = Join-Path $env:LOCALAPPDATA "CrashDumps"
     Get-ChildItem -LiteralPath $dumpDir -Filter "plugable-chat.exe*.dmp" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-    $marker = Join-Path $env:APPDATA "plugable-chat\last-crash.json"
-    Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+    # With --chat-home the app writes <chat-home>\config\last-crash.json (paths::config_dir_under); without it, %APPDATA%\plugable-chat.
+    $markerCandidates = @((Join-Path $ctx.Dir "chat-home\config\last-crash.json"), (Join-Path $env:APPDATA "plugable-chat\last-crash.json"))
+    foreach ($candidate in $markerCandidates) { Remove-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue }
 
     $first = Start-TurnApp $ctx -EnvVars @{ PLUGABLE_CHAT_TEST_FAULT = "crash-at-launch" } -Name "crash"
     if (-not (Wait-AppExit $first 120)) { return @{ Failures = @("the app did not die at launch with the crash fault set") } }
     # 0xC0000409 is the fast-fail code (-1073740791 as a signed exit code)
     if ($first.Process.ExitCode -ne -1073740791) { $f += "the forced crash exited with $($first.Process.ExitCode), expected the fast-fail code 0xC0000409" }
     $dumpSeen = Wait-Until -TimeoutSec 90 -Condition { @(Get-ChildItem -LiteralPath $dumpDir -Filter "plugable-chat.exe*.dmp" -ErrorAction SilentlyContinue).Count -gt 0 }
-    if (-not $dumpSeen) { $f += "no plugable-chat.exe minidump appeared under $dumpDir within 90 s of the crash" }
+    if (-not $dumpSeen) {
+        # Hosted runners may have no Windows Error Reporting service, so no dump can ever appear. That is a labelled skip,
+        # never a pass; the GPU box and any other host still fail hard.
+        if ($env:GITHUB_ACTIONS -eq "true" -and -not $f.Count) { return @{ Skip = "WER LocalDumps produced no plugable-chat.exe minidump under $dumpDir within 90 s on this hosted runner (GITHUB_ACTIONS); the crash marker could not be verified here, run on the GPU box" } }
+        $f += "no plugable-chat.exe minidump appeared under $dumpDir within 90 s of the crash"
+    }
 
     $second = Start-TurnApp $ctx -EnvVars @{ PLUGABLE_CHAT_TEST_FAULT = "ep-fault" } -Name "after-crash"
-    $written = Wait-Until -TimeoutSec 120 -Condition { Test-Path -LiteralPath $marker }
+    $written = Wait-Until -TimeoutSec 120 -Condition { @($markerCandidates | Where-Object { Test-Path -LiteralPath $_ }).Count -gt 0 }
     taskkill /F /T /PID $second.Process.Id 2>&1 | Out-Null
-    if (-not $written) { return @{ Failures = @($f + "the launch after the crash wrote no last-crash.json at $marker") } }
+    if (-not $written) { return @{ Failures = @($f + "the launch after the crash wrote no last-crash.json at " + ($markerCandidates -join " or ")) } }
+    $marker = @($markerCandidates | Where-Object { Test-Path -LiteralPath $_ })[0]
     $m = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
     if (-not $m.inEp) { $f += "the marker does not say the crash was inside a GPU provider (inEp=$($m.inEp))" }
     if ($m.provider -ne "webgpu-ep") { $f += "the marker names provider '$($m.provider)', expected webgpu-ep" }

@@ -24,3 +24,25 @@ test('a remembered choice counts only while its tool is offered', () => {
     assert.equal(activeDirectTool([ask], { server_id: 'iq', tool_name: 'other' }), null);
     assert.equal(activeDirectTool([ask], null), null);
 });
+
+test('--direct-tool / --select-tool find the offered tool by its drop-down text, forgiving case and spaces', async () => {
+    const { toolFromLabel, refFromLabel } = await import('./direct-tools.ts');
+    assert.equal(toolFromLabel([ask], 'plugableiq - ask'), ask);
+    assert.equal(toolFromLabel([ask], '  PlugableIQ - Ask '), ask);
+    assert.equal(toolFromLabel([ask], 'plugableiq - other'), null);
+    assert.equal(toolFromLabel([ask], ''), null);
+    // a tool nobody offers is still addressable, so the backend can report it instead of the run hanging
+    assert.deepEqual(refFromLabel('my - server - ask'), { server_id: 'my - server', tool_name: 'ask' });
+    assert.equal(refFromLabel('ask'), null);
+    assert.equal(refFromLabel(' - ask'), null);
+});
+
+test('--open-settings tab names are the ids the Settings store uses, and anything else is not a tab', async () => {
+    const { asSettingsTab, SETTINGS_TAB_IDS } = await import('./direct-tools.ts');
+    for (const id of SETTINGS_TAB_IDS) assert.equal(asSettingsTab(id), id);
+    assert.equal(asSettingsTab('nope'), null);
+    assert.equal(asSettingsTab(null), null);
+    const { readFileSync } = await import('node:fs');
+    const store = readFileSync(new URL('../store/settings-store.ts', import.meta.url), 'utf8');
+    for (const id of SETTINGS_TAB_IDS) assert.ok(store.includes(`'${id}'`), `settings-store.ts has no tab '${id}'`);
+});

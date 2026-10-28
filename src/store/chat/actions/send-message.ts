@@ -7,6 +7,7 @@ import {
     deriveChatPreviewFromMessage 
 } from '../helpers';
 import { buildFollowUp, takeNextLaunchPrompt } from '../launch-queue';
+import { launchTurnInvocation } from '../launch-turn';
 import { buildChatHistory } from '../../../components/chat/utils/history';
 import { lastUserQuestion } from '../failed-turn';
 
@@ -37,6 +38,8 @@ interface SendMessageSliceDeps {
     launchQueuedPrompts: string[];
     launchSameChat: boolean;
     launchPromptApplied: boolean;
+    // --direct-tool: where the launch prompts go instead of the model
+    launchDirectToolRef: { server_id: string; tool_name: string } | null;
     
     // Operation status
     operationStatus: OperationStatus | null;
@@ -75,7 +78,9 @@ export const createSendMessageSlice: StateCreator<
         const state = get();
         const rawPrompt = state.launchInitialPrompt;
         
-        if (!rawPrompt || state.chatMessages.length > 0) {
+        // The welcome notice of a first run is not a conversation: a direct-tool launch (no model, so that notice is showing) still runs.
+        const openConversation = state.chatMessages.length > 0 && !(state.launchDirectToolRef && state.currentChatId === null);
+        if (!rawPrompt || openConversation) {
             set({ launchPromptApplied: true } as any);
             return;
         }
@@ -121,21 +126,16 @@ export const createSendMessageSlice: StateCreator<
         } as any);
 
         try {
-            const returnedChatId = await invoke<string>('chat', {
-                chatId,
-                title: derivedTitle,
-                message: text,
-                history: [],
-                reasoningEffort: state.reasoningEffort,
-                model: state.currentModel, // Frontend is source of truth for model
-                // The backend command requires all four attachment lists (ChatArea passes the
-                // real ones). Without them the launch prompt failed with "missing required key
-                // attachedFiles". A launch prompt has no attachments.
-                attachedFiles: [],
-                attachedTables: [],
-                attachedTools: [],
-                attachedTabularFiles: [],
-            });
+            const returnedChatId = await invoke<string>(
+                ...launchTurnInvocation(state.launchDirectToolRef, {
+                    chatId,
+                    title: derivedTitle,
+                    message: text,
+                    history: [],
+                    reasoningEffort: state.reasoningEffort,
+                    model: state.currentModel, // Frontend is source of truth for model
+                }),
+            );
 
             if (returnedChatId && returnedChatId !== chatId) {
                 state.setCurrentChatId(returnedChatId);
@@ -197,18 +197,16 @@ export const createSendMessageSlice: StateCreator<
                 lastStreamActivityTs: ts,
             } as any);
             try {
-                await invoke<string>('chat', {
-                    chatId,
-                    title: undefined,
-                    message,
-                    history,
-                    reasoningEffort: state.reasoningEffort,
-                    model: state.currentModel,
-                    attachedFiles: [],
-                    attachedTables: [],
-                    attachedTools: [],
-                    attachedTabularFiles: [],
-                });
+                await invoke<string>(
+                    ...launchTurnInvocation(state.launchDirectToolRef, {
+                        chatId,
+                        title: undefined,
+                        message,
+                        history,
+                        reasoningEffort: state.reasoningEffort,
+                        model: state.currentModel,
+                    }),
+                );
             } catch (error) {
                 console.error('[ChatStore] Failed to send follow-up launch prompt:', error);
                 set({ assistantStreamingActive: false } as any);
