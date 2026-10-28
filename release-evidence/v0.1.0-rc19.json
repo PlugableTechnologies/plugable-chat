@@ -1,0 +1,47 @@
+{
+  "tag": "v0.1.0-rc19",
+  "tested_commit": "c8631b0e90b43e13df7ec4cbb70286596db6e0d9",
+  "gpu_matrix": {
+    "run_at": "2026-10-28T17:43:00Z",
+    "host": "g5.xlarge A10G, driver 596.86, Windows Server 2025, model cache cleared before the run",
+    "junit_sha256": "a892460221135209a74c6880fade4148500278378432fc83a07ad21afbe0d816",
+    "results": {
+      "gpu-baseline": "passed",
+      "crash-capture": "passed",
+      "network-drop-mid-turn": "passed",
+      "network-drop-mid-tool-call": "passed",
+      "foundry-download-resume": "passed",
+      "baseline": "passed",
+      "quarantined-dll": "passed",
+      "upgrade-over-old": "passed",
+      "xet-hosts-blocked": "passed"
+    }
+  },
+  "clean_host_cpu": {
+    "run_at": "2026-10-28T16:30:00Z",
+    "host": "windows-latest hosted runner (per-scenario JUnit files merged)",
+    "run_url": "https://github.com/PlugableTechnologies/plugable-chat/actions/runs/40724548140",
+    "junit_sha256": "2ff0566d79c13a867c00842d0d6d0199beed7791dab8b056ead5de25f1771a05",
+    "results": {
+      "baseline": "passed",
+      "crash-capture": "skipped",
+      "driver-absent": "passed",
+      "egpu-late-arrival": "passed",
+      "egpu-thunderbolt-hint": "passed",
+      "embedding-first-run-contention": "passed",
+      "embedding-no-huggingface": "passed",
+      "embedding-tls-reset-recovers": "passed",
+      "engine-declined": "passed",
+      "kill-mid-download": "passed",
+      "low-disk": "passed",
+      "nvidia-present-no-providers": "passed",
+      "offline-hosts-block": "passed",
+      "proxy-dead": "passed",
+      "quarantined-dll": "passed",
+      "readonly-nonadmin": "passed",
+      "upgrade-over-old": "passed",
+      "version-visible": "passed",
+      "xet-hosts-blocked": "passed"
+    }
+  }
+}
